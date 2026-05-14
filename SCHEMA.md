@@ -68,13 +68,16 @@ memes + cipher + event + news unified.
 - id INTEGER PRIMARY KEY AUTOINCREMENT
 - type TEXT NOT NULL — meme / cipher / event / news
 - key TEXT NOT NULL — trigger phrase / 缩写 / 关键词
-- value TEXT NOT NULL — content / 真实含义 / 出处
+- value TEXT — content / 真实含义 / 出处 for text entries, NULL for binary-only stickers
+- asset_path TEXT — absolute path to gif/jpg/png in `~/.config/ny/stickers/` for visual memes, NULL for text-only entries
 - context TEXT — when to use, intent
 - last_seen TEXT
 - use_count INTEGER NOT NULL DEFAULT 0
 - created_at TEXT NOT NULL
 
 Indexes: type, key. FTS5 `vocab_fts(key, value, context)`.
+
+Binary assets (gif / jpg / png) for type=meme live in `~/.config/ny/stickers/`. Only path + metadata stored in DB. Text-only types (cipher / event / news / quote) use value column. New stickers dropped into the folder by Lumi get tagged via `ny vocab add` or detected by the daemon on filesystem scan.
 
 ### dir
 File path index.
@@ -183,7 +186,8 @@ Triggers on insert/update of content fields in events, vocab, milestones populat
 - `~/Desktop/NY/memory/reference.md` lifestyle block → profile.md (manual review)
 - `~/Desktop/NY/memory/reference.md` dir block → dir table (replaced by watchdog)
 - `~/Desktop/NY/code/_pit.md` items → pit table
-- `~/Desktop/NY/铁锅/语录/*.md` quotes → vocab (type=meme)
+- `~/Desktop/NY/铁锅/语录/*.md` quotes → vocab (type=meme, value column, asset_path NULL)
+- `~/Desktop/NY/Garden/*.gif`, `*.jpg`, `*.png` (manual review) → copy into `~/.config/ny/stickers/` + vocab (type=meme, asset_path set)
 - `~/Desktop/NY/memory/3d.md` Open-Threads → threads table
 - `~/Desktop/NY/memory/3d.md` Alerts → alerts table
 - `~/Desktop/NY/memory/3d.md` Lessons → claude rule additions (manual review, not stored)

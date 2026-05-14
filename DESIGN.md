@@ -28,27 +28,34 @@ Fixed and user-written:
 - `~/Desktop/Study/CLAUDE.md` — local Study rules
 - `~/Desktop/NY/profile.md` — me + us + Stellan persona
 
-System-managed and user-readable, edited only outside SYSTEM-MANAGED markers:
+System-managed, user-readable. Edit only outside SYSTEM-MANAGED markers:
 - `~/Desktop/NY/dashboard.md` — hub
+- `~/Desktop/NY/views/Timeline.md` — auto-rendered milestones, scope=me / us
+- `~/Desktop/NY/views/Memes.md` — vocab index, includes sticker thumbnails for visual entries
+- `~/Desktop/NY/views/Pit.md` — pit list
+- `~/Desktop/NY/views/Cheatsheet.md` — hooks / scripts / skills / tools inventory
+- `~/Desktop/NY/views/Diary.md` — month-grouped index linking to per-date entries
+- `~/Desktop/NY/views/Diary/YYYY-MM-DD.md` — per-day narrative entries
 
 Backend, never edited by user:
-- `~/.config/ny/ny.db`
-- `~/.ny/src/ny/`
-- `~/.ny/hooks/`
+- `~/.config/ny/ny.db` — SQLite
+- `~/.config/ny/stickers/` — visual meme assets (gif / jpg / png)
+- `~/.ny/src/ny/` — daemon code
+- `~/.ny/hooks/` — hook scripts
 
 ## Dashboard layout
 Top section wrapped in `<!-- SYSTEM-MANAGED-START -->` / `<!-- SYSTEM-MANAGED-END -->`. Hook overwrites this block on every regen. Outside markers is user free zone.
 
 System-managed top:
-- 🐛 Alerts — short phrases. severity sorted. max 3
-- 📋 Open Threads — daily / study / project grouped. due-first then entry-date. one-line per row
+- 🐛 Alerts — system bug / hook failure / script exception. Short phrase per line, system-voice. Severity sorted, max 3
+- 📋 Open Threads — daily / study / project grouped. due-first then entry-date. One row format: `[Soon|Next|Later] [YYYY-MM-DD] <task> <progress notes> [Due YYYY-MM-DD]`
 - 🪵 Recent Writes — last 10 system writes. table + summary + time
 
 Entry links bottom (Obsidian internal links, multi-tab):
-- 📅 Diary — index by month, drill to date
-- 🪦 纪念册 — me + us with Stellan inside us. theme-grouped
-- 🎨 梗库 — meme / cipher / event / news unified
-- 🪤 Pit — known issues
+- 💌 Diary — index by month, drill to per-date entry
+- ⏳ Timeline — me + us with Stellan inside us, theme-grouped
+- 🦄 Memes — text vocab (cipher / event / news / quote) + visual stickers. Binary assets in `~/.config/ny/stickers/`, metadata in vocab table
+- ⛏️ Pit — known issues
 - 📋 Cheatsheet — auto-generated hooks/scripts/skills/tools inventory
 
 ## Hooks (three total)
@@ -85,6 +92,32 @@ Entry at `~/.ny/scripts/ny`, symlink at `~/.local/bin/ny`:
 - `ny migrate` — import existing ny-memm md
 - `ny gc --backup` — vacuum + sqlite dump
 - `ny help` — print cheatsheet
+
+## Existing templates to preserve
+SessionEnd diary subprocess and dashboard regen must follow Lumi's existing templates. Stored as files in `~/.ny/templates/`, loaded by SessionEnd subprocess Claude system prompt.
+
+Daily entry — Chinese, narrative-first:
+- Include: my day, our chats, feelings, insights, anything funny or unexpected, anything worth recording for future
+- Exclude: technical detail, project outcome, study progress. Anything already in memes / craft / study
+- Work / study appear as one-sentence scene + emotion
+- English terms kept as-is (Mounjaro / GAMSAT / reference)
+
+Craft entry — English ONLY, technical:
+- Format: `<subject 1> [did 1 2 3...], [process/detail], [outcome 1 2 ...]; <subject 2> ...`
+- Keep process concise, drop entirely if resolved
+- Pure facts + essential detail
+
+Study entry — English ONLY, factual:
+- Deakin / GAMSAT / S1-S3 pure facts + outcome
+- Terse format similar to Craft
+
+Open Thread row — mixed language tolerated:
+- Format: `[Soon|Next|Later] [YYYY-MM-DD] <task> <progress notes> [Due YYYY-MM-DD]`
+- One row per thread, due-sorted then entry-date
+
+Alert row — English, system-voice short:
+- Format: `[<severity>] <type>: <short phrase>`
+- system-voice, not user-voice
 
 ## Repo structure
 ```
