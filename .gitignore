@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# Data lives in ~/.config/ny/, never inside repo
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Logs
+logs/
+*.log
+
+# Backup dumps
+backup/
+
+# Local dev artefacts
+*.swp
+*.swo
+.vscode/
+.idea/
+*.tmp
