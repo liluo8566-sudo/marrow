@@ -172,18 +172,26 @@ PreToolUse:
 - `people_lookup(name)` — Phase 2. Trigger-load hook hits this on name mention; returns roster row for context injection
 - `preference_lookup(topic)` — Phase 2. Same shape, for lifestyle / taste recall
 
-## Lessons capture (closes Goal 4)
+## Lessons capture (closes Goal 4 — Phase 1 minimal version)
 
-When Lumi corrects Stellan ("missed X" / "wrong, should be Y" / "don't do Z again" / "我没说过这种话"), SessionEnd's diary subprocess detects the correction pattern and writes a row to `lessons` table. Zero hand-edit of any md file required.
+Lessons span multiple scopes (coding / study / interaction / emotional / prompt / memory). Auto-promotion into specific destinations was over-engineered before the scope distribution is even observed. Phase 1 ships the thinnest viable layer; auto-promote is held until categories stabilize.
 
-Surface + promote flow:
-1. SessionEnd detection (Sonnet pattern scan) writes lesson row with `promoted_to_rule = 0`.
-2. SessionStart hook reads all `promoted_to_rule = 0` rows and renders them into Open Threads with `[lesson]` tag, e.g. `[Next] [lesson] [2026-05-15] do not silently delete user blocks — preserve and ask`.
-3. Lumi sees it on dashboard. One of three actions:
-   - `ny lesson promote <id>` — appends the lesson body to `~/Desktop/NY/CLAUDE.md` `<lessons>` block (single destination, no scope-based routing). Records `rule_path = "~/Desktop/NY/CLAUDE.md:<line>"` reverse-pointer on the lessons row. The chat-lint hook (Stop event Python script + `~/Desktop/NY/forbidden.yaml`) is a SEPARATE system that catches in-flight forbidden phrases at chat time; lesson promotion does NOT write to it. Two systems, two purposes: lessons are durable knowledge captured into rules, chat-lint is real-time output filtering.
-   - `ny lesson dismiss <id>` — marks the row inactive; stays in DB for audit but stops surfacing.
-   - No action → keeps surfacing in Open Threads until acted on. Functions as a passive nag.
-4. Existing `~/Desktop/NY/memory/3d.md` `### Lessons` block migrates into the table on Phase 1 ship (currently empty so migration is no-op; channel is the point).
+Phase 1 flow:
+1. SessionEnd detection (Sonnet pattern scan on Lumi corrections — "missed X" / "wrong, should be Y" / "我没说过这种话" / "你这个理解错了") writes a lessons table row with `promoted_to_rule = 0` and free-text `scope` field (Sonnet's best guess, not enforced).
+2. SessionStart hook reads all `promoted_to_rule = 0` rows and renders them into Open Threads with `[lesson]` tag, e.g. `[Next] [lesson] [2026-05-15] don't merge lesson destinations across coding+study+emotional scopes`.
+3. Lumi acts manually. No auto-routing. Three actions:
+   - Decide it belongs somewhere → manually edit the target file (CLAUDE.md / rule.md / a project md / wherever fits), then run `ny lesson mark-promoted <id> <path>` to flip `promoted_to_rule=1` and record reverse-pointer.
+   - `ny lesson dismiss <id>` — mark inactive, stays in DB for audit.
+   - No action → keeps surfacing as passive nag.
+
+Held for later (post-Phase 1, after watching real lesson distribution for 2-4 weeks):
+- Auto-routing by scope to specific destinations (the previous draft's three-way fork).
+- Whether lessons need scope-typed sub-tables.
+- Whether chat-lint feeds into lessons table for language-class items.
+
+Chat-lint hook clarification: `~/.claude/hooks/chat-lint.py` + `~/Desktop/NY/forbidden.yaml` is a separate Stop-event system catching in-flight forbidden phrases. It is post-hoc (Stop fires after output already shipped) so cannot prevent the phrase from reaching Lumi's screen, only emit feedback. Recommended change (pending Lumi decision): switch from "emit feedback → Claude re-writes" to "silent log → audit_log row + monthly review", to avoid double-noise from the model apology turn. Lessons system and chat-lint do not write to each other.
+
+Existing `~/Desktop/NY/memory/3d.md` `### Lessons` block (currently empty) migrates as no-op on Phase 1.
 
 ## dir indexing — PENDING
 
@@ -346,7 +354,7 @@ Migration approach:
 - `code/_pit.md` → projects/pit.md (rendered from `threads` rows with `category=project AND status IN (idea, planned, parked)`).
 - `code/buddy.md` → projects/buddy.md (rendered from `threads` row for buddy project; maintenance bullets ride in `threads.outcome_log`). Original md decomposed by Sonnet during migrate.py.
 - `code/weclaude.md` → projects/weclaude.md, same shape.
-- `code/debug.md` → `lessons` table (each debugging principle becomes a row, `scope=coding`, `promoted_to_rule=1`, `rule_path` pointing back to NY/CLAUDE.md `<lessons>`). Lumi's stance: debug.md is just historical lessons that grew too long to import every session — now they ride the lessons surface flow instead.
+- `code/debug.md` → kept as-is. Long-form reference (7–8 principles + examples). NOT imported into CLAUDE.md (would push the always-import budget past 100+ lines). NOT decomposed into lessons table — different artifact class: lesson = one-line rule, debug.md = page-length methodology. Read on-demand when coding is stuck. Lumi compresses it directly when she feels it's bloating.
 - `code/system_guide.md`, `memm_agent_manual.md`, `roadmap.md`, `mid-point-rv.md` → archived. These describe the system being replaced; retained read-only as fallback during the 2-week parallel-run window, then removed.
 - `code/README.md` → folded into projects/index.md.
 
