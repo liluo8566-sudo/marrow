@@ -31,7 +31,7 @@ Personal AI memory + workflow system. Replaces existing ny-memm pipeline. Built 
 - Subprocess timeout 900s default
 - Hook scripts ≤ 100 lines each
 - try/except + alerts row on every scheduled job
-- Data lives in `~/.config/ny/`, code lives in `~/.ny/`. Always separate
+- Data lives in `~/.config/ny/`, code lives in `~/cc-lab/ny/`. Always separate
 - All input/output prompt templates and writing templates require explicit Lumi review before commit. Assistant must surface a draft for confirmation; no template body lands via assistant inference alone
 - LLM call tiering (dedicated-credit-pool aware, post-2026-06-15):
   - Default Haiku — compression, classification, dedup, routing, format normalization. Target ~80% of pipeline calls.
@@ -42,7 +42,7 @@ Personal AI memory + workflow system. Replaces existing ny-memm pipeline. Built 
 - Emotion breath frequency: once per SessionStart, OR every N=10 user turns within a long session — whichever lands first. Never per-turn (rejects Ombre Brain's per-turn breath as token waste).
 
 ## Architecture
-- daemon — Python MCP server (FastMCP) at `~/.ny/src/ny/daemon.py`. Serves CLI + WeChat clients
+- daemon — Python MCP server (FastMCP) at `~/cc-lab/ny/src/ny/daemon.py`. Serves CLI + WeChat clients
 - storage — SQLite at `~/.config/ny/ny.db`. FTS5 + sqlite-vec extensions loaded at boot
 - runtime — subprocess spawn `claude --output-format stream-json --input-format stream-json --permission-prompt-tool stdio --resume <sid>`. Inherits user OAuth subscription. cyberboss pattern verified
 - bridge — Unix socket at `~/.config/ny/ipc.sock` for permission yes/no routing across channels (Phase 4)
@@ -99,7 +99,7 @@ Single dashboard entry. Everything else lives in SQLite or in sub-md rendered fr
 ### Always-imported (CLAUDE.md family, combined < 100 lines)
 
 - `~/.claude/CLAUDE.md` — global. Identity (Lumi + Stellan persona), interaction rules, output style. Hard cap < 100 lines.
-- `~/Desktop/NY/CLAUDE.md` — NY project rules. Imports `code/rule.md` only. Short.
+- `~/Desktop/NY/CLAUDE.md` — NY project rules + coding rules (former `code/rule.md` content folded in) + the `<lessons>` block for promoted lessons. Target ~150 lines. After Phase 1 migration, `code/rule.md` itself is deleted; this file is the single always-import for NY work.
 - `~/Desktop/Study/CLAUDE.md` — Study project rules. Short.
 
 ### Trigger-loaded, not always imported
@@ -131,14 +131,14 @@ Scratch zone — below all system-managed markers. Free zone for Lumi's own note
 
 ### Visual styling
 
-Emoji headers / icons on dashboard.md and sub-page render templates are Lumi's call. The render templates live in `~/.ny/templates/dashboard.md.template` (and per-sub-page equivalents); Lumi edits the template once, every hook render picks it up. The design doc body intentionally carries no emoji to stay readable as a spec.
+Emoji headers / icons on dashboard.md and sub-page render templates are Lumi's call. The render templates live in `~/cc-lab/ny/templates/dashboard.md.template` (and per-sub-page equivalents); Lumi edits the template once, every hook render picks it up. The design doc body intentionally carries no emoji to stay readable as a spec.
 
 ### Backend, user never reads
 
 - `~/.config/ny/ny.db` — SQLite
 - `~/.config/ny/stickers/` — visual meme assets (gif / jpg / png)
-- `~/.ny/src/ny/` — daemon code
-- `~/.ny/hooks/` — hook scripts
+- `~/cc-lab/ny/src/ny/` — daemon code
+- `~/cc-lab/ny/hooks/` — hook scripts
 
 ### Decided (2026-05-15)
 
@@ -180,11 +180,7 @@ Surface + promote flow:
 1. SessionEnd detection (Sonnet pattern scan) writes lesson row with `promoted_to_rule = 0`.
 2. SessionStart hook reads all `promoted_to_rule = 0` rows and renders them into Open Threads with `[lesson]` tag, e.g. `[Next] [lesson] [2026-05-15] do not silently delete user blocks — preserve and ask`.
 3. Lumi sees it on dashboard. One of three actions:
-   - `ny lesson promote <id>` — auto-routes to destination by `scope` field:
-     - `scope=language` → appends pattern to `~/Desktop/NY/forbidden.yaml` (chat-lint).
-     - `scope=interaction` / `coding` / `prompt` → appends to relevant `CLAUDE.md` or `code/rule.md <lessons>` block.
-     - `scope=memory` / `hook` → appends to DESIGN.md or new addendum.
-     - Records `rule_path` reverse-pointer back on the row.
+   - `ny lesson promote <id>` — appends the lesson body to `~/Desktop/NY/CLAUDE.md` `<lessons>` block (single destination, no scope-based routing). Records `rule_path = "~/Desktop/NY/CLAUDE.md:<line>"` reverse-pointer on the lessons row. The chat-lint hook (Stop event Python script + `~/Desktop/NY/forbidden.yaml`) is a SEPARATE system that catches in-flight forbidden phrases at chat time; lesson promotion does NOT write to it. Two systems, two purposes: lessons are durable knowledge captured into rules, chat-lint is real-time output filtering.
    - `ny lesson dismiss <id>` — marks the row inactive; stays in DB for audit but stops surfacing.
    - No action → keeps surfacing in Open Threads until acted on. Functions as a passive nag.
 4. Existing `~/Desktop/NY/memory/3d.md` `### Lessons` block migrates into the table on Phase 1 ship (currently empty so migration is no-op; channel is the point).
@@ -199,7 +195,7 @@ Held until Phase 2 or 3. Provisional approach: Layer 1 (high-level tree) maintai
 Re-design only when a concrete "where is X" need arises more than N times. Schema for `dir` table stays in SCHEMA.md as a placeholder; do not implement the table or watchdog in Phase 1.
 
 ## CLI
-Entry at `~/.ny/scripts/ny`, symlink at `~/.local/bin/ny`:
+Entry at `~/cc-lab/ny/scripts/ny`, symlink at `~/.local/bin/ny`:
 - `ny dashboard` — print top block
 - `ny diary <date>` — show date entry
 - `ny show <type> [filter]` — milestones / vocab / pit / threads / alerts / dir / audit
@@ -242,7 +238,7 @@ Alert row — English, short pipeline-state phrase, follows Lumi's existing `###
 
 ## Repo structure
 ```
-~/.ny/
+~/cc-lab/ny/
   DESIGN.md  SCHEMA.md  FUTURE.md  README.md  .gitignore
   src/ny/
     __init__.py  daemon.py  cli.py
@@ -275,10 +271,10 @@ External:
 ```
 
 ## Git workflow
-- repo `~/.ny/`
+- repo `~/cc-lab/ny/`
 - remote github private. Phase 1 optional, Phase 2 mandatory
 - main = production
-- worktrees per phase: `~/.ny-phase2`, `~/.ny-phase3`, `~/.ny-phase4`
+- Phase branches `phase-2-emotion`, `phase-3-writer`, etc. — created only when starting that phase. No pre-built worktrees.
 - DB backup via cron daily: `sqlite3 ny.db .dump > ~/.config/ny/backup/ny-$(date +%Y%m%d).sql`. Retention 30 days
 - Commit on every dashboard regen blocked (regen writes to filesystem, not repo)
 
@@ -341,6 +337,20 @@ Migration approach:
 - Two-week observation period after Phase 1 ship
 - Retire ny-memm-* scripts and unload launchd plists once SQLite stable
 - Old `~/Desktop/NY/memory/` md files move to `archive/`, kept read-only as historical fallback
+
+## Migration from existing code/ folder
+
+`~/Desktop/NY/code/` currently mixes long-term reference, active projects, and obsolete memm docs. Migration target per file:
+
+- `code/rule.md` → contents folded into `~/Desktop/NY/CLAUDE.md`; file deleted post-merge.
+- `code/_pit.md` → projects/pit.md (rendered from `threads` rows with `category=project AND status IN (idea, planned, parked)`).
+- `code/buddy.md` → projects/buddy.md (rendered from `threads` row for buddy project; maintenance bullets ride in `threads.outcome_log`). Original md decomposed by Sonnet during migrate.py.
+- `code/weclaude.md` → projects/weclaude.md, same shape.
+- `code/debug.md` → `lessons` table (each debugging principle becomes a row, `scope=coding`, `promoted_to_rule=1`, `rule_path` pointing back to NY/CLAUDE.md `<lessons>`). Lumi's stance: debug.md is just historical lessons that grew too long to import every session — now they ride the lessons surface flow instead.
+- `code/system_guide.md`, `memm_agent_manual.md`, `roadmap.md`, `mid-point-rv.md` → archived. These describe the system being replaced; retained read-only as fallback during the 2-week parallel-run window, then removed.
+- `code/README.md` → folded into projects/index.md.
+
+Post-migration the `~/Desktop/NY/code/` folder is empty and removed (or renamed to `code-archive/` if Lumi wants the archive readable from obsidian). Same pattern as `~/Desktop/NY/memory/` md fate.
 
 ## Data flow
 Write side:

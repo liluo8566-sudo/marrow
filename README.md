@@ -8,7 +8,7 @@ Personal AI memory + workflow system. SQLite-backed, model-agnostic, multi-chann
 - FUTURE.md — parked ideas inbox
 
 ## Locations
-- Code: `~/.ny/` (this repo)
+- Code: `~/cc-lab/ny/` (this repo)
 - Data: `~/.config/ny/ny.db`
 - User entry: `~/Desktop/NY/dashboard.md`
 

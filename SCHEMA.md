@@ -245,7 +245,7 @@ Triggers on insert/update of content fields in events, vocab, milestones populat
 - `~/Desktop/NY/memory/reference.md` `<lifestyle_and_preference>` → preferences table (Phase 2; manual review)
 - `~/Desktop/NY/memory/reference.md` family + friend mentions across blocks → people table (Phase 2; manual review)
 
-Migration script: `~/.ny/scripts/migrate.py`. Phase 1 deliverable. Idempotent: re-run skips already-imported rows by source-hash.
+Migration script: `~/cc-lab/ny/scripts/migrate.py`. Phase 1 deliverable. Idempotent: re-run skips already-imported rows by source-hash.
 
 ## Indexes summary
 Per-table indexes listed above. Composite indexes added as query patterns emerge in Phase 1 testing.
