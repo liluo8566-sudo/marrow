@@ -2,7 +2,10 @@
 
 Database `~/.config/ny/ny.db`. Extensions FTS5, sqlite-vec. snake_case tables and columns. Times ISO8601 UTC TEXT.
 
-## Ten tables
+## Tables
+
+Phase 1 first-class: events / threads / milestones / vocab / stickers / lessons / pit / diary / alerts / audit_log / vec.
+Phase 2 placeholders (schema retained, NOT created in Phase 1): emotions / people / preferences / dir.
 
 ### events
 All session turn archives.
@@ -19,17 +22,18 @@ All session turn archives.
 
 Indexes: session_id, timestamp, thread_id. FTS5 virtual table `events_fts(content)`.
 
-### emotions
-Per-event emotional metadata.
-- event_id INTEGER PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE
-- valence REAL — 0..1, low = negative
-- arousal REAL — 0..1, low = calm
+### emotions (Phase 2, placeholder schema — NOT created in Phase 1)
+Per-session aggregated emotional metadata. Per-turn granularity rejected as noise.
+- session_id TEXT PRIMARY KEY
+- valence REAL — 0..1, low = negative, session-aggregated
+- arousal REAL — 0..1, low = calm, session-aggregated
 - importance INTEGER — 1..10
 - unresolved INTEGER NOT NULL DEFAULT 0
 - pinned INTEGER NOT NULL DEFAULT 0
 - decay_score REAL — computed daily by decay engine
 - activation_count INTEGER NOT NULL DEFAULT 0
 - last_active TEXT
+- summary TEXT — one-line mood summary
 
 Indexes: unresolved, pinned, decay_score DESC.
 
@@ -47,8 +51,9 @@ Next-session-tracking work threads.
 - context_pointers TEXT — JSON of paths, event_ids, vocab_ids
 - last_session_id TEXT
 - last_active TEXT NOT NULL
+- outcome_log TEXT — append-only project outcome / decision log; survives across sessions; rendered into projects/<title>.md
 
-Indexes: category, status, due, last_active. FTS5 `threads_fts(title, next_step, last_session_summary)`.
+Indexes: category, status, due, last_active. FTS5 `threads_fts(title, next_step, last_session_summary, outcome_log)`.
 
 ### milestones
 Life events. Backs 纪念册 view.
@@ -64,12 +69,11 @@ Life events. Backs 纪念册 view.
 Indexes: scope, date, theme. FTS5 `milestones_fts(title, description)`.
 
 ### vocab
-memes + cipher + event + news unified.
+Text-only entries: cipher / event / news / meme (text quote portion). Visual stickers live in the separate `stickers` table.
 - id INTEGER PRIMARY KEY AUTOINCREMENT
 - type TEXT NOT NULL — meme / cipher / event / news
 - key TEXT NOT NULL — trigger phrase / 缩写 / 关键词
-- value TEXT — content / 真实含义 / 出处 for text entries, NULL for binary-only stickers
-- asset_path TEXT — absolute path to gif/jpg/png in `~/.config/ny/stickers/` for visual memes, NULL for text-only entries
+- value TEXT NOT NULL — content / 真实含义 / 出处
 - context TEXT — when to use, intent
 - last_seen TEXT
 - use_count INTEGER NOT NULL DEFAULT 0
@@ -77,10 +81,23 @@ memes + cipher + event + news unified.
 
 Indexes: type, key. FTS5 `vocab_fts(key, value, context)`.
 
-Binary assets (gif / jpg / png) for type=meme live in `~/.config/ny/stickers/`. Only path + metadata stored in DB. Text-only types (cipher / event / news / quote) use value column. New stickers dropped into the folder by Lumi get tagged via `ny vocab add` or detected by the daemon on filesystem scan.
+### stickers
+Visual meme assets (gif / jpg / png / webp). Separated from `vocab` to avoid sparse-column rot.
+- id INTEGER PRIMARY KEY AUTOINCREMENT
+- vocab_id INTEGER REFERENCES vocab(id) ON DELETE SET NULL — link if an associated text vocab entry exists
+- key TEXT NOT NULL — trigger phrase / scene description
+- asset_path TEXT NOT NULL — absolute path under `~/.config/ny/stickers/`
+- mime_type TEXT — image/gif / image/png / image/jpeg / image/webp
+- use_count INTEGER NOT NULL DEFAULT 0
+- last_seen TEXT
+- created_at TEXT NOT NULL
 
-### dir
-File path index.
+Indexes: vocab_id, key. FTS5 `stickers_fts(key)`.
+
+Files dropped into `~/.config/ny/stickers/` by Lumi are picked up by daemon's filesystem scan and inserted with `key = filename` placeholder. Lumi promotes via `ny sticker tag <id> "<key>" [--vocab-id N]`.
+
+### dir (PENDING — placeholder, NOT created in Phase 1)
+File path index. See DESIGN.md "dir indexing — PENDING" for current decision: Layer 1 hand-maintained, leaf-level via `mdfind`. Schema retained for Phase 2/3 re-design.
 - path TEXT PRIMARY KEY — absolute path
 - parent TEXT — parent directory
 - project TEXT — NY / Study / cc-lab / Toolkit / Garden / Document / Desktop
@@ -104,6 +121,40 @@ Known issues, workarounds, pending fixes.
 - resolved_at TEXT
 
 Indexes: status. FTS5 `pit_fts(title, description)`.
+
+### lessons
+Captured Lumi corrections + drift catches. Closes Goal 4. Phase 1 first-class table.
+- id INTEGER PRIMARY KEY AUTOINCREMENT
+- date TEXT NOT NULL
+- session_id TEXT
+- scope TEXT NOT NULL — interaction / coding / memory / hook / prompt / language
+- lesson_text TEXT NOT NULL — what got missed or wrong, and what's correct
+- promoted_to_rule INTEGER NOT NULL DEFAULT 0
+- rule_path TEXT — file:line if promoted into rule.md / CLAUDE.md / chat-lint forbidden.yaml
+- created_at TEXT NOT NULL
+
+Indexes: scope, promoted_to_rule, date DESC. FTS5 `lessons_fts(lesson_text)`.
+
+### people (Phase 2, placeholder — NOT created in Phase 1)
+Family + friends roster. Trigger-load on name mention by UserPromptSubmit hook.
+- id INTEGER PRIMARY KEY AUTOINCREMENT
+- name TEXT NOT NULL — primary name (e.g. 妈妈 / 李小云 / Summer / BBB / 南南)
+- aliases TEXT — JSON array of alt names
+- relation TEXT — family / friend / colleague / other
+- short_bio TEXT — one-paragraph context block injected on mention
+- last_mention TEXT
+- created_at TEXT NOT NULL
+
+Indexes: name. FTS5 `people_fts(name, aliases, short_bio)`.
+
+### preferences (Phase 2, placeholder — NOT created in Phase 1)
+Lifestyle + taste facts. Trigger-load on relevant turn.
+- id INTEGER PRIMARY KEY AUTOINCREMENT
+- topic TEXT NOT NULL — fashion / colour / food / scent / entertainment / exercise / travel / aesthetic
+- detail TEXT NOT NULL — fact body
+- created_at TEXT NOT NULL
+
+Indexes: topic.
 
 ### diary
 Daily narrative entry, generated by SessionEnd.
@@ -190,7 +241,9 @@ Triggers on insert/update of content fields in events, vocab, milestones populat
 - `~/Desktop/NY/Garden/*.gif`, `*.jpg`, `*.png` (manual review) → copy into `~/.config/ny/stickers/` + vocab (type=meme, asset_path set)
 - `~/Desktop/NY/memory/3d.md` Open-Threads → threads table
 - `~/Desktop/NY/memory/3d.md` Alerts → alerts table
-- `~/Desktop/NY/memory/3d.md` Lessons → claude rule additions (manual review, not stored)
+- `~/Desktop/NY/memory/3d.md` Lessons → lessons table (Phase 1; currently empty, no migration weight)
+- `~/Desktop/NY/memory/reference.md` `<lifestyle_and_preference>` → preferences table (Phase 2; manual review)
+- `~/Desktop/NY/memory/reference.md` family + friend mentions across blocks → people table (Phase 2; manual review)
 
 Migration script: `~/.ny/scripts/migrate.py`. Phase 1 deliverable. Idempotent: re-run skips already-imported rows by source-hash.
 
