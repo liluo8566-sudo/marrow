@@ -111,11 +111,11 @@ Study entry — English ONLY, factual:
 - Deakin / GAMSAT / S1-S3 pure facts + outcome
 - Terse format similar to Craft
 
-Open Thread row — mixed language tolerated:
+Open Thread row — follows Lumi's existing `### Open-Threads` style in 3d.md:
 - Format: `[Soon|Next|Later] [YYYY-MM-DD] <task> <progress notes> [Due YYYY-MM-DD]`
 - One row per thread, due-sorted then entry-date
 
-Alert row — short pipeline-state phrase, follows Lumi's existing `### Alerts` style in 3d.md (mixed language OK):
+Alert row — English, short pipeline-state phrase, follows Lumi's existing `### Alerts` style in 3d.md:
 - Format: `- [YYYY-MM-DD] <kind> <state>: <detail> [(retry: <command>)]`
 - `<kind>` = pipeline component name (cleanup / weekly / monthly / session / catchup / entry / hook)
 - `<state>` = miss / failed / capped / fired / over cap
