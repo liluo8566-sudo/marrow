@@ -49,6 +49,29 @@ Personal AI memory + workflow system. Replaces existing ny-memm pipeline. Built 
 - frontend — auto-generated dashboard.md + fixed CLAUDE.md family + profile.md
 - supervisor — daemon health watchdog. systemd-style restart on crash; healthcheck endpoint at `~/.config/ny/health.sock`; alert on > 3 restarts in 5 min
 
+## Fault tolerance + operational invariants
+
+What Lumi never has to do in steady state (post Phase 1 ship):
+- No manual `rm <marker>` to clear failed stamps — failed markers auto-expire on next successful run or after 7 days.
+- No manual catchup invocation — daemon watches `~/.claude/projects/-Users-Gabrielle-*/*.jsonl` directly; SessionEnd hook is a fast path, not the only path. If hook misses, daemon picks it up within the next scan cycle (≤ 5 min).
+- No manual retry — every LLM call has retry-once policy baked in (see LLM topology table); after retry, accept-as-is or fall back to a degrade tier.
+- No manual compress — daily / monthly compress steps from the old pipeline do NOT exist. SQLite stores forever; reads filter by date / scope. The only "compression" is SessionEnd diary render (per-day narrative), which is an LLM call by necessity.
+
+Idempotency:
+- jsonl → events ingest uses content hash per (session_id, turn_index, content_hash) unique constraint. Re-running ingestion never duplicates rows.
+- Diary render is per-date; re-render overwrites by `date` PK. Safe to re-trigger.
+- Lesson promotion is by `lesson_id`; `promoted_to_rule = 1` is a sticky flag, re-promote is a no-op with audit log entry.
+
+Supervisor:
+- Daemon launched via launchd KeepAlive. Crash → relaunch within 10s.
+- 3 restarts in 5 min → systemd-style backoff + write alert. Lumi sees on next dashboard load.
+- Health endpoint `~/.config/ny/health.sock` polled by hook every SessionStart; if unreachable, hook falls back to direct SQLite read (degrade-mode read).
+
+Lumi's only steady-state manual actions:
+- `ny lesson promote <id>` / `dismiss <id>` (lesson curation)
+- `ny lesson promote <id>` is auto-suggested via Open Threads `[lesson]` surface
+- Audit dashboard occasionally (the system never demands it; surface is on-demand)
+
 ## LLM call topology
 
 Maps every pipeline LLM event to model tier + credit channel + retry policy. New events must declare these fields before merge.
@@ -90,20 +113,25 @@ Static facts that should NOT eat the always-import budget but should resurface o
 
 `~/Desktop/NY/dashboard.md`. Three system-managed zones at top + hyperlinks to sub-pages + scratch zone below.
 
-System-managed top (wrapped in `<!-- SYSTEM-MANAGED-START -->` / `<!-- SYSTEM-MANAGED-END -->`, hook overwrites on regen):
-- Open Threads — the only zone Lumi looks at every session. Format `[Next|Soon] [YYYY-MM-DD] <task> <progress> [Due YYYY-MM-DD]`. Due-first then entry-date.
-- Alerts — system bug / hook failure / script exception. Functional state phrases, max 3.
-- Recent Writes — monitoring zone, temporary. Last 10 system writes (target table + summary + time). Removed once prompt stability is confirmed (~Phase 2 end).
+System-managed top (wrapped in `<!-- SYSTEM-MANAGED-START -->` / `<!-- SYSTEM-MANAGED-END -->`, hook overwrites on regen). Order from top to bottom:
+1. Open Threads — the only zone Lumi looks at every session. Format `[Next|Soon] [YYYY-MM-DD] <task> <progress> [Due YYYY-MM-DD]`. Due-first then entry-date. Unpromoted lesson rows surface here with `[lesson]` tag so Lumi can promote / dismiss without leaving the dashboard.
+2. Alerts — system bug / hook failure / script exception. Functional state phrases, max 3.
 
 Hyperlinks to sub-pages (obsidian internal links, click to drill in):
 - Diary — `~/Desktop/NY/diary/index.md` month-grouped, drill into per-day narrative.
 - Milestone — `~/Desktop/NY/milestone.md` rendered from `milestones` table (## Us + ## Me).
 - Memes — `~/Desktop/NY/memes.md` rendered from `vocab` + `stickers` tables, sticker thumbnails inline.
 - Cheatsheet — `~/Desktop/NY/cheatsheet.md` rendered from scripts / hooks / skills / aliases on disk.
-- Projects — `~/Desktop/NY/projects/` folder. `index.md` (project list with status), `pit.md` (pending issues across all projects), one `<project>.md` per project (outcome log + decision log + next step). Rendered from `threads` table where `category=project`.
+- Projects — `~/Desktop/NY/projects/` folder. `index.md` (completed + active project list with status), `pit.md` (deferred backlog: features not started and not in Open Threads), one `<project>.md` per project (outcome / changed / updated + maintenance bullets). Rendered from `threads` table where `category=project`. Near-term bugs and next steps live in Open Threads, NOT here.
 - Study — `~/Desktop/NY/study/` folder. One `<unit_code>.md` per unit (current progress / due dates / submitted items). No pit. Notion remains primary; this is a CC-visible mirror. Rendered from `threads` table where `category=study`.
 
-Scratch zone — below system-managed markers. Free zone for Lumi's own notes; hook never touches.
+Audit trace zone — bottom of dashboard, below sub-page hyperlinks, above scratch zone. Last 10 system writes (target table + summary + time). Temporary monitoring channel while Lumi tunes prompts. Removed once write quality is stable (~Phase 2 end).
+
+Scratch zone — below all system-managed markers. Free zone for Lumi's own notes; hook never touches.
+
+### Visual styling
+
+Emoji headers / icons on dashboard.md and sub-page render templates are Lumi's call. The render templates live in `~/.ny/templates/dashboard.md.template` (and per-sub-page equivalents); Lumi edits the template once, every hook render picks it up. The design doc body intentionally carries no emoji to stay readable as a spec.
 
 ### Backend, user never reads
 
@@ -112,13 +140,9 @@ Scratch zone — below system-managed markers. Free zone for Lumi's own notes; h
 - `~/.ny/src/ny/` — daemon code
 - `~/.ny/hooks/` — hook scripts
 
-### PENDING Lumi decision
+### Decided (2026-05-15)
 
-- Profile content placement. Two options on the table:
-  - (a) Keep `~/Desktop/NY/profile.md` as a static identity import in CLAUDE.md glob — simple, all persona context always on.
-  - (b) Split: static persona stays in CLAUDE.md glob body (counted toward < 100 line cap), dynamic people / preferences move to SQLite `people` + `preferences` tables with trigger-load hooks.
-  - Tradeoff: (a) wastes tokens but never miss; (b) saves tokens but risks miss on first mention before hook fires.
-  - Stellan's lean: (b) once Phase 1 hooks are stable, until then (a).
+- Profile content: `~/Desktop/NY/profile.md` will NOT exist. CLAUDE.md glob keeps its current shape (identity / persona / interaction rules / output style) — no edits in Phase 1. The only things that ever leave CLAUDE.md are `people` and `lifestyle/preferences`, both moving to SQLite trigger-load tables in Phase 2. Everything else stays in CLAUDE.md glob.
 
 ## Hooks (three total)
 SessionStart:
@@ -150,12 +174,20 @@ PreToolUse:
 
 ## Lessons capture (closes Goal 4)
 
-When Lumi corrects Stellan ("missed X" / "wrong, should be Y" / "don't do Z again" / "我没说过这种话"), SessionEnd's diary subprocess detects the correction pattern and writes a row to `lessons` table.
+When Lumi corrects Stellan ("missed X" / "wrong, should be Y" / "don't do Z again" / "我没说过这种话"), SessionEnd's diary subprocess detects the correction pattern and writes a row to `lessons` table. Zero hand-edit of any md file required.
 
-Promotion flow:
-- Generic enough to encode as a hard rule → Lumi runs `ny lesson promote <id>`, which appends to `~/Desktop/NY/code/rule.md` `<lessons>` block AND (if linguistic) to `chat-lint` forbidden patterns OR (if behavioural) to the relevant CLAUDE.md. The lessons row records the destination path.
-- Not generic / context-specific → row stays in `lessons` table. Surfaced in dashboard Recent Writes temporarily; monthly batch lets Lumi promote or retire.
-- Existing `~/Desktop/NY/memory/3d.md` `### Lessons` block migrates into the table on Phase 1 ship (currently empty, no migration weight).
+Surface + promote flow:
+1. SessionEnd detection (Sonnet pattern scan) writes lesson row with `promoted_to_rule = 0`.
+2. SessionStart hook reads all `promoted_to_rule = 0` rows and renders them into Open Threads with `[lesson]` tag, e.g. `[Next] [lesson] [2026-05-15] do not silently delete user blocks — preserve and ask`.
+3. Lumi sees it on dashboard. One of three actions:
+   - `ny lesson promote <id>` — auto-routes to destination by `scope` field:
+     - `scope=language` → appends pattern to `~/Desktop/NY/forbidden.yaml` (chat-lint).
+     - `scope=interaction` / `coding` / `prompt` → appends to relevant `CLAUDE.md` or `code/rule.md <lessons>` block.
+     - `scope=memory` / `hook` → appends to DESIGN.md or new addendum.
+     - Records `rule_path` reverse-pointer back on the row.
+   - `ny lesson dismiss <id>` — marks the row inactive; stays in DB for audit but stops surfacing.
+   - No action → keeps surfacing in Open Threads until acted on. Functions as a passive nag.
+4. Existing `~/Desktop/NY/memory/3d.md` `### Lessons` block migrates into the table on Phase 1 ship (currently empty so migration is no-op; channel is the point).
 
 ## dir indexing — PENDING
 
