@@ -81,7 +81,7 @@ lesson is the single exception — it needs manual curation (Lumi promotes or di
 
 Top, system zones, top to bottom:
 
-1. Alerts — bug reports + newly captured lessons. Functional state phrases, short. Pipeline-failure alerts self-clear on the next successful run; bug / lesson alerts are cleared by Lumi after she acts (Alerts is a writable zone — delete the line, or `ny` command). Never accumulates unbounded.
+1. Alerts — bug reports + newly captured lessons. Functional state phrases, short. Pipeline-failure alerts self-clear on the next successful run; bug / lesson alerts are cleared by Lumi after she acts (Alerts is a writable zone — delete the line, or `mw` command). Never accumulates unbounded.
     Lesson - 短期的设计目标是手动修改，长期改为半自动/全自动
 2. Open Threads — the only zone looked at every session. Four classes: daily / study / project / lesson. Row format follows Lumi's existing `### Open-Threads` style, due-first then entry-date.
 
@@ -109,13 +109,13 @@ Principle (replaces the earlier read-only-sub-page split): every rendered file L
 Three hand-run paths, all without code or a required LLM, pick whichever fits:
 
 - Edit the md directly — primary for structured views, supported for narrative views. Open in Obsidian, change / trim / delete, save. Before the next render the hook reconciles back to SQLite, old values to backup, then re-renders. Output matches what she wrote, no visible jump.
-- `ny` CLI — precise single point. Edit or remove one record by id. Deterministic, scriptable, no LLM.
+- `mw` CLI — precise single point. Edit or remove one record by id. Deterministic, scriptable, no LLM.
 - Tell Claude in plain language — convenience. "tighten this diary" / "education's wrong, Bendigo 3y not Melbourne". Claude finds the record, shows current vs new, on confirm writes it, old value to backup.
 
 Reconcile is split by view type — not one parser for all:
 
 - Structured views (Open Threads, milestone, vocab, pit, alerts): each row carries a visible short id at line/block end. id present + text changed → update; id deleted with the row → delete/abandon; new block with no id → insert. md edit is the primary path here.
-- Narrative views (diary, goose-bites): row boundary is the date heading only, never a blank line. Two operations only: edit text inside a date block → update (whole content overwritten by id, internals not parsed, system-only columns preserved by id); delete the whole date block including its heading → delete that day. Clearing the body while keeping the heading is not a delete. Splitting narrative into new rows by blank line / dot points is not supported — re-organising history goes through the `ny` CLI or telling Claude, which is the primary path for narrative.
+- Narrative views (diary, goose-bites): row boundary is the date heading only, never a blank line. Two operations only: edit text inside a date block → update (whole content overwritten by id, internals not parsed, system-only columns preserved by id); delete the whole date block including its heading → delete that day. Clearing the body while keeping the heading is not a delete. Splitting narrative into new rows by blank line / dot points is not supported — re-organising history goes through the `mw` CLI or telling Claude, which is the primary path for narrative.
 
 The reconcile semantics above are fixed, not Pending. Only the anchor's character format + per-view render template are Pending (set when each view is built). Conflict guard unchanged: hash-compare before overwrite; if Lumi changed it, back up + one Alert, never silent.
 
@@ -154,7 +154,7 @@ The per-event topology (which trigger uses which tier, timeout, retry) is a Pend
 
 Each phase ships one outcome.
 
-- Phase 1 — Memory core: SQLite + full-text, the daemon with a minimal MCP tool set, three hooks, dashboard top render, migrate.py, the `ny` CLI. Runs in parallel with old ny-memm ~2 weeks, then retire it. Stream-json subscription routing is pass-tested (2026-05-15). The remaining unknowns — local vector ext on this macOS, MCP parity with cyberboss, cheap-tier diary quality — are not pre-verified; each surfaces and is settled at first build of its module, no separate verify phase.
+- Phase 1 — Memory core: SQLite + full-text, the daemon with a minimal MCP tool set, three hooks, dashboard top render, migrate.py, the `mw` CLI. Runs in parallel with old ny-memm ~2 weeks, then retire it. Stream-json subscription routing is pass-tested (2026-05-15). The remaining unknowns — local vector ext on this macOS, MCP parity with cyberboss, cheap-tier diary quality — are not pre-verified; each surfaces and is settled at first build of its module, no separate verify phase.
 - Phase 2 — Emotion + decay + sub-page render fills out; people/preferences trigger-load tables live.
 - Phase 3 — Writer authority: prompt-class md writes go through the writer sub-Claude.
 - Phase 4 — Cross-channel parity (see weclaude + cyberboss Pending below).
