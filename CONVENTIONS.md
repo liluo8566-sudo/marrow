@@ -5,10 +5,10 @@ Binding. This file is its own example: short, fact-only, no padding.
 ## Writing (docs, plans, prompts)
 
 - English only.
-- Fact only. No examples, no process, no self-correction narrative, no rationale paragraphs.
+- Fact only. No examples (except format examples for subagents' prompt), no process, no self-correction narrative, no rationale paragraphs.
 - One line per point. Short phrase or sentence.
 - A doc states the current truth, never the history of changing it.
-- Do not restate what DESIGN / SCHEMA already says.
+- Do not duplicate content already captured in other artifacts (DESIGN, SCHEMA, plans, commits). Reference them by path or URL instead.
 
 ## Code
 
