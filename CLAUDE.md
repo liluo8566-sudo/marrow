@@ -11,6 +11,7 @@ Always focus on the main goals. Stay on the right track.
 - PROGRESS.md — before claiming what is or is not done. Never grep code to guess; read this + git log.
 - CONTEXT.md — when a term conflicts; glossary only.
 - docs/adr/ — when a past decision's rationale is questioned.
+- docs/notes/ — per-task research scratch, YYYY-MM-DD_<slug>.md. Mid-investigation evidence and rejected options. Distil into ADR/DESIGN at round end, then disposable. Keep raw research out of DESIGN.
 - FUTURE.md — only when pulling a parked idea.
 - handover.md — session handoff from the previous window; act on it. Fixed-name, overwritten at each session end — never delete it.
 
@@ -63,12 +64,12 @@ Reporting:
 
 Commit / git:
 - One logical unit per commit. Commit autonomously at every logical unit. Private GitHub repo (github.com/Jaynechu/marrow) is the remote ledger.
-- Push at the end of the session or when you think essential. No confirm needed unless destructive
+- Push at the end of the session/phase. No confirm needed unless destructive.
 - Never bypass hooks, signing, or pre-commit checks unless explicitly told.
 
 Tools:
 - Bugs / stuck debugging → diagnose skill. Trivial one-liners need none.
-- Deterministic logic with a fixed behavior contract (reconcile semantics, conflict guard, idempotency dedup, atomic write, provider fallback chain, migrate source→target mapping) → tdd skill; vertical slices, one test → one impl, never all tests first. The DESIGN Safety-nets + fixed-contract sections are the test backlog.
+- Use TDD when suitable - Deterministic logic with a fixed behavior contract
 - LLM output quality, daemon / MCP glue, hook stdout → not TDD; verify per module at first build, diagnose skill when stuck.
 - CC shortcuts / hooks / MCP / commands / settings → WebFetch https://blakecrosley.com/guides/claude-code-cheatsheet before guessing; official docs first for new features.
 - Hook stdout injection caps ~10000 chars.

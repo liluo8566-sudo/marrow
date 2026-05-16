@@ -11,6 +11,7 @@ Not prioritized. Read before adding a feature to confirm whether an interface sh
 - **diff_open_threads_audit** — Weekly curator diffs Open-Threads week-over-week, audit-logs silent drops (source: `/Users/Gabrielle/Desktop/NY/code/mid-point-rv.md:76`)
 - **monitor_zone_mini_viz** — Small visualisation in/above Monitor Zone, statusline-bar style: diary count, project count, days-together, system-ops health; cyberboss heatmap-timeline as reference; possible top-of-dashboard placement (source: grill-with-docs 2026-05-15)
 - **html_readonly_dashboard_layer** — Phase 5 addon: daemon serves a local HTTP HTML view for read-only surfaces only (Cheatsheet, Monitor Zone, diary browse, milestone), Notion-style styling without Obsidian plugins; writable surfaces (Open Threads, structured correction) stay md + reconcile — never replace the md edit-reconcile core, layer on top (source: grill-with-docs 2026-05-15)
+- **workflow_reflection_skill** — Phase 5 close-out. After Marrow ships: reflection + workflow retrospective; distil the plan/findings/progress file pattern into an own transferable skill — no hook (handover.md + PROGRESS + git log cover cross-boundary recall); encode routing learned from the real build (debug vs TDD vs brainstorm→grill). Hold until Marrow done — only lived experience makes the routing real. Ref: github.com/OthmanAdi/planning-with-files (Manus-style file planning, the trigger for this idea)
 
 ## Backup / Monitor
 
