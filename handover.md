@@ -1,33 +1,33 @@
-# Marrow Handoff — 2026-05-16 (next window)
+# Marrow Handoff — 2026-05-17 (next window)
 
-Read CLAUDE.md first (it lists when to read what). DESIGN.md is source of truth. PROGRESS.md has this session's 4 entries — do not re-derive. This file is fixed-name persistent: act on it, never delete it; it is overwritten at next session end.
+Read CLAUDE.md → DESIGN.md → PROGRESS.md first. Fixed-name persistent file: act on it, never delete it; overwritten at next session end.
 
-## Pending Lumi decision (do not action without her)
+## This session — done, see artifacts (not restated here)
 
-- GitHub history purge: `archive/DESIGN-original.md` (personal health/identity fragments) + `archive/SCHEMA-original.md` are in pushed commit `ae23fc4`. Local archive/ deleted, but GitHub history still has them. Full removal = git-filter-repo strip + force-push to main (destructive, rewrites 6 commits). Awaiting Lumi's explicit go for the force-push.
+- PROGRESS.md 2026-05-17 (3 lines): ADR-0002, prompt-guard scope-extend, prompt-lint hook.
+- ADR: `docs/adr/0002-agent-invocation-credit-routing.md` — agent/credit routing, final form.
+- DESIGN.md L131 (PreToolUse = global hook, scope-extended) + L157 (four hooks at phase-1 subset) reworded.
 
-## Resolved this session
+## Prior pending — all closed, do not carry
 
-- _pit #3 auto-memory genesis: Lumi deleted it herself. _pit no longer managed by Marrow sessions for now.
-- WeClaude scope: Lumi ruled WeClaude IS in Marrow (deep rebuild late phase, cyberboss-refit-or-rewrite TBD). 14 weclaude items restored to FUTURE.md.
-- /config_auto_memory_off dropped — auto memory off for a week, moot.
+- turn-inject extra rules / coding.md merge / push-timing: Lumi confirmed long decided. Push "conflict" was a mis-record — marrow CLAUDE.md only states `commit per logical unit`, no push timing; no conflict with coding.md. Old handover's pending list is void.
 
-## Parked (carry-over, do not action)
+## prompt-lint — test phase, watch then decide
 
-- reference.md dir tree stale (`ny/`, lists deleted README). Lumi said don't bother — Marrow's Cheatsheet / convention-injection absorbs it later.
+- Live global hook. Scope `~/.claude/` + `~/cc-lab/marrow/`, whitelist meta-doc + `docs/adr/*` + `.claude/rules/*`. Not yet extended to NY / all-CLAUDE.md — Lumi decides after observing.
+- Inherent side effect: Write trims on disk to a compressed version; an immediate Edit using the pre-trim text as `old_string` mis-matches and that Edit passes through. After writing a whitelisted meta-doc, re-read disk before editing the same spot.
+- Rollback: `.bak` per file; remove = settings.json PreToolUse drop 2 lines + rm hook.
 
-## State
+## Style-bloat — settled, no more rules
 
-- grill round 2 already DONE (commit 5972174). Phase 1 build gate is open.
-- 3d.md Open-Threads [Next] still lists "grill round 2 pending" + "grill-with-docs skill redesign pending" — both stale; drop on next memm run.
-- Commit + push are autonomous (CLAUDE.md Commit/git, Lumi-edited). Remote up to date through 672b539.
+- prompt-layer (CLAUDE.md / skill / @import / rule / template) does not fix style bloat. Line-width hook also rejected: measured data shows Lumi's own approved files run long lines too — root cause is density not width, no clean regex gate.
+- Only working cure = post-write haiku trim pass = prompt-lint (now live). Do not propose new style rules. Write meta-doc short/dense/one-assertion-per-line/no-explain/no-dup/reference-by-path regardless; prompt-lint is backstop, not licence.
 
-## Done this session
+## Marrow Phase 1 — not started, gate open
 
-- See PROGRESS.md [2026-05-16] x4: docs consolidation (CONVENTIONS folded into CLAUDE.md + rule.md discipline), ny→mw rename, handover overwrite model, global naming law, FUTURE 106→66→30, _pit memm prune.
-- Out-of-repo (not in marrow git): `~/.claude/CLAUDE.md` File hygiene → naming law; `~/.claude/skills/handoff/SKILL.md` overwrite model; `~/.claude/settings.json` +`~/Desktop/NY` additionalDirectory; `~/cc-lab/marrow.code-workspace` (Raycast ⌥V via `~/Toolkit/scripts/raycast/vs-ny.sh`).
+- Build per DESIGN Phase 1; skills: grill-with-docs, tdd, diagnose.
+- Carried: `reviewer-blind` subagent — config once code exists, nothing to review yet.
 
-## Next task
+## Non-blocking drift
 
-- Start Phase 1 (DESIGN: Memory core — SQLite + full-text, daemon + minimal MCP tool set, three hooks, dashboard top render, migrate.py, `mw` CLI). Resolve the two Lumi decisions above first if she engages them.
-- Suggested skills: grill-with-docs (more design stress before code), tdd (Phase 1 build), diagnose (bugs).
+- ADR-0001 + CONTEXT.md L38 still say `ny` CLI; should be `mw` (renamed, DESIGN swept, these two missed). One sed pass, not phase-1 blocking.

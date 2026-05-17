@@ -128,7 +128,7 @@ Why this beats a black-box model memory: the memory IS Lumi's own SQLite + files
 - SessionStart — calls the daemon once for the cold-start handoff (minimal who-I-am, where-I-left-off, open-alerts); also Phase 2 emotion breath.
 - UserPromptSubmit — must-never-fade injection; plus the optional config-gated deterministic recall fallback (local-embedding vector search → top-K into additionalContext). Default off for a strong model.
 - SessionEnd — async: archive session turns to the store; render the day's diary; capture lessons; (Phase 2) emotion tag + decay update; regen the dashboard top + the day's diary entry.
-- PreToolUse — write_guard. Phase 1: mirror the existing prompt-guard (English-only on prompt-class .md, no pipe tables). Phase 3: route writes to prompt-class md to the writer sub-Claude; main Claude loses direct write there.
+- PreToolUse — write_guard. Phase 1: the existing global `~/.claude/hooks/prompt-guard.py` (English-only + no pipe tables on prompt-class .md), scope extended to cover `~/cc-lab/marrow/` — one global hook, not a Marrow-local copy. Phase 3: route writes to prompt-class md to the writer sub-Claude; main Claude loses direct write there.
 
 ## Injection
 
@@ -154,7 +154,7 @@ The per-event topology (which trigger uses which tier, timeout, retry) is a Pend
 
 Each phase ships one outcome.
 
-- Phase 1 — Memory core: SQLite + full-text, the daemon with a minimal MCP tool set, three hooks, dashboard top render, migrate.py, the `mw` CLI. Runs in parallel with old ny-memm ~2 weeks, then retire it. Stream-json subscription routing is pass-tested (2026-05-15). The remaining unknowns — local vector ext on this macOS, MCP parity with cyberboss, cheap-tier diary quality — are not pre-verified; each surfaces and is settled at first build of its module, no separate verify phase.
+- Phase 1 — Memory core: SQLite + full-text, the daemon with a minimal MCP tool set, all four hooks at phase-1 subset (SessionStart cold-start handoff only; UserPromptSubmit must-never-fade inject, recall fallback default off; SessionEnd archive + diary + lessons, no emotion/decay; PreToolUse mirrors prompt-guard only), dashboard top render, migrate.py, the `mw` CLI. Runs in parallel with old ny-memm ~2 weeks, then retire it. Stream-json subscription routing is pass-tested (2026-05-15). The remaining unknowns — local vector ext on this macOS, MCP parity with cyberboss, cheap-tier diary quality — are not pre-verified; each surfaces and is settled at first build of its module, no separate verify phase.
 - Phase 2 — Emotion + decay + sub-page render fills out; people/preferences trigger-load tables live.
 - Phase 3 — Writer authority: prompt-class md writes go through the writer sub-Claude.
 - Phase 4 — Cross-channel parity (see weclaude + cyberboss Pending below).
