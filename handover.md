@@ -39,6 +39,7 @@ The launchd→diary full path has NOT run end-to-end yet (the stream LLM call it
 - `prompt-lint` hook trims meta-`.md` writes (ADR-0003 was trimmed once; obeyed, re-sent verbatim). Obey trim; escalate to Lumi only on real semantic loss.
 - CN in prompt-class `.md` must be inside `( )` or code or it is blocked by PreToolUse prompt-guard.
 - subagents must never git commit/push/config (subagents.md) — state in every dispatch prompt.
+- `mw` CLI: symlink `~/.local/bin/mw` -> `.venv/bin/mw` (on PATH; #6 was venv-only). Fresh Mac: recreate symlink after `pip install -e`.
 - env: `.venv` py3.14 editable install (`python -m marrow.X` works any cwd); `claude` real bin `/Users/Gabrielle/.local/bin/claude`; launchd PATH carries `.local/bin`+venv; ollama absent.
 
 ## Next window
