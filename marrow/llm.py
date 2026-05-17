@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import threading
 import urllib.error
 import urllib.request
 
@@ -76,20 +77,72 @@ class LLMClient:
         raise LLMError(f"unknown provider kind: {kind}")
 
     def _run_claude_cli(self, spec: dict, model: str, prompt: str) -> str:
-        mode = spec.get("mode", "json")
-        fmt = "stream-json" if mode == "stream_json" else "json"
+        # Default = subscription-window stream-json (no -p): pipe one user
+        # message into an interactive claude over stdin, read events off
+        # stdout until `result`. Verified to ride the OAuth five-hour window
+        # (rate_limit_event five_hour, isUsingOverage:false), not the 6/15
+        # credit pool. mode="p" is the legacy headless fallback.
+        if spec.get("mode") == "p":
+            return self._run_claude_p(spec, model, prompt)
+        return self._run_claude_stream(spec, model, prompt)
+
+    def _run_claude_stream(self, spec: dict, model: str, prompt: str) -> str:
+        timeout = spec.get("timeout_s", 120)
+        cmd = [_claude_bin(), "--output-format", "stream-json",
+               "--input-format", "stream-json", "--verbose",
+               "--model", model, *_ISOLATION]
+        msg = json.dumps({"type": "user", "message": {
+            "role": "user", "content": prompt}})
+        try:
+            p = subprocess.Popen(
+                cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True)
+        except OSError as e:
+            raise LLMError(f"claude_cli spawn failed: {e}") from e
+        killer = threading.Timer(timeout, p.kill)
+        killer.start()
+        lines: list[str] = []
+        try:
+            p.stdin.write(msg + "\n")
+            p.stdin.flush()
+            p.stdin.close()
+            for line in p.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                lines.append(line)
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if ev.get("type") == "result":
+                    break
+        finally:
+            killer.cancel()
+            if p.poll() is None:
+                p.terminate()
+                try:
+                    p.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+        if not lines:
+            err = (p.stderr.read() or "").strip()[:200]
+            raise LLMError(f"claude_cli stream: no output ({err})")
+        return self._parse_claude("\n".join(lines), "stream-json")
+
+    def _run_claude_p(self, spec: dict, model: str, prompt: str) -> str:
         cmd = [_claude_bin(), "-p", prompt, "--model", model,
-               *_ISOLATION, "--output-format", fmt]
-        if fmt == "stream-json":
-            cmd.append("--verbose")
+               *_ISOLATION, "--output-format", "json"]
         try:
             r = subprocess.run(cmd, capture_output=True, text=True,
                                 timeout=spec.get("timeout_s", 120))
         except subprocess.TimeoutExpired as e:
-            raise LLMError(f"claude_cli timeout {spec.get('timeout_s',120)}s") from e
+            raise LLMError(
+                f"claude_cli timeout {spec.get('timeout_s',120)}s") from e
         if r.returncode != 0:
-            raise LLMError(f"claude_cli rc{r.returncode}: {r.stderr.strip()[:200]}")
-        return self._parse_claude(r.stdout, fmt)
+            raise LLMError(
+                f"claude_cli rc{r.returncode}: {r.stderr.strip()[:200]}")
+        return self._parse_claude(r.stdout, "json")
 
     @staticmethod
     def _parse_claude(out: str, fmt: str) -> str:

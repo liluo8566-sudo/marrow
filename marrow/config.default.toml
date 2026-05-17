@@ -19,7 +19,9 @@ emergency = "ollama"
 
 [llm.claude_cli]
 kind = "claude_cli"
-mode = "json"
+# stream = no-`-p` stream-json, rides the OAuth 5h subscription window
+# (not the 6/15 credit pool). "p" = legacy headless fallback (-p).
+mode = "stream"
 timeout_s = 120
 
 [llm.ollama]
