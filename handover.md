@@ -1,45 +1,46 @@
-# Marrow Handoff — 2026-05-17 (next window: #6 mw CLI)
+# Marrow Handoff — 2026-05-18 (Phase 1 complete)
 
-Read CLAUDE.md → DESIGN.md → SCHEMA.md → PROGRESS.md → this. Fixed-name, act on it, never delete; overwritten at session end.
+Read CLAUDE.md → DESIGN.md → SCHEMA.md → PROGRESS.md → ADRs → this. Fixed-name, act on it, never delete; overwritten at session end.
 
-## Done this session — see PROGRESS.md + git log (do not restate)
+## Status: Phase 1 DONE
 
-#4 daemon, #5 migrate.py (TDD), DESIGN fact-corrections section, prompt-lint backtick fix, subagents.md rewrite, render-templates note. pytest 40/40. Commits pushed, main synced.
+All Phase-1 units shipped. See PROGRESS.md + `git log` — do not restate. This session's commits (all pushed, main synced): #6 mw CLI, #7 code hooks + #8 dashboard, subscription-window provider, diary pipeline, launchd + ADR-0003, day-boundary/map-reduce/split-jobs. `~/.claude` settings (marrow hooks) = local commit only, not pushed (per rule).
 
-## Real DB state — do NOT re-apply
+## Live now (parallel with ny-memm ~2 weeks, then ny-memm retires)
 
-`migrate.py --apply` already ran against the live `~/.config/marrow/marrow.db`: events 3 / goose_bites 36 / milestones 21 / pit 23 / vocab 5. Re-run is idempotent (source_hash) but there is nothing to migrate again. ny-memm runs in parallel ~2 weeks per DESIGN, then retires.
+- marrow SessionStart (handoff additionalContext) + SessionEnd (clean→archive→dashboard) hooks active GLOBALLY, all projects, appended alongside ny-memm groups in `~/.claude/settings.json`. Code-only, no LLM.
+- Two launchd jobs registered (`state = not running`, waiting): `com.marrow.diary-routine` 04:00, `com.marrow.diary-catchup` 16:00. Sources `deploy/`, installed `~/Library/LaunchAgents/`.
 
-## Locked — do not re-litigate
+## ONLY unverified thing — next window MUST check
 
-- MCP: official `mcp` SDK (FastMCP), stdio per-session; logic all in `marrow` package, hooks = thin shells importing it (#7).
-- migrate mapping simplified: only `2026.md` / `timeline` / `cipher` / `_pit` / goose-quote files + Lighthouse milestone. 3d/10d/Open-Threads/Garden/stickers dropped. scope = me/us only; Me-section date = birth 1995 + age start.
-- Session-start handoff = open threads + open alerts only, no who-i-am (DESIGN L128/140 fixed).
-- lesson: independent table + 04:00 haiku auto-capture + manual promote. Defined, storage built. Not re-open.
-- Fact corrections: DESIGN "Fact corrections — conflict priority" — 3 hard rules locked (memory never rebuts Lumi; serial facts = append state-seq + latest pointer; priority Lumi-now > confirmed-structured > system-structured > raw event). Reuses lesson intake, skips promote-to-rule. `corrections` table = Phase 2 placeholder (SCHEMA), not built Phase 1.
+The launchd→diary full path has NOT run end-to-end yet (the stream LLM call itself IS live-verified separately; see ADR-0003 evidence). First real fires: routine 2026-05-18 04:00, catchup 16:00. After they fire, verify:
+- `~/Library/Logs/mw-diary-routine.log` / `mw-diary-catchup.log` — clean exit, no "claude not found", no traceback.
+- `diary` table has a row for 2026-05-17 (today's session is huge → first real-world stress test of per-session map-reduce + oversized-session chunking).
+- `alerts` table: no `critical`/`routine` failure rows; `info` lesson rows expected.
+- If routine failed, catchup at 16:00 should backfill it — confirm that fallback actually worked.
 
-## Build sequence: #6 → #7 → #8
+## Locked — do not relitigate
 
-- #6 mw CLI: `mw` entrypoint (pyproject already maps `mw = marrow.cli:main`). Point-edit/remove one record by id; deterministic, no LLM. USE `/tdd` (+ optional `/goal`).
-- #7 four hooks at Phase-1 subset (DESIGN L126-133): SessionEnd code-only clean+archive (reuse repo.archive_events) + dashboard-top regen; SessionStart open-threads+alerts render into CLAUDE.md marker block + diary catchup; UserPromptSubmit must-never-fade (recall fallback off); PreToolUse = global prompt-guard mirror. Nightly 04:00 routine: haiku digest → sonnet diary + haiku lessons. Render templates: `docs/notes/2026-05-17_render-templates.md` (Lumi-locked spec, verbatim). NOT `/tdd` for daemon/hook glue.
-- #8 dashboard top render (atomic write + conflict-guard hash).
+- ADR-0003: subscription-window no-`-p` stream-json; flag meanings; `-p` fallback (config `mode="p"`); local-04:00 day boundary; dual launchd jobs; `/schedule` (cloud) rejected for local pipeline. Read it instead of re-deriving cyberboss.
+- diary prompt bodies = Lumi-reviewed/hand-edited (DESIGN L53 satisfied).
+- catchup hard bounds: 7-day window, cap 3, overflow warn alert.
+- Diary day = local `[D 04:00, D+1 04:00)`; 00:00–04:00 is previous-day spillover.
 
-SessionEnd #7 must enforce audit-drop (drop completed/cancelled/abandoned) + concurrent-write lock — Lumi's pain: parallel sessions never delete, threads pile up.
+## Deferred (by design, NOT gaps)
 
-## Pending — Lumi to rule, not blocking #6
+- UserPromptSubmit must-never-fade: no Phase-1 content source (convention-injection layer is DESIGN Pending). No hook wired until that lands.
+- `corrections` table: Phase 2 placeholder (SCHEMA + DESIGN fixed, not built).
+- ny-memm runs in parallel ~2 weeks then retires; old `memory/` + `code/` archive→remove after.
 
-- corrections table build + capture wiring (Phase 2; design fixed).
-- schema-evolution mechanism (user_version + ordered patch chain) — ADR-candidate, replaces interim hand-written ALTER in storage.init_db, post-Phase-1 cleanup.
-- doc auto-render upkeep (DESIGN/SCHEMA/README/dir map) — cleanup phase, Lumi approved automating, no manual.
+## Gotchas
 
-## State / gotchas
+- `CLAUDE.md` (M) and `docs/notes/` (untracked) were pre-existing at session start, NOT this session's work — left untouched. Do not commit/sweep them unless Lumi rules.
+- `prompt-lint` hook trims meta-`.md` writes (ADR-0003 was trimmed once; obeyed, re-sent verbatim). Obey trim; escalate to Lumi only on real semantic loss.
+- CN in prompt-class `.md` must be inside `( )` or code or it is blocked by PreToolUse prompt-guard.
+- subagents must never git commit/push/config (subagents.md) — state in every dispatch prompt.
+- env: `.venv` py3.14 editable install (`python -m marrow.X` works any cwd); `claude` real bin `/Users/Gabrielle/.local/bin/claude`; launchd PATH carries `.local/bin`+venv; ollama absent.
 
-- env: `.venv` (py3.14), `mcp` 1.27.1 installed, claude bin `/Users/Gabrielle/.local/bin/claude`, ollama absent.
-- storage.init_db has idempotent schema-backfill ALTER (goose_bites.source_hash) — pattern to extend per new column until the proper mechanism lands.
-- prompt-lint hardened: prompt rule + conservative strip of whole-line backtick wrap (`~/.claude` commit f9d7dc3). Obey its trim, never bypass; escalate to Lumi only on real semantic loss.
-- subagents must never git commit/push (subagents.md locked) — sonnet violated once this session; still state it explicitly in every dispatch prompt.
-- CN in prompt-class .md must be inside ( ) or code or PreToolUse blocks the write.
+## Next window
 
-## Skills next window
-
-`/tdd` for #6 mw CLI (deterministic, fixed contract). `/goal` optional if pass condition machine-checkable. diagnose for heavy bugs. No `/tdd` for #7 hooks/daemon glue.
+- Phase 1 has no build work left — first task is the launchd first-run verification above (use `diagnose` skill if a job failed).
+- Phase 2 (DESIGN L171): emotion + decay + sub-page render fill-out; people/preferences trigger-load tables; corrections table build. Use `/tdd` for the deterministic table/logic work; NOT `/tdd` for hook/daemon glue. `/goal` if a sub-module pass condition is machine-checkable.
