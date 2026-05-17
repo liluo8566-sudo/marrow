@@ -14,6 +14,12 @@
 - FUTURE.md — only when pulling a parked idea.
 - handover.md — session handoff from the previous window; act on it. Fixed-name, overwritten at each session end — never delete it.
 
+## Build workflow
+
+Suggest Lumi to use commands/skills:
+- `/goal <condition>`: when a sub-module's pass condition is fixed and machine-checkable; auto-runs each turn until met. Leave test output in the transcript — the evaluator reads only the conversation.
+- `/tdd` skill: for deterministic logic with a fixed behaviour contract — SQLite schema, migrate.py, mw CLI. Red-green-refactor.
+
 ## Conventions
 
 PROGRESS.md:
