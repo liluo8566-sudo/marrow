@@ -138,10 +138,10 @@ Why this beats a black-box model memory: the memory IS Lumi's own SQLite + files
 
 - SessionStart — injects the open threads + open alerts set (no who-i-am; persona stays in the static CLAUDE.md layer); also runs diary catchup (writes any past calendar day with events but no diary, idempotent skip); also Phase 2 emotion breath.
 - UserPromptSubmit — must-never-fade injection; plus the optional config-gated deterministic recall fallback (local-embedding vector search → top-K into additionalContext). Default off for a strong model.
-- SessionEnd — async, code-only (no LLM): clean this session's transcript (strip tool/fetch/system noise, keep the full human dialogue verbatim) and archive turns to events; regen the dashboard top; (Phase 2) emotion tag + decay update. Diary + lessons are NOT here — see diary scheduling.
+- SessionEnd — async, code-only (no LLM): pass an archive-skip gate (see Pending — session archive skip), then clean this session's transcript (strip tool/fetch/system noise, keep the full human dialogue verbatim) and archive turns to events; regen the dashboard top; (Phase 2) emotion tag + decay update. Diary + lessons are NOT here — see diary scheduling.
 - PreToolUse — write_guard. Phase 1: the existing global `~/.claude/hooks/prompt-guard.py` (English-only + no pipe tables on prompt-class .md), scope extended to cover `~/cc-lab/marrow/` — one global hook, not a Marrow-local copy. Phase 3: route writes to prompt-class md to the writer sub-Claude; main Claude loses direct write there.
 
-Diary scheduling — nightly subscription routine at 04:00 writes the previous day. haiku compresses the day's clean events to a digest; sonnet writes diary and haiku extracts lessons from that digest. SessionStart catchup: scan event-days lacking diary, skip if written (Phase 1 rescan, not a resident watcher).
+Diary scheduling — see ADR-0003 for the shipped detail (local-04:00 day boundary, per-session map-reduce, two decoupled launchd jobs: 04:00 routine writes the just-closed day, 16:00 catchup backfills the last days). haiku compresses each session to a digest; sonnet writes the diary, haiku extracts lessons from the merged digest.
 
 ## Injection
 
@@ -230,6 +230,16 @@ Tier split (fixed, not Pending) — three tiers:
 - Raw-stream — detailed event rows, resolved alerts, audit_log, DB dumps, orphaned jsonl, low-use stickers. Real retention + prune.
 
 Effect target: no growth alerts, no manual rm, no DB bloat.
+
+## Pending — session archive skip
+
+Skipped sessions excluded from diary/lessons/recall. (Legacy: `summ-skip` stamp; trigger: `ssmmm` skill.)
+
+- Manual skip: stamp file, `mw` command, or in-session trigger
+- Auto skip: turn threshold (Pending)
+- Idempotent: skip = do nothing; raw-stream cleanup is separate tier
+
+Phase 1: code-only, non-blocking.
 
 ## Pending — open items
 

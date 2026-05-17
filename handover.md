@@ -18,6 +18,7 @@ The launchd→diary full path has NOT run end-to-end yet (the stream LLM call it
 - `diary` table has a row for 2026-05-17 (today's session is huge → first real-world stress test of per-session map-reduce + oversized-session chunking).
 - `alerts` table: no `critical`/`routine` failure rows; `info` lesson rows expected.
 - If routine failed, catchup at 16:00 should backfill it — confirm that fallback actually worked.
+- Compression ratio unknown (not measured). Add instrumentation to `run_day`: raw chars vs merged-digest chars into the audit_log summary (rough prior: digest ~5–15% of raw, unverified).
 
 ## Locked — do not relitigate
 
@@ -43,4 +44,5 @@ The launchd→diary full path has NOT run end-to-end yet (the stream LLM call it
 ## Next window
 
 - Phase 1 has no build work left — first task is the launchd first-run verification above (use `diagnose` skill if a job failed).
+- Session archive skip (DESIGN "Pending — session archive skip"): small code-only Phase-1 follow-up, non-blocking. Manual skip stamp + auto-skip below a turn threshold, gating SessionEnd archive.
 - Phase 2 (DESIGN L171): emotion + decay + sub-page render fill-out; people/preferences trigger-load tables; corrections table build. Use `/tdd` for the deterministic table/logic work; NOT `/tdd` for hook/daemon glue. `/goal` if a sub-module pass condition is machine-checkable.
