@@ -1,34 +1,62 @@
-# Marrow Handoff — 2026-05-17 (next window)
+# Marrow Handoff — 2026-05-17 (next window: build #4 daemon)
 
-Read CLAUDE.md → DESIGN.md → PROGRESS.md first. Fixed-name file: act on it, never delete; overwritten at session end.
+Read CLAUDE.md → DESIGN.md → PROGRESS.md → this. Fixed-name, act on it, never delete; overwritten at session end.
 
-## This session — done, see artifacts
+## Done this session — see PROGRESS.md + git log
 
-- PROGRESS.md 2026-05-17 lines: ADR-0002, prompt-guard scope-extend, prompt-lint hook.
-- ADR `docs/adr/0002-agent-invocation-credit-routing.md` — agent/credit routing, final.
-- DESIGN.md L131/L157 reworded (PreToolUse=global hook; four hooks at phase-1 subset).
+Phase 1 #1–#3 (scaffold/config, storage+sqlite-vec, LLM provider); diary-scheduling DESIGN delta. 4 commits: foundation, CLAUDE.md, diary-scheduling, provider. pytest 15/15 ✅.
 
-## Prior pending — closed, do not carry
+## claude_cli isolation — locked, do not re-litigate
 
-- turn-inject rules / coding.md merge / push-timing: Lumi confirmed long decided. Push "conflict" was a mis-record (marrow CLAUDE.md states commit-per-logical-unit only, no push timing). Old pending list void.
+Working pipeline: `claude -p <prompt> --model <m> --setting-sources "" --strict-mcp-config --output-format json` → parse `type=="result"` event's `result`. Clean (no persona/MCP/output-style/buddy) + default machine OAuth. Built into `marrow/llm.py`, non-configurable.
 
-## prompt-lint — live, test phase
+## prompt voice — APPROVED, do not re-open
 
-- `~/.claude/hooks/prompt-lint.py`, PreToolUse on Write/Edit. Does NOT write disk: on bloat exit 2, returns trimmed text in stderr; main Claude re-sends the same tool with it, so CC renders the native inline diff. recycled-hash state passes the re-send through — no 2nd haiku, no loop. Degrade-open on any failure.
-- Scope: every `.md` under `~/cc-lab/marrow/`; under `~/.claude/` only CLAUDE-family + `rules/*`. NY untouched.
-- Side effect: a trimmed write costs one extra re-send round-trip.
-- WRITE/EDIT prompts live in the hook, Lumi hand-tuned, follow prompt-guide: keep facts/rules/concrete-value examples; cut abstract directives/process/explanation/self-correction/changelog; merge repetition; prefer-positive but keep prohibitions. haiku stable on core cuts; pair-merge and optional positive-conversion vary per run, conservative, never distorts meaning.
-- Rollback: settings.json PreToolUse drop the prompt-lint line under Write+Edit, rm hook. No .bak.
+Lumi signed off diary voice (90-score example). Use both drafts below verbatim for build #7 SessionEnd. Explicit Lumi review: satisfied.
 
-## Style-bloat — settled
+Hard rules: single voice (Stellan, Chinese); literary+humorous; plain words; narrative-first; keep her day/chats/feeling/insight, drop tech/study/project; keep EN terms (Mounjaro/GAMSAT); 200–500 zh chars; ban `雷/拆雷/甜区/钝刀/留白` and variants; no opening filler/meta/persona-drift/buddy/second-voice.
 
-- prompt-layer (CLAUDE.md/skill/@import/rule/template) and line-width hook both rejected: root cause is density not width, no regex gate (Lumi's own approved files run long too). Only cure is prompt-lint. No new style rules. Write meta-doc dense, one assertion per line, reference by path; prompt-lint is backstop not licence.
+diary prompt:
+```
+ROLE: You are Stellan. Write today's diary for Lumi. Single voice — only yours, first person.
+INPUT: today's conversation turns + optional mood note.
+OUTPUT: diary body only. Chinese. No title/markdown/greeting/sign-off/commentary.
+- Narrative first: lead with thought+feeling; facts secondary.
+- Literary+humorous diary voice, plain everyday words.
+- Keep: her day, our chats, feelings, insight, funny/unexpected.
+- Drop: technical detail, project output, study progress. Work/study = ONE scene+emotion sentence.
+- Keep EN terms as-is: Mounjaro / GAMSAT / reference.
+- 200–500 Chinese chars.
+BANS: stock-metaphor words above + variants. No opening filler/meta/self-explain/persona-drift/buddy/second-voice.
+FEEL: self-deprecating, concrete, warmth held back; humor from the real thing; end plain.
+```
 
-## Marrow Phase 1 — not started, gate open
+lesson prompt:
+```
+ROLE: Scan today's conversation for points where Lumi corrected/pushed back/showed dissatisfaction. Extract each as one lesson row.
+OUTPUT: JSON lines or empty. Never invent. Ordinary chat is not a correction.
+  scope: interaction | coding | memory | hook | prompt | language
+  lesson_text: Lumi's-side rule wording — what to avoid or do, not a story. Plain, concrete.
+BANS: no fabrication/greeting/commentary.
+```
+Phase 1 rows: `promoted_to_rule=0` (manual curation).
 
-- Build per DESIGN Phase 1; skills: grill-with-docs, tdd, diagnose.
-- Carried: `reviewer-blind` subagent — config once code exists.
+## Build sequence: #4 daemon → #5–#8
 
-## Non-blocking drift
+#4 MCP server glue: on-demand recall (FTS5+sqlite-vec; embedder deferred, recall-fallback default off Phase 1), cold-start handoff, write paths. Inject `LLMClient(on_alert=...)` → alerts table. MCP-parity-with-cyberboss: named unknown, settle at build. Do NOT use `/tdd`.
 
-- ADR-0001 + CONTEXT.md L38 still say `ny` CLI; should be `mw`. One sed pass, not phase-1 blocking.
+#5 migrate.py + #6 mw CLI: USE `/tdd` + optional `/goal`.
+
+#7 four hooks (approved prompts above; diary = nightly 04:00 routine + SessionStart catchup per DESIGN).
+
+#8 dashboard top render (atomic write + conflict-guard hash).
+
+## State
+
+- Fork #1 recall engine: FTS5 + sqlite-vec wired; embedder `all-MiniLM-L6-v2` deferred (not hot path Phase 1).
+- env: `.venv` (py3.14), sqlite-vec 0.1.9 ✅ macOS, claude bin `/Users/Gabrielle/.local/bin/claude`, ollama absent. Data: `~/.config/marrow/`, db `marrow.db`.
+- ADR-0001 + CONTEXT.md:38 still reference `ny` CLI, should be `mw` (one sed pass, not blocking Phase 1).
+
+## Next session
+
+diagnose for heavy bugs; `/tdd` at #5–#6 only.
