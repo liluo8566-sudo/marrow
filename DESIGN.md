@@ -50,7 +50,7 @@ Personal AI memory + workflow system. Replaces the ny-memm pipeline. SQLite-back
 - Every scheduled job: try/except + an alert row on failure. No silent failure.
 - Data and code live apart: data under `~/.config/`, code under `~/cc-lab/marrow/`.
 - Hook scripts stay small (target ≤ 100 lines each).
-- All prompt/template bodies require explicit Lumi review before commit. No template lands by assistant inference alone.
+- Prompt/subagent template changes: notify Lumi to confirm wording.
 - Three LLM tiers: cheap/local for compression-classification-routing (the bulk), mid for narrative (diary, weekly curate), top for the user-facing conversation only.
 - Emotion breath at most once per SessionStart or every N user turns — never per-turn.
 
@@ -141,7 +141,7 @@ Why this beats a black-box model memory: the memory IS Lumi's own SQLite + files
 - SessionEnd — async, code-only (no LLM): pass an archive-skip gate (see Pending — session archive skip), then clean this session's transcript (strip tool/fetch/system noise, keep the full human dialogue verbatim) and archive turns to events; regen the dashboard top; (Phase 2) emotion tag + decay update. Diary + lessons are NOT here — see diary scheduling.
 - PreToolUse — write_guard. Phase 1: the existing global `~/.claude/hooks/prompt-guard.py` (English-only + no pipe tables on prompt-class .md), scope extended to cover `~/cc-lab/marrow/` — one global hook, not a Marrow-local copy. Phase 3: route writes to prompt-class md to the writer sub-Claude; main Claude loses direct write there.
 
-Diary scheduling — see ADR-0003 for the shipped detail (local-04:00 day boundary, per-session map-reduce, two decoupled launchd jobs: 04:00 routine writes the just-closed day, 16:00 catchup backfills the last days). haiku compresses each session to a digest; sonnet writes the diary, haiku extracts lessons from the merged digest.
+Diary scheduling — see ADR-0003 for the shipped detail (local-04:00 day boundary, per-session map-reduce, two decoupled launchd jobs: 04:00 routine writes the just-closed day, 16:00 catchup backfills the last days). haiku digests sessions (volume-only, no value-cut/arc), merges them on local timeline (tags dropped, weights uneven), sonnet writes diary, haiku extracts lessons. Buddy end-of-turn comments stripped at transcript clean.
 
 ## Injection
 
@@ -168,7 +168,7 @@ The per-event topology (which trigger uses which tier, timeout, retry) is a Pend
 Each phase ships one outcome.
 
 - Phase 1 — Memory core: SQLite + full-text, the daemon with a minimal MCP tool set, all four hooks at phase-1 subset (SessionStart open-threads+alerts handoff only; UserPromptSubmit must-never-fade inject, recall fallback default off; SessionEnd code-only clean+archive + dashboard-top regen, no LLM/emotion/decay; diary+lessons via nightly 04:00 routine + SessionStart catchup; PreToolUse mirrors prompt-guard only), dashboard top render, migrate.py, the `mw` CLI. Runs in parallel with old ny-memm ~2 weeks, then retire it. Stream-json subscription routing is pass-tested (2026-05-15). The remaining unknowns — local vector ext on this macOS, MCP parity with cyberboss, cheap-tier diary quality — are not pre-verified; each surfaces and is settled at first build of its module, no separate verify phase.
-- Phase 2 — Emotion + decay + sub-page render fills out; people/preferences trigger-load tables live.
+- Phase 2 — Emotion + decay + sub-page render fills out; people/preferences trigger-load tables live. Sub-page render is config-driven: the rendered sub-page set is a config list, not hardcoded — opt-in/opt-out is native, never a later retrofit of the render core (goal 7). `stellan_wallet` (FUTURE) is the first opt-in addon riding this contract.
 - Phase 3 — Writer authority: prompt-class md writes go through the writer sub-Claude.
 - Phase 4 — Cross-channel parity (see weclaude + cyberboss Pending below).
 - Phase 5 — Addons + open source.
