@@ -12,7 +12,9 @@ see docs/adr/0003-subscription-window-stream-json.md. Do not re-derive.
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import signal
 import subprocess
 import threading
 import urllib.error
@@ -32,6 +34,15 @@ def _claude_bin() -> str:
     if not b:
         raise LLMError("claude CLI not found on PATH")
     return b
+
+
+def _kill_group(pgid: int, sig: int) -> None:
+    """Kill the whole process group so claude's spawned descendants die
+    with it, not just the direct child (orphan leak on timeout)."""
+    try:
+        os.killpg(pgid, sig)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
 
 
 class LLMClient:
@@ -100,10 +111,15 @@ class LLMClient:
         try:
             p = subprocess.Popen(
                 cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, text=True)
+                stderr=subprocess.PIPE, text=True, start_new_session=True)
         except OSError as e:
             raise LLMError(f"claude_cli spawn failed: {e}") from e
-        killer = threading.Timer(timeout, p.kill)
+        try:
+            pgid = os.getpgid(p.pid)
+        except ProcessLookupError:
+            pgid = p.pid
+        killer = threading.Timer(
+            timeout, lambda: _kill_group(pgid, signal.SIGKILL))
         killer.start()
         lines: list[str] = []
         try:
@@ -124,11 +140,13 @@ class LLMClient:
         finally:
             killer.cancel()
             if p.poll() is None:
-                p.terminate()
+                _kill_group(pgid, signal.SIGTERM)
                 try:
                     p.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    p.kill()
+                    _kill_group(pgid, signal.SIGKILL)
+            else:
+                _kill_group(pgid, signal.SIGKILL)
         if not lines:
             err = (p.stderr.read() or "").strip()[:200]
             raise LLMError(f"claude_cli stream: no output ({err})")
@@ -137,16 +155,29 @@ class LLMClient:
     def _run_claude_p(self, spec: dict, model: str, prompt: str) -> str:
         cmd = [_claude_bin(), "-p", prompt, "--model", model,
                *_ISOLATION, "--output-format", "json"]
+        timeout = spec.get("timeout_s", 120)
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True,
-                                timeout=spec.get("timeout_s", 120))
+            p = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, start_new_session=True)
+        except OSError as e:
+            raise LLMError(f"claude_cli spawn failed: {e}") from e
+        try:
+            pgid = os.getpgid(p.pid)
+        except ProcessLookupError:
+            pgid = p.pid
+        try:
+            out, err = p.communicate(timeout=timeout)
         except subprocess.TimeoutExpired as e:
+            _kill_group(pgid, signal.SIGKILL)
+            p.wait()
+            raise LLMError(f"claude_cli timeout {timeout}s") from e
+        finally:
+            _kill_group(pgid, signal.SIGKILL)
+        if p.returncode != 0:
             raise LLMError(
-                f"claude_cli timeout {spec.get('timeout_s',120)}s") from e
-        if r.returncode != 0:
-            raise LLMError(
-                f"claude_cli rc{r.returncode}: {r.stderr.strip()[:200]}")
-        return self._parse_claude(r.stdout, "json")
+                f"claude_cli rc{p.returncode}: {err.strip()[:200]}")
+        return self._parse_claude(out, "json")
 
     @staticmethod
     def _parse_claude(out: str, fmt: str) -> str:
