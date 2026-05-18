@@ -238,6 +238,8 @@ Decided — raw jsonl cleanup is NOT Marrow's job. Use `cleanupPeriodDays` in `~
 Skipped sessions excluded from diary/lessons/recall. (Legacy: `summ-skip` stamp; trigger: `ssmmm` skill.)
 
 - Manual skip: stamp file, `mw` command, or in-session trigger
+- `mm+` force-include — into diary regardless of turn count (overrides ≤3 drop / SHORT auto-skip)
+- `mm-` force-skip — excluded regardless of turn count (30+ turns still skip)
 - Auto skip: turn threshold (Pending)
 - Idempotent: skip = do nothing; raw-stream cleanup is separate tier
 
