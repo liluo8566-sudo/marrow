@@ -35,7 +35,7 @@ def render_top(conn) -> str:
         for t in threads:
             due = f" [Due {t['due']}]" if t.get("due") else ""
             nxt = f" — {t['next_step']}" if t.get("next_step") else ""
-            out.append(f"- [{t['category']}] {t['title']}{nxt}{due} #{t['id']}")
+            out.append(f"- #{t['id']} [{t['category']}] {t['title']}{nxt}{due}")
     else:
         out.append("- none")
     out.append(M1)

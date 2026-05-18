@@ -41,7 +41,7 @@ def _handoff_text(conn) -> str:
     lines += ["", "## Alerts"]
     if h["alerts"]:
         for a in h["alerts"]:
-            lines.append(f"- [{a['severity']}] {a['message']} #{a['id']}")
+            lines.append(f"- #{a['id']} [{a['severity']}] {a['message']}")
     else:
         lines.append("- none")
     return "\n".join(lines)
