@@ -95,6 +95,7 @@ def _hash(*parts: str) -> str:
 def archive_events(conn: sqlite3.Connection, rows: list[dict]) -> int:
     # Write path for #7 SessionEnd. Idempotent by source_hash; re-run skips.
     n = 0
+    sessions: set[str] = set()
     with conn:
         for r in rows:
             h = _hash(r["session_id"], r["timestamp"], r["role"],
@@ -110,5 +111,16 @@ def archive_events(conn: sqlite3.Connection, rows: list[dict]) -> int:
                 (r["session_id"], r["timestamp"], r["role"], r["content"],
                  r.get("channel"), h),
             )
+            sessions.add(r["session_id"])
             n += 1
+        # One batch audit row per call (Monitor Zone), atomic with the inserts.
+        # Skip when n == 0 so a fully-deduped re-run shows no phantom archive.
+        if n:
+            target = next(iter(sessions)) if len(sessions) == 1 else str(len(sessions))
+            conn.execute(
+                "INSERT INTO audit_log "
+                "(target_table, target_id, action, summary) "
+                "VALUES ('events', ?, 'insert', ?)",
+                (target, f"archived {n} events ({len(sessions)} sessions)"),
+            )
     return n

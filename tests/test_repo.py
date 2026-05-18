@@ -1,6 +1,8 @@
 """Tests for marrow/repo.py public API + daemon smoke test."""
 from __future__ import annotations
 
+import sqlite3
+
 import marrow.daemon as daemon
 import pytest
 
@@ -152,6 +154,74 @@ def test_archive_events_fts_indexed(db):
     results = repo.recall(db, "welcome")
     assert len(results) == 1
     assert "welcome" in results[0]["content"]
+
+
+def test_archive_events_writes_one_batch_audit_row(db):
+    n = repo.archive_events(db, ROWS)
+    rows = db.execute(
+        "SELECT * FROM audit_log WHERE target_table='events'"
+    ).fetchall()
+    assert len(rows) == 1, "exactly one batch audit row per call, not one per event"
+    a = rows[0]
+    assert a["action"] == "insert"
+    assert a["target_id"] == "s1"  # single distinct session_id
+    assert str(n) in a["summary"]
+
+
+def test_archive_events_multi_session_audit_target_id(db):
+    rows = [
+        {"session_id": "s1", "timestamp": "2026-05-17T03:00:00Z", "role": "user",
+         "content": "alpha"},
+        {"session_id": "s2", "timestamp": "2026-05-17T03:01:00Z", "role": "user",
+         "content": "beta"},
+    ]
+    repo.archive_events(db, rows)
+    a = db.execute(
+        "SELECT * FROM audit_log WHERE target_table='events'"
+    ).fetchone()
+    assert a["target_id"] == "2"  # distinct-session count when multi-session
+
+
+def test_archive_events_dedup_rerun_adds_no_audit_row(db):
+    repo.archive_events(db, ROWS)
+    before = db.execute(
+        "SELECT COUNT(*) c FROM audit_log WHERE target_table='events'"
+    ).fetchone()["c"]
+    n2 = repo.archive_events(db, ROWS)
+    assert n2 == 0
+    after = db.execute(
+        "SELECT COUNT(*) c FROM audit_log WHERE target_table='events'"
+    ).fetchone()["c"]
+    assert after == before, "fully-deduped re-run must not write a phantom audit row"
+
+
+class _AuditFailConn(sqlite3.Connection):
+    def execute(self, sql, *a, **k):  # noqa: D401
+        if "INSERT INTO audit_log" in sql:
+            raise sqlite3.OperationalError("forced audit failure")
+        return super().execute(sql, *a, **k)
+
+
+def test_archive_events_audit_atomic_rollback(tmp_path):
+    # If the audit write fails, the whole archive (events + audit) rolls back:
+    # the row loop and the batch audit row share one `with conn:` transaction.
+    p = str(tmp_path / "rb.db")
+    storage.init_db(p).close()
+    conn = sqlite3.connect(p, factory=_AuditFailConn)
+    conn.row_factory = sqlite3.Row
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            repo.archive_events(conn, ROWS)
+    finally:
+        conn.close()
+    chk = storage.connect(p)
+    try:
+        assert chk.execute("SELECT COUNT(*) c FROM events").fetchone()["c"] == 0
+        assert chk.execute(
+            "SELECT COUNT(*) c FROM audit_log WHERE target_table='events'"
+        ).fetchone()["c"] == 0
+    finally:
+        chk.close()
 
 
 # ── daemon smoke ──────────────────────────────────────────────────────────────
