@@ -32,10 +32,24 @@ _Avoid_: text view, freeform view
 The hook step that reads a hand-edited rendered file and writes the differences back into SQLite before re-rendering.
 _Avoid_: sync, merge, import
 
+### Emotion (Phase 2)
+
+**valence / arousal**:
+Two coords on the diary row. valence = positive↔negative; arousal = calm↔excited. Orthogonal to **importance** (saliency).
+_Avoid_: mood-as-single-value, sentiment
+
+**diary.mood**:
+The emotional key of "our day" (Lumi and Stellan together, not one side). Emitted by the diary sonnet call.
+_Avoid_: feel, model_valence
+
+**feel**:
+An Ombre-Brain term, NOT a Marrow concept. Marrow's diary is the first-person lived layer; there is no feel table.
+_Avoid_: using "feel" for any Marrow store
+
 ## Relationships
 
 - Every stored record belongs to exactly one of **Permanent keepsake**, **Demote-sink**, or **Raw-stream**.
-- A **Structured view**'s primary correction path is md edit; a **Narrative view**'s primary correction path is the `ny` CLI or telling Claude.
+- A **Structured view**'s primary correction path is md edit; a **Narrative view**'s primary correction path is the `mw` CLI or telling Claude.
 - **Reconcile** never splits a **Narrative view** block into new rows.
 - **Cold vocab** is **Demote-sink**, not **Permanent keepsake**.
 - Only **Raw-stream** is pruned; **Demote-sink** sinks but persists; **Permanent keepsake** is untouched.

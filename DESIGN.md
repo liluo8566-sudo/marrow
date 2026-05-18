@@ -134,11 +134,21 @@ corrections table = Phase 2 placeholder (design fixed here, not built Phase 1).
 
 Why this beats a black-box model memory: the memory IS Lumi's own SQLite + files, not the model's hidden state. Correction is deterministic, reversible, point-targeted — never begging a model to forget. This is how semi-permanent memory and migration-friendliness land.
 
+## Emotion (Phase 2)
+
+- emotion: valence (0 negative → 1 positive), arousal (0 calm → 1 excited); orthogonal to importance
+- diary.mood: emotional key emitted by sonnet call that writes diary
+- coords hidden from Lumi; colour-tag (Notion-style) opt-in addon
+- session-start: fused-rank recall (recency + arousal + importance) returns top-N diary; once per session
+- decay scoped to Demote-sink; diary in Permanent keepsake, never decays
+- score = importance × e^(-λ·days_idle), computed lazily; below threshold sinks, keyword hit refreshes
+- no mutable emotion-state row
+
 ## Hooks (four)
 
-- SessionStart — injects open threads + open alerts (no who-i-am; persona in static CLAUDE.md); (Phase 2) emotion breath. Diary-catchup not here: 16:00 launchd (ADR-0003).
+- SessionStart — injects open threads + open alerts (no who-i-am; persona in static CLAUDE.md); (Phase 2) emotional entry — one fused-rank recall (see Emotion). Diary-catchup not here: 16:00 launchd (ADR-0003).
 - UserPromptSubmit — must-never-fade injection; plus the optional config-gated deterministic recall fallback (local-embedding vector search → top-K into additionalContext). Default off for a strong model.
-- SessionEnd — async, code-only (no LLM): pass an archive-skip gate (see Pending — session archive skip), then clean this session's transcript (strip tool/fetch/system noise, keep the full human dialogue verbatim) and archive turns to events; regen the dashboard top; (Phase 2) emotion tag + decay update. Diary + lessons are NOT here — see diary scheduling.
+- SessionEnd — async, code-only (no LLM): pass an archive-skip gate (see Pending — session archive skip), then clean this session's transcript (strip tool/fetch/system noise, keep the full human dialogue verbatim) and archive turns to events; regen the dashboard top. Diary + lessons are NOT here — see diary scheduling. Emotion is NOT here either (see Emotion).
 - PreToolUse — write_guard. Phase 1: the existing global `~/.claude/hooks/prompt-guard.py` (English-only + no pipe tables on prompt-class .md), scope extended to cover `~/cc-lab/marrow/` — one global hook, not a Marrow-local copy. Phase 3: route writes to prompt-class md to the writer sub-Claude; main Claude loses direct write there.
 
 Diary scheduling — see ADR-0003 for the shipped detail (local-04:00 day boundary, per-session map-reduce, two decoupled launchd jobs: 04:00 routine writes the just-closed day, 16:00 catchup backfills the last days). haiku digests sessions (volume-only, no value-cut/arc), merges them on local timeline (tags dropped, weights uneven), sonnet writes diary, haiku extracts lessons. Buddy end-of-turn comments stripped at transcript clean.
