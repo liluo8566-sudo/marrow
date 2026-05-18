@@ -28,11 +28,12 @@ Evidence: Haiku returned PONG in 2.7s, `rate_limit_event` with `rateLimitType:"f
 
 A diary day = local `[D 04:00, D+1 04:00)` (00:00-04:00 = previous day). Computed via `zoneinfo Australia/Melbourne` (auto AEST/AEDT), not UTC substr. `run_day` is per-session map-reduce: one haiku digest per session (oversized session chunked first), merged digests then sonnet diary + haiku lessons — never the whole day in one prompt.
 
-**Scheduling (two independent launchd jobs, decoupled)**
+**Scheduling (independent launchd jobs, decoupled)**
 
 - `mw-diary-routine.plist` — 04:00 local, `marrow.diary` (no flag), writes the just-closed day.
 - `mw-diary-catchup.plist` — 16:00 local, `marrow.diary --catchup`, scans last 7 days (cap 3, overflow alert), backfills anything the routine missed.
-- Separate so one job failing never starves the other; both idempotent by `diary.date`. Sources in `deploy/`, installed to `~/Library/LaunchAgents/`, DST auto-followed.
+- `mw-jsonl-cleanup.plist` — Sunday 05:00 local, `marrow.cleanup --apply`, reaps sdk-cli jsonl older than grace_days (disk/UX only, data already firewalled). Standalone, never inside the diary routine.
+- Separate so one job failing never starves another; all idempotent (`diary.date` / re-scan). Sources in `deploy/`, `launchctl bootstrap gui/$UID` directly from the repo path (not copied to `~/Library/LaunchAgents/`), DST auto-followed.
 - Do NOT use Anthropic `/schedule` skill — cloud sandbox has no local SQLite, .venv, or OAuth `claude`.
 
 **Consequences**
