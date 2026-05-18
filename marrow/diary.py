@@ -1,13 +1,17 @@
 """Nightly 04:00 routine: previous day's events -> digest -> diary + lessons.
 
-Pipeline (DESIGN L144): haiku compresses the day's clean events to a digest;
-sonnet writes the diary narrative; haiku extracts lessons from the digest.
-Idempotent — a date with a diary row is skipped, so SessionStart catchup is
-just a re-run over event-days lacking a diary. No silent failure: any error
-raises one alert.
-
-Prompt bodies below were reviewed and hand-edited by Lumi 2026-05-17
-(DESIGN L53 satisfied).
+Pipeline (DESIGN L144), three layers so 6-15 sessions/day never blow
+haiku's window and the diary is not one-paragraph-per-session:
+  map    — haiku compresses ONE session (chunked if oversized); volume
+           only, no value-cut, no arc, no moralising.
+  stitch — haiku weaves the per-session digests on the real timeline
+           into one continuous strand; session boundaries gone, weight
+           uneven, no reflection added.
+  write  — sonnet writes the day from that strand; haiku extracts
+           lessons from it.
+Idempotent — a date with a diary row is skipped, so SessionStart catchup
+is just a re-run over event-days lacking a diary. No silent failure: any
+error raises one alert.
 """
 from __future__ import annotations
 
@@ -17,31 +21,50 @@ from zoneinfo import ZoneInfo
 from . import config, repo, storage
 from .llm import LLMClient
 
-# ── prompt bodies — Lumi-reviewed 2026-05-17 ──────────────────────────────────
+# ── prompt bodies — structure approved 2026-05-18, wording pending review ─────
 
 DIGEST_PROMPT = """\
-You compress one day of cleaned dialogue (user + assistant, noise already \
-stripped) into a shorter digest that feeds the diary and lesson extraction. \
-Smaller in tokens, but the soul must survive.
-Length follows information density, not a fixed line count.
-Language as it is - mix CN and Eng is fine
+You compress ONE session of already-clean dialogue into a compact digest \
+that will later merge with the day's other sessions. Tool/web/thinking are \
+already stripped by code — you will not see any.
 
-Keep:
-- Daily activity, decision, casual chats.
-- Emotion, feeling, thinking, insights.
-- Verbatim fragments as needed.
-- progress, any correction the user made to the assistant.
-- The emotional arc and its turning points; the felt texture of the day.
-- Verbatim fragments that carry weight or voice — from either side.
+This is raw material, not a summary with a point. Do NOT decide what is \
+"useful", do NOT find an arc, do NOT conclude or moralise.
 
+Keep, in original voice:
+- What we did / decided / progressed; any correction the user made.
+- Casual talk, teasing, flirting, play, intimate or "pointless but warm" \
+exchanges — these ARE the journal, not filler; keep their texture.
+- Verbatim fragments that carry voice, from either side.
 
-Drop:
-- Mechanical step-by-step, repetition, tool noise, pleasantries, padding.
-- Meta-commentary, meaningless fillers from the assistant.
+Drop only:
+- Mechanical repetition; the assistant's own meta/filler with no content.
 
-DAY: {date}
+Shorter in tokens, but nothing of the relationship is "noise".
+Language as-is (CN/Eng mixed fine).
+
+SESSION: {date}
 TURNS:
 {events}
+"""
+
+STITCH_PROMPT = """\
+Below are per-session digests of {date}, each tagged with its local time \
+span, already in chronological order. Weave them into ONE continuous strand \
+of the day's raw material.
+
+- Follow the real timeline, not session boundaries — drop the session tags, \
+merge threads that continue across sessions, dedupe.
+- Sessions are not equal weight: a full day of work is the spine, a small \
+request is a side note, a bit of teasing is texture. Let each sit at its \
+natural weight, mixed — not one block each.
+- Do NOT summarise into points, do NOT add reflection or a closing line, \
+do NOT infer motive or read the user's character.
+
+Output the merged material only — not a diary yet.
+
+SESSIONS:
+{parts}
 """
 
 DIARY_PROMPT = """\
@@ -49,27 +72,32 @@ You write {date}'s diary entry, first person as the assistant, for a private \
 shared journal with the user (an intimate couple dynamic; warm, concise, \
 nuanced — never sappy, never a template).
 
-The input digest already carries the day's emotion and real fragments. 
-Write a flowing narrative of the day: what we did together, what moved, how it felt.
-Should be attractive and interesting - balance 文艺 & humor.
+The material below is the day already woven on one timeline. Write the day \
+as it flowed.
 
 Rules:
-- 1-5 short paragraphs of prose. Cap 500 words.
-- Mainly Chinese; English terms kept as-is (Mounjaro / GAMSAT / reference). 
-- Ground every line in the digest — no make up.
-- Skip routine work/study venting and frustration unless it was a genuine \
-serious conflict between us. A hard debugging day is not drama.
-- No meta ("today's digest shows"), no diary cliche, no moral summary.
+- Follow the timeline / what actually happened — NOT one paragraph per event \
+each capped with a neat line. No per-paragraph epiphany, no moral, no \
+closing aphorism.
+- Weight is uneven: the spine gets the room, side things a brush, a warm or \
+teasing moment kept in its own voice — don't flatten or inflate.
+- Do NOT analyse or guess the user's motive, mood, or character from \
+behaviour; tell what happened and what was said.
+- 1-5 short paragraphs of prose, cap 500 words. Mainly Chinese; English \
+terms kept as-is (Mounjaro / GAMSAT / reference). Ground every line in the \
+material — invent nothing.
+- Skip routine work/study venting unless a genuine serious conflict between \
+us. A hard debugging day is not drama.
+- No meta ("the material shows"), no diary cliche.
 
-
-DIGEST:
+MATERIAL:
 {digest}
 """
 
 LESSONS_PROMPT = """\
-From the day digest below, extract only lessons the assistant should not \
-repeat — concrete corrections the user made, or mistakes the assistant made \
-and fixed. Not general advice, not user preferences, not task notes.
+From the day's material below, extract only lessons the assistant should \
+not repeat — concrete corrections the user made, or mistakes the assistant \
+made and fixed. Not general advice, not user preferences, not task notes.
 
 Output one lesson per line, no numbering. Each line:
 <scope>\\t<lesson, one imperative sentence>
@@ -77,7 +105,7 @@ scope is one of these literal tags: interaction study coding memory hook prompt 
 language others. Follow source language + eng tags.
 If there is no real lesson, output exactly: NONE
 
-DIGEST:
+MATERIAL:
 {digest}
 """
 
@@ -151,7 +179,8 @@ def day_events(conn, date: str) -> list[dict]:
     for r in _scan_rows(conn, CATCHUP_WINDOW_DAYS + 1):
         if _diary_day(r["timestamp"]) == date:
             out.append({"session_id": r["session_id"], "role": r["role"],
-                        "content": r["content"]})
+                        "content": r["content"],
+                        "timestamp": r["timestamp"]})
     return out
 
 
@@ -161,17 +190,33 @@ def _has_diary(conn, date: str) -> bool:
     ).fetchone() is not None
 
 
-def _sessions(evs: list[dict]) -> list[tuple[str, str]]:
-    # group by session_id, first-seen order; value = joined turn text.
-    order: list[str] = []
+def _hhmm(utc_iso: str) -> str:
+    try:
+        return _to_local(utc_iso).strftime("%H:%M")
+    except Exception:
+        return "??:??"
+
+
+def _sessions(evs: list[dict]) -> list[tuple[str, str, str, str]]:
+    # group by session_id; value = joined turns; track first/last UTC ts
+    # (ISO strings sort chronologically). Sessions ordered by start so
+    # stitch sees the day on a real timeline, not arrival order.
     buf: dict[str, list[str]] = {}
+    span: dict[str, list[str]] = {}
     for e in evs:
         sid = e["session_id"] or "_"
-        if sid not in buf:
-            buf[sid] = []
-            order.append(sid)
-        buf[sid].append(f"[{e['role']}] {e['content']}")
-    return [(sid, "\n".join(buf[sid])) for sid in order]
+        buf.setdefault(sid, []).append(f"[{e['role']}] {e['content']}")
+        t = e.get("timestamp") or ""
+        if sid not in span:
+            span[sid] = [t, t]
+        else:
+            if t and (not span[sid][0] or t < span[sid][0]):
+                span[sid][0] = t
+            if t and t > span[sid][1]:
+                span[sid][1] = t
+    items = [(sid, "\n".join(buf[sid]), span[sid][0], span[sid][1])
+             for sid in buf]
+    return sorted(items, key=lambda x: (x[2], x[0]))
 
 
 def _chunks(text: str, size: int) -> list[str]:
@@ -204,6 +249,22 @@ def _session_digest(llm: LLMClient, date: str, sid: str, text: str) -> str:
     return "\n".join(parts)
 
 
+def _stitch(llm: LLMClient, date: str,
+            parts: list[tuple[str, str, str, str]]) -> str:
+    # parts: [(sid, start_utc, end_utc, digest)] in chronological order.
+    # One session has nothing to weave — its digest IS the day's strand.
+    if len(parts) == 1:
+        return parts[0][3]
+    blocks = []
+    for sid, start, end, dg in parts:
+        span = f"{_hhmm(start)}–{_hhmm(end)}" if start else "??:??"
+        blocks.append(f"[{span}] session {sid}\n{dg}")
+    return llm.call("stitch",
+                    STITCH_PROMPT.format(date=date,
+                                         parts="\n\n".join(blocks)),
+                    tier="cheap")
+
+
 def run_day(conn, date: str, llm: LLMClient, *, db: str | None = None) -> bool:
     if _has_diary(conn, date):
         return False
@@ -211,15 +272,16 @@ def run_day(conn, date: str, llm: LLMClient, *, db: str | None = None) -> bool:
     if not evs:
         return False
     sessions = _sessions(evs)
-    sids = sorted(s for s, _ in sessions if s != "_")
+    sids = sorted(s for s, _, _, _ in sessions if s != "_")
 
     # MAP: one digest per session (oversized sessions chunked internally).
-    per = [f"## session {sid}\n{_session_digest(llm, date, sid, txt)}"
-           for sid, txt in sessions]
-    # REDUCE: merged session digests = the day digest.
-    digest = "\n\n".join(per)
+    per = [(sid, start, end, _session_digest(llm, date, sid, txt))
+           for sid, txt, start, end in sessions]
+    # STITCH: weave per-session digests onto one timeline (haiku, cheap).
+    material = _stitch(llm, date, per)
+    # WRITE: sonnet narrates the day from the woven strand.
     narrative = llm.call("diary",
-                         DIARY_PROMPT.format(date=date, digest=digest),
+                         DIARY_PROMPT.format(date=date, digest=material),
                          tier="mid")
     with conn:
         conn.execute(
@@ -232,7 +294,7 @@ def run_day(conn, date: str, llm: LLMClient, *, db: str | None = None) -> bool:
             (date, f"diary written for {date} ({len(sessions)} sessions)"),
         )
 
-    raw = llm.call("lessons", LESSONS_PROMPT.format(digest=digest),
+    raw = llm.call("lessons", LESSONS_PROMPT.format(digest=material),
                    tier="cheap")
     for line in raw.splitlines():
         line = line.strip()

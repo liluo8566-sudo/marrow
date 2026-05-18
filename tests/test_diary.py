@@ -23,6 +23,8 @@ class FakeLLM:
         self.calls.append(role)
         if role == "day-digest":
             return "digest: did X"
+        if role == "stitch":
+            return "woven strand with X"
         if role == "diary":
             return "今天我们一起把 X 做完了。"
         if role == "lessons":
@@ -98,6 +100,7 @@ def test_run_day_one_digest_per_session(db):
     f = FakeLLM()
     assert diary.run_day(conn, "2026-05-16", f, db=p) is True
     assert f.n("day-digest") == 2          # s1 + s2, not one whole-day blob
+    assert f.n("stitch") == 1              # 2 sessions woven once
     assert f.n("diary") == 1
     assert f.n("lessons") == 1
     row = conn.execute(
@@ -107,6 +110,19 @@ def test_run_day_one_digest_per_session(db):
     assert row["session_ids"] == "s1,s2"
     assert conn.execute(
         "SELECT 1 FROM lessons").fetchone() is not None
+
+
+def test_single_session_skips_stitch(tmp_path):
+    p = str(tmp_path / "one.db")
+    conn = storage.init_db(p)
+    _ev(conn, "solo", "2026-05-16T02:00:00Z", "user", "just one session")
+    _ev(conn, "solo", "2026-05-16T02:05:00Z", "assistant", "ok")
+    conn.commit()
+    f = FakeLLM()
+    assert diary.run_day(conn, "2026-05-16", f, db=p) is True
+    assert f.n("day-digest") == 1
+    assert f.n("stitch") == 0              # nothing to weave, digest is strand
+    assert f.n("diary") == 1
 
 
 def test_oversized_session_is_chunked(db):
