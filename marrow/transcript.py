@@ -17,31 +17,13 @@ _BUDDY = re.compile(r"\s*<!--\s*buddy\s*:.*?-->", re.S | re.I)
 
 
 def is_headless(jsonl_path: str) -> bool:
-    """True if this transcript is a spawned headless `claude -p` run.
-
-    Structural marker, payload-independent: CC tags every user/assistant
-    line with `entrypoint` — interactive sessions carry "cli", SDK/headless
-    spawns (prompt-lint haiku, diary digest, any subprocess claude) carry
-    "sdk-cli". Those are not real sessions and must never reach events.
-    Absent entrypoint (legacy CC) -> treat as real, don't silently drop.
-    """
-    try:
-        fh = open(jsonl_path, encoding="utf-8")
-    except FileNotFoundError:
-        return False
-    with fh as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                o = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if o.get("type") not in ("user", "assistant"):
-                continue
-            ep = o.get("entrypoint")
-            return ep is not None and ep != "cli"
+    """Hard-disabled bleed-stop: entrypoint cannot separate a real SDK session from a spawned `claude -p` — step4 rework."""
+    # ep!="cli" was wrong: clawbot/Task-agent/worktree/vscode/desktop are
+    # all real human sessions yet carry "sdk-cli" too. The old rule made
+    # clean() drop them from events and cleanup.py unlink their .jsonl.
+    # Keeping a fake spawn is reversible (dedup later); losing a real
+    # session is not. Real headless signal TBD (ADR-0003 / step4).
+    return False
     return False
 
 

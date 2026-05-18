@@ -78,20 +78,23 @@ def test_skips_malformed_lines(tmp_path):
     assert [r["content"] for r in transcript.clean(str(p))] == ["ok"]
 
 
-def test_headless_sdk_session_is_dropped(tmp_path):
-    # prompt-lint / diary-digest spawn `claude -p` -> entrypoint "sdk-cli".
-    # SessionEnd fires for it too; it must never reach events.
+def test_sdk_cli_session_is_kept_during_bleedstop(tmp_path):
+    # entrypoint "sdk-cli" covers BOTH spawned `claude -p` AND real
+    # clawbot/Task-agent/worktree human sessions. Until a real headless
+    # signal exists, is_headless is hard-False so no real session is
+    # lost; a fake spawn slipping into events is reversible (dedup).
     jl = _w(tmp_path / "h.jsonl", [
         {"type": "user", "sessionId": "h1", "timestamp": "t",
          "entrypoint": "sdk-cli",
-         "message": {"role": "user", "content": "Compress this file"}},
+         "message": {"role": "user", "content": "老公 clawbot 真实对话"}},
         {"type": "assistant", "sessionId": "h1", "timestamp": "t",
          "entrypoint": "sdk-cli",
          "message": {"role": "assistant",
-                     "content": [{"type": "text", "text": "trimmed text"}]}},
+                     "content": [{"type": "text", "text": "real reply"}]}},
     ])
-    assert transcript.is_headless(jl) is True
-    assert transcript.clean(jl) == []
+    assert transcript.is_headless(jl) is False
+    assert [r["content"] for r in transcript.clean(jl)] == [
+        "老公 clawbot 真实对话", "real reply"]
 
 
 def test_interactive_cli_session_kept(tmp_path):
