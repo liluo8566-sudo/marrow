@@ -16,9 +16,9 @@ Phase-1 DONE (pytest 129, pushed). Current: grill round 3, emotion branch DONE (
 - Method: do not connector-interview; subagent produces blind designs → converge to TWO versions → Lumi adjudicates (trigger: "两支")
 
 ## Phase 2 entry
-- recall-module (vector + Ombre weight-pool single-score + embedder) — score = importance × time-decay, arousal-boosted, keyword-revive; coeff at build
+- recall-module (vector + RRF fusion + embedder) — fusion = recency+arousal+importance blend
 - #6 events_vec embedder-id/dim provenance: add WITH embedder at recall-module build → FUTURE `events_vec_embedder_provenance` (~/Desktop/NY/CLAUDE.md:5)
-- Ref: Ombre-Brain weight-pool only (fused-rank IS Ombre single decayed score; RRF / weighted-blend NOT the path, no cross-dimension normalisation)
+- Refs: Ombre-Brain (DESIGN weight-pool), claude-imprint (RRF), cyberboss
 - embedder = fork #1 (still open)
 
 ## Residual (non-blocking)
