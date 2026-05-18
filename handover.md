@@ -1,17 +1,23 @@
 # Marrow handover
 
-> Events headless-pollution root-fixed structurally + DB cleaned; data layer firewalled. Two windows merged here. What's left: cosmetic disk backlog, `-p`→stream migration, Lumi prompt-tuning. Read DESIGN/PROGRESS next.
+> CRITICAL: entrypoint-marker false — `entrypoint=="sdk-cli"` ≠ headless. Bleed-stopped; blocker.
 
-## State (committed, not pushed — 5 commits on main)
+## Blocker: entrypoint signal wrong
 
-- `acafd60` fix(transcript): drop headless `claude -p` via `entrypoint` marker (neighbour window)
-- `f08e08e` fix(diary): strict-discard digest + banned-phrase guard in prompts (Lumi prompt-tuning)
-- `6d96dc8` docs(claude): push DB-only output full body to Lumi after a run
+Census (653 jsonl): sdk-cli 389 / cli 259 / vscode 4 / desktop 1. Assumption in `acafd60`+`8f2747f`+`b46deb1` wrong. ~51 min live damage: real `.jsonl` at risk.
+
+Bleed-stop (`24830a3`): launchctl bootout, `is_headless()` hard-False, cleanup verified no-op (del 0 / kept 653). Previous purge (518→464) used same flawed judge — 54 rows may be recoverable from `marrow.db.bak-20260518-220058`.
+
+## State (committed, not pushed — 6 commits on main)
+
+- `24830a3` fix!: BLEED-STOP — is_headless hard-False, entrypoint signal wrong
+- `acafd60` fix(transcript): entrypoint headless marker
+- `8f2747f`+`b46deb1` cleanup.py reaper + launchd
+- `f08e08e` fix(diary): strict-discard digest + banned-phrase guard
+- `6d96dc8` docs(claude): push DB-only output full body to Lumi
 - `2fb88bd` fix(diary): stitch span tag carries local date for cross-04:00 days
-- `b6febbd` fix(hooks): session_end no-op on unflushed/missing transcript
-- uncommitted: `FUTURE.md` (dashboard_customization addon) — committed with this handover
 
-pytest 88/88. events 518→464 (fake Compress-NEW = 0). backup `~/.config/marrow/marrow.db.bak-20260518-220058`.
+pytest 91/91. events 479 (backup 518).
 
 ## Done & verified (both windows)
 
