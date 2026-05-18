@@ -15,20 +15,20 @@ from marrow import diary, storage
 
 
 class FakeLLM:
-    def __init__(self, lessons="coding\tnever guess a path"):
-        self.lessons = lessons
+    def __init__(self, digest="digest: did X"):
+        self.digest = digest
         self.calls: list[str] = []
+        self.digest_bodies: list[str] = []
 
     def call(self, role, body, *, tier="cheap"):
         self.calls.append(role)
         if role == "day-digest":
-            return "digest: did X"
+            self.digest_bodies.append(body)
+            return self.digest
         if role == "stitch":
             return "woven strand with X"
         if role == "diary":
             return "今天我们一起把 X 做完了。"
-        if role == "lessons":
-            return self.lessons
         return ""
 
     def n(self, role):
@@ -40,15 +40,22 @@ def _ev(conn, sid, ts, role, content):
                  "VALUES(?,?,?,?)", (sid, ts, role, content))
 
 
+def _session(conn, sid, hh, n_user=4):
+    # n_user user turns (+ a reply each) inside diary day 2026-05-16.
+    # Default 4 clears _SKIP_DROP_MAX (3) and lands in the judge window.
+    for i in range(n_user):
+        _ev(conn, sid, f"2026-05-16T{hh:02d}:{i:02d}:00Z", "user", f"msg {i}")
+        _ev(conn, sid, f"2026-05-16T{hh:02d}:{i:02d}:30Z", "assistant", "ok")
+
+
 @pytest.fixture()
 def db(tmp_path):
     p = str(tmp_path / "t.db")
     conn = storage.init_db(p)
-    # all map to diary day 2026-05-16 (utc+6h within that date)
-    _ev(conn, "s1", "2026-05-16T02:00:00Z", "user", "build cli")
-    _ev(conn, "s1", "2026-05-16T02:01:00Z", "assistant", "done")
-    _ev(conn, "s2", "2026-05-16T09:00:00Z", "user", "fix bug")
-    _ev(conn, "s2", "2026-05-16T09:01:00Z", "assistant", "fixed")
+    # all map to diary day 2026-05-16 (utc+6h within that date);
+    # 4 user turns each -> survive the skip filter, kept
+    _session(conn, "s1", 2)
+    _session(conn, "s2", 9)
     conn.commit()
     return p, conn
 
@@ -102,21 +109,17 @@ def test_run_day_one_digest_per_session(db):
     assert f.n("day-digest") == 2          # s1 + s2, not one whole-day blob
     assert f.n("stitch") == 1              # 2 sessions woven once
     assert f.n("diary") == 1
-    assert f.n("lessons") == 1
     row = conn.execute(
         "SELECT content,session_ids FROM diary WHERE date='2026-05-16'"
     ).fetchone()
     assert "X" in row["content"]
     assert row["session_ids"] == "s1,s2"
-    assert conn.execute(
-        "SELECT 1 FROM lessons").fetchone() is not None
 
 
 def test_single_session_skips_stitch(tmp_path):
     p = str(tmp_path / "one.db")
     conn = storage.init_db(p)
-    _ev(conn, "solo", "2026-05-16T02:00:00Z", "user", "just one session")
-    _ev(conn, "solo", "2026-05-16T02:05:00Z", "assistant", "ok")
+    _session(conn, "solo", 2)
     conn.commit()
     f = FakeLLM()
     assert diary.run_day(conn, "2026-05-16", f, db=p) is True
@@ -129,6 +132,8 @@ def test_oversized_session_is_chunked(db):
     p, conn = db
     big = "x" * (diary._SESSION_CHAR_CAP + diary._CHUNK_CHARS)
     _ev(conn, "s3", "2026-05-16T10:00:00Z", "user", big)
+    for i in range(1, 4):  # extra turns so s3 clears the skip filter
+        _ev(conn, "s3", f"2026-05-16T10:0{i}:00Z", "user", "more")
     conn.commit()
     f = FakeLLM()
     diary.run_day(conn, "2026-05-16", f, db=p)
@@ -144,10 +149,6 @@ def test_idempotent_skip(db):
     assert f2.calls == []
 
 
-def test_lessons_none(db):
-    p, conn = db
-    diary.run_day(conn, "2026-05-16", FakeLLM(lessons="NONE"), db=p)
-    assert conn.execute("SELECT COUNT(*) c FROM lessons").fetchone()["c"] == 0
 
 
 # ── dual triggers ─────────────────────────────────────────────────────────────
@@ -169,3 +170,62 @@ def test_catchup_caps_and_alerts(db):
 def test_run_explicit_day(db):
     p, conn = db
     assert diary.run(conn, FakeLLM(), db=p, day="2026-05-16") == ["2026-05-16"]
+
+
+# ── skip filter ───────────────────────────────────────────────────────────────
+
+def test_low_turn_session_hard_dropped(tmp_path):
+    # <= _SKIP_DROP_MAX user turns -> never reaches haiku
+    p = str(tmp_path / "lo.db")
+    conn = storage.init_db(p)
+    _session(conn, "lo", 3, n_user=diary._SKIP_DROP_MAX)
+    conn.commit()
+    f = FakeLLM()
+    assert diary.run_day(conn, "2026-05-16", f, db=p) is True
+    assert f.n("day-digest") == 0          # hard-dropped in code
+    row = conn.execute(
+        "SELECT content,session_ids FROM diary WHERE date='2026-05-16'"
+    ).fetchone()
+    assert row["content"] == "—"           # placeholder, whole day trivial
+    assert row["session_ids"] == ""
+
+
+def test_short_session_skip_drops(db):
+    # 4-turn sessions route to DIGEST_SHORT; SKIP is honoured -> dropped
+    p, conn = db
+    f = FakeLLM(digest="SKIP")
+    assert diary.run_day(conn, "2026-05-16", f, db=p) is True
+    assert f.n("day-digest") == 2
+    assert f.n("stitch") == 0 and f.n("diary") == 0
+    assert conn.execute(
+        "SELECT content FROM diary WHERE date='2026-05-16'"
+    ).fetchone()["content"] == "—"
+
+
+def test_long_session_skip_not_honoured(tmp_path):
+    # >_SKIP_JUDGE_MAX turns route to DIGEST_LONG: even if haiku returns
+    # SKIP, the session is kept (stub digest), heavy work never vanishes
+    p = str(tmp_path / "long.db")
+    conn = storage.init_db(p)
+    _session(conn, "lng", 2, n_user=diary._SKIP_JUDGE_MAX + 5)
+    conn.commit()
+    f = FakeLLM(digest="SKIP")
+    assert diary.run_day(conn, "2026-05-16", f, db=p) is True
+    row = conn.execute(
+        "SELECT content,session_ids FROM diary WHERE date='2026-05-16'"
+    ).fetchone()
+    assert row["content"] != "—" and row["session_ids"] == "lng"
+
+
+def test_short_session_routes_to_short_prompt(tmp_path):
+    # routing is by code, not haiku self-classification
+    p = str(tmp_path / "r.db")
+    conn = storage.init_db(p)
+    _session(conn, "sh", 2, n_user=6)            # 6 -> SHORT
+    _session(conn, "lg", 9, n_user=diary._SKIP_JUDGE_MAX + 5)  # -> LONG
+    conn.commit()
+    f = FakeLLM()
+    diary.run_day(conn, "2026-05-16", f, db=p)
+    short_in = any("short session" in b for b in f.digest_bodies)
+    long_in = any("long session" in b for b in f.digest_bodies)
+    assert short_in and long_in
