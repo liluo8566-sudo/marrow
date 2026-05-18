@@ -22,7 +22,7 @@ Phase-1 DONE (pytest 129, pushed). Current: grill round 3, emotion branch DONE (
 - embedder = fork #1 (still open)
 
 ## Residual (non-blocking)
-- Lessons subsystem retired (backup: marrow-2026-05-19.db); 4 launchd jobs loaded + disk plists restored; lesson refs parked for Phase-2 grill
+- 4 launchd jobs loaded + disk plists restored
 
 ## Phase-1 shipped (verified on main, pushed)
 - blocker: `is_headless` = assistant model-set ⊆ config `worker_models` (ADR-0004); `entrypoint` abandoned
@@ -36,6 +36,7 @@ Phase-1 DONE (pytest 129, pushed). Current: grill round 3, emotion branch DONE (
 
 ## Don't redo / decided
 - feel layer NOT a Marrow concept (ADR-0005) — do not reintroduce feel table or session-start dream-write
+- lesson NOT a base concept (ADR-0006) — FUTURE addon only, do not re-add to dashboard/Open-Threads/SCHEMA
 - DESIGN is overturnable working design, not T&C — override by engineering argument; only uncrossable technical/cost wall is hard constraint
 - `entrypoint` NOT a headless marker (ADR-0004); #7 `_routine_target` correct under 04:00 boundary — do not "fix"
 - #6 waits for embedder — never add empty provenance column to Phase-1 schema

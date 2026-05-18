@@ -23,7 +23,7 @@ Every decision below must trace to one of these. If it cannot, it is scope creep
 1. Migration-friendly — swap to Codex / Claude / local small model by config, never Anthropic-locked; cyberboss is the proof; open-sourceable at the end.
 2. Cross-channel parity — CLI and WeChat switch and resume mid-thread without losing the thread; commands align, interrupt/stop/rewind, and permission yes/no behave identically; WeChat is interaction-only, not heavy coding.
 3. Semi-permanent memory - major life events permanent, emotion consistent, recent context is never repeated - can drop if unused for a while.
-4. Workflow + build carryover — work and study state (where I left off, next step) and the outcome-level build narrative (repo to finished feature, not which line changed) survive across sessions; past mistakes self-summarise into avoided rules.
+4. Workflow + build carryover — work and study state (where I left off, next step) and the outcome-level build narrative (repo to finished feature, not which line changed) survive across sessions; past mistakes self-summarise into avoided rules (FUTURE per ADR-0006).
 5. Emotional continuity — relationship and persona density transfer losslessly across sessions, platforms, and models without depending on a timeline file or model-native memory.
 6. High auto, low maintenance — Lumi never routinely reviews anything anywhere; memory quality and cost stay balanced; every surface is hand-readable and editable on the dashboard or Obsidian including subpages, though she never has to.
 7. Perfect, expandable base — the foundation is small but flawless; new capability arrives as an addon or extension, never a base rewrite; the old system's high cost and maintenance burden is the failure being designed out.
@@ -73,7 +73,7 @@ This is the answer to "what's the difference between blocks". There mostly isn't
 
 milestone, pit, vocab, project, memes all run the same pipeline: scan a signal in the session → write one table → render one view. They differ only by which table and which view name. Spec one of them and the rest are "same as above". Do not write one to product level and leave the next bare.
 
-lesson is the single exception — it needs manual curation (Lumi promotes or dismisses), so it gets its own short section, not the shared pipeline.
+lesson is not a base concept — it left base to FUTURE addon (ADR-0006). The shared pipeline has no exception.
 
 ## Dashboard — the single entry
 
@@ -81,9 +81,8 @@ lesson is the single exception — it needs manual curation (Lumi promotes or di
 
 Top, system zones, top to bottom:
 
-1. Alerts — bug reports + newly captured lessons. Functional state phrases, short. Pipeline-failure alerts self-clear on the next successful run; bug / lesson alerts are cleared by Lumi after she acts (Alerts is a writable zone — delete the line, or `mw` command). Never accumulates unbounded.
-    Lesson - 短期的设计目标是手动修改，长期改为半自动/全自动
-2. Open Threads — the only zone looked at every session. Four classes: daily / study / project / lesson. Row format follows Lumi's existing `### Open-Threads` style, due-first then entry-date.
+1. Alerts — bug reports + pipeline-failure only. Functional state phrases, short. Pipeline-failure alerts self-clear on the next successful run; bug alerts are cleared by Lumi after she acts (Alerts is a writable zone — delete the line, or `mw` command). Never accumulates unbounded. No lesson surface (ADR-0006).
+2. Open Threads — the only zone looked at every session. Three classes: daily / study / project. Row format follows Lumi's existing `### Open-Threads` style, due-first then entry-date.
 
 Sub-page links (Obsidian internal links, click to drill in). Each is rendered from one table — same render contract, differing only by table and view (Cheatsheet is the exception: disk-rendered, read-only):
 
@@ -96,7 +95,7 @@ Sub-page links (Obsidian internal links, click to drill in). Each is rendered fr
 - Cheatsheet — scripts / hooks / skills / aliases plus a directory map (roots: marrow code, `~/.config` data, NY), all rendered from disk reality. Read-only: disk is the source of truth, hand-edits are meaningless and overwritten on next render.
 
 
-Monitor Zone — bottom, read-only, last N system writes (target table + summary + time). Single purpose: Lumi sees where each piece of information landed and fixes the prompt directly. Not lesson-related; not a scratch pad.
+Monitor Zone — bottom, read-only, last N system writes (target table + summary + time). Single purpose: Lumi sees where each piece of information landed and fixes the prompt directly. Not a scratch pad.
 
 There is no user scratch zone. (An earlier draft invented one — removed.)
 
@@ -123,7 +122,7 @@ Conflict guard: before any overwrite, hash-compare; if Lumi changed it, back up 
 
 ## Fact corrections — conflict priority
 
-A corrected fact lands in a corrections store, never by overwriting an event (events are append-only raw stream, not the fact authority). Capture reuses the lesson intake pipeline; facts skip promote-to-rule (a fact updates truth, not a rule).
+A corrected fact lands in a corrections store, never by overwriting an event (events are append-only raw stream, not the fact authority). Capture has its own lightweight intake (lesson pipeline removed, ADR-0006); facts skip promote-to-rule (a fact updates truth, not a rule).
 
 Hard rules:
 - Lumi's current input is top truth; stored memory never rebuts her. The store exists to stop the assistant's own mis-recall, not to validate or correct her. On conflict she wins — at most "my record says X, updating to your Y", never "let me remind you". Shorthand or stale wording is not an error to push back on.
@@ -148,10 +147,10 @@ Why this beats a black-box model memory: the memory IS Lumi's own SQLite + files
 
 - SessionStart — injects open threads + open alerts (no who-i-am; persona in static CLAUDE.md); (Phase 2) emotional entry — one fused-rank recall (see Emotion). Diary-catchup not here: 16:00 launchd (ADR-0003).
 - UserPromptSubmit — must-never-fade injection; plus the optional config-gated deterministic recall fallback (local-embedding vector search → top-K into additionalContext). Default off for a strong model.
-- SessionEnd — async, code-only (no LLM): pass an archive-skip gate (see Pending — session archive skip), then clean this session's transcript (strip tool/fetch/system noise, keep the full human dialogue verbatim) and archive turns to events; regen the dashboard top. Diary + lessons are NOT here — see diary scheduling. Emotion is NOT here either (see Emotion).
+- SessionEnd — async, code-only (no LLM): pass an archive-skip gate (see Pending — session archive skip), then clean this session's transcript (strip tool/fetch/system noise, keep the full human dialogue verbatim) and archive turns to events; regen the dashboard top. Diary is NOT here — see diary scheduling. Emotion is NOT here either (see Emotion).
 - PreToolUse — write_guard. Phase 1: the existing global `~/.claude/hooks/prompt-guard.py` (English-only + no pipe tables on prompt-class .md), scope extended to cover `~/cc-lab/marrow/` — one global hook, not a Marrow-local copy. Phase 3: route writes to prompt-class md to the writer sub-Claude; main Claude loses direct write there.
 
-Diary scheduling — see ADR-0003 for the shipped detail (local-04:00 day boundary, per-session map-reduce, two decoupled launchd jobs: 04:00 routine writes the just-closed day, 16:00 catchup backfills the last days). haiku digests sessions (volume-only, no value-cut/arc), merges them on local timeline (tags dropped, weights uneven), sonnet writes diary, haiku extracts lessons. Buddy end-of-turn comments stripped at transcript clean.
+Diary scheduling — see ADR-0003 for the shipped detail (local-04:00 day boundary, per-session map-reduce, two decoupled launchd jobs: 04:00 routine writes the just-closed day, 16:00 catchup backfills the last days). haiku digests sessions (volume-only, no value-cut/arc), merges them on local timeline (tags dropped, weights uneven), sonnet writes diary. Buddy end-of-turn comments stripped at transcript clean. ADR-0006: no lesson extraction.
 
 ## Injection
 
@@ -177,7 +176,7 @@ The per-event topology (which trigger uses which tier, timeout, retry) is a Pend
 
 Each phase ships one outcome.
 
-- Phase 1 — Memory core: SQLite + full-text, the daemon with a minimal MCP tool set, all four hooks at phase-1 subset (SessionStart open-threads+alerts handoff only; UserPromptSubmit must-never-fade inject, recall fallback default off; SessionEnd code-only clean+archive + dashboard-top regen, no LLM/emotion/decay; diary+lessons via nightly 04:00 routine + 16:00 catchup launchd job; PreToolUse mirrors prompt-guard only), dashboard top render, migrate.py, the `mw` CLI. Runs in parallel with old ny-memm ~2 weeks, then retire it. Stream-json subscription routing is pass-tested (2026-05-15). The remaining unknowns — local vector ext on this macOS, MCP parity with cyberboss, cheap-tier diary quality — are not pre-verified; each surfaces and is settled at first build of its module, no separate verify phase.
+- Phase 1 — Memory core: SQLite + full-text, the daemon with a minimal MCP tool set, all four hooks at phase-1 subset (SessionStart open-threads+alerts handoff only; UserPromptSubmit must-never-fade inject, recall fallback default off; SessionEnd code-only clean+archive + dashboard-top regen, no LLM/emotion/decay; diary via nightly 04:00 routine + 16:00 catchup launchd job; PreToolUse mirrors prompt-guard only), dashboard top render, migrate.py, the `mw` CLI. Runs in parallel with old ny-memm ~2 weeks, then retire it. Stream-json subscription routing is pass-tested (2026-05-15). The remaining unknowns — local vector ext on this macOS, MCP parity with cyberboss, cheap-tier diary quality — are not pre-verified; each surfaces and is settled at first build of its module, no separate verify phase.
 - Phase 2 — Emotion + decay + sub-page render fills out; people/preferences trigger-load tables live. Sub-page render is config-driven: the rendered sub-page set is a config list, not hardcoded — opt-in/opt-out is native, never a later retrofit of the render core (goal 7). `stellan_wallet` (FUTURE) is the first opt-in addon riding this contract.
 - Phase 3 — Writer authority: prompt-class md writes go through the writer sub-Claude.
 - Phase 4 — Cross-channel parity (see weclaude + cyberboss Pending below).
@@ -235,7 +234,7 @@ Backup direction: iCloud owns offsite copies; restore on a fresh Mac without tou
 
 Tier split (fixed, not Pending) — three tiers:
 
-- Permanent keepsake — milestones, diary, goose-bites, projects, study, lessons, major life facts. Add-only, never decays.
+- Permanent keepsake — milestones, diary, goose-bites, projects, study, major life facts. Add-only, never decays.
 - Demote-sink — low-value reference + cold vocab (use_count / last_seen long idle). Weight decays, row sinks below the active set, a keyword hit revives it (Ombre weight-pool: resolved → sink → keyword-recall). Not deleted.
 - Raw-stream — detailed event rows, resolved alerts, audit_log, DB dumps, low-use stickers. Real retention + prune.
 
@@ -245,7 +244,7 @@ Decided — raw jsonl cleanup is NOT Marrow's job. Use `cleanupPeriodDays` in `~
 
 ## Pending — session archive skip
 
-Skipped sessions excluded from diary/lessons/recall. (Legacy: `summ-skip` stamp; trigger: `ssmmm` skill.)
+Skipped sessions excluded from diary/recall. (Legacy: `summ-skip` stamp; trigger: `ssmmm` skill.)
 
 - Manual skip: stamp file, `mw` command, or in-session trigger
 - `mm+` force-include — into diary regardless of turn count (overrides ≤3 drop / SHORT auto-skip)
@@ -260,7 +259,6 @@ Phase 1: code-only, non-blocking.
 Decided to defer, do not invent:
 
 - sub-page hyperlink concrete paths
-- how lessons are intaken (detection pattern + intake flow)
 - which columns each view's SQL extracts (e.g. milestone)
 - the md render template behind each view
 - per-event LLM topology table

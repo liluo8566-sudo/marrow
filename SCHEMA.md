@@ -6,22 +6,21 @@ DB lives under `~/.config/` (exact path finalized at build). snake_case names. T
 
 ## Tables
 
-Phase 1 first-class: events, threads, milestones, vocab, stickers, lessons, pit, diary, goose_bites, alerts, audit_log.
+Phase 1 first-class: events, threads, milestones, vocab, stickers, pit, diary, goose_bites, alerts, audit_log.
 
 Phase 2 placeholder — schema reserved, NOT created in Phase 1: emotions, people, preferences, dir, corrections, transactions.
 
 Full-text and vector search structures are daemon-built on top of these tables. Which columns get indexed or embedded is a build-time decision, not fixed in this doc.
 
 - events — every session turn archived. content = cleaned human dialogue (tool/fetch/system noise stripped at SessionEnd), never raw RPC. Key: session_id, timestamp, role, content, channel, compressed (1 = imported from old 10d/2026 archives). Day-digest haiku is routine-internal; raw events stay, catchup recomputes.
-- threads — next-session work tracking; backs Open Threads. Key: category (daily / study / project), title, due, status (active / done / abandoned), next_step, last_session_summary, context_pointers, outcome_log (append-only project log). The lesson class shown in Open Threads is rendered by merging unpromoted `lessons` rows — it is not a category here.
-- milestones — life events; backs the Milestone view. Key: scope (me / us), date, title, description, theme, pinned.
+- threads — next-session work tracking; backs Open Threads. Key: category (daily / study / project), title, due, status (active / done / abandoned), next_step, last_session_summary, context_pointers, outcome_log (append-only project log).- milestones — life events; backs the Milestone view. Key: scope (me / us), date, title, description, theme, pinned.
 - vocab — text memes / cipher / event / news. Key: type, key (trigger phrase), value (meaning / source), context, use_count, last_seen.
 - stickers — visual meme assets, kept apart from vocab to avoid sparse columns. Key: optional vocab_id link, key, asset_path, mime_type, use_count.
-- lessons — captured Lumi corrections; the only manual-curation block (the self-correction goal). Key: date, session_id, scope (interaction / coding / memory / hook / prompt / language), lesson_text, promoted_to_rule, rule_path (file:line when promoted).
+- lessons — dropped 2026-05-19, out of base (ADR-0006). Table + code removed; a FUTURE addon recreates it if revived.
 - pit — known issues / deferred fixes; backs the Projects pit page. Key: title, description, status (idea / planned / parked / inprogress / resolved), related_files.
 - diary — daily narrative from SessionEnd. Key: date (primary key), content (Chinese narrative), mood, session_ids.
 - goose_bites — 铁锅's same-day takes; own sub-page (Best of the day), independent of diary. Key: date, session_id, bites (the day's lines), best (1 = picked for the Best-of page).
-- alerts — system bugs / failures + newly captured lessons surface; backs dashboard top. Key: severity, type, message (Lumi alert style), source (file:line), resolved.
+- alerts — system bugs / failures only; backs dashboard top. Key: severity, type, message (Lumi alert style), source (file:line), resolved.
 - audit_log — recent system writes; backs the Monitor Zone (last N). Key: target_table, target_id, action, summary, occurred_at.
 - emotions — Phase 2 placeholder. Per-session aggregated mood for breath + decay. Per-turn granularity rejected as noise. Key: session_id, valence, arousal, importance, unresolved, decay_score.
 - people — Phase 2 placeholder. Family + friends roster, trigger-loaded on name mention. Key: name, aliases, relation, short_bio.
