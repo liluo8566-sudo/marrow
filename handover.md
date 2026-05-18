@@ -1,30 +1,29 @@
 # Marrow handover
 
-> Phase-1 close-out done bar #2. blocker root-fixed (ADR-0004 model-set signal). #3/#4/#5 shipped, #7 adjudicated not-a-bug, #6 deferred. ONLY open thread: #2 data-restore awaiting Lumi's y/n.
+> Phase-1 DONE. blocker root-fixed; #3/#4/#5/#12 shipped; #7 not-a-bug; #2 restored; #6 deferred to Phase 2. Next = Phase 2. Only residual: #8 timeout minor + launchd jobs awaiting Lumi load-gate. pytest 128 green, pushed.
 
-## Awaiting Lumi (only open thread)
-- #2 purge recovery: 52 backup-only rows triaged — 48 = correctly-deleted haiku-spawn, 4 = wrongly-deleted REAL (ids 453-456, sessions `9851c4d9`+`f8b22b07`, two "hello"→persona-greeting turns; jsonl gone, content thin). Idempotent restore SQL ready in `docs/notes/2026-05-19_purge-recovery-triage.md`. NOT executed — destructive, Lumi's call.
+## Phase 2 entry
+- DESIGN Phase 2 = emotion + decay + sub-page render + people/preferences trigger-load; recall-module (vector + RRF fusion + embedder) first-built here.
+- #6 events_vec embedder-id/dim provenance: add WITH embedder at recall-module build — see FUTURE `events_vec_embedder_provenance`. Fusion refs (urls there + `~/Desktop/NY/CLAUDE.md:10`): Ombre-Brain (DESIGN:229 weight-pool), claude-imprint (RRF vector/FTS/recency, DESIGN:259), cyberboss.
+- embedder itself = fork #1 (still open).
 
-## Done this window
-- blocker#1: `is_headless` rewritten per ADR-0004 — assistant model-set ⊆ config `worker_models` → headless, else empty-set spawn-prompt-head backstop. `entrypoint` abandoned. `cleanup.py` auto-follows. Config single-source + sync-guard test. Live jsonl: real opus/clawbot → keep, haiku spawn → headless.
-- #3: diary same-day correction (`run_day(force=)` deletes+rewrites; catchup stays idempotent) + `fcntl.flock` app-lock serializes routine/catchup/manual (DESIGN L188 REQUIRED net).
-- #7: `_routine_target` adjudicated NOT-a-bug — 02:00 run correctly targets prev-closed day under `[04:00,04:00)`; regression-locked 03:59/04:01.
-- #4: `marrow/backup.py` `VACUUM INTO`+`os.replace` atomic local + iCloud offsite, keep=14 prune, dry-run/`--apply`, per-leg `add_alert` on fail. `deploy/mw-db-backup.plist` daily 03:00.
-- #5: `archive_events` mirrors one batch `audit_log` row/call (n==0 → none) in same txn.
-- #6: events_vec provenance DEFERRED → FUTURE (embedder itself deferred; avoid Phase-1 base-schema thaw with no writer).
-- #8: DESIGN L139/L170 catchup doc-drift (SessionStart → 16:00 launchd) corrected; dead `return False` removed by blocker#1.
+## Residual (non-blocking)
+- #8 timeout not process-group kill: `llm.py` `threading.Timer` kills main `claude`, orphan children possible — own focused TDD round.
+- #8 lessons 2 stale rows — safe, leave (Lumi-intentional).
+- All marrow launchd jobs (diary routine/catchup, jsonl-cleanup, db-backup) NOT launchctl-loaded — Lumi gate.
 
-## Remaining minor (non-blocking, NOT done)
-- #8 timeout not process-group kill: `llm.py` `threading.Timer` kills main `claude`, orphan children possible — robustness, deserves its own focused TDD round.
-- #8 lessons 2 stale rows — safe (no auto read-path); Lumi-intentional removal, leave.
-
-## State
-- main: blocker#1 + #3 + #4 + #5 + ADR-0004 + census/triage notes + doc-fixes + PROGRESS deltas. pytest 125 (real-run on main, not worktree self-report). Pushed → origin/main.
-- All marrow launchd jobs (diary routine/catchup, jsonl-cleanup, new db-backup) NOT launchctl-loaded — Lumi gate, unchanged.
-- 4 agent worktrees locked → harness auto-cleans; `phase1-review` worktree from prior window untouched. `.claude/worktrees/` now gitignored.
+## Phase-1 shipped (verified on main, pushed)
+- blocker: `is_headless` = assistant model-set ⊆ config `worker_models` (ADR-0004); `entrypoint` abandoned; `cleanup.py` follows.
+- #3 diary same-day `--force` overwrite + `fcntl.flock` app-lock (DESIGN L188 net).
+- #4 `backup.py` atomic `VACUUM INTO` + iCloud offsite + keep=14; `mw-db-backup.plist` daily 03:00.
+- #5 `archive_events` mirrors one batch `audit_log` row.
+- #12 session_end dashboard `PermissionError` → skip this regen (lossless, alert#11 sibling); alert#12 resolved.
+- alert / thread / handoff id moved to line-front (was buried at line-end).
+- #2 restored ids 453-456 (2 real hello sessions); 48 spawn rows correctly stayed purged.
 
 ## Don't redo / decided
-- `entrypoint` is NOT a headless marker — ADR-0004 supersedes; do not reopen.
-- #7 `_routine_target` is correct under the 04:00 boundary; the "off-by-one" was a wrong mental model. Do not "fix" it.
-- #2 restore is Lumi's call — never auto-execute.
-- `isolation:"worktree"` subagents branch from the origin baseline, not current main → always cherry-pick to main and real-run pytest there; never trust the worktree's own pytest count.
+- `entrypoint` NOT a headless marker — ADR-0004 supersedes.
+- #7 `_routine_target` correct under the 04:00 boundary — do not "fix" it.
+- #6 waits for embedder — never add an empty provenance column to the Phase-1 schema.
+- `isolation:"worktree"` subagents branch from the origin baseline → always cherry-pick to main and real-run pytest there; never trust the worktree's own count.
+- dashboard lives in `~/Desktop/NY` (Obsidian) — cannot move out of the TCC zone; EPERM degrade is the fix, not relocation.
