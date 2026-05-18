@@ -25,7 +25,7 @@
     2. Give design.md and goal - check logic bugs and coding quality
     3. /ultrareview after all major phases done (before add-ons)
     4. Simplify (optional) at the end of the project
-- 
+- DB-only output Lumi can't see (diary text, dry-run narrative, anything living only in marrow.db): after the run push the FULL body to her via PushNotification — full text, not a summary.
 
 ## Conventions
 
