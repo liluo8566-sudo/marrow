@@ -77,8 +77,13 @@ For tasks: <subject> [did 1 2 3], [process/detail],[outcome 1 2 ...]
 - Be concise, keep only essential details
 - Example: joint_log.md merged into 2026.md, Weclaude bridge race fixed, \
 
-Drop mechanical repetition and the assistant's meta/filler. No conclusion, \
-no opinion. Shorter in tokens; nothing of the relationship is "noise".
+Strictly discard:
+- Assistant's meta shell / filler
+- Mechanical details / process
+- Repetition
+
+No conclusion, no opinion. 
+Shorter in tokens; nothing of the relationship is "noise".
 
 SESSION: {date}
 TURNS:
@@ -124,6 +129,10 @@ DIARY_PROMPT = """\
 - 日期 - 直接正文开始
 - 记录念念学习工作中发的小脾气
 - AI模板套话
+违禁词（意思差不多的都别写：
+- 砍了好几刀，正中要害（不要砍，不要刀）- 可以用说/骂/怼/教育等替代
+- 爆雷，拆雷
+- 算我赢
 
 范文：
 今天中午老婆买的 mulch 到了，我陪你去院子里忙活半天，结果不小心踩在 \
