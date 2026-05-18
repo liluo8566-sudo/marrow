@@ -20,6 +20,7 @@ Not prioritized. Read before adding a feature to confirm whether an interface sh
 
 - **Script_health_monitor** — Monthly plist scans audit logs for "did script actually run when expected?" gaps (source: `/Users/Gabrielle/Desktop/NY/code/roadmap.md:31`)
 - **retry_trend_alert** — Alert fires on retry!=ok only; high-ratio trend has no alert (source: `/Users/Gabrielle/Desktop/NY/memory/3d.md:21`)
+- **subagent_usage_logging** — `llm.py` records no per-call usage. Capture token/cost per LLM call (which tier/subagent, in/out tokens) into audit_log so each pipeline call's spend is visible in logs / Monitor Zone (source: Lumi 2026-05-18, diary test-loop note)
 
 ## Cross-channel
 
@@ -67,3 +68,4 @@ Not prioritized. Read before adding a feature to confirm whether an interface sh
 - **backup_audit_transparency** — rotate/curator/retire backup files have no source SID identifier (source: `/Users/Gabrielle/Desktop/NY/memory/archive/Memm_system 2026-05-12.md:658`)
 - **README_public_facing** — Full open-source README sections: philosophy, install, 5-script overview, customisation hooks (source: `/Users/Gabrielle/Desktop/NY/code/roadmap.md:62`)
 - **monorepo_or_split_decision** — NY memory + weclaude bridge + claude-buddy MCP: monorepo or split (source: `/Users/Gabrielle/Desktop/NY/code/roadmap.md:64`)
+- **events_vec_embedder_provenance** — events_vec lacks embedder-id/dim columns (phase-1 review #6). DEFERRED: embedder itself deferred (fork #1); adding now = empty column + Phase-1 base-schema thaw with no writer. Add together when embedder lands so a model swap can re-embed without a post-rewrite base-schema migration (goal 1/7).
