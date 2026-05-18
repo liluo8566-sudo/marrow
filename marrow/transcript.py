@@ -7,18 +7,27 @@ Deterministic, no LLM. Output feeds repo.archive_events (idempotent).
 from __future__ import annotations
 
 import json
+import re
+
+# Buddy MCP appends an invisible end-of-turn HTML comment to assistant text
+# (<!-- buddy: ... -->). It is a legal text block so the type-based filter
+# below never sees it; strip it here or it leaks into events -> digest ->
+# diary as if 铁锅 were a speaker.
+_BUDDY = re.compile(r"\s*<!--\s*buddy\s*:.*?-->", re.S | re.I)
 
 
 def _text(content) -> str:
     if isinstance(content, str):
-        return content.strip()
-    if isinstance(content, list):
-        parts = [
+        s = content
+    elif isinstance(content, list):
+        s = "\n".join(
             b.get("text", "") for b in content
             if isinstance(b, dict) and b.get("type") == "text"
-        ]
-        return "\n".join(p for p in parts if p).strip()
-    return ""
+            and b.get("text")
+        )
+    else:
+        return ""
+    return _BUDDY.sub("", s).strip()
 
 
 def clean(jsonl_path: str) -> list[dict]:
