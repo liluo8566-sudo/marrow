@@ -20,11 +20,15 @@
 - `/tdd` skill: for deterministic logic with a fixed behaviour contract — SQLite schema, migrate.py, mw CLI. Red-green-refactor.
 - `grill-with-doc` skill: after each review, grill for the next phase.
 - Commit: One logical unit per commit. Private GitHub repo (github.com/Jaynechu/marrow) is the remote ledger.
-- Review: Once phase x completed, start review in a new session.
-    1. Give onlt goal and outcome list to subagent - grill design gap
-    2. Give design.md and goal - check logic bugs and coding quality
-    3. /ultrareview after all major phases done (before add-ons)
-    4. Simplify (optional) at the end of the project
+- Review: once a phase completes, run in a new clean session.
+    0. Fact-check: PROGRESS + git log + pytest + dashboard vs outcome list; feed step 1 only verified facts.
+    1. Blind design-gap: subagent gets goal + outcome list (forbidden repo access, no DESIGN/code) — reasons from results.
+    2a. DESIGN traceability: each phase-subset item DONE / DEFERRED-by-plan / MISSING / DRIFT; evidence = code, not PROGRESS.
+    2b. Code quality + logic bugs: subagent with DESIGN + goal.
+    3. /ultrareview on `main` (user-triggered, billed) — after major phases, before add-ons.
+    4. Main session adjudicates: findings material, not verdict; never trust self-report — double-check stop-bleed/fix claims; fix → pytest + dashboard green → PROGRESS delta.
+    5. Simplify (optional) at project end.
+- Review subagents: opus for blind + code passes; sonnet ok for blind only; no git/config writes.
 - DB-only output Lumi can't see (diary text, dry-run narrative, anything living only in marrow.db): after the run push the FULL body to her via PushNotification — full text, not a summary.
 
 ## Conventions
