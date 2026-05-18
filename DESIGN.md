@@ -136,7 +136,7 @@ Why this beats a black-box model memory: the memory IS Lumi's own SQLite + files
 ## Emotion (Phase 2)
 
 Two reads of memory, never fused (ADR-0007).
-- Generic recall — SQLite's core: event rows + targeted diary pulls. Claude self-pulls in-session, on-demand, unbounded, cheap, must-not-cut (goal 3).
+- Generic recall — SQLite's core: event rows + targeted diary pulls. Claude self-pulls in-session, on-demand, unbounded, cheap. Never throttle or remove this call — loses goal 3. (event data itself is Raw-stream, pruned normally by data-lifecycle.)
 - breath is NOT a Marrow concept — it is Ombre's recall engine (Ombre has no SQLite). Marrow = SQLite/claude-imprint, no per-turn breath.
 
 - emotion = valence + arousal, emitted by the same sonnet call that writes diary. Orthogonal to importance.
