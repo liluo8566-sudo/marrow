@@ -1,12 +1,8 @@
-"""Tests for marrow/cleanup.py — bleed-stop contract.
+"""Tests for marrow/cleanup.py — spawned sdk-cli .jsonl reaper.
 
-The old contract (delete iff entrypoint==sdk-cli) was wrong: sdk-cli
-covers real clawbot/Task-agent/worktree human sessions too, so the
-reaper would unlink real conversation .jsonl. Until a true headless
-signal exists (step4 / ADR-0003), transcript.is_headless is hard-False
-and cleanup MUST be a guaranteed no-op for every input — no real
-session can ever be lost. Delete-behaviour tests are intentionally
-gone; they will be rewritten against the real signal in step4.
+cleanup reuses transcript.is_headless (ADR-0004): delete iff is_headless
+AND older than grace_days. Real sessions (opus model, or human first
+message with no assistant) are always kept. Idempotent.
 """
 from __future__ import annotations
 
@@ -19,35 +15,58 @@ DAY = 86400.0
 NOW = 1_700_000_000.0
 
 
-def _jsonl(p, entrypoint, mtime_age_days):
-    line = {"type": "user", "message": {"role": "user", "content": "x"}}
-    if entrypoint is not None:
-        line["entrypoint"] = entrypoint
-    p.write_text(json.dumps(line))
+def _jsonl(p, lines, mtime_age_days):
+    p.write_text("\n".join(json.dumps(o) for o in lines))
     t = NOW - mtime_age_days * DAY
     os.utime(p, (t, t))
     return p
 
 
-def test_no_input_is_ever_marked_for_deletion(tmp_path):
+def _headless(p, age):
+    return _jsonl(p, [
+        {"type": "user", "message": {"role": "user",
+         "content": "Compress this file per the rules"}},
+        {"type": "assistant", "message": {"role": "assistant",
+         "model": "claude-haiku-4-5-20251001",
+         "content": [{"type": "text", "text": "x"}]}},
+    ], age)
+
+
+def _real(p, age):
+    return _jsonl(p, [
+        {"type": "user", "message": {"role": "user", "content": "老公"}},
+        {"type": "assistant", "message": {"role": "assistant",
+         "model": "claude-opus-4-7",
+         "content": [{"type": "text", "text": "hi"}]}},
+    ], age)
+
+
+def test_old_headless_marked_real_kept(tmp_path):
     sub = tmp_path / "-Users-Gabrielle-cc-lab-marrow"
     sub.mkdir()
-    files = [
-        _jsonl(tmp_path / "sdk_old.jsonl", "sdk-cli", mtime_age_days=99),
-        _jsonl(tmp_path / "sdk_young.jsonl", "sdk-cli", mtime_age_days=0.1),
-        _jsonl(tmp_path / "cli.jsonl", "cli", mtime_age_days=99),
-        _jsonl(tmp_path / "legacy.jsonl", None, mtime_age_days=99),
-        _jsonl(sub / "deep_sdk.jsonl", "sdk-cli", mtime_age_days=99),
-    ]
+    h_old = _headless(tmp_path / "h_old.jsonl", 99)
+    h_young = _headless(tmp_path / "h_young.jsonl", 0.1)
+    r_old = _real(tmp_path / "r_old.jsonl", 99)
+    h_deep = _headless(sub / "deep.jsonl", 99)
     to_delete, skipped = cleanup.scan(tmp_path, grace_days=1, now=NOW)
-    assert to_delete == []
-    assert {p for p, _ in skipped} == set(files)
+    assert set(to_delete) == {h_old, h_deep}
+    skipped_paths = {p for p, _ in skipped}
+    assert h_young in skipped_paths and r_old in skipped_paths
 
 
-def test_apply_unlinks_nothing(tmp_path):
-    f = _jsonl(tmp_path / "a.jsonl", "sdk-cli", mtime_age_days=99)
+def test_apply_unlinks_only_old_headless(tmp_path):
+    h = _headless(tmp_path / "h.jsonl", 99)
+    r = _real(tmp_path / "r.jsonl", 99)
     rep = cleanup.run(apply=True, projects_dir=tmp_path, grace_days=1, now=NOW)
-    assert f.exists()
+    assert not h.exists()
+    assert r.exists()
+    assert rep["deleted"] == 1
+
+
+def test_idempotent_second_run_deletes_nothing(tmp_path):
+    _headless(tmp_path / "h.jsonl", 99)
+    cleanup.run(apply=True, projects_dir=tmp_path, grace_days=1, now=NOW)
+    rep = cleanup.run(apply=True, projects_dir=tmp_path, grace_days=1, now=NOW)
     assert rep["deleted"] == 0
     assert rep["would_delete"] == 0
 
