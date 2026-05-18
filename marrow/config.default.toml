@@ -5,8 +5,16 @@
 # Empty = use defaults under ~/.config/marrow/
 db = ""
 backup_dir = ""
+# iCloud offsite copy of the daily DB snapshot. Empty =
+# ~/Library/Mobile Documents/com~apple~CloudDocs/marrow-backup
+offsite_backup_dir = ""
 # Dashboard renders here (Obsidian vault). Empty = ~/Desktop/NY/dashboard.md
 dashboard = ""
+
+[backup]
+# Daily DB snapshots to retain each side (local + offsite). Conservative
+# flat count; calendar/GFS rotation is DESIGN-Pending.
+keep = 14
 
 [llm]
 # Selection chain: default -> emergency. Callers pass intent only.

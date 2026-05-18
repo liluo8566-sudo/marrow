@@ -24,12 +24,18 @@ def load() -> dict:
     paths = cfg.setdefault("paths", {})
     db = paths.get("db") or str(DATA_DIR / "marrow.db")
     backup = paths.get("backup_dir") or str(DATA_DIR / "backup")
+    offsite = paths.get("offsite_backup_dir") or str(
+        Path.home() / "Library" / "Mobile Documents"
+        / "com~apple~CloudDocs" / "marrow-backup"
+    )
     dash = paths.get("dashboard") or str(
         Path.home() / "Desktop" / "NY" / "dashboard.md"
     )
     paths["db"] = db
     paths["backup_dir"] = backup
+    paths["offsite_backup_dir"] = offsite
     paths["dashboard"] = dash
+    cfg.setdefault("backup", {}).setdefault("keep", 14)
     Path(backup).mkdir(parents=True, exist_ok=True)
     return cfg
 
