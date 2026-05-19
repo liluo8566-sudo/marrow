@@ -173,7 +173,7 @@ See DECISIONS.md — per-event affect table, two-band SessionStart entry, single
 - SessionEnd — async, code-only (no LLM): pass an archive-skip gate (see Pending — session archive skip), then clean this session's transcript (strip tool/fetch/system noise, keep the full human dialogue verbatim) and archive turns to events; regen the dashboard top. Diary is NOT here — see diary scheduling. Emotion is NOT here either (see Emotion).
 - PreToolUse — write_guard. Phase 1: the existing global `~/.claude/hooks/prompt-guard.py` (English-only + no pipe tables on prompt-class .md), scope extended to cover `~/cc-lab/marrow/` — one global hook, not a Marrow-local copy. Phase 3: route writes to prompt-class md to the writer sub-Claude; main Claude loses direct write there.
 
-Diary scheduling — see DECISIONS for the shipped detail (local-04:00 day boundary, per-session map-reduce, two decoupled launchd jobs: 04:00 routine writes the just-closed day, 16:00 catchup backfills the last days). haiku digests sessions (volume-only, no value-cut/arc), merges them on local timeline (tags dropped, weights uneven), sonnet writes diary. Buddy end-of-turn comments stripped at transcript clean. No lesson extraction (see DECISIONS).
+Diary scheduling — see DECISIONS (04:00 routine + 16:00 catchup, per-session map-reduce, haiku digest → sonnet). Buddy end-of-turn comments stripped at transcript clean; no lesson extraction.
 
 ## Injection
 
@@ -215,14 +215,14 @@ Phase 1 ships SQLite alongside the running ny-memm; both run in parallel ~2 week
 
 Baseline effect: Lumi never manually clears markers, never triggers catchup, never retries. No silent failure. Token bounded. Originals always recoverable.
 
-- backup — DB never lost — daily dump + iCloud offsite — method agreed; retention Pending.
+- backup — DB never lost — daily dump + iCloud offsite — shipped (VACUUM INTO + iCloud, keep14); see DECISIONS.
 - retry — transient LLM/IO failure self-heals — one retry then degrade tier — method agreed; thresholds Pending.
 - catchup — a missed diary/endhook is recovered — SessionStart-triggered rescan over event-days lacking output (not a resident watcher), idempotent skip — method agreed; scan window/cap Pending.
 - failure alert — no silent fail — any step writes an alert row to dashboard top with a recovery hint — agreed.
-- concurrent-write lock — parallel session-ends never corrupt the DB — serialize writers — REQUIRED, mechanism Pending.
-- atomic write — a crash mid-write never leaves a half file — temp + replace on every rendered md — REQUIRED, mechanism Pending.
+- concurrent-write lock — parallel session-ends never corrupt the DB — shipped (fcntl.flock app-lock); see DECISIONS.
+- atomic write — a crash mid-write never leaves a half file — temp + replace on every rendered md — shipped; see DECISIONS.
 - idempotency — catchup re-run never double-inserts — content/source-hash dedup — method agreed.
-- timeout brake — a hung agent cannot stall the pipeline or burn tokens — hard subprocess timeout + kill — REQUIRED, mechanism Pending.
+- timeout brake — a hung agent cannot stall the pipeline or burn tokens — shipped (process-group kill); see DECISIONS.
 - edit safety — every visible rendered file is writable; structured views reconcile by row id, narrative views by date block (whole-content overwrite or full-block delete); hand-edits never lost; conflict = back up + alert before overwrite — agreed; anchor char format + render template Pending.
 - drift sweep — a moved/renamed/deleted/merged file never leaves dangling references — git-diff-triggered deterministic ripgrep + key-indirection + cheap-model free-text fallback — REQUIRED, mechanism Pending.
 - claude.md render guard — the daemon-rendered marker block never destroys the hand-written zone — marker partition + hash-compare + reconcile + backup + atomic + Alert — REQUIRED, mechanism Pending.
