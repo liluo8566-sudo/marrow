@@ -17,10 +17,24 @@ CFG = {
 }
 
 
-def _json_out(result, is_error=False):
-    return json.dumps([
-        {"type": "system", "subtype": "init"},
-        {"type": "result", "result": result, "is_error": is_error},
+def _json_out(result, is_error=False, stop_reason=None, usage=None):
+    rec = {"type": "result", "result": result, "is_error": is_error}
+    if stop_reason is not None:
+        rec["stop_reason"] = stop_reason
+    if usage is not None:
+        rec["usage"] = usage
+    return json.dumps([{"type": "system", "subtype": "init"}, rec])
+
+
+def _stream_out(result, stop_reason=None, usage=None):
+    rec = {"type": "result", "result": result, "is_error": False}
+    if stop_reason is not None:
+        rec["stop_reason"] = stop_reason
+    if usage is not None:
+        rec["usage"] = usage
+    return "\n".join([
+        json.dumps({"type": "system"}),
+        json.dumps(rec),
     ])
 
 
@@ -180,3 +194,124 @@ def test_stream_timeout_kills_process_group(tmp_path, monkeypatch):
         c._run_claude_stream({"timeout_s": 1}, "m", "hi")
     gc = _grandchild_pid(pidfile)
     assert _wait_dead(gc), f"orphan grandchild {gc} survived stream timeout"
+
+
+# --- Refusal sentinel tests (P0) ---
+
+def test_refusal_stop_reason_raises_json():
+    refusal_text = "I'm not able to help with that request."
+    with pytest.raises(LLMError, match="refusal"):
+        LLMClient._parse_claude(
+            _json_out(refusal_text, stop_reason="refusal"), "json")
+
+
+def test_refusal_stop_reason_raises_stream():
+    refusal_text = "I'm unable to assist with that."
+    with pytest.raises(LLMError, match="refusal"):
+        LLMClient._parse_claude(
+            _stream_out(refusal_text, stop_reason="refusal"), "stream-json")
+
+
+def test_refusal_fingerprint_raises_without_stop_reason():
+    # is_error=False, no stop_reason — the real hole this sentinel closes
+    refusal_text = "I'm unable to assist with this request. It violates policy."
+    with pytest.raises(LLMError, match="refusal"):
+        LLMClient._parse_claude(_json_out(refusal_text), "json")
+
+
+def test_refusal_fingerprint_case_insensitive_leading_whitespace():
+    refusal_text = "  I cannot assist with that.\nMore text."
+    with pytest.raises(LLMError, match="refusal"):
+        LLMClient._parse_claude(_json_out(refusal_text), "json")
+
+
+def test_normal_text_starting_with_i_not_flagged():
+    # "I think" / "I found" etc. must not false-positive
+    safe = "I think the answer is 42."
+    assert LLMClient._parse_claude(_json_out(safe), "json") == safe
+
+
+def test_refusal_never_returned_as_success_via_call(monkeypatch):
+    # End-to-end: refusal triggers LLMError through call(), chain exhausts
+    c = LLMClient(CFG)
+    refusal_out = _json_out(
+        "I'm not able to help with that.", stop_reason="refusal")
+
+    def fake_run(spec, model, prompt):
+        return LLMClient._parse_claude(refusal_out, "json")
+
+    monkeypatch.setattr(c, "_run_claude_cli", fake_run)
+    with pytest.raises(LLMError):
+        c.call("diary", "body")
+
+
+# --- Cost monitor tests ---
+
+def test_extract_usage_json():
+    usage = {"input_tokens": 100, "output_tokens": 50}
+    out = _json_out("ok", usage=usage)
+    result = LLMClient._extract_usage(out, "json")
+    assert result == usage
+
+
+def test_extract_usage_stream():
+    usage = {"input_tokens": 200, "output_tokens": 80, "cache_read_input_tokens": 10}
+    out = _stream_out("ok", usage=usage)
+    result = LLMClient._extract_usage(out, "stream-json")
+    assert result == usage
+
+
+def test_extract_usage_missing_returns_none():
+    out = _json_out("ok")
+    assert LLMClient._extract_usage(out, "json") is None
+
+
+def test_extract_usage_garbage_returns_none():
+    assert LLMClient._extract_usage("not json at all", "json") is None
+
+
+def test_log_usage_writes_audit_row(tmp_path, monkeypatch):
+    from marrow import storage as stor
+
+    db = str(tmp_path / "test.db")
+    _real_connect = stor.connect  # capture before any patch
+
+    stor.init_db(db)  # creates all tables incl. audit_log
+    monkeypatch.setattr("marrow.llm.storage.connect",
+                        lambda path=None: _real_connect(db))
+
+    c = LLMClient(CFG)
+    usage = {"input_tokens": 1000, "output_tokens": 300,
+             "cache_read_input_tokens": 50, "cache_creation_input_tokens": 20}
+    c._log_usage(usage, "claude-haiku", "stream-json")
+
+    read_conn = _real_connect(db)
+    rows = read_conn.execute(
+        "SELECT action, summary FROM audit_log WHERE target_table='llm_usage'"
+    ).fetchall()
+    read_conn.close()
+    assert len(rows) == 1
+    action, summary = rows[0]
+    assert action == "llm_call_cost"
+    assert "in=1000" in summary
+    assert "out=300" in summary
+    assert "cache_read=50" in summary
+
+
+def test_log_usage_none_does_not_write(tmp_path, monkeypatch):
+    # _log_usage(None, ...) is a no-op — no DB interaction
+    written = []
+    c = LLMClient(CFG)
+    monkeypatch.setattr("marrow.llm.storage.connect",
+                        lambda path=None: written.append(1) or (_ for _ in ()).throw(
+                            AssertionError("should not connect")))
+    c._log_usage(None, "m", "json")  # must not raise
+    assert written == []
+
+
+def test_log_usage_db_failure_does_not_raise(monkeypatch):
+    c = LLMClient(CFG)
+    # storage.connect raises — _log_usage must swallow it silently
+    monkeypatch.setattr("marrow.llm.storage.connect",
+                        lambda path=None: (_ for _ in ()).throw(OSError("db gone")))
+    c._log_usage({"input_tokens": 1}, "m", "json")  # must not raise

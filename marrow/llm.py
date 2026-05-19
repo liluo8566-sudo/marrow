@@ -21,8 +21,26 @@ import urllib.error
 import urllib.request
 
 from . import config
+from . import storage
 
 _ISOLATION = ["--setting-sources", "", "--strict-mcp-config"]
+
+# Lowercase prefixes of policy-refusal prose (defense-in-depth; primary
+# signal is stop_reason=="refusal"). Keep short — match intent, not wording.
+_REFUSAL_FINGERPRINTS = (
+    "i'm not able to",
+    "i am not able to",
+    "i can't assist",
+    "i cannot assist",
+    "i can't help",
+    "i cannot help",
+    "i'm unable to",
+    "i am unable to",
+    "i won't be able to",
+    "i will not be able to",
+    "i'm going to decline",
+    "i must decline",
+)
 
 # ollama is chronically down on this host; while muted it is dropped from the
 # chain entirely so a transient claude miss does not rotate into a guaranteed
@@ -165,7 +183,10 @@ class LLMClient:
         if not lines:
             err = (p.stderr.read() or "").strip()[:200]
             raise LLMError(f"claude_cli stream: no output ({err})")
-        return self._parse_claude("\n".join(lines), "stream-json")
+        raw = "\n".join(lines)
+        result = self._parse_claude(raw, "stream-json")
+        self._log_usage(self._extract_usage(raw, "stream-json"), model, "stream-json")
+        return result
 
     def _run_claude_p(self, spec: dict, model: str, prompt: str) -> str:
         cmd = [_claude_bin(), "-p", prompt, "--model", model,
@@ -192,7 +213,9 @@ class LLMClient:
         if p.returncode != 0:
             raise LLMError(
                 f"claude_cli rc{p.returncode}: {err.strip()[:200]}")
-        return self._parse_claude(out, "json")
+        result = self._parse_claude(out, "json")
+        self._log_usage(self._extract_usage(out, "json"), model, "json")
+        return result
 
     @staticmethod
     def _parse_claude(out: str, fmt: str) -> str:
@@ -219,10 +242,75 @@ class LLMClient:
             rec = recs[0]
         if rec.get("is_error"):
             raise LLMError(f"claude_cli is_error: {str(rec.get('result'))[:200]}")
+        # Refusal sentinel (P0): stop_reason=="refusal" is the primary signal;
+        # fingerprint scan is defense-in-depth (is_error may be false on refusal).
+        if rec.get("stop_reason") == "refusal":
+            raise LLMError(
+                f"claude_cli refusal (stop_reason): {str(rec.get('result'))[:120]}")
         text = rec.get("result")
         if not text:
             raise LLMError("claude_cli: empty result")
+        low = text.lower().lstrip()
+        if any(low.startswith(fp) for fp in _REFUSAL_FINGERPRINTS):
+            raise LLMError(f"claude_cli refusal (fingerprint): {text[:120]}")
         return text
+
+    @staticmethod
+    def _extract_usage(out: str, fmt: str) -> dict | None:
+        """Parse usage/modelUsage from the result event. Returns None on any failure."""
+        try:
+            if fmt == "stream-json":
+                rec = None
+                for line in out.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        ev = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if ev.get("type") == "result":
+                        rec = ev
+                if rec is None:
+                    return None
+            else:
+                j = json.loads(out)
+                recs = [x for x in j if x.get("type") == "result"] \
+                    if isinstance(j, list) else [j]
+                rec = recs[0] if recs else None
+                if rec is None:
+                    return None
+            usage = rec.get("usage") or rec.get("modelUsage")
+            if not usage or not isinstance(usage, dict):
+                return None
+            return usage
+        except Exception:
+            return None
+
+    def _log_usage(self, usage: dict | None, model: str, fmt: str) -> None:
+        """Write a cost-monitor row to audit_log. Best-effort: never raises."""
+        if not usage:
+            return
+        try:
+            input_tok = usage.get("input_tokens", 0)
+            output_tok = usage.get("output_tokens", 0)
+            cache_read = usage.get("cache_read_input_tokens", 0)
+            cache_write = usage.get("cache_creation_input_tokens", 0)
+            summary = (
+                f"model={model} fmt={fmt} "
+                f"in={input_tok} out={output_tok} "
+                f"cache_read={cache_read} cache_write={cache_write}"
+            )
+            conn = storage.connect()
+            with conn:
+                conn.execute(
+                    "INSERT INTO audit_log (target_table, action, summary)"
+                    " VALUES (?, ?, ?)",
+                    ("llm_usage", "llm_call_cost", summary),
+                )
+            conn.close()
+        except Exception:
+            pass
 
     def _run_ollama(self, spec: dict, prompt: str) -> str:
         payload = json.dumps({
