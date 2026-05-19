@@ -1,19 +1,20 @@
-Read DECISIONS.md first — single current-truth entry, every line confidence-tagged.
+Read DECISIONS.md first — single current-truth, confidence-tagged. Decisions + deletions in commits b185d39 (rebuild) + d89c658 (reconcile); do not restate.
 
-## This round (2026-05-19 grill round 5 + doc-system rebuild)
-- Three-way collision (Ombre/claude-imprint real source + blind design) converged Phase 2 emotion; Lumi adjudicated A1/A2/A3.
-- Doc-system rebuilt: new DECISIONS.md (confidence dimension); DESIGN slimmed + absorbed SCHEMA; FUTURE re-grouped by phase; docs/adr deleted (conclusions folded into DECISIONS); CONTEXT 3 conflicts fixed, placement unchanged; 6 historical hard contradictions cleared.
-
-## Flipped this round (old versions void)
-- decay = importance×e^(-λ·days) ONLY → entry ≠ decay, two formulas; entry keeps emotion term
-- recall = claude-imprint RRF → single weighted scalar, copy imprint lane engineering not RRF (C2 Lumi)
-- session-start fused-rank top-N over diary → two bands: peak top-3 + trend 1 line, code template (A1)
-- emotion = diary.mood per-day → per-event affect table
+## This round done (2026-05-19, NOT pushed)
+- Doc-system rebuilt, reviewed (zero BLOCK); DECISIONS.md entry; docs/adr + SCHEMA.md deleted; SCHEMA → DESIGN Data-model; 6 contradictions cleared; FUTURE regroups by phase; CONTEXT 3 conflicts fixed.
+- Pipeline bug fixed by Lumi; root cause claudemiss, not `-p`.
 
 ## Open
-- [hold] entity pipeline (M6) pending pipeline-bug fix (B)
-- the pipeline bug itself (Lumi investigating; this session did not touch it)
+- Push: 2 commits on main, NOT pushed — waiting on Lumi's go (system-level change + ADR/SCHEMA deletion).
+- DESIGN slim: ~293 lines, target ~150; Lumi reviewing — do NOT touch DESIGN unprompted. Proposed: move 5 `## Pending —` sections to FUTURE (by phase); move Editing&correction + Fact-corrections mechanism to DECISIONS (pointer in DESIGN).
+- entity (M6): hold-precondition cleared; buildable; no mechanism written; DECISIONS `[hold]` until Lumi approves.
 
 ## Don't redo
-- docs/adr deleted — do not recreate; conclusions live only in DECISIONS, overturn = overwrite in place, never stack
-- CONTEXT belongs to grill-with-doc skill — fixing its conflicts is fine, do not change its role/placement
+- docs/adr deleted — never recreate; conclusions live only in DECISIONS; overturn = overwrite in place, never stack.
+- DESIGN slim — Lumi owns it this round; no unprompted DESIGN edits.
+- pipeline bug — root cause claudemiss, not `-p`; do not reblame `-p`.
+- CONTEXT.md — grill-with-doc skill's file; fix conflicts only, never change its role/placement.
+
+## Next session
+- Skill grill-with-doc for grilling/advancing Phase 2 entity pipeline.
+- Phase 2 build (affect / single-scalar recall / decay FLOOR) converged in DECISIONS — ready to implement when Lumi starts it; entry payload ≤6000 chars, backdrop ≤5 lines ≤350 chars.
