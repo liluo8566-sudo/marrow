@@ -45,16 +45,22 @@ mid = "claude-sonnet-4-6"
 top = "claude-opus-4-7"
 
 [embedding]
-# Phase 2: bge-m3 1024d in-process (DECISIONS, Lumi-locked). `model` stays
-# empty until the recall module enables loading; `id` tags vector provenance
-# so a future swap re-embeds without a base-schema rewrite.
-model = ""
+# Phase 2: bge-m3 1024d in-process (DECISIONS, Lumi-locked). `model` tags
+# which HuggingFace repo to source; `id` tags vector provenance so a future
+# swap re-embeds without a base-schema rewrite.
+model = "BAAI/bge-m3"
 id = "bge-m3"
 dim = 1024
 
 [recall]
-# Phase 1: FTS5 always on. Vector path wired when embedding.model is set.
-vector = false
+# FTS5 always on. Vector path active when embedding model files are present.
+vector = true
+# Fusion weights (DECISIONS B3). Tunable post-audit.
+w_vec = 0.55
+w_bm25 = 0.30
+w_recency = 0.15
+w_affect = 0.10
+min_score = 0.35
 
 [transcript]
 # ADR-0004 single source of truth for the headless-spawn signal. A jsonl

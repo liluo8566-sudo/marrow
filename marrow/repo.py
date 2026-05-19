@@ -7,6 +7,7 @@ import hashlib
 import sqlite3
 
 from . import storage
+from . import recall as _recall_mod
 
 
 def _fts_query(q: str) -> str:
@@ -16,27 +17,11 @@ def _fts_query(q: str) -> str:
 
 def recall(conn: sqlite3.Connection, query: str, limit: int = 10,
            budget_chars: int = 4000) -> list[dict]:
-    q = query.strip()
-    if not q:
-        return []
-    rows = conn.execute(
-        "SELECT e.id, e.session_id, e.timestamp, e.role, e.content, e.channel "
-        "FROM events_fts f JOIN events e ON e.id = f.rowid "
-        "WHERE events_fts MATCH ? ORDER BY rank LIMIT ?",
-        (_fts_query(q), max(1, limit)),
-    ).fetchall()
-    out, used = [], 0
-    for r in rows:
-        d = dict(r)
-        c = d["content"] or ""
-        if used + len(c) > budget_chars:
-            c = c[: max(0, budget_chars - used)]
-        d["content"] = c
-        out.append(d)
-        used += len(c)
-        if used >= budget_chars:
-            break
-    return out
+    """Recall past events. Uses fusion (vec+bm25+recency+affect) when
+    bge-m3 is loaded; falls back to FTS5-only when embedder is absent."""
+    return _recall_mod.recall_fusion(
+        conn, query, limit=limit, budget_chars=budget_chars
+    )
 
 
 def open_threads(conn: sqlite3.Connection) -> list[dict]:
