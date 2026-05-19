@@ -64,7 +64,7 @@ Phase-1 first-class tables:
 - alerts — system bugs / failures only; backs dashboard top
 - audit_log — recent system writes; backs Monitor Zone (last N)
 
-Phase-2 / later: affect (per-event, see DECISIONS) / entities+entity_facts (HOLD) / corrections (placeholder) / transactions (FUTURE stellan_wallet); emotions/people/preferences/dir placeholders removed.
+Phase-2 / later: affect (per-episode, see DECISIONS) / entities+entity_facts (emitted in the single call, see DECISIONS) / corrections (placeholder) / transactions (FUTURE stellan_wallet); emotions/people/preferences/dir placeholders removed.
 
 Migration mapping (source → target):
 
@@ -124,7 +124,7 @@ Conflict guard: before any overwrite, hash-compare; if Lumi changed it, back up 
 
 ## Emotion (Phase 2)
 
-See DECISIONS.md — per-event affect table, two-band SessionStart entry, single-scalar recall, decay FLOOR tiers. Mechanism converged 2026-05-19 from real source + blind design.
+See DECISIONS.md — per-episode affect table, 4-element SessionStart backdrop, single-scalar recall, decay FLOOR tiers. Mechanism converged 2026-05-19 from real source + blind design.
 
 ## Hooks (four)
 
@@ -133,7 +133,7 @@ See DECISIONS.md — per-event affect table, two-band SessionStart entry, single
 - SessionEnd — async, code-only (no LLM): pass an archive-skip gate (see FUTURE Phase 2 — session_archive_skip), then clean this session's transcript (strip tool/fetch/system noise, keep the full human dialogue verbatim) and archive turns to events; regen the dashboard top. Diary is NOT here — see diary scheduling. Emotion is NOT here either (see Emotion).
 - PreToolUse — write_guard. Phase 1: the existing global `~/.claude/hooks/prompt-guard.py` (English-only + no pipe tables on prompt-class .md), scope extended to cover `~/cc-lab/marrow/` — one global hook, not a Marrow-local copy. Phase 3: route writes to prompt-class md to the writer sub-Claude; main Claude loses direct write there.
 
-Diary scheduling — see DECISIONS (04:00 routine + 16:00 catchup, per-session map-reduce, haiku digest → sonnet). Buddy end-of-turn comments stripped at transcript clean; no lesson extraction.
+Diary scheduling — see DECISIONS (04:00 routine + 16:00 catchup, single sonnet call; per-session map-reduce kept only as the over-volume fallback). Buddy end-of-turn comments stripped at transcript clean; no lesson extraction.
 
 ## Injection
 
@@ -160,7 +160,7 @@ The per-event topology (which trigger uses which tier, timeout, retry) is a Pend
 Each phase ships one outcome.
 
 - Phase 1 — Memory core: SQLite + full-text, the daemon with a minimal MCP tool set, all four hooks at phase-1 subset (SessionStart open-threads+alerts handoff only; UserPromptSubmit must-never-fade inject, recall fallback default off; SessionEnd code-only clean+archive + dashboard-top regen, no LLM/emotion/decay; diary via nightly 04:00 routine + 16:00 catchup launchd job; PreToolUse mirrors prompt-guard only), dashboard top render, migrate.py, the `mw` CLI. Runs in parallel with old ny-memm ~2 weeks, then retire it. Stream-json subscription routing is pass-tested (2026-05-15). The remaining unknowns — local vector ext on this macOS, MCP parity with cyberboss, cheap-tier diary quality — are not pre-verified; each surfaces and is settled at first build of its module, no separate verify phase.
-- Phase 2 — Emotion (affect) + decay + sub-page render fills out; entity (people/pref) pipeline HOLD pending pipeline-bug — see DECISIONS. Sub-page render config-driven (goal 7); stellan_wallet first opt-in addon.
+- Phase 2 — Emotion (affect) + decay + sub-page render fills out; entity (people/pref) emitted in the single call — see DECISIONS. Sub-page render config-driven (goal 7); stellan_wallet first opt-in addon.
 - Phase 3 — Writer authority: prompt-class md writes go through the writer sub-Claude.
 - Phase 4 — Cross-channel parity (see FUTURE Phase 4 — weclaude_runtime_rebuild).
 - Phase 5 — Addons + open source.

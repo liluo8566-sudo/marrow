@@ -35,11 +35,11 @@ _Avoid_: sync, merge, import
 ### Emotion (Phase 2)
 
 **valence / arousal**:
-Per-event affect rows (see DECISIONS.md). valence = positive↔negative; arousal = calm↔excited. Orthogonal to **importance** (saliency).
+Per-episode affect rows (see DECISIONS.md). valence = positive↔negative; arousal = calm↔excited. Orthogonal to **importance** (saliency).
 _Avoid_: mood-as-single-value, sentiment
 
 **diary.mood**:
-optional code-rollup of daily affect (display only); actual emotion per-event rows in DECISIONS.md.
+optional code-rollup of daily affect (display only); actual emotion per-episode rows in DECISIONS.md.
 _Avoid_: feel, model_valence
 
 **feel**:
