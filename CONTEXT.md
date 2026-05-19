@@ -7,7 +7,7 @@ Personal AI memory + workflow system replacing the ny-memm pipeline. This glossa
 ### Data lifecycle tiers
 
 **Permanent keepsake**:
-Memory that is add-only and never decays — milestones, diary, goose-bites, projects, study, lessons, major life facts.
+Memory that is add-only and never decays — milestones, diary, goose-bites, projects, study, major life facts.
 _Avoid_: archive, cold storage
 
 **Demote-sink**:
@@ -35,11 +35,11 @@ _Avoid_: sync, merge, import
 ### Emotion (Phase 2)
 
 **valence / arousal**:
-Two coords on the diary row. valence = positive↔negative; arousal = calm↔excited. Orthogonal to **importance** (saliency).
+Per-event affect rows (see DECISIONS.md). valence = positive↔negative; arousal = calm↔excited. Orthogonal to **importance** (saliency).
 _Avoid_: mood-as-single-value, sentiment
 
 **diary.mood**:
-The emotional key of "our day" (Lumi and Stellan together, not one side). Emitted by the diary sonnet call.
+optional code-rollup of daily affect (display only); actual emotion per-event rows in DECISIONS.md.
 _Avoid_: feel, model_valence
 
 **feel**:
