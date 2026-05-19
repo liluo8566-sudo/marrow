@@ -102,10 +102,17 @@ class LLMClient:
         return self._run_claude_stream(spec, model, prompt)
 
     def _run_claude_stream(self, spec: dict, model: str, prompt: str) -> str:
+        # -p + --tools "": stream-json I/O is documented as --print-only, and
+        # without tool isolation claude acts on the digest material (paths,
+        # imperatives) as an agent instead of compressing it -> empty/no
+        # result. A bare PONG never triggers tools, which is why ADR-0003's
+        # probe missed this. Both flags are load-bearing; see
+        # docs/notes/2026-05-19_claude-cli-stream-json.md.
         timeout = spec.get("timeout_s", 120)
-        cmd = [_claude_bin(), "--output-format", "stream-json",
+        cmd = [_claude_bin(), "-p",
+               "--output-format", "stream-json",
                "--input-format", "stream-json", "--verbose",
-               "--model", model, *_ISOLATION]
+               "--model", model, "--tools", "", *_ISOLATION]
         msg = json.dumps({"type": "user", "message": {
             "role": "user", "content": prompt}})
         try:
@@ -154,7 +161,7 @@ class LLMClient:
 
     def _run_claude_p(self, spec: dict, model: str, prompt: str) -> str:
         cmd = [_claude_bin(), "-p", prompt, "--model", model,
-               *_ISOLATION, "--output-format", "json"]
+               "--tools", "", *_ISOLATION, "--output-format", "json"]
         timeout = spec.get("timeout_s", 120)
         try:
             p = subprocess.Popen(
