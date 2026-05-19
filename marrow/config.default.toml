@@ -45,9 +45,12 @@ mid = "claude-sonnet-4-6"
 top = "claude-opus-4-7"
 
 [embedding]
-# Local sentence model for vector recall. Pending pick; recall fallback off in Phase 1.
+# Phase 2: bge-m3 1024d in-process (DECISIONS, Lumi-locked). `model` stays
+# empty until the recall module enables loading; `id` tags vector provenance
+# so a future swap re-embeds without a base-schema rewrite.
 model = ""
-dim = 384
+id = "bge-m3"
+dim = 1024
 
 [recall]
 # Phase 1: FTS5 always on. Vector path wired when embedding.model is set.
