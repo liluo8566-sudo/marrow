@@ -1,5 +1,6 @@
 """Tests for marrow/diary.py. LLM faked — prompt quality not under test;
-day-boundary, per-session map-reduce, idempotency, dual triggers are.
+day-boundary, single-call pipeline, affect rows, fallback path, idempotency,
+and dual triggers are.
 
 Melbourne is UTC+10 (AEST) on these dates; diary_day(utc) = (utc+10h-4h)
 = (utc+6h).date(). So UTC 18:00 rolls into the next diary day; a local
@@ -8,18 +9,29 @@ Melbourne is UTC+10 (AEST) on these dates; diary_day(utc) = (utc+10h-4h)
 from __future__ import annotations
 
 import datetime as dt
+import json
 
 import pytest
 
 from marrow import diary, storage
+from marrow.llm import LLMError
 
 
 class FakeLLM:
-    def __init__(self, digest="digest: did X"):
+    """Fake LLM for unit tests.
+
+    Normal path: role='diary' -> returns prose + affect JSON.
+    Fallback path (over-volume or LLMError): also handles day-digest/stitch.
+    Pass raise_on_diary=True to simulate LLMError on the single call.
+    """
+    def __init__(self, digest="digest: did X", raise_on_diary=False):
         self.digest = digest
+        self.raise_on_diary = raise_on_diary
         self.calls: list[str] = []
         self.digest_bodies: list[str] = []
         self.stitch_bodies: list[str] = []
+        # tracks how many diary calls so tests can vary the return value
+        self._diary_call_n = 0
 
     def call(self, role, body, *, tier="cheap"):
         self.calls.append(role)
@@ -30,13 +42,35 @@ class FakeLLM:
             self.stitch_bodies.append(body)
             return "woven strand with X"
         if role == "diary":
-            # echo the digest so a re-run with a different digest yields
-            # different diary text (force-overwrite test depends on this)
-            return f"今天我们一起把 X 做完了。[{self.digest}]"
+            if self.raise_on_diary:
+                raise LLMError("fake diary failure")
+            self._diary_call_n += 1
+            # Return a prose+affect block so affect rows are written.
+            # Different digest -> different content (force-overwrite test).
+            prose = f"今天我们一起把 X 做完了。[{self.digest}]"
+            affect = json.dumps(
+                [{"ep": 1, "valence": 0.7, "arousal": 0.5, "importance": 5,
+                  "label": "温馨日常", "entities": [], "event_hint": ""}])
+            return f"{prose}\n===AFFECT===\n{affect}\n===END==="
         return ""
 
     def n(self, role):
         return self.calls.count(role)
+
+
+class FakeLLMNoAffect:
+    """Single-call LLM that returns prose without any ===AFFECT=== block."""
+    def call(self, role, body, *, tier="cheap"):
+        if role == "diary":
+            return "今天没什么特别的。"
+        if role == "day-digest":
+            return "digest"
+        if role == "stitch":
+            return "woven"
+        return ""
+
+    def n(self, role):
+        return 0
 
 
 def _ev(conn, sid, ts, role, content):
@@ -104,15 +138,17 @@ def test_pending_days_excludes_written(db):
     assert diary.pending_days(conn) == []
 
 
-# ── per-session map-reduce ────────────────────────────────────────────────────
+# ── single-call pipeline (Phase 2 main path) ────────────────────────────────
 
-def test_run_day_one_digest_per_session(db):
+def test_run_day_single_call(db):
+    # Phase 2: normal volume -> ONE diary call, no day-digest or stitch.
+    # Both sessions are fenced in the prompt; prose+affect returned together.
     p, conn = db
     f = FakeLLM()
     assert diary.run_day(conn, "2026-05-16", f, db=p) is True
-    assert f.n("day-digest") == 2          # s1 + s2, not one whole-day blob
-    assert f.n("stitch") == 1              # 2 sessions woven once
-    assert f.n("diary") == 1
+    assert f.n("day-digest") == 0          # map skipped in single-call path
+    assert f.n("stitch") == 0              # stitch skipped
+    assert f.n("diary") == 1              # ONE sonnet call
     row = conn.execute(
         "SELECT content,session_ids FROM diary WHERE date='2026-05-16'"
     ).fetchone()
@@ -120,23 +156,148 @@ def test_run_day_one_digest_per_session(db):
     assert row["session_ids"] == "s1,s2"
 
 
-def test_single_session_skips_stitch(tmp_path):
-    p = str(tmp_path / "one.db")
+def test_run_day_writes_affect_rows(db):
+    # affect rows written in same txn as diary row.
+    p, conn = db
+    f = FakeLLM()
+    diary.run_day(conn, "2026-05-16", f, db=p)
+    rows = conn.execute(
+        "SELECT * FROM affect WHERE date='2026-05-16'"
+    ).fetchall()
+    assert len(rows) == 1
+    r = dict(rows[0])
+    assert r["ep"] == 1
+    assert abs(r["valence"] - 0.7) < 0.01
+    assert r["source"] == "diary_single_call"
+
+
+def test_run_day_neutral_affect_on_missing_json(tmp_path):
+    # No ===AFFECT=== block -> neutral fallback; diary still written.
+    p = str(tmp_path / "na.db")
     conn = storage.init_db(p)
-    _session(conn, "solo", 2)
+    _session(conn, "s1", 2)
     conn.commit()
+    f = FakeLLMNoAffect()
+    assert diary.run_day(conn, "2026-05-16", f, db=p) is True
+    diary_row = conn.execute(
+        "SELECT content FROM diary WHERE date='2026-05-16'"
+    ).fetchone()
+    assert diary_row is not None
+    affect_rows = conn.execute(
+        "SELECT * FROM affect WHERE date='2026-05-16'"
+    ).fetchall()
+    assert len(affect_rows) == 1
+    r = dict(affect_rows[0])
+    assert abs(r["valence"] - diary._NEUTRAL_VALENCE) < 0.01
+    assert abs(r["arousal"] - diary._NEUTRAL_AROUSAL) < 0.01
+
+
+def test_run_day_multi_episode_affect(tmp_path):
+    # Two --- separators -> two affect rows (ep=1,2).
+    p = str(tmp_path / "ep.db")
+    conn = storage.init_db(p)
+    _session(conn, "s1", 2)
+    conn.commit()
+
+    class MultiEpLLM:
+        def call(self, role, body, *, tier="cheap"):
+            if role == "diary":
+                prose = "早上很开心。\n---\n晚上有点累。"
+                affect = json.dumps([
+                    {"ep": 1, "valence": 0.8, "arousal": 0.6,
+                     "importance": 6, "label": "开心", "entities": [],
+                     "event_hint": ""},
+                    {"ep": 2, "valence": 0.3, "arousal": 0.2,
+                     "importance": 4, "label": "疲惫", "entities": [],
+                     "event_hint": ""},
+                ])
+                return f"{prose}\n===AFFECT===\n{affect}\n===END==="
+            return "ok"
+
+    diary.run_day(conn, "2026-05-16", MultiEpLLM(), db=p)
+    rows = conn.execute(
+        "SELECT ep, valence FROM affect WHERE date='2026-05-16' ORDER BY ep"
+    ).fetchall()
+    assert len(rows) == 2
+    assert rows[0]["ep"] == 1
+    assert rows[1]["ep"] == 2
+    assert rows[0]["valence"] > rows[1]["valence"]
+
+
+def test_run_day_affect_cascade_on_force(db):
+    # force=True: old affect rows deleted and rebuilt with diary in same txn.
+    p, conn = db
+    diary.run_day(conn, "2026-05-16", FakeLLM(), db=p)
+    count_before = conn.execute(
+        "SELECT COUNT(*) FROM affect WHERE date='2026-05-16'"
+    ).fetchone()[0]
+    assert count_before == 1
+    diary.run_day(conn, "2026-05-16", FakeLLM(), db=p, force=True)
+    count_after = conn.execute(
+        "SELECT COUNT(*) FROM affect WHERE date='2026-05-16'"
+    ).fetchone()[0]
+    # rebuilt: still 1, no orphan or duplicate
+    assert count_after == 1
+
+
+def test_over_volume_falls_back_to_3stage(db, monkeypatch):
+    # chars > _OVER_VOLUME_CHARS -> pre-call early-exit to fallback; alert fired.
+    p, conn = db
+    monkeypatch.setattr(diary, "_OVER_VOLUME_CHARS", 1)  # force over-volume
     f = FakeLLM()
     assert diary.run_day(conn, "2026-05-16", f, db=p) is True
-    assert f.n("day-digest") == 1
-    assert f.n("stitch") == 0              # nothing to weave, digest is strand
-    assert f.n("diary") == 1
+    assert f.n("day-digest") >= 1          # fallback map fires
+    assert f.n("diary") >= 1
+    al = conn.execute(
+        "SELECT message FROM alerts WHERE type='routine'"
+    ).fetchone()
+    assert al and "over-volume" in al["message"]
 
 
-def test_stitch_span_tag_carries_local_date(tmp_path):
-    # Two sessions in ONE diary day (2026-05-16) but different local dates:
-    # an afternoon one (local 05-16) and a post-midnight one (local 05-17,
-    # still <04:00 so same diary day). Tag must carry the date so haiku
-    # keeps real order instead of sorting 01:00 before 14:00.
+def test_over_volume_fallback_writes_neutral_affect(db, monkeypatch):
+    # Fallback (3-stage) yields neutral affect row (source=diary_fallback).
+    p, conn = db
+    monkeypatch.setattr(diary, "_OVER_VOLUME_CHARS", 1)
+    f = FakeLLM()
+    diary.run_day(conn, "2026-05-16", f, db=p)
+    rows = conn.execute(
+        "SELECT source FROM affect WHERE date='2026-05-16'"
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["source"] == "diary_fallback"
+
+
+def test_llmerror_triggers_fallback(db):
+    # LLMError on single call -> falls back to 3-stage map/stitch/write.
+    p, conn = db
+
+    class ErrThenOkLLM:
+        """First diary call raises; subsequent calls (fallback) succeed."""
+        def __init__(self):
+            self.calls = []
+            self._diary_n = 0
+
+        def call(self, role, body, *, tier="cheap"):
+            self.calls.append(role)
+            if role == "diary":
+                self._diary_n += 1
+                if self._diary_n == 1:
+                    raise LLMError("refusal sentinel")
+                return "今天也是平凡的一天。"
+            if role == "day-digest":
+                return "digest"
+            if role == "stitch":
+                return "woven"
+            return ""
+
+    llm = ErrThenOkLLM()
+    assert diary.run_day(conn, "2026-05-16", llm, db=p) is True
+    assert llm.calls.count("diary") == 2   # 1st raises, 2nd in fallback
+    assert llm.calls.count("day-digest") >= 1
+
+
+def test_stitch_span_tag_carries_local_date_in_fallback(tmp_path, monkeypatch):
+    # Fallback stitch must carry local date so haiku keeps real order.
     p = str(tmp_path / "cross.db")
     conn = storage.init_db(p)
     for i in range(4):  # afternoon: UTC 04:00 -> local 14:00
@@ -146,6 +307,7 @@ def test_stitch_span_tag_carries_local_date(tmp_path):
         _ev(conn, "am", f"2026-05-16T15:0{i}:00Z", "user", f"b{i}")
         _ev(conn, "am", f"2026-05-16T15:0{i}:30Z", "assistant", "ok")
     conn.commit()
+    monkeypatch.setattr(diary, "_OVER_VOLUME_CHARS", 1)  # force fallback
     f = FakeLLM()
     assert diary.run_day(conn, "2026-05-16", f, db=p) is True
     body = f.stitch_bodies[0]
@@ -153,16 +315,18 @@ def test_stitch_span_tag_carries_local_date(tmp_path):
     assert body.index("05-16 14:00") < body.index("05-17 01:00")
 
 
-def test_oversized_session_is_chunked(db):
+def test_oversized_session_in_fallback_is_chunked(db, monkeypatch):
+    # Over-volume fallback: chunked digest for an oversized session.
     p, conn = db
+    monkeypatch.setattr(diary, "_OVER_VOLUME_CHARS", 1)
     big = "x" * (diary._SESSION_CHAR_CAP + diary._CHUNK_CHARS)
     _ev(conn, "s3", "2026-05-16T10:00:00Z", "user", big)
-    for i in range(1, 4):  # extra turns so s3 clears the skip filter
+    for i in range(1, 4):
         _ev(conn, "s3", f"2026-05-16T10:0{i}:00Z", "user", "more")
     conn.commit()
     f = FakeLLM()
     diary.run_day(conn, "2026-05-16", f, db=p)
-    # s1 (1) + s2 (1) + s3 chunked (>=2) -> more than 3 digest calls
+    # s1 (1) + s2 (1) + s3 chunked (>=2) -> more than 3 digest calls in fallback
     assert f.n("day-digest") >= 4
 
 
@@ -332,43 +496,44 @@ def test_run_explicit_day(db):
     assert diary.run(conn, FakeLLM(), db=p, day="2026-05-16") == ["2026-05-16"]
 
 
-# ── skip filter ───────────────────────────────────────────────────────────────
+# ── skip / code-drop filter ───────────────────────────────────────────────────
 
 def test_low_turn_session_hard_dropped(tmp_path):
-    # <= _SKIP_DROP_MAX user turns -> never reaches haiku
+    # <= _SKIP_DROP_MAX user turns -> code-drops before single call, no LLM.
     p = str(tmp_path / "lo.db")
     conn = storage.init_db(p)
     _session(conn, "lo", 3, n_user=diary._SKIP_DROP_MAX)
     conn.commit()
     f = FakeLLM()
     assert diary.run_day(conn, "2026-05-16", f, db=p) is True
-    assert f.n("day-digest") == 0          # hard-dropped in code
+    assert f.n("diary") == 0           # whole day code-dropped -> placeholder
     row = conn.execute(
         "SELECT content,session_ids FROM diary WHERE date='2026-05-16'"
     ).fetchone()
-    assert row["content"] == "—"           # placeholder, whole day trivial
+    assert row["content"] == "—"
     assert row["session_ids"] == ""
 
 
-def test_short_session_skip_drops(db):
-    # 4-turn sessions route to DIGEST_SHORT; SKIP is honoured -> dropped
+def test_fallback_short_session_skip_drops(db, monkeypatch):
+    # Fallback path: 4-turn sessions hit DIGEST_SHORT; SKIP honoured -> dropped.
+    # Simulate fallback by forcing over-volume.
     p, conn = db
+    monkeypatch.setattr(diary, "_OVER_VOLUME_CHARS", 1)
     f = FakeLLM(digest="SKIP")
     assert diary.run_day(conn, "2026-05-16", f, db=p) is True
     assert f.n("day-digest") == 2
-    assert f.n("stitch") == 0 and f.n("diary") == 0
     assert conn.execute(
         "SELECT content FROM diary WHERE date='2026-05-16'"
     ).fetchone()["content"] == "—"
 
 
-def test_long_session_skip_not_honoured(tmp_path):
-    # >_SKIP_JUDGE_MAX turns route to DIGEST_LONG: even if haiku returns
-    # SKIP, the session is kept (stub digest), heavy work never vanishes
+def test_fallback_long_session_skip_not_honoured(tmp_path, monkeypatch):
+    # Fallback path: >_SKIP_JUDGE_MAX turns -> DIGEST_LONG; SKIP not honoured.
     p = str(tmp_path / "long.db")
     conn = storage.init_db(p)
     _session(conn, "lng", 2, n_user=diary._SKIP_JUDGE_MAX + 5)
     conn.commit()
+    monkeypatch.setattr(diary, "_OVER_VOLUME_CHARS", 1)
     f = FakeLLM(digest="SKIP")
     assert diary.run_day(conn, "2026-05-16", f, db=p) is True
     row = conn.execute(
@@ -377,15 +542,91 @@ def test_long_session_skip_not_honoured(tmp_path):
     assert row["content"] != "—" and row["session_ids"] == "lng"
 
 
-def test_short_session_routes_to_short_prompt(tmp_path):
-    # routing is by code, not haiku self-classification
+def test_fallback_routes_by_turn_count(tmp_path, monkeypatch):
+    # Fallback routes DIGEST_SHORT vs DIGEST_LONG by turn count.
     p = str(tmp_path / "r.db")
     conn = storage.init_db(p)
-    _session(conn, "sh", 2, n_user=6)            # 6 -> SHORT
-    _session(conn, "lg", 9, n_user=diary._SKIP_JUDGE_MAX + 5)  # -> LONG
+    _session(conn, "sh", 2, n_user=6)
+    _session(conn, "lg", 9, n_user=diary._SKIP_JUDGE_MAX + 5)
     conn.commit()
+    monkeypatch.setattr(diary, "_OVER_VOLUME_CHARS", 1)
     f = FakeLLM()
     diary.run_day(conn, "2026-05-16", f, db=p)
     short_in = any("short session" in b for b in f.digest_bodies)
     long_in = any("long session" in b for b in f.digest_bodies)
     assert short_in and long_in
+
+
+# ── Phase 2: _parse_single_call unit tests ────────────────────────────────────
+
+def test_parse_single_call_prose_and_affect():
+    prose, aff = diary._parse_single_call(
+        "段落一。\n---\n段落二。\n===AFFECT===\n"
+        '[{"ep":1,"valence":0.8,"arousal":0.5,"importance":7,'
+        '"label":"开心","entities":["Lumi"],"event_hint":"早上好"},'
+        '{"ep":2,"valence":0.4,"arousal":0.3,"importance":5,'
+        '"label":"平静","entities":[],"event_hint":""}]\n===END==="'
+    )
+    assert "段落一" in prose and "段落二" in prose
+    assert "===AFFECT===" not in prose
+    assert len(aff) == 2
+    assert aff[0]["ep"] == 1
+
+
+def test_parse_single_call_bad_json_returns_empty_affect():
+    prose, aff = diary._parse_single_call(
+        "一些日记内容。\n===AFFECT===\n{not valid json}\n===END==="
+    )
+    assert "日记内容" in prose
+    assert aff == []
+
+
+def test_parse_single_call_no_affect_block():
+    prose, aff = diary._parse_single_call("完全没有情感数据的正文。")
+    assert prose == "完全没有情感数据的正文。"
+    assert aff == []
+
+
+def test_parse_single_call_missing_end_sentinel():
+    # ===END=== absent -> still attempt parse up to EOF
+    prose, aff = diary._parse_single_call(
+        "正文。\n===AFFECT===\n[]\n"
+    )
+    assert aff == []  # empty list is valid, though unusual
+
+
+# ── Phase 2: _resolve_event_hint unit test ────────────────────────────────────
+
+def test_resolve_event_hint_no_match(tmp_path):
+    p = str(tmp_path / "h.db")
+    conn = storage.init_db(p)
+    assert diary._resolve_event_hint(conn, "不存在的关键词XYZ") is None
+
+
+def test_resolve_event_hint_unique_match(tmp_path):
+    # FTS5 unicode61 tokenizes ASCII; unique match -> event_id returned.
+    p = str(tmp_path / "h2.db")
+    conn = storage.init_db(p)
+    conn.execute(
+        "INSERT INTO events(session_id,timestamp,role,content) "
+        "VALUES('s1','2026-05-16T02:00:00Z','user','only this event ZZZQ')"
+    )
+    conn.commit()
+    eid = diary._resolve_event_hint(conn, "ZZZQ")
+    assert eid is not None
+
+
+def test_resolve_event_hint_multi_match_returns_null(tmp_path):
+    # Two events both match the hint -> NULL, never first-match.
+    p = str(tmp_path / "h3.db")
+    conn = storage.init_db(p)
+    conn.execute(
+        "INSERT INTO events(session_id,timestamp,role,content) "
+        "VALUES('s1','2026-05-16T02:00:00Z','user','common keyword MATCHKEY first')"
+    )
+    conn.execute(
+        "INSERT INTO events(session_id,timestamp,role,content) "
+        "VALUES('s2','2026-05-16T03:00:00Z','user','common keyword MATCHKEY second')"
+    )
+    conn.commit()
+    assert diary._resolve_event_hint(conn, "MATCHKEY") is None
