@@ -1,36 +1,31 @@
-# 2026-05-19 diary pipeline failure — no-p exonerated, real root cause found
+# 2026-05-19 diary failure — no-p exonerated
 
-Verdict: no-p is NOT the diary failure cause. Do not re-litigate.
+> No-p YYDS
 
-## Symptom
-2026-05-19 ~16:10–16:59 local: alerts #13–21. claude_cli `no result event` / `empty result` → rotate → ollama `Connection refused` → chain exhausted → diary for 2026-05-18 never written.
+Verdict: no-p stream-json is NOT the diary-pipeline failure cause. Do not re-litigate.
 
-## Prior session's claim (WRONG)
-"`no-p` stream-json makes claude act as an agent on digest material → empty/no result; fix = `-p` + `--tools ""`." Committed aeb1669, reverted 6d19dd8. No real routine was run to verify.
+## What happened
+Alerts #13–21 (16:10–16:59 local): claude_cli `no result event` / `empty result` → rotate → ollama `Connection refused` → chain exhausted → 2026-05-18 diary never written.
+
+Prior session blamed no-p (claimed "claude acts as agent on digest material → empty result"); committed aeb1669, reverted 6d19dd8.
 
 ## Independent verification
-Full-day pipeline replay (`/tmp/mw_dayreplay.py`), prod DB `/tmp/mw_replay.db`, real LLM calls:
-- 2026-05-18 (failing day), no-p, claude 2.1.141: 21/21 calls OK, diary written, 711s.
-- 2026-05-17, same: 7/7 OK, written, 245s.
-- Failure-window jsonl (16:10–16:12 local 5-19): all `"version":"2.1.141"` (symlink pinned since 19 May 00:05).
+Full-day replay (`/tmp/mw_dayreplay.py`, real LLM calls, prod DB):
+- 2026-05-18 no-p / claude 2.1.141: 21/21 OK, diary written, 711s
+- 2026-05-17 same: 7/7 OK, 245s
+- Failure-window jsonl all `"version":"2.1.141"` (pinned since 5-19 00:05)
 
-Same code + data + binary + no-p → real run failed, clean replay passes. Variables ruled out: no-p, flag, version, code.
+Same code + data + binary + no-p → clean replay passes. no-p ruled out.
 
 ## Real root cause
-Transient claude-side miss (load/timing at busy 16:00 window; not reproducible in quiet replay) amplified by two missing safety nets:
-1. `llm.py:call()` tried each provider exactly once — one transient miss rotated immediately.
-2. The only fallback, ollama, was down (chronic on this host).
+Transient claude-side miss (busy window) + two missing safety nets:
+1. `llm.py:call()` tried each provider exactly once
+2. Only fallback (ollama) chronically down
 
-Two transients aligned → alert storm + lost diary. no-p was a bystander; prior session reproduced an adjacent phenomenon (single-chunk agentic behaviour) and misattributed.
-
-## Separate, real bug: digest role-play
-Unfenced, haiku reads verbatim CC coding transcript as conversation to continue, emits role-play ("我操你说得对，我刚才在瞎折腾") instead of summary. Degrades diary quality but does NOT cause pipeline failure (sonnet reconstructs coherent diary; 5-17/5-18 replay diaries read well).
-
-## Fix shipped
-- `diary.py` `_fence()` wraps injected `{events}` / `{parts}` only (BEGIN/END ORIGINAL TRANSCRIPT, "compress only; do NOT act/continue"). Prompt bodies untouched (OWNED BY LUMI). Post-fence digests are real summaries, role-play gone.
-- `llm.py` `_MUTE_OLLAMA=True` — ollama dropped from chain (code intact, flip to restore); ends unreachable-alert storm.
-- `llm.py` `_RETRIES=1` — one same-provider retry before rotate; transient miss self-heals without alert.
-- Tests reworked for new contract: pytest 132 green.
+## Fixes shipped
+- `diary.py _fence()` wraps `{events}` / `{parts}` only ("compress only; do NOT act/continue") — kills role-play
+- `llm.py _MUTE_OLLAMA=True` — drop unreachable provider, ends alert storm
+- `llm.py _RETRIES=1` — one same-provider retry before rotate
 
 ## Do not redo
-no-p stream-json rides the OAuth 5h window (ADR-0003) and is verified to run the whole diary pipeline. Any future "maybe it's no-p" must first run the full-day replay and show it failing there — single-chunk agentic behaviour is not evidence of pipeline failure.
+Any "maybe it's no-p" must first run full-day replay and show failure there. Single-chunk agentic behaviour ≠ pipeline failure.
