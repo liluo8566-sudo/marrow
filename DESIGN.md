@@ -6,7 +6,7 @@
 ## Lumi's goals
 > Always think about if goals are matched by the design.
 
-1. Migration-friendly — swap to Codex / Claude / local small model by config, never Anthropic-locked; cyberboss is the proof; open-sourceable at the end.
+1. Host & vendor portable — LLM provider, storage path, scheduler, notifier, backup target swap by config (cyberboss-proven). Mac → Mac mini / VPS / cloud is deployment change, not rewrite. Open-sourceable at the end.
 2. Cross-channel parity — CLI and WeChat switch and resume mid-thread without losing the thread; commands align, interrupt/stop/rewind, and permission yes/no behave identically; WeChat is interaction-only, not heavy coding.
 3. Semi-permanent memory - major life events permanent, emotion consistent, recent context is never repeated - can drop if unused for a while.
 4. Workflow + build carryover — work and study state (where I left off, next step) and the outcome-level build narrative (repo to finished feature, not which line changed) survive across sessions; past mistakes self-summarise into avoided rules (lesson = FUTURE addon, see DECISIONS).
