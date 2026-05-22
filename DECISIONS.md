@@ -48,6 +48,10 @@
 - [reasoned] ===DIGEST=== compress: task-heavy ≥80% (≤20% original), daily-chat ~80%, intermediate by work ratio · goal3/5 · 2026-05-23
 - [reasoned] ===DIGEST=== prompt: language register, second-person voice, verbatim conversational (not work-style summary; same gate as DIARY_PROMPT) · goal5 · 2026-05-23
 - [reasoned] SessionEnd async skip ≤5 turns; nightly no reference; threshold pending 1-week sample · goal4/6 · 2026-05-23
+- [reasoned] tasks.tag minimal nullable TEXT; order Study/Project/Appointment/Daily/Others; tag labels pending Lumi · goal4 · 2026-05-23
+- [reasoned] affect Today/Week = rolling 24h/7d (independent of 6AM diary boundary); aggregation = weighted mean v×a (w=imp) -> V band (Low/Neu/High @ 0.4/0.6) × A band (Calm/Active/Intense @ 0.4/0.6) -> 9-label lookup; CN labels pending (黯淡/烦躁/痛苦 · 平淡/平稳/焦虑 · 温暖/愉悦/兴奋) · goal3/5 · 2026-05-23
+- [reasoned] affect variance detect stddev(v)>0.3 -> '(波动)' suffix + 1-2 key ep (importance highest + |v-mean| farthest) · goal3 · 2026-05-23
+- [reasoned] handover template LOCKED 2026-05-23 at marrow/handover_template.md: top sync 4 sections (Alerts / Tasks / Milestone candidate / Affect) + handover-only 3 sections (This Session / Next Session / Reference); Completed [N]/To-Do [N] = render-time numeric fill · goal4/5 · 2026-05-23
 
 ## Doc system (this round C)
 - [verified] doc system: DESIGN = goal+structure+hard-constraints+sub-pages (no still-changing decisions); DECISIONS = single current-truth entry, overwrite-in-place, read first; FUTURE = unbuilt plans by phase; PROGRESS = append-only action log; handover = next-session only, overwrite; docs/notes = hard-problem memo / research scratch, NOT a truth source; docs/adr deleted (conclusions folded into DECISIONS); CONTEXT = glossary maintained by grill-with-doc skill, outside this system but its conflicts get fixed each round · goal7 · this round C
