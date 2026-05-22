@@ -243,6 +243,31 @@ def test_run_day_neutral_affect_on_missing_json(tmp_path):
     r = dict(affect_rows[0])
     assert abs(r["valence"] - diary._NEUTRAL_VALENCE) < 0.01
     assert abs(r["arousal"] - diary._NEUTRAL_AROUSAL) < 0.01
+    # Source tag distinguishes single-call-with-no-affect from full LLMError
+    # fallback; this row came from a successful single call missing AFFECT.
+    assert r["source"] == "diary_single_call_no_affect"
+
+
+def test_run_day_parse_fail_affect_source_tag(tmp_path):
+    # Marker present but JSON broken -> source tag is diary_single_call_no_affect
+    # (not diary_single_call, not diary_fallback).
+    p = str(tmp_path / "pf.db")
+    conn = storage.init_db(p)
+    _session(conn, "s1", 2)
+    conn.commit()
+
+    class BrokenJSONLLM:
+        def call(self, role, body, *, tier="cheap"):
+            if role == "diary":
+                return ("正文。\n===AFFECT===\n{broken json}\n===END===")
+            return ""
+
+    diary.run_day(conn, "2026-05-16", BrokenJSONLLM(), db=p)
+    rows = conn.execute(
+        "SELECT source FROM affect WHERE date='2026-05-16'"
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["source"] == "diary_single_call_no_affect"
 
 
 def test_run_day_multi_episode_affect(tmp_path):

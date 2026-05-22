@@ -561,8 +561,18 @@ def _resolve_event_hint(conn, hint: str) -> int | None:
 
 
 def _build_affect_rows(conn, date: str, prose: str,
-                       affect_raw: list[dict]) -> list[dict]:
-    """One affect row per prose episode. Bad/missing entry -> neutral fallback."""
+                       affect_raw: list[dict],
+                       outcome: str = "ok") -> list[dict]:
+    """One affect row per prose episode. Bad/missing entry -> neutral fallback.
+
+    Source tag distinguishes single-call success from single-call-with-no-affect
+    (model wrote prose but skipped / broke the AFFECT block):
+      outcome == "ok"          -> "diary_single_call"
+      outcome in {"no_marker","parse_fail"} -> "diary_single_call_no_affect"
+    The LLMError fallback path uses "diary_fallback" via _neutral_affect_rows.
+    """
+    src = ("diary_single_call" if outcome == "ok"
+           else "diary_single_call_no_affect")
     episodes = [p.strip() for p in prose.split("---") if p.strip()]
     n_ep = max(len(episodes), 1)
     rows = []
@@ -585,7 +595,7 @@ def _build_affect_rows(conn, date: str, prose: str,
         rows.append({"date": date, "ep": ep, "event_id": event_id,
                      "valence": valence, "arousal": arousal,
                      "importance": importance, "label": label,
-                     "entities": entities, "source": "diary_single_call"})
+                     "entities": entities, "source": src})
     return rows
 
 
@@ -716,7 +726,8 @@ def run_day(conn, date: str, llm: LLMClient, *, db: str | None = None,
         try:
             raw = llm.call("diary", prompt, tier="mid")
             prose, affect_raw_parsed, _outcome, _err = _parse_single_call(raw)
-            affect_rows = _build_affect_rows(conn, date, prose, affect_raw_parsed)
+            affect_rows = _build_affect_rows(
+                conn, date, prose, affect_raw_parsed, outcome=_outcome)
             narrative = prose.strip() or None  # empty prose -> fallback
             _log_single_call_outcome(
                 conn, date, _outcome, len(affect_rows), _err)
