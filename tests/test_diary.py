@@ -713,3 +713,43 @@ def test_resolve_event_hint_multi_match_returns_null(tmp_path):
     )
     conn.commit()
     assert diary._resolve_event_hint(conn, "MATCHKEY") is None
+
+
+# ── entities table write (Phase 2.5c step 2 cherry-pick) ──────────────────────
+
+class EntityLLM:
+    """Single-call LLM returning prose + 2 entity dicts in the AFFECT block."""
+    def call(self, role, body, *, tier="cheap"):
+        if role == "diary":
+            affect = json.dumps([{
+                "ep": 1, "valence": 0.7, "arousal": 0.5, "importance": 5,
+                "label": "温馨", "event_hint": "",
+                "entities": [
+                    {"kind": "person", "name": "念念"},
+                    {"kind": "pref", "name": "喜欢咖啡"},
+                ],
+            }])
+            return f"今天和念念喝咖啡。\n===AFFECT===\n{affect}\n===END==="
+        return ""
+
+
+def test_run_day_writes_entities_table(db):
+    # LLM returns 2 entities -> 2 rows in entities table (kind+name match).
+    p, conn = db
+    diary.run_day(conn, "2026-05-16", EntityLLM(), db=p)
+    rows = conn.execute(
+        "SELECT kind, name FROM entities ORDER BY kind, name"
+    ).fetchall()
+    assert len(rows) == 2
+    kinds_names = {(r["kind"], r["name"]) for r in rows}
+    assert kinds_names == {("person", "念念"), ("pref", "喜欢咖啡")}
+
+
+def test_run_day_entities_idempotent_on_rerun(db):
+    # Re-running with the same input on a fresh source MUST NOT double-insert.
+    # force=True rebuilds affect rows but entities are append-only — still 2.
+    p, conn = db
+    diary.run_day(conn, "2026-05-16", EntityLLM(), db=p)
+    diary.run_day(conn, "2026-05-16", EntityLLM(), db=p, force=True)
+    count = conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
+    assert count == 2

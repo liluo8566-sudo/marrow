@@ -650,6 +650,47 @@ def _write_affect(conn, rows: list[dict]) -> None:
         )
 
 
+# entities table = first-class structured surface alongside affect.entities JSON.
+# Append-only via superseded_by (NULL = live). Idempotent: skip if (kind, name)
+# already has a live row, so re-running diary on the same source never doubles.
+_ENTITY_KINDS = {"person", "pref", "place"}
+
+
+def _write_entities(conn, affect_raw: list[dict]) -> None:
+    """Extract {kind, name} entities from parsed affect and INSERT new ones.
+
+    Dedup by (kind, name) within batch AND against live rows. CJK names matched
+    exactly after strip() — no normalisation.
+    """
+    seen: set[tuple[str, str]] = set()
+    for ep in affect_raw:
+        ents = ep.get("entities") if isinstance(ep, dict) else None
+        if not isinstance(ents, list):
+            continue
+        for e in ents:
+            if not isinstance(e, dict):
+                continue
+            kind = (e.get("kind") or "").strip()
+            name = (e.get("name") or "").strip()
+            if kind not in _ENTITY_KINDS or not name:
+                continue
+            key = (kind, name)
+            if key in seen:
+                continue
+            seen.add(key)
+            exists = conn.execute(
+                "SELECT 1 FROM entities WHERE kind=? AND name=? "
+                "AND superseded_by IS NULL LIMIT 1",
+                (kind, name),
+            ).fetchone()
+            if exists:
+                continue
+            conn.execute(
+                "INSERT INTO entities (kind, name, source) VALUES (?, ?, ?)",
+                (kind, name, "diary_single_call"),
+            )
+
+
 def _sessions_flat(kept: list[tuple[str, str, str, str, int]]) -> str:
     """Flat fenced text of all kept sessions for the single-call prompt."""
     blocks = []
@@ -722,6 +763,7 @@ def run_day(conn, date: str, llm: LLMClient, *, db: str | None = None,
 
     narrative: str | None = None
     affect_rows: list[dict] = []
+    affect_raw_parsed: list[dict] = []  # also feeds entities table write
 
     if not use_fallback:
         # ── Single sonnet call (Phase 2 main path) ───────────────────────────
@@ -778,6 +820,7 @@ def run_day(conn, date: str, llm: LLMClient, *, db: str | None = None,
             (date, narrative.strip(), ",".join(sids)),
         )
         _write_affect(conn, affect_rows)
+        _write_entities(conn, affect_raw_parsed)
         conn.execute(
             "INSERT INTO audit_log (target_table, target_id, action, summary) "
             "VALUES ('diary', ?, ?, ?)",
