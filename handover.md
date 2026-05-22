@@ -1,34 +1,28 @@
-# Marrow handover — 2026-05-22 00:10
+# Marrow handover — 2026-05-22 18:20
 
-## Phase 2 status: DONE
-- All 5 handover priorities from 2026-05-21 23:45 cleared.
-- main has: refusal sentinel + sub-page render + diary single-call + recall (bge-m3 + fusion) + SessionStart affect backdrop/heartbeat + UserPromptSubmit→recall wire.
-- 234/234 pytest green.
+## State
+- pytest 244/244 (234 + 10 milestone recall tests)
+- UserPromptSubmit live verified end-to-end: query (`鸭子`) → 5 hits incl. milestone #15/#16
 
 ## This session shipped
-- `/rr phase 2` adjudication → 8 main fixes (CJK tokenizer / events_vec dim alert / config deep merge / CN refusal fingerprints / atomic hash / session_end PermissionError alert / test fixture date / speaker labels). `38ba644`.
-- Speaker-label fix for diary pronoun POV (root cause: `[user]/[assistant]` collided with sonnet identity → flipped 屿忱/念念). Applied main + worktree-A.
-- 3 worktree merges: C `b3aacda` (0 conflicts), A `c61f0ab` (auto-merged 2 files), D `25ad192` (2 conflicts kept-HEAD: storage.py FTS rebuild + dim alert / config.default.toml [embedding].model).
-- D's UserPromptSubmit stub wired to C's `recall.recall_fusion`. `2ff1875`.
-- Portability cross-phase note in DECISIONS + DESIGN goal 1 rewrite (Lumi-authored, committed alongside). `9869427`.
+- **milestones into recall_fusion** `marrow/recall.py` (new `_milestone_candidates` + scoring leg) — LIKE-scan over `title || ' ' || description`, CJK + ASCII tokenizer, `w_bm25 * kw_score + 0.10 pinned`. Sidesteps trigram FTS5 CN >=3-char limit (would miss 2-char `鸭子`). 21 rows, scan cost negligible.
+- **UserPromptSubmit hook wired** `~/.claude/settings.json` UserPromptSubmit array — `python -m marrow.hooks user_prompt_submit` registered alongside name-react / turn-inject / code-bar. SessionStart/SessionEnd pattern.
+- **`tests/test_recall.py`** +10 tests: tokenizer / exact-term surface / partial token / no-match / pinned ordering / mixed events+milestones / min_score gate / content render / pinned-pushes-over-gate.
 
-## User action needed
-- `~/.config/marrow/config.toml` has `[recall] vector = false` (predates this phase). Flip to `true` to actually run vector recall on UserPromptSubmit. Config now deep-merges defaults under user toml, so all `w_*` / `min_score` keys land automatically; only the boolean needs editing.
-
-## Open / deferred (FUTURE candidates)
-- diary.py worktree-A is 785 LOC (single-call + 3-stage fallback duplication); soft cap 300. Defer to simplify pass.
-- subpages.py + subpages_render.py duplicate `_MARKER_*` constants. Defer.
-- llm.py `_log_usage` opens new DB conn per LLM call (smell under WAL, not bug). Defer.
-- SCHEMA.md root file is pre-Phase-2 stale (still lists retired emotions/people/preferences/dir). Doc-only.
-- DESIGN.md L190 heartbeat ">48h OR gap-day" line is stale (DECISIONS L37 supersedes with gap-day-only). Remove next doc pass.
-- mood labels in `marrow/hooks.py:28-29` are CN (沉/暖/亮/轻/重). Old handover decision flagged EN but rationale unclear; CN reads fine in the SessionStart backdrop for a CN-major user. Leave unless Lumi requests EN.
-- Locked worktree branches still in `.claude/worktrees/`. Safe to clean up: `git worktree remove --force <path> && git branch -D <branch>` for A/C/D once merges are confirmed live.
-
-## Next session
-- Decide Phase 3 scope. Options worth grilling: cross-channel parity (WeChat/CLI thread continuity), workflow carry-over (where I left off / next step survival), or sticker/vocab learn loop. Run `grill-with-doc` to converge before code.
-- `~/.claude` has a local-only hook commit (`21094cd`, prompt-lint per-key flag) per global rule — never push.
+## Open / not touched — Phase 3 milestone & people gap
+- **milestone persistent input** — `DESIGN.md:118` says structured-view persistence walks md edit + reconcile (short-id per row, edit/add/delete -> reconcile). `FUTURE.md:19` parks the milestone sub-page render template in `build_time_deferred` — no md file currently lets Lumi write new milestones. `timeline.md` is the one-shot migration source (ny-memm retiring), not the ongoing input. Three options for Phase 3:
+    1. Render milestone sub-page md (under dashboard or standalone), Lumi hand-edits, SessionEnd reconcile writes back — matches DESIGN L118.
+    2. `mw add milestone --scope us --date YYYY-MM-DD --title ... [--description ...]` CLI.
+    3. Both (md = daily, CLI = scriptable fallback). Recommended.
+- **people / preference pipeline** — `DECISIONS.md:36`: `entities` + `entity_facts` (kind=person|pref|place), append-only with `superseded_by`, emitted in the diary single sonnet call. Reality: `entity_facts` schema not built; `entities` exists but unused; `affect` table 0 rows (single call never produced output successfully). Static `<Family_and_Friend>` block in global CLAUDE.md is the only live people memory. Root: single-call pipeline never delivered — see next item.
+- **affect / single-call 0 rows** — `affect` 0 rows despite diary rows 5/17–5/20. Trace `diary.py:520-535` `_parse_single_call` (===AFFECT=== extraction) and `_build_affect_rows` / `_write_affect`. Same blockage holds back entity extraction.
+- **alert provider-chain severity** — fires `critical` for every tier despite success. Rule: tier failure = `warn`; chain "no output" = `critical`. Interim mute in CLAUDE.md; real fix at diary/provider-chain `severity="critical"` emit site.
+- **sub-page render** — `DESIGN.md:163` Phase 2; `FUTURE.md` `build_time_deferred` punted. Reconcile + atomic write done; no sub-page to disk yet. Milestone gap above depends on this.
 
 ## Reference
-- `docs/notes/review-phase-2.md` — /rr findings + decisions
-- `.claude/rules/build-workflow.md` — /rr usage
-- `.claude/rules/agent-dispatch.md` — delegation policy
+- `DESIGN.md:72,93,118,163`
+- `DECISIONS.md:36`
+- `FUTURE.md:19,67`
+- `docs/notes/review-phase-2.md` (/rr Phase 2)
+- `.claude/rules/build-workflow.md`
+- `.claude/rules/agent-dispatch.md`

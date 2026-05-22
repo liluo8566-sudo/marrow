@@ -23,10 +23,10 @@ from datetime import datetime, timedelta, timezone
 from . import config, dashboard, repo, storage, transcript
 
 # ── affect label lookup ──────────────────────────────────────────────────────
-# valence: 沉 < -0.3 ≤ 暖 ≤ 0.3 < 亮
-# intensity (arousal): 轻 < 0.4 ≤ 重
-_VALENCE_LABEL = [(-0.3, "沉"), (0.3, "暖"), (float("inf"), "亮")]
-_INTENSITY_LABEL = [(0.4, "轻"), (float("inf"), "重")]
+# valence: Low ≤ -0.3 < Neu ≤ 0.3 < High
+# intensity (arousal): Calm < 0.4 ≤ Intense
+_VALENCE_LABEL = [(-0.3, "Low"), (0.3, "Neu"), (float("inf"), "High")]
+_INTENSITY_LABEL = [(0.4, "Calm"), (float("inf"), "Intense")]
 
 BACKDROP_MAX_CHARS = 350
 SESSION_START_HARD_CAP = 6000
@@ -36,11 +36,11 @@ def _vlabel(v: float) -> str:
     for threshold, label in _VALENCE_LABEL:
         if v <= threshold:
             return label
-    return "亮"
+    return "High"
 
 
 def _ilabel(a: float) -> str:
-    return "轻" if a < 0.4 else "重"
+    return "Calm" if a < 0.4 else "Intense"
 
 
 def _now_utc() -> datetime:
@@ -109,7 +109,7 @@ def _affect_backdrop(conn: sqlite3.Connection) -> str:
     cur = rows[0]
     cur_tag = f"{_vlabel(cur['valence'])}/{_ilabel(cur['arousal'])}"
     cur_label = f" ({cur['label']})" if cur.get("label") else ""
-    lines.append(f"② 当前 {cur['date']} ep{cur['ep']}: {cur_tag}{cur_label}")
+    lines.append(f"② Now {cur['date']} ep{cur['ep']}: {cur_tag}{cur_label}")
 
     # ① recent past: top-N by importance (exclude the current row), last 7d
     past = [r for r in rows[1:] if r.get("source") != "pending"]
@@ -120,7 +120,7 @@ def _affect_backdrop(conn: sqlite3.Connection) -> str:
             tag = f"{_vlabel(r['valence'])}/{_ilabel(r['arousal'])}"
             lbl = f"({r['label']})" if r.get("label") else ""
             segs.append(f"{r['date']} ep{r['ep']} {tag}{lbl}")
-        lines.insert(0, "① 近期: " + " · ".join(segs))
+        lines.insert(0, "① Recent: " + " · ".join(segs))
 
     # ③ calm-vs-swing: exponential weighted std of valence over last 7d
     # weight = exp(-days_ago/3)
@@ -136,9 +136,9 @@ def _affect_backdrop(conn: sqlite3.Connection) -> str:
         wmean = sum(v * w for v, w in scored) / wsum
         wvar = sum(w * (v - wmean) ** 2 for v, w in scored) / wsum
         wstd = math.sqrt(wvar)
-        trend = "情绪平稳" if wstd < 0.2 else ("情绪波动" if wstd < 0.45 else "情绪剧烈波动")
+        trend = "Stable" if wstd < 0.2 else ("Wavy" if wstd < 0.45 else "Stormy")
         wmean_tag = _vlabel(wmean)
-        lines.append(f"③ 7d趋势: {wmean_tag}调/{trend} (σ={wstd:.2f})")
+        lines.append(f"③ 7d trend: {wmean_tag} / {trend} (σ={wstd:.2f})")
 
     # ④ emotional-pending: rows with source='pending', newest first
     pending = [r for r in rows if r.get("source") == "pending"]
@@ -147,7 +147,7 @@ def _affect_backdrop(conn: sqlite3.Connection) -> str:
         for r in pending[:2]:
             lbl = r.get("label") or f"ep{r['ep']}"
             segs.append(lbl)
-        lines.append("④ 情感悬挂: " + " · ".join(segs))
+        lines.append("④ Pending: " + " · ".join(segs))
 
     # Enforce ≤5 lines, ≤350 chars
     result = "\n".join(lines[:5])
@@ -245,6 +245,18 @@ def session_end() -> int:
             repo.add_alert(
                 "warn", "dashboard",
                 f"session_end skipped dashboard write: {e}",
+                source="hooks.py", db=db,
+            )
+        # Auto-embed events freshly archived this session so recall stays
+        # current without a manual MCP call. Fail-soft: embedder absence or
+        # any runtime error must never block session_end.
+        try:
+            from . import recall as recall_mod
+            recall_mod.embed_pending(conn, batch=200)
+        except Exception as e:
+            repo.add_alert(
+                "warn", "embed",
+                f"session_end embed_pending failed: {e}",
                 source="hooks.py", db=db,
             )
     finally:

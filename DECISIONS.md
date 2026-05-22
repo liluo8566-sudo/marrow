@@ -37,10 +37,6 @@
 - [reasoned] de-risk (DESIGN do-not-cut) = SessionStart heartbeat fires ONLY on a day that HAD events but NO affect (supersedes >48h/gap-day) → block first line [⚠ (情感记录可能中断): YYYY-MM-DD]; + bad/missing-JSON neutral fallback (V0.5/A0.3/imp3); + idempotent catchup (days w/ events but no affect, self-heals, same code as backfill) · goal6 · B5 handover 2026-05-19
 - [reasoned] corrections table = Phase 2 placeholder, design fixed (Fact-corrections conflict priority: Lumi current input > Lumi-confirmed structured > system structured > raw event), not built · goal3 · FUTURE Phase 2
 
-## Portability (cross-phase)
-- Portability extends to host-coupled surfaces: storage (MARROW_HOME env + config, never Path.home()), scheduler (interface: launchd today/systemd/cron), notifier (interface: md file/push/webhook), backup (interface: iCloud/S3/B2). Host change = deployment change, never base rewrite.
-- Audit 2026-05-21: portable—LLM chain, alert/dashboard md, hooks JSON, SQLite schema. Not yet—Path.home() in config.py/cleanup.py/subpages_render.py, launchd 4 plists, iCloud backup. Cleanup interleaved with phases, not a dedicated phase.
-
 ## Doc system (this round C)
 - [verified] doc system: DESIGN = goal+structure+hard-constraints+sub-pages (no still-changing decisions); DECISIONS = single current-truth entry, overwrite-in-place, read first; FUTURE = unbuilt plans by phase; PROGRESS = append-only action log; handover = next-session only, overwrite; docs/notes = hard-problem memo / research scratch, NOT a truth source; docs/adr deleted (conclusions folded into DECISIONS); CONTEXT = glossary maintained by grill-with-doc skill, outside this system but its conflicts get fixed each round · goal7 · this round C
 - [verified] decision vs process: DECISIONS = current conclusions (overwrite-in-place, reflect only current truth); PROGRESS = historical actions (append-only, "happened" stays true even if later overturned) · goal7

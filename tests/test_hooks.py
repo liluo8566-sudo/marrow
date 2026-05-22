@@ -180,11 +180,11 @@ def test_affect_backdrop_present_in_context(env, monkeypatch, capsys):
     out = json.loads(capsys.readouterr().out)
     ctx = out["hookSpecificOutput"]["additionalContext"]
     assert "## Affect" in ctx
-    assert "亮" in ctx  # valence > 0.3
-    assert "重" in ctx  # arousal >= 0.4
+    assert "High" in ctx  # valence > 0.3
+    assert "Intense" in ctx  # arousal >= 0.4
 
 
-def test_affect_backdrop_valence_沉(env, monkeypatch, capsys):
+def test_affect_backdrop_valence_low(env, monkeypatch, capsys):
     db, _, _ = env
     conn = storage.connect(db)
     today = datetime.now(timezone.utc).date()
@@ -194,12 +194,12 @@ def test_affect_backdrop_valence_沉(env, monkeypatch, capsys):
     _stdin(monkeypatch, {})
     hooks.main(["session_start"])
     ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
-    assert "沉" in ctx
-    assert "轻" in ctx
+    assert "Low" in ctx
+    assert "Calm" in ctx
 
 
 def test_affect_backdrop_trend_line_calm(env, monkeypatch, capsys):
-    """Many similar valence rows -> 情绪平稳."""
+    """Many similar valence rows -> Stable."""
     db, _, _ = env
     conn = storage.connect(db)
     today = datetime.now(timezone.utc).date()
@@ -211,11 +211,11 @@ def test_affect_backdrop_trend_line_calm(env, monkeypatch, capsys):
     _stdin(monkeypatch, {})
     hooks.main(["session_start"])
     ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
-    assert "情绪平稳" in ctx
+    assert "Stable" in ctx
 
 
 def test_affect_backdrop_trend_line_swing(env, monkeypatch, capsys):
-    """Alternating high/low valence -> 情绪波动 or 情绪剧烈波动."""
+    """Alternating high/low valence -> Wavy or Stormy."""
     db, _, _ = env
     conn = storage.connect(db)
     today = datetime.now(timezone.utc).date()
@@ -228,7 +228,7 @@ def test_affect_backdrop_trend_line_swing(env, monkeypatch, capsys):
     _stdin(monkeypatch, {})
     hooks.main(["session_start"])
     ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
-    assert "波动" in ctx
+    assert "Wavy" in ctx or "Stormy" in ctx
 
 
 def test_affect_backdrop_pending_element(env, monkeypatch, capsys):
@@ -244,7 +244,7 @@ def test_affect_backdrop_pending_element(env, monkeypatch, capsys):
     _stdin(monkeypatch, {})
     hooks.main(["session_start"])
     ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
-    assert "情感悬挂" in ctx
+    assert "Pending" in ctx
     assert "争吵未解决" in ctx
 
 
@@ -263,7 +263,7 @@ def test_affect_backdrop_pending_excluded_from_trend(env, monkeypatch, capsys):
     hooks.main(["session_start"])
     ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
     # Only 1 non-pending row -> no trend line (need >= 2)
-    assert "趋势" not in ctx
+    assert "trend" not in ctx
 
 
 def test_affect_backdrop_char_cap(env, monkeypatch, capsys):

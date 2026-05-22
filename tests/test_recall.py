@@ -297,6 +297,140 @@ def test_repo_recall_delegates_to_fusion(db):
     assert result == [{"id": 1, "content": "x", "score": 0.8}]
 
 
+# ── milestones leg ────────────────────────────────────────────────────────────
+
+def _make_milestone(db, *, scope="us", date="2026-02-19", title="t",
+                    description="", pinned=0) -> int:
+    db.execute(
+        "INSERT INTO milestones(scope, date, title, description, pinned) "
+        "VALUES(?, ?, ?, ?, ?)",
+        (scope, date, title, description, pinned),
+    )
+    db.commit()
+    return db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+
+def test_query_tokens_cjk_and_ascii():
+    assert rm._query_tokens("鸭子") == ["鸭", "子"]
+    assert rm._query_tokens("大笨鸭子") == ["大", "笨", "鸭", "子"]
+    assert rm._query_tokens("hello Marrow") == ["hello", "marrow"]
+    assert rm._query_tokens("Marrow 记忆") == ["marrow", "记", "忆"]
+    # dedup
+    assert rm._query_tokens("鸭鸭") == ["鸭"]
+
+
+def test_query_tokens_empty():
+    assert rm._query_tokens("") == []
+    assert rm._query_tokens("   ") == []
+    assert rm._query_tokens("!!!") == []
+
+
+def test_milestone_surfaces_by_exact_term(db):
+    _make_milestone(
+        db, title="鸭鸭昵称诞生",
+        description="你说我是你的鸭子，没有鸭德。",
+    )
+    with patch.object(rm, "_ensure_embedder", return_value=None):
+        results = rm.recall_fusion(db, "鸭子", min_score=0.1)
+    assert len(results) >= 1
+    hit = next((r for r in results if r.get("kind") == "milestone"), None)
+    assert hit is not None
+    assert "鸭" in hit["content"]
+    assert hit["timestamp"].startswith("2026-02-19")
+
+
+def test_milestone_partial_token_match(db):
+    """大笨鸭子 → 鸭+子 match in milestone, score = 2/4 * 0.30 = 0.15."""
+    _make_milestone(
+        db, title="鸭鸭昵称诞生",
+        description="你说我是你的鸭子，没有鸭德。",
+    )
+    with patch.object(rm, "_ensure_embedder", return_value=None):
+        results = rm.recall_fusion(db, "大笨鸭子", min_score=0.1)
+    hits = [r for r in results if r.get("kind") == "milestone"]
+    assert len(hits) == 1
+    assert hits[0]["score"] >= 0.1
+
+
+def test_milestone_no_match_returns_nothing(db):
+    _make_milestone(db, title="不相关", description="完全不沾边")
+    with patch.object(rm, "_ensure_embedder", return_value=None):
+        results = rm.recall_fusion(db, "鸭子", min_score=0.1)
+    assert [r for r in results if r.get("kind") == "milestone"] == []
+
+
+def test_milestone_pinned_outranks_unpinned(db):
+    """Equal kw_score: pinned gets +0.10 boost."""
+    _make_milestone(
+        db, title="鸭子 unpinned", description="x", pinned=0,
+    )
+    _make_milestone(
+        db, title="鸭子 pinned", description="x", pinned=1,
+    )
+    with patch.object(rm, "_ensure_embedder", return_value=None):
+        results = rm.recall_fusion(db, "鸭子", min_score=0.1)
+    mhits = [r for r in results if r.get("kind") == "milestone"]
+    assert len(mhits) == 2
+    assert mhits[0]["pinned"] == 1
+    assert mhits[0]["score"] > mhits[1]["score"]
+
+
+def test_milestone_mixed_with_events(db):
+    """One event hit + one milestone hit appear in the same result set.
+
+    Note: events_fts trigram needs >=3 char phrase for CN, so the query
+    is a 3-char phrase that both event content and milestone description
+    contain.
+    """
+    _make_event(db, "今天聊到了鸭德的话题")
+    _make_milestone(
+        db, title="鸭鸭昵称诞生",
+        description="你的鸭德的故事",
+    )
+    with patch.object(rm, "_ensure_embedder", return_value=None):
+        results = rm.recall_fusion(db, "鸭德的", min_score=0.1)
+    kinds = {r.get("kind", "event") for r in results}
+    assert "milestone" in kinds
+    # event rows have no "kind" field; treat absence as event
+    assert any(r.get("kind") != "milestone" for r in results)
+
+
+def test_milestone_min_score_gate_respected(db):
+    """1/4 token match → kw_score=0.25 → raw=0.075, below 0.1 gate."""
+    # Title only has 子; query is 大笨鸭子 → 1/4 match
+    _make_milestone(db, title="子曰", description="孔丘语录")
+    with patch.object(rm, "_ensure_embedder", return_value=None):
+        results = rm.recall_fusion(db, "大笨鸭子", min_score=0.1)
+    assert [r for r in results if r.get("kind") == "milestone"] == []
+
+
+def test_milestone_content_renders_title_and_desc(db):
+    _make_milestone(
+        db, title="鸭鸭昵称诞生",
+        description="你的鸭子，没有鸭德",
+    )
+    with patch.object(rm, "_ensure_embedder", return_value=None):
+        results = rm.recall_fusion(db, "鸭子", min_score=0.1)
+    hit = next(r for r in results if r.get("kind") == "milestone")
+    assert "鸭鸭昵称诞生" in hit["content"]
+    assert "鸭德" in hit["content"]
+
+
+def test_milestone_pinned_only_boost_when_pinned(db):
+    """Bare match below gate; pinned boost pushes it above."""
+    # 1/2 match (子 only in title), kw_score=0.5, raw=0.15 → already above 0.1.
+    # Use 1/3 match: kw_score=0.333, raw=0.10 (borderline).
+    # Easier: 1/4 match alone fails (0.075); with pinned +0.10 = 0.175 passes.
+    _make_milestone(
+        db, title="子曰", description="孔丘语录", pinned=1,
+    )
+    with patch.object(rm, "_ensure_embedder", return_value=None):
+        results = rm.recall_fusion(db, "大笨鸭子", min_score=0.1)
+    hits = [r for r in results if r.get("kind") == "milestone"]
+    assert len(hits) == 1
+    assert hits[0]["score"] >= 0.1
+
+
 # ── daemon tools ──────────────────────────────────────────────────────────────
 
 def test_daemon_embed_pending_callable():

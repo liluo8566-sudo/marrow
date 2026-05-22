@@ -6,10 +6,16 @@ Embedder: BAAI/bge-m3 via onnxruntime (no torch). Lazy-loaded singleton.
 
 DECISIONS Phase 2: B3, B7, decay tier rules.
 Fusion weights init: vec=0.55, bm25=0.30, recency=0.15, affect=0.10.
+
+Milestones leg: small table (<=30 rows), LIKE-scan over title+description,
+no FTS5/vec index. Tokenize query into CJK chars + ASCII runs; score by
+matched-token ratio. Pinned rows get an additive boost. No vec/recency
+weight — milestones are evergreen identity anchors.
 """
 from __future__ import annotations
 
 import math
+import re
 import sqlite3
 import struct
 import threading
@@ -220,6 +226,75 @@ def _is_dormant(importance: int | None, age_days: float) -> bool:
     return imp <= 3 and age_days > 90
 
 
+# ── milestone keyword scan ────────────────────────────────────────────────────
+
+_TOKEN_RE = re.compile(r"[A-Za-z0-9]+|[一-鿿]")
+# Milestone pinned-row boost added to raw fusion score before min_score gate.
+_MILESTONE_PINNED_BOOST = 0.10
+
+
+def _query_tokens(q: str) -> list[str]:
+    """Split query into CJK chars + ASCII alnum runs, lowercased, deduped."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for m in _TOKEN_RE.finditer(q):
+        t = m.group(0).lower()
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
+def _milestone_candidates(
+    conn: sqlite3.Connection, query: str, limit: int
+) -> list[dict]:
+    """LIKE-scan milestones; rank by matched-token ratio + pinned boost.
+
+    Returns rows already shaped for fusion: timestamp (date as ISO),
+    content (title[: description]), bm25 (kw_score), pinned.
+    """
+    tokens = _query_tokens(query)
+    if not tokens:
+        return []
+    rows = conn.execute(
+        "SELECT id, scope, date, title, description, pinned "
+        "FROM milestones"
+    ).fetchall()
+    if not rows:
+        return []
+    scored: list[dict] = []
+    for r in rows:
+        title = r["title"] or ""
+        desc = r["description"] or ""
+        hay = (title + " " + desc).lower()
+        hits = sum(1 for t in tokens if t in hay)
+        if not hits:
+            continue
+        kw_score = hits / len(tokens)
+        # Pinned only matters as a tiebreaker once final raw is computed;
+        # carry the flag through so the fusion loop can add the boost.
+        date = r["date"] or ""
+        ts = date if "T" in date else (date + "T00:00:00Z" if date else "")
+        content = title if not desc else f"{title}: {desc}"
+        scored.append({
+            "kind": "milestone",
+            "id": r["id"],
+            "session_id": None,
+            "timestamp": ts,
+            "role": "milestone",
+            "content": content,
+            "channel": None,
+            "compressed": 0,
+            "bm25": kw_score,
+            "vec": 0.0,
+            "fts_hit": True,
+            "pinned": int(r["pinned"] or 0),
+            "scope": r["scope"],
+        })
+    scored.sort(key=lambda c: (c["pinned"], c["bm25"]), reverse=True)
+    return scored[: limit * 3]
+
+
 # ── fusion retrieval ──────────────────────────────────────────────────────────
 
 def recall_fusion(
@@ -310,7 +385,10 @@ def recall_fusion(
                     "bm25": 0.0, "vec": vec_score, "fts_hit": False,
                 }
 
-    if not candidates:
+    # ── milestone candidates (small table, LIKE scan, no vec/recency) ────────
+    milestone_cands = _milestone_candidates(conn, q, limit)
+
+    if not candidates and not milestone_cands:
         return []
 
     # ── dormant revive + scoring ──────────────────────────────────────────────
@@ -367,6 +445,14 @@ def recall_fusion(
 
         if final >= min_score:
             scored.append((final, {**c, "score": final}))
+
+    # ── milestone scoring (no vec, no recency, no affect) ─────────────────────
+    for mc in milestone_cands:
+        raw = w_bm25 * mc["bm25"]
+        if mc["pinned"]:
+            raw += _MILESTONE_PINNED_BOOST
+        if raw >= min_score:
+            scored.append((raw, {**mc, "score": raw}))
 
     scored.sort(key=lambda x: x[0], reverse=True)
 
