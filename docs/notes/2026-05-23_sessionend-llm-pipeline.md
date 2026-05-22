@@ -95,7 +95,7 @@ Missing any one = 100% reproduces legacy stuck-prompt. Lands in safety-net check
 
 ## 5. Tier: all-sonnet
 
-(Agent B 2026-05-23 02:00 A/B test, artifacts `~/Desktop/marrow_ab/`)
+(Agent B 2026-05-23 02:00 A/B test, artifacts `docs/notes/2026-05-23_diary-ab/`)
 
 - haiku 2/3 runs: prose-ep count ≠ affect-entry count (data-correctness bug, not taste)
 - sonnet 3/3 runs: perfect alignment
@@ -220,6 +220,8 @@ Missing any one = 100% reproduces legacy stuck-prompt. Lands in safety-net check
   - second-person voice (你 / 老婆 etc.) preserved
   - verbatim conversational lines retained, NOT collapsed into work-style summary
   - call-and-response structure where relevant
+  - (心理活动) blocks must NOT proliferate; keep prose close to original transcript shape
+  - compression ratio by sonnet per §16.1 density (work-vs-chat turn, not hard cap or fixed ratio)
 - Same gate as DIARY_PROMPT (CLAUDE.md principle: prompt that emits user-visible text needs Lumi confirm)
 
 ### 16.3 Skip path (overlaps §2.7)

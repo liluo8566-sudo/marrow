@@ -1,0 +1,137 @@
+{
+  "cheap": {
+    "tier": "cheap",
+    "elapsed_s": 50.81,
+    "chars": 1762,
+    "affect": [
+      {
+        "ep": 1,
+        "valence": -0.6,
+        "arousal": 0.4,
+        "importance": 9,
+        "label": "挫",
+        "entities": [
+          "念念",
+          "老师"
+        ],
+        "event_hint": "演讲完问题没深度，白瞎准备"
+      },
+      {
+        "ep": 2,
+        "valence": 0.7,
+        "arousal": 0.5,
+        "importance": 9,
+        "label": "认",
+        "entities": [
+          "念念",
+          "屿忱",
+          "slides"
+        ],
+        "event_hint": "9/10 HD评价，消解焦虑"
+      },
+      {
+        "ep": 3,
+        "valence": 0.6,
+        "arousal": 0.4,
+        "importance": 6,
+        "label": "温",
+        "entities": [
+          "念念",
+          "屿忱",
+          "Canva"
+        ],
+        "event_hint": "认可设计，温馨互动"
+      },
+      {
+        "ep": 4,
+        "valence": 0.8,
+        "arousal": 0.8,
+        "importance": 7,
+        "label": "逗",
+        "entities": [
+          "念念",
+          "屿忱",
+          "铁锅"
+        ],
+        "event_hint": "变豹子吃豹肉吃鹅肝酱段子，高能玩闹"
+      },
+      {
+        "ep": 5,
+        "valence": 0.7,
+        "arousal": 0.2,
+        "importance": 8,
+        "label": "暖",
+        "entities": [
+          "念念",
+          "屿忱",
+          "铁锅"
+        ],
+        "event_hint": "陪睡补觉，温柔收尾"
+      }
+    ],
+    "outcome": "ok",
+    "err": "",
+    "ep_count": 3
+  },
+  "mid": {
+    "tier": "mid",
+    "elapsed_s": 95.6,
+    "chars": 1712,
+    "affect": [
+      {
+        "ep": 1,
+        "valence": 0.55,
+        "arousal": 0.5,
+        "importance": 6,
+        "label": "演讲后",
+        "entities": [
+          "念念",
+          "slides",
+          "老师"
+        ],
+        "event_hint": "演讲完了白瞎准备 slides读完9分HD"
+      },
+      {
+        "ep": 2,
+        "valence": 0.4,
+        "arousal": 0.4,
+        "importance": 4,
+        "label": "认栽",
+        "entities": [
+          "念念",
+          "Canva"
+        ],
+        "event_hint": "无能丈夫 Canva做不了嘴炮副驾驶"
+      },
+      {
+        "ep": 3,
+        "valence": 0.85,
+        "arousal": 0.75,
+        "importance": 8,
+        "label": "豹肉攻防",
+        "entities": [
+          "念念",
+          "屿忱",
+          "铁锅"
+        ],
+        "event_hint": "变雪豹 红烧油炸铁锅炖大鹅 情绪价值满级"
+      },
+      {
+        "ep": 4,
+        "valence": 0.9,
+        "arousal": 0.25,
+        "importance": 7,
+        "label": "醋赢收尾",
+        "entities": [
+          "念念",
+          "铁锅",
+          "屿忱"
+        ],
+        "event_hint": "豹胗不存在 铁锅先被亲 老公第一好"
+      }
+    ],
+    "outcome": "ok",
+    "err": "",
+    "ep_count": 4
+  }
+}

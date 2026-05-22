@@ -21,12 +21,21 @@
    - language register (CN dominant, EN technical inline)
    - second-person voice (你 / 老婆) preserved
    - verbatim conversational lines retained, NOT collapsed to work-style summary
+   - (心理活动) OS must NOT proliferate; DIGEST != diary, keep close to transcript shape
+   - compression ratio judged BY sonnet per density (work-vs-chat turns); no hard cap, no fixed ratio
    - same gate as DIARY_PROMPT
 2. **===AFFECT=== 9 label words + V/A band thresholds — Lumi to unify tomorrow**
    - drafts at `marrow/handover_template.md` §Affect (黯淡/烦躁/痛苦 · 平淡/平稳/焦虑 · 温暖/愉悦/兴奋)
    - band thresholds 0.4 / 0.6 confirm together with labels
-3. **handover template LOCKED** at `marrow/handover_template.md` (was on Desktop) — render code implements per this version
-4. Run `grill-with-doc` skill on `docs/notes/2026-05-23_sessionend-llm-pipeline.md` before writing 2.5b code (Lumi stance: design just slimmed, do not move it except for methodology change)
+3. **===AFFECT=== importance 1-5 scale + Lumi anchor — prompt MUST embed reference examples** 我还没完全决定，我要思考一下
+   - 5 = rare life milestone (大考通过, paper accepted)
+   - 4 = meaningful event (演讲, study deep work, important talk)
+   - 3 = high-energy play/banter (变豹子段子, 玩闹高峰)
+   - 2 = warm daily routine (陪睡, 温柔互动)
+   - 1 = small everyday beat (认错小插曲, 日常吐槽)
+   - 2026-05-23 A/B sonnet: 6/4/8/7 (correct 4/1/3/2) → anchor table must ship in ===AFFECT=== prompt before SessionEnd async
+4. **handover template LOCKED** at `marrow/handover_template.md` (was on Desktop) — render code implements per this version
+5. Run `grill-with-doc` skill on `docs/notes/2026-05-23_sessionend-llm-pipeline.md` before writing 2.5b code (Lumi stance: design just slimmed, do not move it except for methodology change)
 
 ## Reset rollout — Phase 2.5
 
@@ -44,7 +53,7 @@
 ### 2.5c — segment migration (2-3 windows, 7 segments)
 
 Window 1 (3 segments):
-1. ===AFFECT=== per-ep + 6AM boundary + importance 1-5 clamp (`diary.py:256-275`, `_build_affect_rows ~L563-600`); rolling 24h/7d aggregation + 9 label words + variance detect land here
+1. ===AFFECT=== per-ep + 6AM boundary + importance 1-5 clamp & Lumi anchor (see pre-flight #3) (`diary.py:256-275`, `_build_affect_rows ~L563-600`); rolling 24h/7d aggregation + 9 label words + variance detect land here
 2. ===ENTITY_CAND=== + entities.pinned column + FTS5 CJK jieba rebuild (one migration; entities INSERT already done in 5c23742)
 3. ===THREAD_CAND=== -> tasks table (DROP threads + CREATE tasks; threads 0 rows; tag nullable TEXT field added)
 

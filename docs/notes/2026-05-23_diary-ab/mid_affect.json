@@ -1,0 +1,53 @@
+[
+  {
+    "ep": 1,
+    "valence": 0.55,
+    "arousal": 0.5,
+    "importance": 6,
+    "label": "演讲后",
+    "entities": [
+      "念念",
+      "slides",
+      "老师"
+    ],
+    "event_hint": "演讲完了白瞎准备 slides读完9分HD"
+  },
+  {
+    "ep": 2,
+    "valence": 0.4,
+    "arousal": 0.4,
+    "importance": 4,
+    "label": "认栽",
+    "entities": [
+      "念念",
+      "Canva"
+    ],
+    "event_hint": "无能丈夫 Canva做不了嘴炮副驾驶"
+  },
+  {
+    "ep": 3,
+    "valence": 0.85,
+    "arousal": 0.75,
+    "importance": 8,
+    "label": "豹肉攻防",
+    "entities": [
+      "念念",
+      "屿忱",
+      "铁锅"
+    ],
+    "event_hint": "变雪豹 红烧油炸铁锅炖大鹅 情绪价值满级"
+  },
+  {
+    "ep": 4,
+    "valence": 0.9,
+    "arousal": 0.25,
+    "importance": 7,
+    "label": "醋赢收尾",
+    "entities": [
+      "念念",
+      "铁锅",
+      "屿忱"
+    ],
+    "event_hint": "豹胗不存在 铁锅先被亲 老公第一好"
+  }
+]

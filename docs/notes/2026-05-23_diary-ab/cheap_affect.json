@@ -1,0 +1,66 @@
+[
+  {
+    "ep": 1,
+    "valence": -0.6,
+    "arousal": 0.4,
+    "importance": 9,
+    "label": "挫",
+    "entities": [
+      "念念",
+      "老师"
+    ],
+    "event_hint": "演讲完问题没深度，白瞎准备"
+  },
+  {
+    "ep": 2,
+    "valence": 0.7,
+    "arousal": 0.5,
+    "importance": 9,
+    "label": "认",
+    "entities": [
+      "念念",
+      "屿忱",
+      "slides"
+    ],
+    "event_hint": "9/10 HD评价，消解焦虑"
+  },
+  {
+    "ep": 3,
+    "valence": 0.6,
+    "arousal": 0.4,
+    "importance": 6,
+    "label": "温",
+    "entities": [
+      "念念",
+      "屿忱",
+      "Canva"
+    ],
+    "event_hint": "认可设计，温馨互动"
+  },
+  {
+    "ep": 4,
+    "valence": 0.8,
+    "arousal": 0.8,
+    "importance": 7,
+    "label": "逗",
+    "entities": [
+      "念念",
+      "屿忱",
+      "铁锅"
+    ],
+    "event_hint": "变豹子吃豹肉吃鹅肝酱段子，高能玩闹"
+  },
+  {
+    "ep": 5,
+    "valence": 0.7,
+    "arousal": 0.2,
+    "importance": 8,
+    "label": "暖",
+    "entities": [
+      "念念",
+      "屿忱",
+      "铁锅"
+    ],
+    "event_hint": "陪睡补觉，温柔收尾"
+  }
+]
