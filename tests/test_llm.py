@@ -83,7 +83,7 @@ def test_retry_absorbs_transient_miss_no_alert(monkeypatch):
     assert alerts == []  # transient miss never alerts
 
 
-def test_claude_only_exhausted_is_critical(monkeypatch):
+def test_claude_only_failure_is_warn(monkeypatch):
     alerts = []
     c = LLMClient(CFG, on_alert=lambda *a: alerts.append(a))
     monkeypatch.setattr(
@@ -91,7 +91,26 @@ def test_claude_only_exhausted_is_critical(monkeypatch):
         lambda s, m, p: (_ for _ in ()).throw(LLMError("cli down")))
     with pytest.raises(LLMError, match="all providers failed"):
         c.call("diary", "body", tier="cheap")
-    assert alerts and alerts[-1][0] == "critical"
+    assert alerts and alerts[-1][0] == "warn"
+    assert "no fallback configured" in alerts[-1][2]
+
+
+def test_multi_tier_all_fail_last_alert_critical_exhausted(monkeypatch):
+    # Chain length >= 2, every tier fails -> warn (rotating) then critical
+    # (chain exhausted) on the terminal tier.
+    monkeypatch.setattr("marrow.llm._MUTE_OLLAMA", False)
+    alerts = []
+    c = LLMClient(CFG, on_alert=lambda *a: alerts.append(a))
+    assert c.chain == ["claude_cli", "ollama"]
+    monkeypatch.setattr(
+        c, "_run_claude_cli",
+        lambda s, m, p: (_ for _ in ()).throw(LLMError("cli down")))
+    monkeypatch.setattr(
+        c, "_run_ollama",
+        lambda spec, prompt: (_ for _ in ()).throw(LLMError("ollama down")))
+    with pytest.raises(LLMError, match="all providers failed"):
+        c.call("diary", "body", tier="cheap")
+    assert alerts[-1][0] == "critical"
     assert "chain exhausted" in alerts[-1][2]
 
 
@@ -111,6 +130,8 @@ def test_rotation_path_intact_when_unmuted(monkeypatch):
 
 
 def test_whole_chain_fails_raises_and_critical_alert(monkeypatch):
+    # Multi-tier chain, every tier fails -> last alert is critical.
+    monkeypatch.setattr("marrow.llm._MUTE_OLLAMA", False)
     alerts = []
     c = LLMClient(CFG, on_alert=lambda *a: alerts.append(a))
     monkeypatch.setattr(c, "_run", lambda *a: (_ for _ in ()).throw(LLMError("x")))

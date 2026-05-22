@@ -117,12 +117,16 @@ class LLMClient:
                     last = e
                     if attempt < _RETRIES:
                         continue  # transient miss — one retry, same provider
-                    terminal = i == len(self.chain) - 1
+                    multi = len(self.chain) > 1
+                    terminal = multi and i == len(self.chain) - 1
+                    if multi:
+                        tail = "chain exhausted" if terminal else "rotating"
+                    else:
+                        tail = "no fallback configured"
                     self._alert(
                         "critical" if terminal else "warn",
                         "llm_provider",
-                        f"{role}: provider {name} failed ({e}); "
-                        + ("chain exhausted" if terminal else "rotating"),
+                        f"{role}: provider {name} failed ({e}); {tail}",
                         f"llm.py:{name}",
                     )
         raise LLMError(f"{role}: all providers failed; last: {last}")
