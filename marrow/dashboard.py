@@ -14,10 +14,18 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import repo
+from . import config, repo
 
 M0 = "<!-- marrow:top:start -->"
 M1 = "<!-- marrow:top:end -->"
+
+# Order matters — milestone first (highest-touch), curated by hand to put
+# the highest-utility navigation links closest to where Lumi reads. New
+# views: add to subpages.build_all_configs AND mirror the key here.
+_SUB_PAGE_NAV = [
+    "milestone", "diary", "study", "projects",
+    "cheatsheet", "memes", "goose",
+]
 
 
 def render_top(conn) -> str:
@@ -38,6 +46,12 @@ def render_top(conn) -> str:
             out.append(f"- #{t['id']} [{t['category']}] {t['title']}{nxt}{due}")
     else:
         out.append("- none")
+    out += ["", "## Sub Pages"]
+    folder = Path(config.sub_pages_path())
+    for key in _SUB_PAGE_NAV:
+        f = folder / f"{key}.md"
+        if f.exists():
+            out.append(f"- [[sub_pages/{key}]]")
     out.append(M1)
     return "\n".join(out)
 

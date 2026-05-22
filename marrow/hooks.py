@@ -160,6 +160,10 @@ def _affect_backdrop(conn: sqlite3.Connection) -> str:
 # ── session-start payload ────────────────────────────────────────────────────
 
 def _read_input() -> dict:
+    # Manual CLI runs (tty stdin) skip the blocking read so devs can
+    # invoke `python -m marrow.hooks <event>` without piping JSON.
+    if sys.stdin.isatty():
+        return {}
     try:
         return json.loads(sys.stdin.read() or "{}")
     except json.JSONDecodeError:
