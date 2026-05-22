@@ -1,5 +1,7 @@
 # Marrow handover — 2026-05-22 18:20
 
+> Note from Lumi: 确保未来我能看到的语言有规则的统一，不要一会中文一会英语（可以mix但是要看起来不奇怪的mix，该align的地方要对齐
+
 ## State
 - pytest 244/244 (234 + 10 milestone recall tests)
 - UserPromptSubmit live verified end-to-end: query (`鸭子`) → 5 hits incl. milestone #15/#16
