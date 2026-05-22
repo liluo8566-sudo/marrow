@@ -160,3 +160,70 @@ def test_rm_diary_by_date(diary_db):
 def test_show_diary_by_date(diary_db, capsys):
     assert cli.main(["show", "diary", "2026-05-17", "--db", diary_db]) == 0
     assert "draft" in capsys.readouterr().out
+
+
+# ── add milestone ─────────────────────────────────────────────────────────────
+
+def test_add_milestone_inserts_with_timestamps(db, capsys):
+    rc = cli.main([
+        "add", "milestone",
+        "--scope", "me", "--date", "2026-05-22",
+        "--title", "Started Round 2",
+        "--description", "milestone reconcile work",
+        "--db", db,
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Started Round 2" in out
+    row = _rows(db, "SELECT scope, date, title, description, pinned, "
+                    "created_at, updated_at, source_hash "
+                    "FROM milestones WHERE title = 'Started Round 2'")[0]
+    assert row["scope"] == "me"
+    assert row["date"] == "2026-05-22"
+    assert row["description"] == "milestone reconcile work"
+    assert row["pinned"] == 0
+    assert row["created_at"] is not None
+    assert row["updated_at"] is not None
+    assert row["source_hash"] is not None
+
+
+def test_add_milestone_audits(db):
+    cli.main(["add", "milestone", "--scope", "us", "--date", "2026-01-17",
+              "--title", "First meeting", "--db", db])
+    a = _rows(db,
+              "SELECT action FROM audit_log WHERE target_table='milestones'")
+    assert a and a[0]["action"] == "insert"
+
+
+def test_add_milestone_pinned_flag(db):
+    cli.main(["add", "milestone", "--scope", "me", "--date", "2026-05-15",
+              "--title", "Marrow rebuild", "--pinned", "--db", db])
+    row = _rows(db, "SELECT pinned FROM milestones WHERE title = ?",
+                ("Marrow rebuild",))[0]
+    assert row["pinned"] == 1
+
+
+def test_add_milestone_rejects_bad_scope(db):
+    rc = cli.main(["add", "milestone", "--scope", "wrong", "--date",
+                   "2026-05-22", "--title", "x", "--db", db])
+    assert rc != 0
+    assert _rows(db, "SELECT COUNT(*) c FROM milestones")[0]["c"] == 0
+
+
+def test_add_milestone_rejects_bad_date(db):
+    rc = cli.main(["add", "milestone", "--scope", "me", "--date",
+                   "2026/05/22", "--title", "x", "--db", db])
+    assert rc != 0
+
+
+def test_add_milestone_rejects_empty_title(db):
+    rc = cli.main(["add", "milestone", "--scope", "me", "--date",
+                   "2026-05-22", "--title", "   ", "--db", db])
+    assert rc != 0
+
+
+def test_add_unknown_target_fails(db):
+    # argparse choices=... rejects the value before our code runs -> SystemExit
+    with pytest.raises(SystemExit):
+        cli.main(["add", "robots", "--scope", "me", "--date", "2026-05-22",
+                  "--title", "x", "--db", db])

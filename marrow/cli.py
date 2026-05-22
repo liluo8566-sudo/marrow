@@ -6,6 +6,8 @@ an exit code. Hooks/daemon never call here — they use repo.py.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import re
 import sys
 from contextlib import contextmanager
 
@@ -109,6 +111,47 @@ def cmd_done(args) -> int:
     )
 
 
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _add_milestone(conn, args) -> int:
+    if args.scope not in {"us", "me"}:
+        return _fail(f"invalid scope: {args.scope} (us|me)")
+    if not _DATE_RE.match(args.date):
+        return _fail(f"invalid date: {args.date} (YYYY-MM-DD)")
+    title = (args.title or "").strip()
+    if not title:
+        return _fail("title required")
+    desc = args.description
+    theme = args.theme
+    pinned = 1 if args.pinned else 0
+    src = "\x1f".join([args.scope, args.date, title, desc or ""])
+    h = hashlib.sha256(src.encode()).hexdigest()
+    with conn:
+        cur = conn.execute(
+            "INSERT INTO milestones "
+            "(scope, date, title, description, theme, pinned, source_hash) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (args.scope, args.date, title, desc, theme, pinned, h),
+        )
+        mid = cur.lastrowid
+        _audit(conn, "milestones", str(mid), "insert",
+               f"{args.scope}/{args.date}/{title[:60]}")
+    print(f"milestone #{mid} [{args.scope}] {args.date} {title}")
+    return 0
+
+
+_ADD_TABLES = {"milestone": _add_milestone}
+
+
+def cmd_add(args) -> int:
+    fn = _ADD_TABLES.get(args.table)
+    if fn is None:
+        return _fail(f"add target not supported: {args.table}")
+    with _conn(args.db) as conn:
+        return fn(conn, args)
+
+
 def cmd_show(args) -> int:
     with _conn(args.db) as conn:
         if not _columns(conn, args.table):
@@ -183,6 +226,16 @@ def build_parser() -> argparse.ArgumentParser:
     ls.add_argument("--status", default=None)
     ls.add_argument("--limit", type=int, default=50)
     ls.set_defaults(fn=cmd_ls)
+
+    ad = sub.add_parser("add", parents=[common])
+    ad.add_argument("table", choices=list(_ADD_TABLES.keys()))
+    ad.add_argument("--scope", required=True)
+    ad.add_argument("--date", required=True)
+    ad.add_argument("--title", required=True)
+    ad.add_argument("--description", default=None)
+    ad.add_argument("--theme", default=None)
+    ad.add_argument("--pinned", action="store_true")
+    ad.set_defaults(fn=cmd_add)
 
     return p
 
