@@ -229,6 +229,27 @@ def test_recall_fusion_budget_truncation(db):
     assert total <= 4000
 
 
+def test_recall_per_item_budget_cap(db):
+    """One long hit must not starve the others — each hit capped to budget//limit."""
+    # 1 long hit + 9 short hits; all FTS-match "marrow".
+    _make_event(db, "marrow " + "x" * 3000, session_id="s0",
+                timestamp="2026-05-19T01:00:00Z")
+    for i in range(1, 10):
+        _make_event(db, f"marrow short event {i}", session_id=f"s{i}",
+                    timestamp=f"2026-05-19T01:{i:02d}:00Z")
+    with patch.object(rm, "_ensure_embedder", return_value=None):
+        results = rm.recall_fusion(
+            db, "marrow", limit=10, budget_chars=3500, min_score=0.0,
+        )
+    assert len(results) == 10
+    cap = 3500 // 10
+    slack = 8
+    for r in results:
+        assert len(r["content"]) <= cap + slack, (
+            f"hit length {len(r['content'])} exceeds per-item cap {cap}"
+        )
+
+
 # ── recall_fusion — vec path ──────────────────────────────────────────────────
 
 def test_recall_fusion_with_vec(db):

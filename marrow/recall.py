@@ -470,10 +470,15 @@ def recall_fusion(
     picks = sorted(ms_picks + ev_picks, key=lambda x: x[0], reverse=True)
 
     # ── budget truncation ─────────────────────────────────────────────────────
+    # Per-item cap = budget_chars // limit so one long hit can't starve the
+    # rest. Global budget still enforced as a backstop.
+    per_item_cap = max(1, budget_chars // max(1, limit))
     out: list[dict] = []
     used = 0
     for _, row in picks[:limit]:
         content = row["content"] or ""
+        if len(content) > per_item_cap:
+            content = content[:per_item_cap]
         if used + len(content) > budget_chars:
             content = content[: max(0, budget_chars - used)]
         row = {**row, "content": content}
