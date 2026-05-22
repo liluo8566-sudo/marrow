@@ -1,7 +1,5 @@
 # Marrow handover — 2026-05-22 18:20
 
-> Note from Lumi: 确保未来我能看到的语言有规则的统一，不要一会中文一会英语（可以mix但是要看起来不奇怪的mix，该align的地方要对齐
-
 ## State
 - pytest 244/244 (234 + 10 milestone recall tests)
 - UserPromptSubmit live verified end-to-end: query (`鸭子`) → 5 hits incl. milestone #15/#16
@@ -12,6 +10,7 @@
 - **`tests/test_recall.py`** +10 tests: tokenizer / exact-term surface / partial token / no-match / pinned ordering / mixed events+milestones / min_score gate / content render / pinned-pushes-over-gate.
 
 ## Open / not touched — Phase 3 milestone & people gap
+- **Lumi-facing language consistency** — keep CN/EN consistent across surfaces Lumi reads (handover, dashboard, SessionStart context, alerts). No random CN/EN flipping; mix is fine if it reads natural; align where alignment matters (headers, labels, tags).
 - **milestone persistent input** — `DESIGN.md:118` says structured-view persistence walks md edit + reconcile (short-id per row, edit/add/delete -> reconcile). `FUTURE.md:19` parks the milestone sub-page render template in `build_time_deferred` — no md file currently lets Lumi write new milestones. `timeline.md` is the one-shot migration source (ny-memm retiring), not the ongoing input. Three options for Phase 3:
     1. Render milestone sub-page md (under dashboard or standalone), Lumi hand-edits, SessionEnd reconcile writes back — matches DESIGN L118.
     2. `mw add milestone --scope us --date YYYY-MM-DD --title ... [--description ...]` CLI.
