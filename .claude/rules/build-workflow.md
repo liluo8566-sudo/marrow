@@ -11,6 +11,7 @@
 - `grill-with-doc` skill: after each review, grill for the next phase.
 
 ## Review (run in a new clean session after a phase completes)
+> No pytest if no code change
 0. Fact-check (`fact-checker` agent): integrate DECISIONS + DESIGN + FUTURE + PROGRESS + git log + pytest + dashboard → one baseline (DONE / DEFERRED-by-plan / DRIFT / test status). Downstream steps work from this baseline.
 1. Blind design-gap (`blind-reviewer` agent): goal + DONE list only; forbidden repo access; reasons from outcomes.
 2a. DESIGN traceability (`design-traceability-auditor` agent): each phase item DONE / DEFERRED / MISSING / DRIFT; evidence = code, not PROGRESS.
