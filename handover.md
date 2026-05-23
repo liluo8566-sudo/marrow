@@ -24,6 +24,8 @@
 ## Next window
 
 ### Bug #0 — recall outlet starves on default limit, ignores entity table (P0, blocks "memory exists" trust)
+
+Acceptance: (李小云) / (大龙虾) queries return ≥10 of 12 known events at SessionStart `## Recall (auto)`. Blocks all backlog items.
 - Symptom: Lumi mentioned (李小云) ~12 times over 5/19-5/22, auto recall surfaces only 3 (75% missing). (大龙虾) 2 events, 1 surfaced.
 - Raw evidence (sqlite events_fts MATCH): (李小云) 12 distinct events; (大龙虾) 2.
 - Write + FTS index path verified healthy. Failure is the OUTLET.
