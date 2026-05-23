@@ -1,8 +1,8 @@
 """Tests for marrow/dashboard.py — code-only dashboard top render.
 
-Contract: deterministic Alerts + Open Threads block between markers, atomic
-write, hand-written zone outside markers never touched, hash conflict guard
-(Lumi hand-edit -> backup + one alert, never silent overwrite). No LLM.
+Contract: deterministic 4-section block between markers, atomic write,
+hand-written zone outside markers never touched. Free-form hand-edits
+inside the rendered block are silently overwritten on next render. No LLM.
 """
 from __future__ import annotations
 
@@ -78,7 +78,7 @@ def test_write_preserves_hand_zone(db, tmp_path):
     assert "Essay 370" in txt
 
 
-def test_hand_edit_in_block_backs_up_and_alerts(db, tmp_path):
+def test_hand_edit_in_block_silently_overwritten(db, tmp_path):
     dash = tmp_path / "dashboard.md"
     state = tmp_path / "state"
     conn = storage.connect(db)
@@ -88,9 +88,13 @@ def test_hand_edit_in_block_backs_up_and_alerts(db, tmp_path):
         t = dash.read_text().replace("Essay 370", "Essay 370 EDITED BY LUMI")
         dash.write_text(t)
         dashboard.write_dashboard(str(dash), conn, state_dir=str(state), db=db)
+        result = dash.read_text()
         alerts = [a["message"] for a in
                   __import__("marrow.repo", fromlist=["x"]).open_alerts(conn)]
     finally:
         conn.close()
-    assert any("dashboard" in m.lower() for m in alerts)
-    assert list(Path(state).glob("dashboard*.bak"))
+    # Hand-edit overwritten silently: edited text gone, no alert, no .bak.
+    assert "EDITED BY LUMI" not in result
+    assert not any("dashboard" in m.lower() and "hand-edited" in m.lower()
+                   for m in alerts)
+    assert not list(Path(state).glob("dashboard*.bak"))
