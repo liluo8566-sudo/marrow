@@ -1,9 +1,8 @@
-"""Code-only dashboard top render (#8). Deterministic Alerts + Open Threads
+"""Code-only dashboard top render. 4 top sections (Alerts/Tasks/Milestone/Affect)
 between markers; hand-written zone outside markers untouched; atomic write;
 hash conflict guard (Lumi hand-edit -> backup + one alert). No LLM.
 
-The curated Next/Soon + dehydrated craft/study rewrite is the nightly LLM
-routine's job (render-templates.md); this is the always-correct code refresh.
+Section renderers live in top_sections.py — shared with handover_render.py.
 """
 from __future__ import annotations
 
@@ -14,46 +13,14 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import config, repo
+from . import config, repo, top_sections
 
 M0 = "<!-- marrow:top:start -->"
 M1 = "<!-- marrow:top:end -->"
 
-# Order matters — milestone first (highest-touch), curated by hand to put
-# the highest-utility navigation links closest to where Lumi reads. New
-# views: add to subpages.build_all_configs AND mirror the key here.
-_SUB_PAGE_NAV = [
-    "milestone", "diary", "study", "projects",
-    "cheatsheet", "memes", "goose",
-]
-
 
 def render_top(conn) -> str:
-    alerts = repo.open_alerts(conn)
-    threads = repo.open_threads(conn)
-    out = [M0, "# Marrow", "", "## Alerts"]
-    if alerts:
-        for a in alerts:
-            src = f" ({a['source']})" if a.get("source") else ""
-            out.append(f"- #{a['id']} [{a['severity']}] {a['message']}{src}")
-    else:
-        out.append("- none")
-    out += ["", "## Open Threads"]
-    if threads:
-        for t in threads:
-            due = f" [Due {t['due']}]" if t.get("due") else ""
-            nxt = f" — {t['next_step']}" if t.get("next_step") else ""
-            out.append(f"- #{t['id']} [{t['category']}] {t['title']}{nxt}{due}")
-    else:
-        out.append("- none")
-    out += ["", "## Sub Pages"]
-    folder = Path(config.sub_pages_path())
-    for key in _SUB_PAGE_NAV:
-        f = folder / f"{key}.md"
-        if f.exists():
-            out.append(f"- [[sub_pages/{key}]]")
-    out.append(M1)
-    return "\n".join(out)
+    return M0 + "\n" + top_sections.render_top(conn) + "\n" + M1
 
 
 def _hash(s: str) -> str:

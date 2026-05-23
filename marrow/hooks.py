@@ -21,7 +21,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import config, dashboard, repo, storage, subpages, transcript
+from . import config, dashboard, handover_render, repo, storage, subpages, transcript
 from .popen_detach import popen_detach
 
 # ── affect label lookup ──────────────────────────────────────────────────────
@@ -277,6 +277,23 @@ def session_end() -> int:
                 f"session_end skipped sub-pages write: {e}",
                 source="hooks.py", db=db,
             )
+        # Render handover.md sync skeleton (§4.1): zero LLM, <500ms target.
+        # Output → ~/.config/marrow/handover.md (separate from Lumi's hand-edited
+        # ~/cc-lab/marrow/handover.md — see handover_render.py for rationale).
+        try:
+            sid = rows[0]["session_id"] if rows else None
+            if sid:
+                handover_render.write_handover(conn, sid)
+        except Exception as e:
+            try:
+                repo.add_alert(
+                    "warn", "handover_render",
+                    f"session_end handover_render failed: {e}",
+                    source="hooks.py", db=db,
+                )
+            except Exception:
+                pass
+
         # Auto-embed events freshly archived this session so recall stays
         # current without a manual MCP call. Fail-soft: embedder absence or
         # any runtime error must never block session_end.
