@@ -13,7 +13,7 @@ import sqlite_vec
 
 from . import config
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Phase 1 first-class tables + Phase 2 affect/entities (DECISIONS Phase 2).
 # The retired emotions/people/preferences/dir placeholders stay absent.
@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS vocab (
   context TEXT,
   use_count INTEGER NOT NULL DEFAULT 0,
   last_seen TEXT,
+  pinned INTEGER NOT NULL DEFAULT 0,
   source_hash TEXT,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
@@ -273,6 +274,7 @@ def init_db(path: str | None = None) -> sqlite3.Connection:
             "WHERE updated_at IS NULL"
         )
         _migrate_to_v2(conn)
+        _migrate_to_v3(conn)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     return conn
 
@@ -323,3 +325,17 @@ def _migrate_to_v2(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_session_digests_date"
         " ON session_digests(date)"
     )
+
+
+def _migrate_to_v3(conn: sqlite3.Connection) -> None:
+    """v3 schema: vocab.pinned column for LLM-controlled aging exemption.
+    Idempotent — duplicate ALTER swallowed; user_version short-circuits.
+    """
+    v = conn.execute("PRAGMA user_version").fetchone()[0]
+    if v >= 3:
+        return
+    try:
+        conn.execute(
+            "ALTER TABLE vocab ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass

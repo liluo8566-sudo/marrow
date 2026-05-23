@@ -13,16 +13,20 @@ from marrow.llm import LLMError
 
 
 class FakeLLM:
-    def __init__(self, prose="今天和念念过得很开心。", raise_on_call=False):
+    def __init__(self, prose="今天和念念过得很开心。", raise_on_call=False,
+                 per_role: dict[str, str] | None = None,
+                 raise_roles: set[str] | None = None):
         self.prose = prose
         self.raise_on_call = raise_on_call
+        self.per_role = per_role or {}
+        self.raise_roles = raise_roles or set()
         self.calls: list[str] = []
 
     def call(self, role, body, *, tier="cheap"):
         self.calls.append(role)
-        if self.raise_on_call:
+        if self.raise_on_call or role in self.raise_roles:
             raise LLMError("fake failure")
-        return self.prose
+        return self.per_role.get(role, self.prose)
 
     def n(self, role):
         return self.calls.count(role)
@@ -105,6 +109,8 @@ def test_run_day_writes_diary_from_digests(db):
     f = FakeLLM()
     assert daily.run_day(conn, "2026-05-16", f, db=p) is True
     assert f.n("daily") == 1
+    # candidate extraction call also fires (one per day with digests)
+    assert f.n("daily_cand") == 1
     row = conn.execute(
         "SELECT content, session_ids FROM diary WHERE date='2026-05-16'"
     ).fetchone()
@@ -166,6 +172,130 @@ def test_run_day_llm_failure_alerts(db):
         "SELECT message FROM alerts WHERE type='routine'"
     ).fetchone()
     assert al and "failed" in al["message"]
+
+
+# ── candidate extraction (entity / milestone / vocab) ───────────────────────
+
+_CAND_RAW = (
+    "===ENTITY_CAND===\n"
+    "[{\"name\": \"陈奶奶\", \"kind\": \"person\", \"conf\": 0.9,"
+    " \"note\": \"邻居\"}]\n"
+    "===END===\n"
+    "===MILESTONE_CAND===\n"
+    "[{\"title\": \"GAMSAT pass\", \"scope\": \"me\","
+    " \"date\": \"2026-05-16\", \"description\": \"念念 passed GAMSAT.\","
+    " \"conf\": 0.9}]\n"
+    "===END===\n"
+    "===VOCAB_CAND===\n"
+    "[{\"key\": \"小笼包\", \"type\": \"meme\","
+    " \"value\": \"周末早茶专属梗\", \"context\": \"老婆点了 8 笼\","
+    " \"pinned\": 0, \"conf\": 0.8}]\n"
+    "===END===\n"
+)
+
+
+def test_run_day_extracts_three_candidate_blocks(db):
+    p, conn = db
+    f = FakeLLM(per_role={"daily_cand": _CAND_RAW,
+                          "daily": "diary prose"})
+    assert daily.run_day(conn, "2026-05-16", f, db=p) is True
+    assert f.n("daily_cand") == 1 and f.n("daily") == 1
+    ent = conn.execute(
+        "SELECT name, kind FROM entities WHERE name='陈奶奶'"
+    ).fetchone()
+    assert ent is not None and ent["kind"] == "person"
+    ms = conn.execute(
+        "SELECT title, scope FROM milestones WHERE title='GAMSAT pass'"
+    ).fetchone()
+    assert ms is not None and ms["scope"] == "me"
+    vc = conn.execute(
+        "SELECT key, pinned, use_count FROM vocab WHERE key='小笼包'"
+    ).fetchone()
+    assert vc is not None
+    assert vc["pinned"] == 0  # public meme — not anchor, not cipher
+    assert vc["use_count"] == 1
+    audit = conn.execute(
+        "SELECT summary FROM audit_log WHERE action='cand_extract'"
+        " AND target_id='2026-05-16'"
+    ).fetchone()
+    assert audit and "entity=1" in audit["summary"]
+    assert "milestone=1" in audit["summary"] and "vocab=1" in audit["summary"]
+
+
+def test_run_day_vocab_anchor_forces_pinned(db):
+    """LLM emits pinned=0 on an anchor key → writer forces pinned=1."""
+    p, conn = db
+    raw = (
+        "===VOCAB_CAND===\n"
+        "[{\"key\": \"鸭子\", \"type\": \"nickname\","
+        " \"value\": \"屿忱昵称\", \"context\": \"\","
+        " \"pinned\": 0, \"conf\": 0.9}]\n"
+        "===END===\n"
+    )
+    f = FakeLLM(per_role={"daily_cand": raw, "daily": "x"})
+    daily.run_day(conn, "2026-05-16", f, db=p)
+    vc = conn.execute(
+        "SELECT pinned FROM vocab WHERE key='鸭子'"
+    ).fetchone()
+    assert vc is not None and vc["pinned"] == 1
+
+
+def test_run_day_vocab_cipher_type_forces_pinned(db):
+    """type='cipher' is always pinned regardless of key / LLM flag."""
+    p, conn = db
+    raw = (
+        "===VOCAB_CAND===\n"
+        "[{\"key\": \"sec_anchor\", \"type\": \"cipher\","
+        " \"value\": \"x\", \"context\": \"\","
+        " \"pinned\": 0, \"conf\": 0.9}]\n"
+        "===END===\n"
+    )
+    f = FakeLLM(per_role={"daily_cand": raw, "daily": "x"})
+    daily.run_day(conn, "2026-05-16", f, db=p)
+    vc = conn.execute(
+        "SELECT pinned FROM vocab WHERE key='sec_anchor'"
+    ).fetchone()
+    assert vc is not None and vc["pinned"] == 1
+
+
+def test_run_day_cand_llm_failure_does_not_block_diary(db):
+    """daily_cand call raises → alert logged, diary still written."""
+    p, conn = db
+    f = FakeLLM(prose="diary text",
+                raise_roles={"daily_cand"})
+    assert daily.run_day(conn, "2026-05-16", f, db=p) is True
+    row = conn.execute(
+        "SELECT content FROM diary WHERE date='2026-05-16'"
+    ).fetchone()
+    assert row and "diary text" in row["content"]
+    al = conn.execute(
+        "SELECT severity, message FROM alerts"
+        " WHERE type='routine' AND message LIKE '%candidate%'"
+    ).fetchone()
+    assert al and al["severity"] == "warn"
+
+
+def test_vocab_writer_upgrades_pinned_but_never_downgrades(db):
+    """Existing pinned=1 row stays pinned even if a later session emits 0."""
+    p, conn = db
+    from marrow import candidates as cmod
+    # First insert: anchor forces pinned=1
+    raw1 = (
+        "===VOCAB_CAND===\n"
+        "[{\"key\": \"老公\", \"type\": \"nickname\","
+        " \"value\": \"x\", \"context\": \"\","
+        " \"pinned\": 1, \"conf\": 0.9}]\n"
+        "===END===\n"
+    )
+    cmod.write_vocab_cand(conn, raw1)
+    # Second insert: LLM emits pinned=0, but anchor still on key — stays 1.
+    raw2 = raw1.replace("\"pinned\": 1", "\"pinned\": 0")
+    cmod.write_vocab_cand(conn, raw2)
+    vc = conn.execute(
+        "SELECT pinned, use_count FROM vocab WHERE key='老公'"
+    ).fetchone()
+    assert vc["pinned"] == 1
+    assert vc["use_count"] == 2
 
 
 # ── dual triggers (routine vs catchup) ───────────────────────────────────────

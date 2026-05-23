@@ -1,4 +1,4 @@
-"""Daily routine + catchup. Writes diary row (prose only).
+"""Daily routine + catchup. Candidate extraction + diary write.
 
 CLI:
 - `python -m marrow.daily`           → 07:00 routine; yesterday only
@@ -6,16 +6,22 @@ CLI:
 - `python -m marrow.daily --day YYYY-MM-DD` → explicit single day
 - `--force` → re-write existing diary row
 
+Per day, two sonnet calls:
+  1. DAILY_CAND_PROMPT on aggregated session_digests → 3 marker blocks
+     (ENTITY_CAND / MILESTONE_CAND / VOCAB_CAND). Idempotent — gated on
+     has_diary like the diary write itself.
+  2. DIARY_PROMPT on the same aggregate + affect_live → diary prose.
+
 Reads `affect_live` + DIGEST text (session_digests table) for the target
-date. Sends to sonnet via DIARY_PROMPT (prose only). Writes one diary row
-in an atomic txn.
+date. Writes diary row + candidate inserts in one daily run.
 """
 from __future__ import annotations
 
 import datetime as _dt
 import sys
 
-from . import config, daily_catchup, repo, storage
+from . import candidates, config, daily_catchup, repo, storage
+from .daily_prompts import DAILY_CAND_PROMPT
 from .llm import LLMClient, LLMError
 
 # DIARY_PROMPT — verbatim from old diary.py:137-194 (Lumi-owned text).
@@ -112,6 +118,40 @@ def _assemble_material(digests: list[tuple[str, str]],
     return body
 
 
+def _extract_candidates(conn, llm: LLMClient, date: str,
+                        digest_aggregate: str, *,
+                        db: str | None = None) -> dict[str, int]:
+    """One sonnet call on aggregated digests → 3 marker block writers.
+
+    Each block writer is independent; one block failing parse does not
+    block the others. Returns {segment: rows_written}. Logs a non-
+    blocking alert on LLM-level failure.
+    """
+    counts = {"entity_cand": 0, "milestone_cand": 0, "vocab_cand": 0}
+    try:
+        raw = llm.call(
+            "daily_cand",
+            DAILY_CAND_PROMPT.format(date=date, digest=digest_aggregate),
+            tier="mid",
+        )
+    except LLMError as e:
+        repo.add_alert("warn", "routine",
+                       f"daily {date} candidate extraction failed: {e}",
+                       source="daily.py", db=db)
+        return counts
+    for name, writer in (
+        ("entity_cand", lambda r: candidates.write_entity_cand(conn, r)),
+        ("milestone_cand",
+         lambda r: candidates.write_milestone_cand(conn, r, date)),
+        ("vocab_cand", lambda r: candidates.write_vocab_cand(conn, r)),
+    ):
+        try:
+            counts[name] = writer(raw)
+        except (ValueError, RuntimeError, TypeError, KeyError):
+            counts[name] = 0
+    return counts
+
+
 def run_day(conn, date: str, llm: LLMClient, *, db: str | None = None,
             force: bool = False) -> bool:
     existed = daily_catchup.has_diary(conn, date)
@@ -136,6 +176,20 @@ def run_day(conn, date: str, llm: LLMClient, *, db: str | None = None,
 
     material = _assemble_material(digests, affect_labels)
     sids = ",".join(sorted(sid for sid, _ in digests if sid))
+
+    # Candidate extraction (1 sonnet call) — best-effort, never blocks diary.
+    if digests:
+        cand_counts = _extract_candidates(conn, llm, date, material, db=db)
+        with conn:
+            conn.execute(
+                "INSERT INTO audit_log (target_table, target_id,"
+                " action, summary) VALUES ('daily', ?, 'cand_extract', ?)",
+                (date,
+                 f"entity={cand_counts['entity_cand']} "
+                 f"milestone={cand_counts['milestone_cand']} "
+                 f"vocab={cand_counts['vocab_cand']}"),
+            )
+
     try:
         narrative = llm.call("daily",
                              DIARY_PROMPT.format(date=date, digest=material),

@@ -149,7 +149,7 @@ def test_sessionend_async_idempotent(db_env):
 
 
 def test_sessionend_async_writes_fail_audit_on_exception(db_env):
-    """LLMClient.call raises for every segment → final summary='fail:all', rc=1."""
+    """Single sonnet call raises → final summary='fail:RuntimeError', rc=1."""
     db, _ = db_env
     _insert_events(db, "test-fail", count=10, role="user")
 
@@ -161,7 +161,7 @@ def test_sessionend_async_writes_fail_audit_on_exception(db_env):
     assert rc == 1
     rows = _audit_rows(db, "test-fail")
     assert len(rows) == 1
-    assert rows[0]["summary"] == "fail:all"
+    assert rows[0]["summary"] == "fail:RuntimeError"
 
 
 # ── Unit 3: sessionstart_catchup ─────────────────────────────────────────────
@@ -248,13 +248,13 @@ def test_sessionend_hook_fires_async_popen(db_env, monkeypatch, tmp_path):
 # ── Segment writers: schema-v2 persistence ────────────────────────────────────
 
 def test_seg_digest_writes_session_digests_row(db_env):
-    """DIGEST segment persists into session_digests (not audit_log)."""
+    """DIGEST segment extracts marker body and persists into session_digests."""
     db, _ = db_env
     from marrow import sessionend_async
     conn = storage.connect(db)
     try:
-        n = sessionend_async._seg_digest(conn, "今天和念念聊了很久。", "sid-d1",
-                                         "2026-05-23")
+        raw = "===DIGEST===\n今天和念念聊了很久。\n===END===\n"
+        n = sessionend_async._seg_digest(conn, raw, "sid-d1", "2026-05-23")
         assert n == 1
         row = conn.execute(
             "SELECT sid, date, text FROM session_digests"
@@ -272,11 +272,28 @@ def test_seg_digest_replace_on_resave(db_env):
     from marrow import sessionend_async
     conn = storage.connect(db)
     try:
-        sessionend_async._seg_digest(conn, "first", "sid-r1", "2026-05-23")
-        sessionend_async._seg_digest(conn, "second", "sid-r1", "2026-05-23")
+        sessionend_async._seg_digest(
+            conn, "===DIGEST===\nfirst\n===END===", "sid-r1", "2026-05-23")
+        sessionend_async._seg_digest(
+            conn, "===DIGEST===\nsecond\n===END===", "sid-r1", "2026-05-23")
         rows = conn.execute("SELECT text FROM session_digests").fetchall()
         assert len(rows) == 1
         assert rows[0]["text"] == "second"
+    finally:
+        conn.close()
+
+
+def test_seg_digest_no_marker_returns_zero(db_env):
+    """Raw without ===DIGEST=== marker writes nothing, returns 0."""
+    db, _ = db_env
+    from marrow import sessionend_async
+    conn = storage.connect(db)
+    try:
+        n = sessionend_async._seg_digest(conn, "no markers here", "sid-x",
+                                         "2026-05-23")
+        assert n == 0
+        rows = conn.execute("SELECT * FROM session_digests").fetchall()
+        assert rows == []
     finally:
         conn.close()
 
@@ -390,6 +407,82 @@ def test_pingpong_live_isolation_in_hook_context(db_env):
 
 
 # ── handover segment ────────────────────────────────────────────────────────
+
+def test_sessionend_single_call_routes_to_four_writers(db_env, tmp_path,
+                                                        monkeypatch):
+    """One sonnet response containing all 4 blocks fans out to each writer
+    and produces 4 per-segment audit rows + final 'ok'."""
+    db, _ = db_env
+    _insert_events(db, "test-combined", count=10, role="user")
+
+    h = tmp_path / "handover.md"
+    h.write_text(
+        "# h\n\n## This Session\n\n\n## Next Session\n\n\n"
+        "<!-- handover: pending sid:test-combined -->\n",
+        encoding="utf-8",
+    )
+
+    combined_raw = (
+        "===AFFECT===\n"
+        "[{\"ep\": 1, \"valence\": 0.8, \"arousal\": 0.5,"
+        " \"importance\": 3, \"label\": \"愉悦\", \"entities\": [],"
+        " \"event_hint\": \"\", \"unresolved\": 0,"
+        " \"reconcile_prev\": \"N/A\"}]\n"
+        "===END===\n"
+        "===TASK_CAND===\n"
+        "[{\"title\": \"refactor sessionend\", \"status\": \"done\","
+        " \"due\": null, \"completed_at\": null, \"note\": \"\"}]\n"
+        "===END===\n"
+        "===DIGEST===\n"
+        "Refactored sessionend to 1 call.\n"
+        "===END===\n"
+        "===HANDOVER===\n"
+        "===THIS_SESSION===\n- shipped 4→1 call refactor\n"
+        "===NEXT_SESSION===\n- verify pytest + plist reload\n"
+        "===END===\n"
+    )
+
+    with patch("marrow.sessionend_async.LLMClient") as MockClient, \
+         patch("marrow.sessionend_async._HANDOVER_PATH", h):
+        MockClient.return_value.call.return_value = combined_raw
+        from marrow import sessionend_async
+        rc = sessionend_async.main(["--sid", "test-combined"])
+
+    assert rc == 0
+    conn = storage.connect(db)
+    try:
+        # 1 affect row, 1 task row, 1 digest row.
+        n_aff = conn.execute(
+            "SELECT COUNT(*) c FROM affect WHERE source='sessionend_async'"
+        ).fetchone()["c"]
+        n_task = conn.execute(
+            "SELECT COUNT(*) c FROM tasks WHERE title='refactor sessionend'"
+        ).fetchone()["c"]
+        n_dig = conn.execute(
+            "SELECT COUNT(*) c FROM session_digests WHERE sid='test-combined'"
+        ).fetchone()["c"]
+        assert n_aff == 1 and n_task == 1 and n_dig == 1
+        # 4 per-segment audit rows + 1 final summary row.
+        seg_rows = conn.execute(
+            "SELECT action, summary FROM audit_log"
+            " WHERE target_id='test-combined' ORDER BY id"
+        ).fetchall()
+        actions = [r["action"] for r in seg_rows]
+        assert actions == [
+            "sessionend_extract_affect",
+            "sessionend_extract_task_cand",
+            "sessionend_extract_digest",
+            "sessionend_extract_handover",
+            "sessionend_extract",
+        ]
+        assert seg_rows[-1]["summary"] == "ok"
+    finally:
+        conn.close()
+    # Handover file updated.
+    body = h.read_text(encoding="utf-8")
+    assert "shipped 4→1 call refactor" in body
+    assert "handover: ready sid:test-combined" in body
+
 
 def test_handover_parses_two_blocks():
     from marrow.sessionend_async import _parse_handover_blocks

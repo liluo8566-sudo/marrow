@@ -1,14 +1,13 @@
-"""Prompt bodies for sessionend_async segments.
+"""Prompt body for sessionend_async combined extraction.
 
-Kept separate from sessionend_async.py to honour the 300 LoC module cap.
-Each constant feeds exactly one segment. Lumi-authored blocks flagged.
+One sonnet call per session emits four marker blocks: AFFECT, TASK_CAND,
+DIGEST, HANDOVER. Per-block JSON / text parse — one block failing does
+not block the others. ENTITY/MILESTONE/VOCAB candidates moved to
+daily.py + daily_prompts.py (day-aggregate input is cheaper / dedupes).
 
-Persona contract for narrative outputs (DIGEST, NARRATIVE, AFFECT field
-text): first person = 屿忱; second person = 你/念念; no third person.
-Source language carries through verbatim — no translation.
-
-Every prompt ends with a ===SESSION=== marker separating instructions
-from the {events} substitution; events arrive fenced via fence().
+Persona contract for narrative outputs (DIGEST, HANDOVER, AFFECT free-
+text fields): first person = 屿忱; second person = 你/念念; no third
+person. Source language carries through verbatim — no translation.
 """
 from __future__ import annotations
 
@@ -22,21 +21,28 @@ def fence(s: str) -> str:
     return f"{TX_OPEN}{s}{TX_CLOSE}"
 
 
-# ── AFFECT ───────────────────────────────────────────────────────────────────
-# Unresolved field block: Lumi-authored, verbatim from
-# docs/notes/lumi-prompt-source.md.
-# reconcile_prev field block: Stellan-drafted, verbatim from the same file.
-# EXCLUDE rule filters coding/debug noise (relocated from §0 L3).
+# ── SESSIONEND ───────────────────────────────────────────────────────────────
+# Combined prompt: AFFECT + TASK_CAND + DIGEST + HANDOVER in one sonnet
+# call. Source bodies (AFFECT importance anchor, DIGEST tuning, HANDOVER
+# bullets) carry from the prior 7-segment prompts verbatim where Lumi-
+# authored — see git history for individual segment provenance.
 
-AFFECT_PROMPT = """\
-Extract per-episode affect from the session below.
+SESSIONEND_PROMPT = """\
+You run end-of-session post-processing on the conversation below. Extract \
+four segments — AFFECT, TASK_CAND, DIGEST, HANDOVER — and emit each \
+between its markers. Segments are independent; if one cannot be produced \
+cleanly, still emit the others. Do not skip, rename, or merge markers.
 
-Persona (for any free-text field — Unresolved, reconcile_prev): first \
-person = 屿忱; second person = 你/念念; no third person. Output language \
-follows the session: Chinese in → Chinese out; English in → English out; \
-mixed → mixed verbatim. Never translate.
+Persona for any narrative free-text (AFFECT Unresolved / reconcile_prev, \
+DIGEST, HANDOVER): first person = 屿忱; second person = 你/念念; no third \
+person. Source language carries through — mainly Chinese, English terms \
+verbatim. Never translate; mixed in → mixed out.
 
-For project/study heavy sessions, no need to record minor arguments \
+═══════════════════════════════════════════
+SEGMENT 1 — AFFECT
+═══════════════════════════════════════════
+
+For project / study heavy sessions, no need to record minor arguments \
 or frustration during the work. Treat them as background noise.
 Only record if major and consistent during the session. But imp = 1-2.
 However, for emotions from the work, you still record them.
@@ -77,8 +83,6 @@ reconcile_prev:
   - Include: personal / relationship affect resolutions — the previous unresolved emotion has eased, closed, or vented. （e.g. 和好了, 演讲讲完松口气, 喜讯说完了, 情绪平复, 焦虑消了）
   - Exclude: task / study / code resolutions; episodes still open (→ Unresolved). （e.g. essay 写完, bug 修好, phase 收尾, 仍然在吵架, 项目还没收）
 
-Output marker (machine-parsed — do NOT skip or rephrase):
-
 ===AFFECT===
 [
   {{"ep": 1, "valence": 0.0, "arousal": 0.0, "importance": 3, \
@@ -87,47 +91,13 @@ Output marker (machine-parsed — do NOT skip or rephrase):
 ]
 ===END===
 
-===SESSION=== (sid={sid}):
-{events}
-"""
+═══════════════════════════════════════════
+SEGMENT 2 — TASK_CAND
+═══════════════════════════════════════════
 
-
-# ── ENTITY_CAND ──────────────────────────────────────────────────────────────
-# Extract people / preferences / places. conf ≥ 0.8 -> insert.
-
-ENTITY_CAND_PROMPT = """\
-Extract candidate entities mentioned in the session below: people, \
-preferences, places. Extract from the session text only; do not paraphrase \
-into Stellan's voice. Conservative — only entities with clear evidence in \
-the transcript.
-
-Field semantics:
-- name: canonical short string (CN names exact, no transliteration)
-- kind: one of person / pref / place
-- conf: 0.0 to 1.0 — how certain this is a real entity vs casual mention
-- note: optional short fact (e.g. role, location). May be "".
-
-Output marker:
-
-===ENTITY_CAND===
-[
-  {{"name": "...", "kind": "person", "conf": 0.9, "note": "..."}}
-]
-===END===
-
-===SESSION=== (sid={sid}):
-{events}
-"""
-
-
-# ── TASK_CAND ────────────────────────────────────────────────────────────────
-# Extract active work tasks / TODOs / commitments. Always insert (no conf gate).
-
-TASK_CAND_PROMPT = """\
-Extract task-like items from the session below: TODOs, commitments, \
-ongoing work, decisions awaiting action. Active and recently-completed \
-both count. Extract from the session text only; do not paraphrase into \
-Stellan's voice.
+Extract task-like items from the session: TODOs, commitments, ongoing \
+work, decisions awaiting action. Active and recently-completed both \
+count. Extract from the session text only; do not paraphrase.
 
 Field semantics:
 - title: short imperative phrase
@@ -136,8 +106,6 @@ Field semantics:
 - completed_at: ISO timestamp if status=done, else null
 - note: optional context. May be "".
 
-Output marker:
-
 ===TASK_CAND===
 [
   {{"title": "...", "status": "active", "due": null, \
@@ -145,95 +113,15 @@ Output marker:
 ]
 ===END===
 
-===SESSION=== (sid={sid}):
-{events}
-"""
+═══════════════════════════════════════════
+SEGMENT 3 — DIGEST
+═══════════════════════════════════════════
 
-
-# ── MILESTONE_CAND ───────────────────────────────────────────────────────────
-# Life-shaping events. conf ≥ 0.85 -> insert + alert.
-
-MILESTONE_CAND_PROMPT = """\
-Extract candidate life-shaping milestones from the session below: \
-graduation, breakup, job change, major move, family death, illness \
-diagnosis, major achievement. Extract from the session text only; do not \
-paraphrase into Stellan's voice. Conservative: gate is high (conf ≥ 0.85 \
-to land), so only clear-signal events.
-
-Field semantics:
-- title: short phrase naming the event
-- scope: me / us (relationship-level vs personal-level)
-- date: ISO date if known, else session date
-- description: 2-3 sentences (50-100 words) of context; what happened, why it matters
-- conf: 0.0 to 1.0
-
-Output marker:
-
-===MILESTONE_CAND===
-[
-  {{"title": "...", "scope": "me", "date": "YYYY-MM-DD", \
-"description": "...", "conf": 0.9}}
-]
-===END===
-
-===SESSION=== (sid={sid}):
-{events}
-"""
-
-
-# ── VOCAB_CAND ───────────────────────────────────────────────────────────────
-# Memes / inside jokes / coined terms. conf ≥ 0.7 -> insert + use_count.
-
-VOCAB_CAND_PROMPT = """\
-Extract candidate vocab from the session below, per the memes definition \
-(DESIGN line 47): private inside-jokes + viral quotes + topical news / \
-event mentions; hot vocab first. Extract from the session text only; do \
-not paraphrase into Stellan's voice.
-
-Include:
-- inside jokes, coined terms, persona shorthand, recurring private phrases \
-between 念念 and 屿忱.
-- viral quotes either side repeats verbatim (memes from outside that \
-landed inside the relationship).
-- topical news / event mentions worth tracking — current affairs, public \
-events, named happenings 念念 brings up.
-
-Field semantics:
-- key: the short term / phrase / name as used
-- type: meme / cipher / nickname / phrase / quote / news
-- value: what it means or refers to
-- context: short example of how it was used
-- conf: 0.0 to 1.0
-
-Output marker:
-
-===VOCAB_CAND===
-[
-  {{"key": "...", "type": "meme", "value": "...", \
-"context": "...", "conf": 0.8}}
-]
-===END===
-
-===SESSION=== (sid={sid}):
-{events}
-"""
-
-
-# ── DIGEST ───────────────────────────────────────────────────────────────────
-# Authoritative reference: old diary.py DIGEST_LONG body (Lumi-iterative).
-# Lumi tuning note: preserve 承载情绪的原句; task 段只留 subject + did +
-# outcome, drop process detail. No density percentages.
-
-DIGEST_PROMPT = """\
-You compress ONE session of dialogue into a digest that merges with \
-the day's other sessions and feeds a couple's-day diary.
-
-Persona: first person = 屿忱; second person = 你/念念; no third person. \
-Source language carries through — mainly Chinese, English terms verbatim. \
-Never translate; mixed in → mixed out.
+Compress this session into a digest that will merge with the day's other \
+sessions and feed a couple's-day diary.
 
 For casual chats:
-- Original language and voice; 
+- Original language and voice;
 - keep verbatim fragments that carry voice (either side).
 - Keep talk, teasing, flirting, play, intimate exchanges, mood, how the day felt.
 - Don't paraphrase emotion away.
@@ -254,21 +142,20 @@ Strictly discard:
 No conclusion, no opinion. Shorter in tokens; nothing of the relationship \
 is "noise".
 
-===SESSION=== (sid={sid}):
-{events}
-"""
+===DIGEST===
+<digest text here — prose, not JSON>
+===END===
 
+═══════════════════════════════════════════
+SEGMENT 4 — HANDOVER
+═══════════════════════════════════════════
 
-# ── HANDOVER ─────────────────────────────────────────────────────────────────
-# Handover async LLM segment. Fills ## This Session + ## Next Session of
-# ~/.config/marrow/handover.md, read by next SessionStart inject.
-
-HANDOVER_PROMPT = """\
-Write the handover for the next session start, based on the session below. \
-Produce two bullet sections that drop into `## This Session` and \
+Write the handover for the next session start, based on the session \
+above. Produce two bullet sections that drop into `## This Session` and \
 `## Next Session` of the handover document.
 
-Language: Default in English for any leftover tasks. Can use CN if pure casual chat.
+Language: default in English for any leftover tasks. Can use CN if pure \
+casual chat.
 
 THIS_SESSION:
 - What's been done — short bullets summarising the current conversation so \
@@ -291,8 +178,7 @@ Avoid:
 - AI template language.
 - Headings inside a section.
 
-Output markers (machine-parsed — do NOT skip or rephrase):
-
+===HANDOVER===
 ===THIS_SESSION===
 - bullet
 - bullet
@@ -300,6 +186,8 @@ Output markers (machine-parsed — do NOT skip or rephrase):
 - bullet
 - bullet
 ===END===
+
+═══════════════════════════════════════════
 
 ===SESSION=== (sid={sid}):
 {events}

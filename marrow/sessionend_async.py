@@ -1,12 +1,16 @@
-"""SessionEnd async LLM extraction: 7 sonnet segments + DB writes.
+"""SessionEnd async LLM extraction: 1 sonnet call → 4 block writers.
 
 CLI: python -m marrow.sessionend_async --sid <session_id>
 
-Per pipeline §2.3: AFFECT / ENTITY_CAND / TASK_CAND / MILESTONE_CAND /
-VOCAB_CAND / DIGEST / HANDOVER. Each segment is independent — failure of
-one does not block others; overall audit summary reports ok / partial / fail.
+One combined SESSIONEND_PROMPT emits AFFECT / TASK_CAND / DIGEST /
+HANDOVER blocks. Each writer parses its own marker — one block failing
+to parse does not block the others. Audit row per block + final summary
+(ok / partial / fail).
 
 Skip rule: sessions with ≤ skip_turn_threshold user turns extract nothing.
+
+ENTITY/MILESTONE/VOCAB candidate extraction lives in daily.py (day-
+aggregated input is cheaper and dedupes naturally).
 """
 from __future__ import annotations
 
@@ -18,13 +22,9 @@ import time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from . import config, storage
+from . import candidates, config, storage
 from .llm import LLMClient, LLMError
-from .sessionend_prompts import (
-    AFFECT_PROMPT, ENTITY_CAND_PROMPT, TASK_CAND_PROMPT,
-    MILESTONE_CAND_PROMPT, VOCAB_CAND_PROMPT, DIGEST_PROMPT,
-    HANDOVER_PROMPT, fence,
-)
+from .sessionend_prompts import SESSIONEND_PROMPT, fence
 
 _LOGS_DIR = Path.home() / ".config" / "marrow" / "logs"
 _TZ = ZoneInfo("Australia/Melbourne")
@@ -33,31 +33,20 @@ _CUTOFF_H = 6  # 6AM day boundary (per pipeline §6)
 _SUMMARY_OK = "ok"
 _SUMMARY_SKIP = "skip:short_session"
 
-_SEGMENTS = (
-    "affect", "entity_cand", "task_cand",
-    "milestone_cand", "vocab_cand", "digest", "handover",
-)
-
-_ENTITY_KINDS = {"person", "pref", "place"}
-_MILESTONE_SCOPES = {"me", "us"}
+_SEGMENTS = ("affect", "task_cand", "digest", "handover")
 
 
 # ── parsing helpers ─────────────────────────────────────────────────────────
 
-def _extract_block(text: str, marker: str) -> list | None:
-    """Pull JSON list between ===<marker>=== and ===END===. None on miss."""
+def _extract_text_block(text: str, marker: str) -> str:
+    """Pull prose between ===<marker>=== and the next ===END==='."""
     open_tag = f"==={marker}==="
     i = text.find(open_tag)
     if i == -1:
-        return None
+        return ""
     tail = text[i + len(open_tag):]
     j = tail.find("===END===")
-    body = tail[:j].strip() if j != -1 else tail.strip()
-    try:
-        parsed = json.loads(body)
-    except (json.JSONDecodeError, ValueError):
-        return None
-    return parsed if isinstance(parsed, list) else None
+    return tail[:j].strip() if j != -1 else tail.strip()
 
 
 def _clamp_importance(x) -> int:
@@ -136,7 +125,7 @@ def _write_final_audit(conn, sid: str, summary: str) -> None:
 
 def _seg_affect(conn, raw: str, sid: str, date: str) -> int:
     """Insert affect rows with importance clamp + unresolved/reconcile linkage."""
-    items = _extract_block(raw, "AFFECT")
+    items = candidates.extract_block(raw, "AFFECT")
     if not items:
         return 0
     n = 0
@@ -174,7 +163,7 @@ def _seg_affect(conn, raw: str, sid: str, date: str) -> int:
                 reconcile_ref = prior["id"]
 
         with conn:
-            cur = conn.execute(
+            conn.execute(
                 "INSERT INTO affect (date, ep, valence, arousal, importance,"
                 " label, entities, source, unresolved, reconcile_ref,"
                 " reconcile_prev_text)"
@@ -191,55 +180,12 @@ def _seg_affect(conn, raw: str, sid: str, date: str) -> int:
                     (ts_now, reconcile_ref),
                 )
             n += 1
-            _ = cur  # suppress unused
-    return n
-
-
-def _seg_entity_cand(conn, raw: str) -> int:
-    items = _extract_block(raw, "ENTITY_CAND")
-    if not items:
-        return 0
-    n = 0
-    seen: set[tuple[str, str]] = set()
-    for it in items:
-        if not isinstance(it, dict):
-            continue
-        try:
-            conf = float(it.get("conf", 0))
-        except (TypeError, ValueError):
-            conf = 0
-        if conf < 0.8:
-            continue
-        kind = (it.get("kind") or "").strip()
-        name = (it.get("name") or "").strip()
-        if kind not in _ENTITY_KINDS or not name:
-            continue
-        key = (kind, name)
-        if key in seen:
-            continue
-        seen.add(key)
-        exists = conn.execute(
-            "SELECT 1 FROM entities WHERE kind=? AND name=?"
-            " AND superseded_by IS NULL LIMIT 1", (kind, name),
-        ).fetchone()
-        if exists:
-            continue
-        fact = (it.get("note") or "").strip() or None
-        with conn:
-            conn.execute(
-                "INSERT INTO entities (kind, name, fact, source)"
-                " VALUES (?, ?, ?, ?)",
-                (kind, name, fact, "sessionend_async"),
-            )
-        n += 1
     return n
 
 
 def _seg_task_cand(conn, raw: str) -> int:
-    """tasks table: id/category/title/due/status/next_step/...
-    Map extracted fields to tasks schema (category='task' default).
-    """
-    items = _extract_block(raw, "TASK_CAND")
+    """tasks table: dedup on (title, status='active'); category='task'."""
+    items = candidates.extract_block(raw, "TASK_CAND")
     if not items:
         return 0
     n = 0
@@ -254,7 +200,6 @@ def _seg_task_cand(conn, raw: str) -> int:
             status = "active"
         due = it.get("due") or None
         note = (it.get("note") or "").strip() or None
-        # Dedup on (title, status='active')
         exists = conn.execute(
             "SELECT 1 FROM tasks WHERE title=? AND status='active' LIMIT 1",
             (title,),
@@ -271,85 +216,9 @@ def _seg_task_cand(conn, raw: str) -> int:
     return n
 
 
-def _seg_milestone_cand(conn, raw: str, date: str) -> int:
-    items = _extract_block(raw, "MILESTONE_CAND")
-    if not items:
-        return 0
-    n = 0
-    for it in items:
-        if not isinstance(it, dict):
-            continue
-        try:
-            conf = float(it.get("conf", 0))
-        except (TypeError, ValueError):
-            conf = 0
-        if conf < 0.85:
-            continue
-        title = (it.get("title") or "").strip()
-        if not title:
-            continue
-        scope = it.get("scope") or "me"
-        if scope not in _MILESTONE_SCOPES:
-            scope = "me"
-        m_date = it.get("date") or date
-        desc = (it.get("description") or "").strip() or None
-        with conn:
-            conn.execute(
-                "INSERT INTO milestones (scope, date, title, description, source)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (scope, m_date, title, desc, "sessionend_async"),
-            )
-        n += 1
-    return n
-
-
-def _seg_vocab_cand(conn, raw: str) -> int:
-    items = _extract_block(raw, "VOCAB_CAND")
-    if not items:
-        return 0
-    n = 0
-    for it in items:
-        if not isinstance(it, dict):
-            continue
-        try:
-            conf = float(it.get("conf", 0))
-        except (TypeError, ValueError):
-            conf = 0
-        if conf < 0.7:
-            continue
-        key = (it.get("key") or "").strip()
-        if not key:
-            continue
-        vtype = it.get("type") or "phrase"
-        value = (it.get("value") or "").strip() or None
-        context = (it.get("context") or "").strip() or None
-        # Existing key + same type -> bump use_count
-        row = conn.execute(
-            "SELECT id, use_count FROM vocab WHERE type=? AND key=? LIMIT 1",
-            (vtype, key),
-        ).fetchone()
-        ts_now = _dt.datetime.now(_dt.timezone.utc).strftime(
-            "%Y-%m-%dT%H:%M:%SZ")
-        with conn:
-            if row:
-                conn.execute(
-                    "UPDATE vocab SET use_count=use_count+1, last_seen=?"
-                    " WHERE id=?", (ts_now, row["id"]),
-                )
-            else:
-                conn.execute(
-                    "INSERT INTO vocab (type, key, value, context,"
-                    " use_count, last_seen, source_hash)"
-                    " VALUES (?, ?, ?, ?, 1, ?, ?)",
-                    (vtype, key, value, context, ts_now, "sessionend_async"),
-                )
-        n += 1
-    return n
-
-
 def _seg_digest(conn, raw: str, sid: str, date: str) -> int:
-    """Persist digest text into session_digests (INSERT OR REPLACE on sid)."""
-    body = raw.strip()
+    """Persist DIGEST text into session_digests. INSERT OR REPLACE on sid."""
+    body = _extract_text_block(raw, "DIGEST")
     if not body:
         return 0
     ts_now = _dt.datetime.now(_dt.timezone.utc).strftime(
@@ -394,8 +263,8 @@ def _inject_section(text: str, header: str, body: str) -> str:
 
 def _seg_handover(raw: str, sid: str) -> int:
     """Inject LLM bullets into `## This Session` / `## Next Session` of
-    ~/.config/marrow/handover.md. Also stamps the pending handover slot
-    as ready so SessionStart hook can detect sid alignment.
+    ~/.config/marrow/handover.md. Stamps pending → ready so SessionStart
+    can detect sid alignment.
     """
     this_s, next_s = _parse_handover_blocks(raw)
     if not this_s and not next_s:
@@ -407,7 +276,6 @@ def _seg_handover(raw: str, sid: str) -> int:
         text = _inject_section(text, "This Session", this_s)
     if next_s:
         text = _inject_section(text, "Next Session", next_s)
-    # Stamp pending → ready (race-avoidance per DECISIONS:46)
     pending_re = re.compile(r"<!--\s*handover:\s*pending\s+sid:(\S+)\s*-->")
     m = pending_re.search(text)
     ts_unix = int(time.time())
@@ -430,12 +298,6 @@ def _seg_handover(raw: str, sid: str) -> int:
 
 
 # ── main loop ───────────────────────────────────────────────────────────────
-
-def _run_segment(client, prompt_tpl, sid, events_text, tier="mid"):
-    body = prompt_tpl.format(sid=sid, events=events_text)
-    return client.call(role=f"sessionend_{prompt_tpl[:20]}",
-                       body=body, tier=tier)
-
 
 def main(argv: list[str] | None = None) -> int:
     args = argv if argv is not None else sys.argv[1:]
@@ -472,34 +334,29 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
         client = LLMClient(cfg=cfg)
-        failures: list[str] = []
-        seg_specs = (
-            ("affect", AFFECT_PROMPT,
-             lambda r: _seg_affect(conn, r, sid, date)),
-            ("entity_cand", ENTITY_CAND_PROMPT,
-             lambda r: _seg_entity_cand(conn, r)),
-            ("task_cand", TASK_CAND_PROMPT,
-             lambda r: _seg_task_cand(conn, r)),
-            ("milestone_cand", MILESTONE_CAND_PROMPT,
-             lambda r: _seg_milestone_cand(conn, r, date)),
-            ("vocab_cand", VOCAB_CAND_PROMPT,
-             lambda r: _seg_vocab_cand(conn, r)),
-            ("digest", DIGEST_PROMPT,
-             lambda r: _seg_digest(conn, r, sid, date)),
-            ("handover", HANDOVER_PROMPT,
-             lambda r: _seg_handover(r, sid)),
-        )
+        # One sonnet call emits all 4 segment blocks.
+        try:
+            raw = client.call(
+                role="sessionend",
+                body=SESSIONEND_PROMPT.format(sid=sid, events=events_text),
+                tier="mid",
+            )
+        except (LLMError, ValueError, RuntimeError) as e:
+            _write_final_audit(conn, sid, f"fail:{type(e).__name__}")
+            return 1
 
-        for name, tpl, writer in seg_specs:
+        writers = (
+            ("affect", lambda r: _seg_affect(conn, r, sid, date)),
+            ("task_cand", lambda r: _seg_task_cand(conn, r)),
+            ("digest", lambda r: _seg_digest(conn, r, sid, date)),
+            ("handover", lambda r: _seg_handover(r, sid)),
+        )
+        failures: list[str] = []
+        for name, writer in writers:
             try:
-                raw = client.call(
-                    role=f"sessionend_{name}",
-                    body=tpl.format(sid=sid, events=events_text),
-                    tier="mid",
-                )
                 writer(raw)
                 _write_segment_audit(conn, sid, name, "ok")
-            except (LLMError, ValueError, RuntimeError) as e:
+            except (ValueError, RuntimeError, TypeError, KeyError) as e:
                 failures.append(name)
                 try:
                     _write_segment_audit(
@@ -510,7 +367,7 @@ def main(argv: list[str] | None = None) -> int:
         if not failures:
             _write_final_audit(conn, sid, _SUMMARY_OK)
             return 0
-        if len(failures) == len(seg_specs):
+        if len(failures) == len(writers):
             _write_final_audit(conn, sid, "fail:all")
             return 1
         _write_final_audit(conn, sid, f"partial:{','.join(failures)}")
