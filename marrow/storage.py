@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS vocab (
   use_count INTEGER NOT NULL DEFAULT 0,
   last_seen TEXT,
   pinned INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'active',
   source_hash TEXT,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
@@ -328,14 +329,18 @@ def _migrate_to_v2(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_to_v3(conn: sqlite3.Connection) -> None:
-    """v3 schema: vocab.pinned column for LLM-controlled aging exemption.
+    """v3 schema: vocab.pinned (LLM-written, aging exemption) +
+    vocab.status (code-written by aging job — 'active' | 'dormant').
     Idempotent — duplicate ALTER swallowed; user_version short-circuits.
     """
     v = conn.execute("PRAGMA user_version").fetchone()[0]
     if v >= 3:
         return
-    try:
-        conn.execute(
-            "ALTER TABLE vocab ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass
+    for col, decl in (
+        ("pinned", "INTEGER NOT NULL DEFAULT 0"),
+        ("status", "TEXT NOT NULL DEFAULT 'active'"),
+    ):
+        try:
+            conn.execute(f"ALTER TABLE vocab ADD COLUMN {col} {decl}")
+        except sqlite3.OperationalError:
+            pass

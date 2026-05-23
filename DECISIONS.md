@@ -15,7 +15,7 @@
 - [verified] concurrent-write = fcntl.flock app-lock serializes routine/catchup/manual · goal6 · PROGRESS 2026-05-19 Major#3
 - [verified] migrate.py = 5 parsers + source_hash idempotent + dry-run/--apply · goal7 · PROGRESS 2026-05-17 #5
 - [verified] lesson left base → FUTURE opt-in addon; dashboard Alerts = bug/pipeline-fail only, Open Threads = daily/study/project only · goal4 · PROGRESS 2026-05-19 grill round 4
-- [verified] launchd 4 jobs active (diary-routine/catchup/db-backup/jsonl-cleanup); jsonl-cleanup is_headless-driven, currently provable no-op · goal6 · PROGRESS 2026-05-19
+- [verified] launchd 4 jobs (daily-routine/catchup/db-backup/aging); was diary-routine/catchup/db-backup/jsonl-cleanup (replaced by cc cleanupPeriodDays=30) · goal6 · PROGRESS 2026-05-19,2026-05-24
 
 ## Phase 2 (emotion + recall — converged 2026-05-19, real-source + blind-design)
 - [verified] affect granularity = per-episode, Lumi-locked; NOT per-event, NOT per-day · goal3/5 · handover 2026-05-19
