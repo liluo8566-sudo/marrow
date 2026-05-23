@@ -54,12 +54,12 @@
 
 ## Content flow — bidirectional
 - System → md: pipeline scans events, writes candidate rows, next render shows them. Idempotent on source_hash.
-- md → System: edit md (hook reconciles before next render, old → backup), or `mw` CLI by id, or tell Claude in plain language.
+- md → System: edit md (hook reconciles before next render), or `mw` CLI by id, or tell Claude in plain language.
 - Reconcile by view type:
   - Structured — row-end short id. id+text change → update; id removed → delete; new no-id block → insert.
   - Narrative (diary, goose-bites) — date heading = row boundary. Edit body → whole-row overwrite by id; delete block incl heading → delete day; clearing body alone is not a delete.
 - Anti-revive: deleted row's hash → tombstone, extractor skips.
-- Conflict: hash-compare before overwrite; mismatch → backup + 1 alert, never silent.
+- Hand-edit policy → DECISIONS (Lumi input > render; silent overwrite; alert only on AI/bug/reconcile-failure).
 - Pending: anchor char format · per-view render template · per-table extraction trigger/confidence.
 
 ## Hooks (four)
