@@ -91,13 +91,13 @@ def test_render_tasks_grouping_by_tag_and_time(env):
     far = (datetime.now(timezone.utc).date() + timedelta(days=30)).isoformat()
 
     # Today tasks (no due date, but we also test with a today due)
-    conn.execute("INSERT INTO threads(category,title,status,due) VALUES('Study','Study today','active',?)", (today,))
-    conn.execute("INSERT INTO threads(category,title,status,due) VALUES('Project','Project tomorrow','active',?)", (tomorrow,))
-    conn.execute("INSERT INTO threads(category,title,status,due) VALUES('Daily','Daily later','active',?)", (far,))
+    conn.execute("INSERT INTO tasks(category,title,status,due) VALUES('Study','Study today','active',?)", (today,))
+    conn.execute("INSERT INTO tasks(category,title,status,due) VALUES('Project','Project tomorrow','active',?)", (tomorrow,))
+    conn.execute("INSERT INTO tasks(category,title,status,due) VALUES('Daily','Daily later','active',?)", (far,))
     # No-due ends up in Later
-    conn.execute("INSERT INTO threads(category,title,status) VALUES('Appointment','No due task','active')")
+    conn.execute("INSERT INTO tasks(category,title,status) VALUES('Appointment','No due task','active')")
     # Done today
-    conn.execute("INSERT INTO threads(category,title,status,updated_at) VALUES('Study','Done study','done',?)",
+    conn.execute("INSERT INTO tasks(category,title,status,updated_at) VALUES('Study','Done study','done',?)",
                  (datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),))
     conn.commit()
 
@@ -123,9 +123,9 @@ def test_render_tasks_tag_order(env):
     db, _, _, _ = env
     conn = _conn(db)
     far = (datetime.now(timezone.utc).date() + timedelta(days=30)).isoformat()
-    conn.execute("INSERT INTO threads(category,title,status,due) VALUES('Others','Others task','active',?)", (far,))
-    conn.execute("INSERT INTO threads(category,title,status,due) VALUES('Study','Study task','active',?)", (far,))
-    conn.execute("INSERT INTO threads(category,title,status,due) VALUES('Project','Project task','active',?)", (far,))
+    conn.execute("INSERT INTO tasks(category,title,status,due) VALUES('Others','Others task','active',?)", (far,))
+    conn.execute("INSERT INTO tasks(category,title,status,due) VALUES('Study','Study task','active',?)", (far,))
+    conn.execute("INSERT INTO tasks(category,title,status,due) VALUES('Project','Project task','active',?)", (far,))
     conn.commit()
 
     out = top_sections.render_tasks(conn)
@@ -245,7 +245,7 @@ def test_render_affect_empty_tables(env):
 
 # ── Unit: handover_render ─────────────────────────────────────────────────────
 
-def test_handover_write_atomic_and_narrative_stamp(env, monkeypatch, tmp_path):
+def test_handover_write_atomic_and_handover_stamp(env, monkeypatch, tmp_path):
     """write_handover produces file at _RENDERED_PATH with sid stamp + 4 sections."""
     db, _, _, rendered_path = env
     conn = _conn(db)
@@ -257,7 +257,7 @@ def test_handover_write_atomic_and_narrative_stamp(env, monkeypatch, tmp_path):
     content = rendered_path.read_text(encoding="utf-8")
 
     # Narrative stamp present
-    assert "<!-- narrative: pending sid:abc123 -->" in content
+    assert "<!-- handover: pending sid:abc123 -->" in content
     # All 4 section headers present
     assert "## Alerts (active)" in content
     assert "## Tasks" in content
@@ -323,8 +323,8 @@ def test_dashboard_top_now_uses_4_sections(env):
     assert "## Tasks" in block
     assert "## Milestone candidate" in block
     assert "## Affect" in block
-    # Old "Open Threads" header must not appear
-    assert "## Open Threads" not in block
+    # Old "Open Tasks" header must not appear
+    assert "## Open Tasks" not in block
 
 
 def test_dashboard_top_markers_present(env):
@@ -397,3 +397,29 @@ def test_handover_render_hook_fail_soft(env, monkeypatch, tmp_path):
     finally:
         conn.close()
     assert alerts, "expected an alert for the render failure"
+
+
+# ── _inject_reference_commits / _last_3_commits ──────────────────────────────
+
+def test_inject_reference_commits_replaces_body():
+    text = ("## Reference (last 3 commits)\n"
+            "old body\n"
+            "more old\n\n"
+            "<!-- handover: pending -->\n")
+    out = handover_render._inject_reference_commits(text, "- abc one\n- def two")
+    assert "## Reference (last 3 commits)\n- abc one\n- def two\n\n" in out
+    assert "old body" not in out
+    assert "<!-- handover: pending -->" in out
+
+
+def test_inject_reference_commits_noop_on_empty():
+    text = "## Reference (last 3 commits)\nkeep me\n"
+    assert handover_render._inject_reference_commits(text, "") == text
+
+
+def test_last_3_commits_returns_bullets():
+    out = handover_render._last_3_commits()
+    # marrow repo has commits; expect bullet lines starting with "- "
+    if out:
+        for ln in out.splitlines():
+            assert ln.startswith("- ")

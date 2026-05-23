@@ -17,7 +17,16 @@ Unresolved:
   - Exclude: Resolved emotions, unresolved tasks, emotions related to study/project.（e.g. 已合好，情绪稳定，已聊完，essay还有两段）
 ```
 
-## reconcile_prev 
+## reconcile_prev
 
-> Pending. Stellan to draft in next window following the Unresolved block
-> structure above (Include / Exclude / N/A + Chinese examples).
+> Drafted by Stellan, 2026-05-23. Mirrors Unresolved structure (Include / Exclude / N/A + CN examples). Paste verbatim into AFFECT segment prompt.
+
+```
+reconcile_prev:
+  - Record when this session resolves or winds down a previously-unresolved emotional episode (the one referenced by reconcile_ref).
+  - Output a short Chinese phrase, not a sentence.
+  - If nothing fits, output N/A.
+  - Include: personal / relationship affect resolutions — the previous unresolved emotion has eased, closed, or vented. （e.g. 和好了, 演讲讲完松口气, 喜讯说完了, 情绪平复, 焦虑消了）
+  - Exclude: task / study / code resolutions; episodes still open (→ Unresolved). （e.g. essay 写完, bug 修好, phase 收尾, 仍然在吵架, 项目还没收）
+```
+

@@ -24,10 +24,10 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 10,
     )
 
 
-def open_threads(conn: sqlite3.Connection) -> list[dict]:
+def open_tasks(conn: sqlite3.Connection) -> list[dict]:
     rows = conn.execute(
         "SELECT id, category, title, due, next_step, last_session_summary "
-        "FROM threads WHERE status = 'active' "
+        "FROM tasks WHERE status = 'active' "
         "ORDER BY (due IS NULL), due, created_at"
     ).fetchall()
     return [dict(r) for r in rows]
@@ -44,9 +44,9 @@ def open_alerts(conn: sqlite3.Connection) -> list[dict]:
 
 
 def handoff(conn: sqlite3.Connection) -> dict:
-    # Phase 1 session-start payload: open threads + open alerts only.
+    # Phase 1 session-start payload: open tasks + open alerts only.
     # No who-i-am/persona (static CLAUDE.md layer); emotion is Phase 2.
-    return {"threads": open_threads(conn), "alerts": open_alerts(conn)}
+    return {"tasks": open_tasks(conn), "alerts": open_alerts(conn)}
 
 
 def add_alert(severity: str, atype: str, message: str,

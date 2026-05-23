@@ -5,7 +5,7 @@ marrow registers ALONGSIDE them, never replaces. Logic lives in the marrow
 package; this only does hook I/O (stdin JSON in, stdout JSON for
 SessionStart additionalContext, side effects for SessionEnd).
 
-  session_start      -> inject open threads + alerts + affect backdrop
+  session_start      -> inject open tasks + alerts + affect backdrop
   session_end        -> clean transcript, archive events, regen dashboard top
   user_prompt_submit -> deterministic vector recall fallback (scaffold; default off)
 
@@ -173,9 +173,9 @@ def _read_input() -> dict:
 
 def _handoff_text(conn) -> str:
     h = repo.handoff(conn)
-    lines = ["# Marrow handoff", "", "## Open Threads"]
-    if h["threads"]:
-        for t in h["threads"]:
+    lines = ["# Marrow handoff", "", "## Open Tasks"]
+    if h["tasks"]:
+        for t in h["tasks"]:
             due = f" [Due {t['due']}]" if t.get("due") else ""
             nxt = f" — {t['next_step']}" if t.get("next_step") else ""
             lines.append(f"- [{t['category']}] {t['title']}{nxt}{due} #{t['id']}")

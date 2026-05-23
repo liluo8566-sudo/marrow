@@ -13,7 +13,7 @@ import sqlite_vec
 
 from . import config
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Phase 1 first-class tables + Phase 2 affect/entities (DECISIONS Phase 2).
 # The retired emotions/people/preferences/dir placeholders stay absent.
@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS events (
   source_hash TEXT,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
-CREATE TABLE IF NOT EXISTS threads (
+CREATE TABLE IF NOT EXISTS tasks (
   id INTEGER PRIMARY KEY,
   category TEXT NOT NULL,
   title TEXT NOT NULL,
@@ -218,6 +218,10 @@ def init_db(path: str | None = None) -> sqlite3.Connection:
     conn = connect(path)
     dim = int(cfg.get("embedding", {}).get("dim", 1024))
     with conn:
+        # Pre-_TABLES rename: legacy DB has `threads` populated. Renaming
+        # before CREATE TABLE IF NOT EXISTS tasks is the only way to carry
+        # the rows across; doing it after would leave both tables present.
+        _pre_v2_rename(conn)
         conn.executescript(_TABLES)
         # FTS5 tokenizer migration: Phase 1 shipped unicode61 (CJK tokenless).
         # Drop + rebuild with trigram when stale; rebuild only on migration.
@@ -268,5 +272,54 @@ def init_db(path: str | None = None) -> sqlite3.Connection:
             "UPDATE milestones SET updated_at = created_at "
             "WHERE updated_at IS NULL"
         )
+        _migrate_to_v2(conn)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     return conn
+
+
+def _pre_v2_rename(conn: sqlite3.Connection) -> None:
+    """Pre-_TABLES rename: legacy `threads` -> `tasks`. Idempotent.
+
+    Must run BEFORE `_TABLES` so CREATE TABLE IF NOT EXISTS tasks does not
+    create a sibling empty table next to the populated legacy one.
+    """
+    has_threads = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='threads'"
+    ).fetchone()
+    has_tasks = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks'"
+    ).fetchone()
+    if has_threads and not has_tasks:
+        conn.execute("ALTER TABLE threads RENAME TO tasks")
+
+
+def _migrate_to_v2(conn: sqlite3.Connection) -> None:
+    """v2 schema: affect Unresolved/reconcile cols + session_digests table.
+    Idempotent — duplicate ALTER swallowed; user_version short-circuits.
+    """
+    v = conn.execute("PRAGMA user_version").fetchone()[0]
+    if v >= 2:
+        return
+    for col, decl in (
+        ("unresolved", "INTEGER DEFAULT 0"),
+        ("reconcile_ref", "INTEGER REFERENCES affect(id)"),
+        ("resolved_at", "TEXT"),
+        ("reconcile_prev_text", "TEXT"),
+    ):
+        try:
+            conn.execute(f"ALTER TABLE affect ADD COLUMN {col} {decl}")
+        except sqlite3.OperationalError:
+            pass
+    # session_digests: one row per sessionend_async DIGEST result.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS session_digests ("
+        "  sid TEXT PRIMARY KEY,"
+        "  date TEXT NOT NULL,"
+        "  text TEXT NOT NULL,"
+        "  ts TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))"
+        ")"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_session_digests_date"
+        " ON session_digests(date)"
+    )

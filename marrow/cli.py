@@ -106,8 +106,8 @@ def cmd_resolve(args) -> int:
 
 def cmd_done(args) -> int:
     return _shortcut(
-        args, "threads",
-        "UPDATE threads SET status='done' WHERE id=?", "status=done",
+        args, "tasks",
+        "UPDATE tasks SET status='done' WHERE id=?", "status=done",
     )
 
 

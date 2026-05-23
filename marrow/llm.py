@@ -1,6 +1,5 @@
 """LLM provider client. Callers pass intent (role + body + tier); provider,
-flags, model, channel are config. One chain: default -> emergency, generic
-over an ordered list so a fallback link is a config edit, not code.
+flags, model, channel are config. One chain: default only (2.5c P8 ollama strip).
 
 claude_cli isolation is built in and non-negotiable: a pipeline call must
 never inherit persona / user MCP / output-style.
@@ -17,8 +16,6 @@ import shutil
 import signal
 import subprocess
 import threading
-import urllib.error
-import urllib.request
 
 from . import config
 from . import storage
@@ -53,12 +50,6 @@ _REFUSAL_FINGERPRINTS = (
     "我恐怕无法",
 )
 
-# ollama is chronically down on this host; while muted it is dropped from the
-# chain entirely so a transient claude miss does not rotate into a guaranteed
-# "unreachable" critical-alert storm. Code path (_run_ollama) kept intact —
-# flip to False to bring it back. Provider-level retry absorbs the kind of
-# transient claude miss that previously needed the fallback.
-_MUTE_OLLAMA = True
 _RETRIES = 1  # per provider, before rotating
 
 
@@ -89,8 +80,6 @@ class LLMClient:
         self.chain = [
             nm for k in ("default", "fallback", "emergency")
             if (nm := llm.get(k))
-            and not (_MUTE_OLLAMA
-                     and (llm.get(nm) or {}).get("kind") == "ollama")
         ]
         self.specs = llm
         self.tiers = self.cfg.get("tiers", {})
@@ -135,8 +124,6 @@ class LLMClient:
         kind = spec.get("kind")
         if kind == "claude_cli":
             return self._run_claude_cli(spec, model, prompt)
-        if kind == "ollama":
-            return self._run_ollama(spec, prompt)
         raise LLMError(f"unknown provider kind: {kind}")
 
     def _run_claude_cli(self, spec: dict, model: str, prompt: str) -> str:
@@ -327,21 +314,3 @@ class LLMClient:
         except Exception:
             pass
 
-    def _run_ollama(self, spec: dict, prompt: str) -> str:
-        payload = json.dumps({
-            "model": spec.get("model", "qwen2.5:7b"),
-            "prompt": prompt,
-            "stream": False,
-        }).encode()
-        req = urllib.request.Request(
-            "http://localhost:11434/api/generate",
-            data=payload, headers={"Content-Type": "application/json"})
-        try:
-            with urllib.request.urlopen(req, timeout=spec.get("timeout_s", 180)) as resp:
-                data = json.loads(resp.read())
-        except (urllib.error.URLError, TimeoutError, OSError) as e:
-            raise LLMError(f"ollama unreachable: {e}") from e
-        text = data.get("response")
-        if not text:
-            raise LLMError("ollama: empty response")
-        return text

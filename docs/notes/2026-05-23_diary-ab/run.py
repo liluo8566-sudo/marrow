@@ -1,4 +1,9 @@
-"""One-off haiku vs sonnet A/B on SINGLE_CALL_PROMPT. Read-only on DB."""
+"""One-off haiku vs sonnet A/B on SINGLE_CALL_PROMPT. Read-only on DB.
+
+NOTE (2.5c): historical artifact. The marrow.diary module was deleted in
+phase 2.5c; this script references symbols that no longer exist. Kept for
+provenance; do not re-run.
+"""
 from __future__ import annotations
 
 import json

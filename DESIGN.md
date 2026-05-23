@@ -77,12 +77,12 @@
 
 ## LLM provider abstraction
 - All pipeline calls route through one client. Callers pass intent (role + body); provider/flags/model/credit channel are config.
-- Chain: stream-json subscription (default) → `claude -p` pool (fallback) → local Ollama (emergency). Swap = edit one config line.
+- Chain: stream-json subscription (default) → `claude -p` pool (fallback). Swap = edit one config line.
 - Auto-rotation: per-step alert; whole chain fails → halt + big alert, never silent degrade.
 - Pending: per-event tier/timeout/retry table, filled per event at build.
 
 ## Hard constraints
-- LLM via `claude` CLI subprocess (OAuth) or local Ollama. No cloud embedding.
+- LLM via `claude` CLI subprocess (OAuth). No cloud embedding.
 - Three tiers: cheap/local for tagging-routing (bulk), mid for narrative, top for user-facing only.
 - Atomic write every rendered md (temp + replace). Every scheduled job: try/except + alert row on fail.
 - Data under `~/.config/marrow/`, code under `~/cc-lab/marrow/`. Hook scripts ≤100 lines.

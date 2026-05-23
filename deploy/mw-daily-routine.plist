@@ -4,13 +4,13 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.marrow.diary-routine</string>
+  <string>com.marrow.daily-routine</string>
 
   <key>ProgramArguments</key>
   <array>
     <string>/Users/Gabrielle/cc-lab/marrow/.venv/bin/python</string>
     <string>-m</string>
-    <string>marrow.diary</string>
+    <string>marrow.daily</string>
   </array>
 
   <key>WorkingDirectory</key>
@@ -24,7 +24,7 @@
 
   <key>StartCalendarInterval</key>
   <dict>
-    <key>Hour</key><integer>4</integer>
+    <key>Hour</key><integer>7</integer>
     <key>Minute</key><integer>0</integer>
   </dict>
 
@@ -35,8 +35,8 @@
   <string>Background</string>
 
   <key>StandardOutPath</key>
-  <string>/Users/Gabrielle/Library/Logs/mw-diary-routine.log</string>
+  <string>/Users/Gabrielle/Library/Logs/mw-daily-routine.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/Gabrielle/Library/Logs/mw-diary-routine.log</string>
+  <string>/Users/Gabrielle/Library/Logs/mw-daily-routine.log</string>
 </dict>
 </plist>

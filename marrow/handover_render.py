@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import subprocess
 import tempfile
 import os
 from datetime import datetime
@@ -49,6 +50,31 @@ def _replace_top_sections(text: str, rendered: str) -> str:
     return before + "\n" + rendered + "\n" + after
 
 
+def _last_3_commits() -> str:
+    """git log -3 --oneline from the marrow repo, empty on any failure."""
+    repo = Path(__file__).resolve().parent.parent
+    try:
+        out = subprocess.check_output(
+            ["git", "log", "-3", "--oneline"],
+            cwd=str(repo), text=True, timeout=2,
+            stderr=subprocess.DEVNULL,
+        )
+        return "\n".join(f"- {ln}" for ln in out.strip().splitlines())
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        return ""
+
+
+def _inject_reference_commits(text: str, commits: str) -> str:
+    """Insert commit list under `## Reference (last 3 commits)`."""
+    if not commits:
+        return text
+    pat = re.compile(
+        r"(^## Reference \(last 3 commits\)[ \t]*\n)(.*?)(?=^## |^<!--|\Z)",
+        re.MULTILINE | re.DOTALL,
+    )
+    return pat.sub(lambda m: f"{m.group(1)}{commits}\n\n", text, count=1)
+
+
 def write_handover(conn: sqlite3.Connection, session_id: str) -> Path:
     """Atomic write of handover.md sync skeleton per §4.1."""
     template = _TEMPLATE_PATH.read_text(encoding="utf-8")
@@ -64,10 +90,13 @@ def write_handover(conn: sqlite3.Connection, session_id: str) -> Path:
     top = top_sections.render_top(conn)
     template = _replace_top_sections(template, top)
 
-    # Stamp narrative slot just before EOF
+    # Inject last-3-commits (code-fetched fact, not LLM)
+    template = _inject_reference_commits(template, _last_3_commits())
+
+    # Stamp handover slot just before EOF
     if not template.endswith("\n"):
         template += "\n"
-    template += f"<!-- narrative: pending sid:{session_id} -->\n"
+    template += f"<!-- handover: pending sid:{session_id} -->\n"
 
     out_path = _RENDERED_PATH
     _atomic_write(str(out_path), template)

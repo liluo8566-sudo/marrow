@@ -9,9 +9,7 @@ from marrow.llm import LLMClient, LLMError
 CFG = {
     "llm": {
         "default": "claude_cli",
-        "emergency": "ollama",
         "claude_cli": {"kind": "claude_cli", "mode": "json", "timeout_s": 5},
-        "ollama": {"kind": "ollama", "model": "m", "timeout_s": 5},
     },
     "tiers": {"cheap": "claude-haiku-4-5-20251001"},
 }
@@ -61,11 +59,6 @@ def test_parse_empty_raises():
         LLMClient._parse_claude(_json_out(""), "json")
 
 
-def test_ollama_muted_by_default_chain_is_claude_only():
-    c = LLMClient(CFG)
-    assert c.chain == ["claude_cli"]
-
-
 def test_retry_absorbs_transient_miss_no_alert(monkeypatch):
     alerts = []
     c = LLMClient(CFG, on_alert=lambda *a: alerts.append(a))
@@ -95,49 +88,6 @@ def test_claude_only_failure_is_warn(monkeypatch):
     assert "no fallback configured" in alerts[-1][2]
 
 
-def test_multi_tier_all_fail_last_alert_critical_exhausted(monkeypatch):
-    # Chain length >= 2, every tier fails -> warn (rotating) then critical
-    # (chain exhausted) on the terminal tier.
-    monkeypatch.setattr("marrow.llm._MUTE_OLLAMA", False)
-    alerts = []
-    c = LLMClient(CFG, on_alert=lambda *a: alerts.append(a))
-    assert c.chain == ["claude_cli", "ollama"]
-    monkeypatch.setattr(
-        c, "_run_claude_cli",
-        lambda s, m, p: (_ for _ in ()).throw(LLMError("cli down")))
-    monkeypatch.setattr(
-        c, "_run_ollama",
-        lambda spec, prompt: (_ for _ in ()).throw(LLMError("ollama down")))
-    with pytest.raises(LLMError, match="all providers failed"):
-        c.call("diary", "body", tier="cheap")
-    assert alerts[-1][0] == "critical"
-    assert "chain exhausted" in alerts[-1][2]
-
-
-def test_rotation_path_intact_when_unmuted(monkeypatch):
-    # ollama code path is retained; flipping the mute restores claude->ollama.
-    monkeypatch.setattr("marrow.llm._MUTE_OLLAMA", False)
-    alerts = []
-    c = LLMClient(CFG, on_alert=lambda *a: alerts.append(a))
-    assert c.chain == ["claude_cli", "ollama"]
-    monkeypatch.setattr(
-        c, "_run_claude_cli",
-        lambda s, m, p: (_ for _ in ()).throw(LLMError("cli down")))
-    monkeypatch.setattr(c, "_run_ollama", lambda spec, prompt: "from-ollama")
-    assert c.call("diary", "body", tier="cheap") == "from-ollama"
-    assert alerts and alerts[0][0] == "warn"
-    assert "rotating" in alerts[0][2]
-
-
-def test_whole_chain_fails_raises_and_critical_alert(monkeypatch):
-    # Multi-tier chain, every tier fails -> last alert is critical.
-    monkeypatch.setattr("marrow.llm._MUTE_OLLAMA", False)
-    alerts = []
-    c = LLMClient(CFG, on_alert=lambda *a: alerts.append(a))
-    monkeypatch.setattr(c, "_run", lambda *a: (_ for _ in ()).throw(LLMError("x")))
-    with pytest.raises(LLMError, match="all providers failed"):
-        c.call("lesson", "b")
-    assert any(a[0] == "critical" for a in alerts)
 
 
 def test_p_timeout_kills_process_group(tmp_path, monkeypatch):

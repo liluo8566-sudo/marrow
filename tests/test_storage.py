@@ -5,10 +5,10 @@ import pytest
 from marrow import storage
 
 PHASE1_TABLES = {
-    "events", "threads", "milestones", "vocab", "stickers",
+    "events", "tasks", "milestones", "vocab", "stickers",
     "pit", "diary", "goose_bites", "alerts", "audit_log",
 }
-PHASE2_ABSENT = {"emotions", "people", "preferences", "dir"}
+PHASE2_ABSENT = {"emotions", "people", "preferences", "dir", "threads"}
 
 
 @pytest.fixture()
@@ -262,6 +262,55 @@ def test_vec_dim_migration_rebuilds_when_empty(tmp_path, monkeypatch):
     ).fetchone()[0]
     conn.close()
     assert "float[1024]" in sql
+
+
+# --- v2 migration (Step 0): tasks rename + session_digests + affect cols ---
+
+def test_v2_threads_renamed_to_tasks(db):
+    """Fresh DB at user_version=2: tasks present, threads absent."""
+    names = _names(db)
+    assert "tasks" in names
+    assert "threads" not in names
+
+
+def test_v2_session_digests_table(db):
+    assert "session_digests" in _names(db)
+    assert {"sid", "date", "text", "ts"} <= _cols(db, "session_digests")
+
+
+def test_v2_affect_unresolved_cols(db):
+    cols = _cols(db, "affect")
+    assert {"unresolved", "reconcile_ref", "resolved_at",
+            "reconcile_prev_text"} <= cols
+
+
+def test_v2_legacy_threads_rename_preserves_rows(tmp_path):
+    """Legacy DB (user_version<2) with `threads` rows → rename to `tasks`."""
+    p = str(tmp_path / "legacy.db")
+    legacy = sqlite3.connect(p)
+    legacy.executescript(
+        "CREATE TABLE threads (id INTEGER PRIMARY KEY, category TEXT, "
+        "title TEXT, status TEXT, due TEXT, next_step TEXT,"
+        " last_session_summary TEXT, context_pointers TEXT,"
+        " outcome_log TEXT, created_at TEXT, updated_at TEXT);"
+        "INSERT INTO threads (category, title, status)"
+        " VALUES ('study', 'legacy-row', 'active');"
+        "PRAGMA user_version=1;"
+    )
+    legacy.commit()
+    legacy.close()
+    conn = storage.init_db(p)
+    try:
+        names = _names(conn)
+        assert "tasks" in names
+        assert "threads" not in names
+        row = conn.execute(
+            "SELECT title, status FROM tasks WHERE title='legacy-row'"
+        ).fetchone()
+        assert row is not None
+        assert row["status"] == "active"
+    finally:
+        conn.close()
 
 
 def test_vec_dim_migration_preserves_when_nonempty(tmp_path, monkeypatch):

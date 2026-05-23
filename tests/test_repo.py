@@ -52,22 +52,22 @@ def test_recall_budget_chars_truncates(db):
     assert total <= 4000
 
 
-# ── open_threads ──────────────────────────────────────────────────────────────
+# ── open_tasks ────────────────────────────────────────────────────────────────
 
-def test_open_threads_active_only(db):
-    db.execute("INSERT INTO threads(category,title,status) VALUES('work','A','active')")
-    db.execute("INSERT INTO threads(category,title,status) VALUES('work','B','closed')")
+def test_open_tasks_active_only(db):
+    db.execute("INSERT INTO tasks(category,title,status) VALUES('work','A','active')")
+    db.execute("INSERT INTO tasks(category,title,status) VALUES('work','B','closed')")
     db.commit()
-    titles = [t["title"] for t in repo.open_threads(db)]
+    titles = [t["title"] for t in repo.open_tasks(db)]
     assert "A" in titles
     assert "B" not in titles
 
 
-def test_open_threads_due_before_null(db):
-    db.execute("INSERT INTO threads(category,title,status,due) VALUES('work','NullDue','active',NULL)")
-    db.execute("INSERT INTO threads(category,title,status,due) VALUES('work','HasDue','active','2026-06-01')")
+def test_open_tasks_due_before_null(db):
+    db.execute("INSERT INTO tasks(category,title,status,due) VALUES('work','NullDue','active',NULL)")
+    db.execute("INSERT INTO tasks(category,title,status,due) VALUES('work','HasDue','active','2026-06-01')")
     db.commit()
-    titles = [t["title"] for t in repo.open_threads(db)]
+    titles = [t["title"] for t in repo.open_tasks(db)]
     assert titles.index("HasDue") < titles.index("NullDue")
 
 
@@ -96,15 +96,15 @@ def test_open_alerts_severity_order(db):
 
 def test_handoff_keys(db):
     h = repo.handoff(db)
-    assert set(h.keys()) == {"threads", "alerts"}
+    assert set(h.keys()) == {"tasks", "alerts"}
 
 
 def test_handoff_reflects_open(db):
-    db.execute("INSERT INTO threads(category,title,status) VALUES('work','T','active')")
+    db.execute("INSERT INTO tasks(category,title,status) VALUES('work','T','active')")
     db.execute("INSERT INTO alerts(severity,type,message) VALUES('warn','x','A')")
     db.commit()
     h = repo.handoff(db)
-    assert len(h["threads"]) == 1
+    assert len(h["tasks"]) == 1
     assert len(h["alerts"]) == 1
 
 

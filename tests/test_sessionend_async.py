@@ -149,7 +149,7 @@ def test_sessionend_async_idempotent(db_env):
 
 
 def test_sessionend_async_writes_fail_audit_on_exception(db_env):
-    """LLMClient.call raises → audit_log summary='fail:RuntimeError', rc=1."""
+    """LLMClient.call raises for every segment → final summary='fail:all', rc=1."""
     db, _ = db_env
     _insert_events(db, "test-fail", count=10, role="user")
 
@@ -161,7 +161,7 @@ def test_sessionend_async_writes_fail_audit_on_exception(db_env):
     assert rc == 1
     rows = _audit_rows(db, "test-fail")
     assert len(rows) == 1
-    assert rows[0]["summary"] == "fail:RuntimeError"
+    assert rows[0]["summary"] == "fail:all"
 
 
 # ── Unit 3: sessionstart_catchup ─────────────────────────────────────────────
@@ -245,6 +245,120 @@ def test_sessionend_hook_fires_async_popen(db_env, monkeypatch, tmp_path):
     assert async_calls[0][idx] == "sid-hook-test"
 
 
+# ── Segment writers: schema-v2 persistence ────────────────────────────────────
+
+def test_seg_digest_writes_session_digests_row(db_env):
+    """DIGEST segment persists into session_digests (not audit_log)."""
+    db, _ = db_env
+    from marrow import sessionend_async
+    conn = storage.connect(db)
+    try:
+        n = sessionend_async._seg_digest(conn, "今天和念念聊了很久。", "sid-d1",
+                                         "2026-05-23")
+        assert n == 1
+        row = conn.execute(
+            "SELECT sid, date, text FROM session_digests"
+        ).fetchone()
+        assert row["sid"] == "sid-d1"
+        assert row["date"] == "2026-05-23"
+        assert "念念" in row["text"]
+    finally:
+        conn.close()
+
+
+def test_seg_digest_replace_on_resave(db_env):
+    """Re-writing the same sid REPLACES the row (idempotent on sid)."""
+    db, _ = db_env
+    from marrow import sessionend_async
+    conn = storage.connect(db)
+    try:
+        sessionend_async._seg_digest(conn, "first", "sid-r1", "2026-05-23")
+        sessionend_async._seg_digest(conn, "second", "sid-r1", "2026-05-23")
+        rows = conn.execute("SELECT text FROM session_digests").fetchall()
+        assert len(rows) == 1
+        assert rows[0]["text"] == "second"
+    finally:
+        conn.close()
+
+
+def test_seg_affect_persists_reconcile_prev_text(db_env):
+    """affect.reconcile_prev_text holds the model's CN phrase (N/A → NULL)."""
+    db, _ = db_env
+    from marrow import sessionend_async
+    conn = storage.connect(db)
+    try:
+        # Seed an unresolved prior so reconcile_ref links.
+        conn.execute(
+            "INSERT INTO affect (date, ep, valence, arousal, importance,"
+            " label, source, unresolved)"
+            " VALUES ('2026-05-22', 1, 0.2, 0.7, 4, '焦虑',"
+            " 'sessionend_async', 1)")
+        conn.commit()
+        raw = (
+            "===AFFECT===\n"
+            "[{\"ep\": 1, \"valence\": 0.7, \"arousal\": 0.4,"
+            " \"importance\": 3, \"label\": \"释然\", \"entities\": [],"
+            " \"event_hint\": \"\", \"unresolved\": 0,"
+            " \"reconcile_prev\": \"和好了\"}]\n"
+            "===END===\n"
+        )
+        n = sessionend_async._seg_affect(conn, raw, "sid-a1", "2026-05-23")
+        assert n == 1
+        row = conn.execute(
+            "SELECT reconcile_prev_text, reconcile_ref FROM affect"
+            " WHERE date='2026-05-23'"
+        ).fetchone()
+        assert row["reconcile_prev_text"] == "和好了"
+        assert row["reconcile_ref"] is not None
+    finally:
+        conn.close()
+
+
+def test_seg_affect_na_reconcile_prev_text_is_null(db_env):
+    db, _ = db_env
+    from marrow import sessionend_async
+    conn = storage.connect(db)
+    try:
+        raw = (
+            "===AFFECT===\n"
+            "[{\"ep\": 1, \"valence\": 0.5, \"arousal\": 0.3,"
+            " \"importance\": 2, \"label\": \"平静\", \"entities\": [],"
+            " \"event_hint\": \"\", \"unresolved\": 0,"
+            " \"reconcile_prev\": \"N/A\"}]\n"
+            "===END===\n"
+        )
+        sessionend_async._seg_affect(conn, raw, "sid-a2", "2026-05-23")
+        row = conn.execute(
+            "SELECT reconcile_prev_text FROM affect WHERE date='2026-05-23'"
+        ).fetchone()
+        assert row["reconcile_prev_text"] is None
+    finally:
+        conn.close()
+
+
+def test_seg_task_cand_writes_tasks_table(db_env):
+    """TASK_CAND segment writes to renamed `tasks` table."""
+    db, _ = db_env
+    from marrow import sessionend_async
+    conn = storage.connect(db)
+    try:
+        raw = (
+            "===TASK_CAND===\n"
+            "[{\"title\": \"Ship 2.5c\", \"status\": \"active\","
+            " \"due\": null, \"completed_at\": null, \"note\": \"\"}]\n"
+            "===END===\n"
+        )
+        n = sessionend_async._seg_task_cand(conn, raw)
+        assert n == 1
+        row = conn.execute(
+            "SELECT title, status FROM tasks WHERE title='Ship 2.5c'"
+        ).fetchone()
+        assert row is not None
+        assert row["status"] == "active"
+    finally:
+        conn.close()
+
+
 # ── Manual: live isolation test ───────────────────────────────────────────────
 
 @pytest.mark.manual
@@ -273,3 +387,58 @@ def test_pingpong_live_isolation_in_hook_context(db_env):
     assert rc == 0
     rows = _audit_rows(db, "live-ping-sid")
     assert rows and rows[-1]["summary"] == "ok"
+
+
+# ── handover segment ────────────────────────────────────────────────────────
+
+def test_handover_parses_two_blocks():
+    from marrow.sessionend_async import _parse_handover_blocks
+    raw = ("intro\n===THIS_SESSION===\n- did A\n- did B\n"
+           "===NEXT_SESSION===\n- pick up C\n===END===\n")
+    this_s, next_s = _parse_handover_blocks(raw)
+    assert this_s == "- did A\n- did B"
+    assert next_s == "- pick up C"
+
+
+def test_handover_inject_section_replaces_body():
+    from marrow.sessionend_async import _inject_section
+    text = "## This Session\nold\nstuff\n\n## Next Session\nkeep\n"
+    out = _inject_section(text, "This Session", "- new")
+    assert "## This Session\n- new\n" in out
+    assert "## Next Session\nkeep" in out
+    assert "old" not in out
+
+
+def test_seg_handover_injects_into_handover(tmp_path, monkeypatch):
+    from marrow import sessionend_async
+    h = tmp_path / "handover.md"
+    h.write_text(
+        "# Marrow handover\n\n## This Session\n\n\n## Next Session\n\n\n"
+        "<!-- handover: pending sid:S1 -->\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sessionend_async, "_HANDOVER_PATH", h)
+    raw = ("===THIS_SESSION===\n- shipped phase 2.5c\n"
+           "===NEXT_SESSION===\n- launchctl + commit\n===END===\n")
+    n = sessionend_async._seg_handover(raw, "S1")
+    assert n == 1
+    body = h.read_text(encoding="utf-8")
+    assert "- shipped phase 2.5c" in body
+    assert "- launchctl + commit" in body
+    assert "handover: ready sid:S1" in body
+    assert "handover: pending" not in body
+
+
+def test_seg_handover_sid_lag_label(tmp_path, monkeypatch):
+    from marrow import sessionend_async
+    h = tmp_path / "handover.md"
+    h.write_text(
+        "## This Session\n\n## Next Session\n\n"
+        "<!-- handover: pending sid:OLD -->\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sessionend_async, "_HANDOVER_PATH", h)
+    raw = ("===THIS_SESSION===\n- x\n===NEXT_SESSION===\n- y\n===END===\n")
+    sessionend_async._seg_handover(raw, "NEW")
+    body = h.read_text(encoding="utf-8")
+    assert "handover sid=NEW, skeleton sid=OLD" in body

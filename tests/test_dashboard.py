@@ -20,7 +20,7 @@ M1 = "<!-- marrow:top:end -->"
 def db(tmp_path):
     p = str(tmp_path / "t.db")
     conn = storage.init_db(p)
-    conn.execute("INSERT INTO threads(category,title,status,due,next_step) "
+    conn.execute("INSERT INTO tasks(category,title,status,due,next_step) "
                  "VALUES('study','Essay 370','active','2026-05-20','write intro')")
     conn.execute("INSERT INTO alerts(severity,type,message) "
                  "VALUES('warn','bug','recall returned 0')")
@@ -29,7 +29,7 @@ def db(tmp_path):
     return p
 
 
-def test_render_top_has_alerts_and_threads(db):
+def test_render_top_has_alerts_and_tasks(db):
     conn = storage.connect(db)
     try:
         block = dashboard.render_top(conn)

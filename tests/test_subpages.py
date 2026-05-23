@@ -37,9 +37,9 @@ def db(tmp_path):
                      "VALUES('cipher','大龙虾','Openclaw','popular AI agent',5)")
         conn.execute("INSERT INTO goose_bites(date,bites,best) "
                      "VALUES('2026-05-20','quack quack',1)")
-        conn.execute("INSERT INTO threads(category,title,status,due,next_step) "
+        conn.execute("INSERT INTO tasks(category,title,status,due,next_step) "
                      "VALUES('study','Biochem:Unit 3','active','2026-06-01','read ch5')")
-        conn.execute("INSERT INTO threads(category,title,status,next_step) "
+        conn.execute("INSERT INTO tasks(category,title,status,next_step) "
                      "VALUES('project','Marrow','active','build subpages')")
         conn.execute("INSERT INTO pit(title,description,status) "
                      "VALUES('old feature','dropped idea','idea')")

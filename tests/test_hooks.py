@@ -22,7 +22,7 @@ def env(tmp_path, monkeypatch):
     sub_folder = str(tmp_path / "sub_pages")
     sub_state = str(tmp_path / "sub_state")
     conn = storage.init_db(db)
-    conn.execute("INSERT INTO threads(category,title,status) "
+    conn.execute("INSERT INTO tasks(category,title,status) "
                  "VALUES('study','GAMSAT plan','active')")
     conn.commit()
     conn.close()
@@ -306,7 +306,7 @@ def test_affect_backdrop_char_cap(env, monkeypatch, capsys):
     _stdin(monkeypatch, {})
     hooks.main(["session_start"])
     ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
-    # Full context can be longer (threads+alerts+backdrop), but backdrop itself ≤350
+    # Full context can be longer (tasks+alerts+backdrop), but backdrop itself ≤350
     # Extract backdrop section
     if "## Affect" in ctx:
         backdrop_section = ctx.split("## Affect\n", 1)[1].split("\n\n")[0]
@@ -318,10 +318,10 @@ def test_session_start_total_hard_cap(env, monkeypatch, capsys):
     db, _, _ = env
     conn = storage.connect(db)
     today = datetime.now(timezone.utc).date()
-    # Add a lot of threads and alerts to bloat the output.
+    # Add a lot of tasks and alerts to bloat the output.
     for i in range(50):
-        conn.execute("INSERT INTO threads(category,title,status) VALUES('work',?,?)",
-                     (f"Thread {i} " + "x" * 100, "active"))
+        conn.execute("INSERT INTO tasks(category,title,status) VALUES('work',?,?)",
+                     (f"Task {i} " + "x" * 100, "active"))
     for i in range(20):
         conn.execute("INSERT INTO alerts(severity,type,message) VALUES('warn','test',?)",
                      ("Alert " + "y" * 200,))

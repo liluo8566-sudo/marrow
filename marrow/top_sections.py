@@ -91,13 +91,14 @@ def render_alerts(conn: sqlite3.Connection) -> str:
 def render_tasks(conn: sqlite3.Connection) -> str:
     cutoff_iso = _day_cutoff_utc().strftime("%Y-%m-%dT%H:%M:%SZ")
     done = conn.execute(
-        "SELECT category, title FROM threads WHERE status='done' AND updated_at>=? "
+        "SELECT category, title FROM tasks WHERE status='done' AND updated_at>=? "
         "ORDER BY updated_at DESC", (cutoff_iso,)).fetchall()
 
     today_local = datetime.now(_TZ).date()
     next7 = today_local + timedelta(days=7)
     active = conn.execute(
-        "SELECT category, title, due, created_at FROM threads WHERE status='active' "
+        "SELECT category, title, due, created_at, next_step FROM tasks "
+        "WHERE status='active' "
         "ORDER BY (due IS NULL), due, created_at").fetchall()
 
     buckets: dict[str, list] = {"t": [], "n": [], "l": []}
@@ -114,23 +115,34 @@ def render_tasks(conn: sqlite3.Connection) -> str:
     for k in buckets:
         buckets[k].sort(key=_tag_key)
 
+    def _row(r, date_str: str | None) -> str:
+        tag = r[0] or "Others"
+        detail = f": {r[4]}" if r[4] else ""
+        date_part = f" [{date_str}]" if date_str else ""
+        return f"- [ ] [{tag}] {r[1]}{detail}{date_part}"
+
     out = [f"## Tasks", f"### Completed [{len(done)}]"]
     out += [f"- [x] [{r[0] or 'Others'}] {r[1]}" for r in done] if done else ["- (none)"]
     out.append(f"### To-Do List [{len(active)}]")
     out.append("Today")
-    out += [f"- [ ] [{r[0] or 'Others'}] {r[1]}" for r in buckets["t"]] if buckets["t"] else ["- (none)"]
+    out += [_row(r, None) for r in buckets["t"]] if buckets["t"] else ["- (none)"]
     out.append("Next 7 Days")
     if buckets["n"]:
-        out += [f"- [ ] [{r[0] or 'Others'}] {r[1]}" + (f" [{r[2][:10]}]" if r[2] else "") for r in buckets["n"]]
+        out += [_row(r, r[2][:10] if r[2] else None) for r in buckets["n"]]
     else:
         out.append("- (none)")
     out.append("Later")
-    if buckets["l"]:
-        for r in buckets["l"]:
-            ds = f" [{r[2][:10]}]" if r[2] else (f" [{r[3][:10]}]" if r[3] else "")
-            out.append(f"- [ ] [{r[0] or 'Others'}] {r[1]}{ds}")
-    else:
+    l_due = [r for r in buckets["l"] if r[2]]
+    l_nodue = [r for r in buckets["l"] if not r[2]]
+    if not l_due and not l_nodue:
         out.append("- (none)")
+    else:
+        if l_due:
+            out += [_row(r, r[2][:10]) for r in l_due]
+        if l_due and l_nodue:
+            out.append("---")
+        if l_nodue:
+            out += [_row(r, r[3][:10] if r[3] else None) for r in l_nodue]
     return "\n".join(out)
 
 

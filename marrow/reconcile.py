@@ -1,6 +1,6 @@
 """md->DB reconcile for sub-pages.
 
-Scope: milestone only. Vocab/pit/threads plug in later via the same shape
+Scope: milestone only. Vocab/pit/tasks plug in later via the same shape
 (parse(md)->rows, diff against DB, apply). reconcile_milestones is the
 public entry; write_subpage wires it via SubPageConfig.reconcile.
 """

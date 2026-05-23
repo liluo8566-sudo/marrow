@@ -138,16 +138,16 @@ def write_subpage(cfg: SubPageConfig, conn: sqlite3.Connection,
 
 def build_study_configs(conn: sqlite3.Connection,
                         folder: str, state_dir: str) -> SubPageConfig:
-    """Study index + one child per unit (threads grouped by title prefix)."""
+    """Study index + one child per unit (tasks grouped by title prefix)."""
     rows = conn.execute(
         "SELECT id, title, due, status, next_step "
-        "FROM threads WHERE category = 'study' "
+        "FROM tasks WHERE category = 'study' "
         "ORDER BY (due IS NULL), due, created_at"
     ).fetchall()
-    threads = [dict(r) for r in rows]
+    tasks = [dict(r) for r in rows]
 
     units: dict[str, list[dict]] = defaultdict(list)
-    for t in threads:
+    for t in tasks:
         unit = t["title"].split(":")[0].strip() if ":" in t["title"] else t["title"]
         units[unit].append(t)
 
@@ -183,13 +183,13 @@ def build_study_configs(conn: sqlite3.Connection,
 
 def build_projects_configs(conn: sqlite3.Connection,
                            folder: str, state_dir: str) -> SubPageConfig:
-    """Projects index + pit child + one child per project thread."""
+    """Projects index + pit child + one child per project task."""
     rows = conn.execute(
         "SELECT id, title, status, next_step, due, "
         "last_session_summary, context_pointers, outcome_log "
-        "FROM threads WHERE category = 'project'"
+        "FROM tasks WHERE category = 'project'"
     ).fetchall()
-    threads = [dict(r) for r in rows]
+    tasks = [dict(r) for r in rows]
 
     proj_state = str(Path(state_dir) / "projects")
 
@@ -212,7 +212,7 @@ def build_projects_configs(conn: sqlite3.Connection,
             path=str(Path(folder) / "projects" / f"{t['title']}.md"),
             state_dir=proj_state,
         )
-        for t in threads
+        for t in tasks
     ]
 
     return SubPageConfig(

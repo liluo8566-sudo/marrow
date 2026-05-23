@@ -19,11 +19,16 @@ _DEFAULT_WORKER_MODELS = ["claude-haiku-4-5", "claude-sonnet-4-6"]
 # no model signal. Its first user / queue-operation content head matches a
 # Marrow-pipeline or prompt-lint spawn prompt; a real interrupted session
 # carries a human prompt instead. Heads kept in sync with the prompt
-# constants in marrow/diary.py and ~/.claude/hooks/prompt-lint.py.
+# constants in marrow/daily.py, marrow/sessionend_prompts.py, and
+# ~/.claude/hooks/prompt-lint.py.
 _SPAWN_HEADS = (
-    "You compress ONE short session",
-    "You compress ONE long session",
-    "Below are per-session digests of",
+    "You compress ONE long session of dialogue",
+    "Extract per-episode affect from the session",
+    "Extract candidate entities mentioned in the session",
+    "Extract task-like items from the session",
+    "Extract candidate life-shaping milestones from the session",
+    "Extract candidate vocab from the session",
+    "Write the handover narrative",
     "你是褚屿忱，你要以第一人称写一篇日记",
     "You are a ruthless markdown compressor",
     "You compress a markdown edit",

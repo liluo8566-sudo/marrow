@@ -15,7 +15,7 @@ def db(tmp_path):
     p = str(tmp_path / "t.db")
     conn = storage.init_db(p)
     conn.execute(
-        "INSERT INTO threads(category,title,status) VALUES('work','Old','active')"
+        "INSERT INTO tasks(category,title,status) VALUES('work','Old','active')"
     )
     conn.execute(
         "INSERT INTO alerts(severity,type,message,resolved) "
@@ -37,31 +37,31 @@ def _rows(p, sql, args=()):
 # ── set: core point-edit ──────────────────────────────────────────────────────
 
 def test_set_updates_one_field(db):
-    rc = cli.main(["set", "threads", "1", "title", "Renamed", "--db", db])
+    rc = cli.main(["set", "tasks", "1", "title", "Renamed", "--db", db])
     assert rc == 0
-    row = _rows(db, "SELECT title FROM threads WHERE id=1")[0]
+    row = _rows(db, "SELECT title FROM tasks WHERE id=1")[0]
     assert row["title"] == "Renamed"
 
 
 def test_set_mirrors_audit_log(db):
-    cli.main(["set", "threads", "1", "title", "Renamed", "--db", db])
+    cli.main(["set", "tasks", "1", "title", "Renamed", "--db", db])
     a = _rows(
         db,
-        "SELECT * FROM audit_log WHERE target_table='threads' AND target_id='1'",
+        "SELECT * FROM audit_log WHERE target_table='tasks' AND target_id='1'",
     )
     assert len(a) == 1
     assert a[0]["action"] == "update"
 
 
 def test_set_blocks_protected_field(db):
-    rc = cli.main(["set", "threads", "1", "id", "99", "--db", db])
+    rc = cli.main(["set", "tasks", "1", "id", "99", "--db", db])
     assert rc != 0
     # original row untouched
-    assert _rows(db, "SELECT id FROM threads")[0]["id"] == 1
+    assert _rows(db, "SELECT id FROM tasks")[0]["id"] == 1
 
 
 def test_set_blocks_unknown_field(db):
-    rc = cli.main(["set", "threads", "1", "nope", "x", "--db", db])
+    rc = cli.main(["set", "tasks", "1", "nope", "x", "--db", db])
     assert rc != 0
 
 
@@ -71,7 +71,7 @@ def test_set_rejects_unknown_table(db):
 
 
 def test_set_missing_id_fails(db):
-    rc = cli.main(["set", "threads", "999", "title", "x", "--db", db])
+    rc = cli.main(["set", "tasks", "999", "title", "x", "--db", db])
     assert rc != 0
     assert _rows(db, "SELECT COUNT(*) c FROM audit_log")[0]["c"] == 0
 
@@ -79,15 +79,15 @@ def test_set_missing_id_fails(db):
 # ── rm ─────────────────────────────────────────────────────────────────────────
 
 def test_rm_deletes_row_and_audits(db):
-    rc = cli.main(["rm", "threads", "1", "--db", db])
+    rc = cli.main(["rm", "tasks", "1", "--db", db])
     assert rc == 0
-    assert _rows(db, "SELECT COUNT(*) c FROM threads")[0]["c"] == 0
-    a = _rows(db, "SELECT action FROM audit_log WHERE target_table='threads'")
+    assert _rows(db, "SELECT COUNT(*) c FROM tasks")[0]["c"] == 0
+    a = _rows(db, "SELECT action FROM audit_log WHERE target_table='tasks'")
     assert a[0]["action"] == "delete"
 
 
 def test_rm_missing_id_fails(db):
-    rc = cli.main(["rm", "threads", "999", "--db", db])
+    rc = cli.main(["rm", "tasks", "999", "--db", db])
     assert rc != 0
 
 
@@ -101,16 +101,16 @@ def test_resolve_marks_alert(db):
     assert row["resolved_at"] is not None
 
 
-def test_done_marks_thread(db):
+def test_done_marks_task(db):
     rc = cli.main(["done", "1", "--db", db])
     assert rc == 0
-    assert _rows(db, "SELECT status FROM threads WHERE id=1")[0]["status"] == "done"
+    assert _rows(db, "SELECT status FROM tasks WHERE id=1")[0]["status"] == "done"
 
 
 # ── show / ls read paths ───────────────────────────────────────────────────────
 
 def test_show_prints_row(db, capsys):
-    rc = cli.main(["show", "threads", "1", "--db", db])
+    rc = cli.main(["show", "tasks", "1", "--db", db])
     assert rc == 0
     out = capsys.readouterr().out
     assert "Old" in out
@@ -118,18 +118,18 @@ def test_show_prints_row(db, capsys):
 
 
 def test_show_missing_id_fails(db):
-    assert cli.main(["show", "threads", "999", "--db", db]) != 0
+    assert cli.main(["show", "tasks", "999", "--db", db]) != 0
 
 
 def test_ls_lists_rows(db, capsys):
-    cli.main(["ls", "threads", "--db", db])
+    cli.main(["ls", "tasks", "--db", db])
     out = capsys.readouterr().out
     assert "Old" in out
 
 
 def test_ls_status_filter(db, capsys):
-    cli.main(["set", "threads", "1", "status", "done", "--db", db])
-    cli.main(["ls", "threads", "--status", "active", "--db", db])
+    cli.main(["set", "tasks", "1", "status", "done", "--db", db])
+    cli.main(["ls", "tasks", "--status", "active", "--db", db])
     assert "Old" not in capsys.readouterr().out
 
 

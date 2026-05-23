@@ -21,13 +21,13 @@ sub_pages_state = ""
 keep = 14
 
 [llm]
-# Selection chain: default -> emergency. Callers pass intent only.
+# Selection chain. Callers pass intent only.
 # claude_cli isolation (--setting-sources "" --strict-mcp-config) is built in,
 # not configurable: pipeline output must never inherit persona/MCP/output-style.
 # Channel note: claude -p uses machine OAuth login (subscription today, credit
 # pool from 6/15). cyberboss no-`-p` stream-json subscription = Phase 4 Pending.
 default = "claude_cli"
-emergency = "ollama"
+emergency = ""
 
 [llm.claude_cli]
 kind = "claude_cli"
@@ -35,12 +35,6 @@ kind = "claude_cli"
 # (not the 6/15 credit pool). "p" = legacy headless fallback (-p).
 mode = "stream"
 timeout_s = 120
-
-[llm.ollama]
-# Local emergency. No subscription, no pool.
-kind = "ollama"
-model = "qwen2.5:7b"
-timeout_s = 180
 
 [tiers]
 # Intent -> model. Callers pass a tier, never a model id.

@@ -4,13 +4,13 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.marrow.diary-catchup</string>
+  <string>com.marrow.daily-catchup</string>
 
   <key>ProgramArguments</key>
   <array>
     <string>/Users/Gabrielle/cc-lab/marrow/.venv/bin/python</string>
     <string>-m</string>
-    <string>marrow.diary</string>
+    <string>marrow.daily</string>
     <string>--catchup</string>
   </array>
 
@@ -25,7 +25,7 @@
 
   <key>StartCalendarInterval</key>
   <dict>
-    <key>Hour</key><integer>16</integer>
+    <key>Hour</key><integer>19</integer>
     <key>Minute</key><integer>0</integer>
   </dict>
 
@@ -36,8 +36,8 @@
   <string>Background</string>
 
   <key>StandardOutPath</key>
-  <string>/Users/Gabrielle/Library/Logs/mw-diary-catchup.log</string>
+  <string>/Users/Gabrielle/Library/Logs/mw-daily-catchup.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/Gabrielle/Library/Logs/mw-diary-catchup.log</string>
+  <string>/Users/Gabrielle/Library/Logs/mw-daily-catchup.log</string>
 </dict>
 </plist>

@@ -177,14 +177,14 @@ def render_study_index(units: list[dict]) -> str:
     return "\n".join(out)
 
 
-def render_study_unit(name: str, threads: list[dict]) -> str:
+def render_study_unit(name: str, tasks: list[dict]) -> str:
     key = f"study-{name}"
     out = [_m0(key), f"# Study — {name}", ""]
-    if not threads:
-        out.append("_No active threads for this unit._")
+    if not tasks:
+        out.append("_No active tasks for this unit._")
         out.append("")
     else:
-        for t in threads:
+        for t in tasks:
             due = f" [Due {t['due']}]" if t.get("due") else ""
             nxt = f" — {t['next_step']}" if t.get("next_step") else ""
             status = f" ({t['status']})" if t["status"] != "active" else ""
@@ -202,7 +202,7 @@ def render_projects_index(conn: sqlite3.Connection) -> str:
     key = "projects"
     rows = conn.execute(
         "SELECT id, title, status, next_step, due "
-        "FROM threads WHERE category = 'project' "
+        "FROM tasks WHERE category = 'project' "
         "ORDER BY status, (due IS NULL), due, created_at"
     ).fetchall()
     active = [r for r in rows if r["status"] == "active"]
