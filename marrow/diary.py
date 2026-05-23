@@ -265,10 +265,16 @@ Emit one JSON object per `---` separated prose episode, ep starting at 1, in the
 ===END===
 
 Field semantics:
-- valence: -1 to 1 (negative to positive)
-- arousal: 0 to 1 (calm to excited)
-- importance: 1 to 10
-- label: 2-4 character Chinese tag
+- valence: 0 to 1 (negative to positive); 0.5 = neutral; band cutoffs Low/Neu/High @ 0.4 / 0.6
+- arousal: 0 to 1 (calm to excited); band cutoffs Calm/Active/Intense @ 0.4 / 0.6
+- importance: 1 to 5 (NOT 1-10). Measures FUTURE retention, NOT this-moment intensity. V/A and importance are independent axes.
+    5 — long-term (1+ month) life-shaping: graduation / family death / breakup / job change / major move
+    4 — mid-term (days-weeks) weighty: finals / project breakthrough / illness / travel / multi-day conflict
+    3 — short-term (within a week): funny moments / light quarrels / daily arguments / dinner with friends
+    2 — daily routine: tender exchanges / small talk / shift / appointments
+    1 — trivial: routine study/code without breakthrough / chores
+    When uncertain between two adjacent levels, pick the lower one.
+- label: 2-character Chinese precision tag, finer than the 9 main tones (低落/烦躁/痛苦 · 平淡/专注/紧张 · 温暖/愉悦/兴奋). Pick a specific emotion word like 狂怒/恐惧/绝望/委屈/窃喜/心碎/欣慰/雀跃, not a main tone.
 - entities: list of people / things / places (may be empty list)
 - event_hint: a short keyword phrase from the source that best represents this episode, used for later linking (may be empty string)
 

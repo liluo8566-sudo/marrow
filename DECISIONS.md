@@ -19,6 +19,7 @@
 
 ## Phase 2 (emotion + recall — converged 2026-05-19, real-source + blind-design)
 - [verified] affect granularity = per-episode, Lumi-locked; NOT per-event, NOT per-day · goal3/5 · handover 2026-05-19
+- [reasoned] importance 1-5 anchor (Lumi-locked): 5 = long-term (1+ month) life-shaping (graduation / family death / breakup); 4 = mid-term (days-weeks) weighty (finals / project breakthrough / illness); 3 = short-term (within a week) (funny moments / light quarrels / daily arguments); 2 = daily routine (tender exchanges / small talk / shift); 1 = trivial (routine study/code / chores); V/A measure THIS moment, importance measures FUTURE retention, independent axes; tiebreak = pick lower · goal3 · 2026-05-23
 - [reasoned] affect schema = (id / date / ep / event_id nullable / valence / arousal / importance / label / entities / source / superseded_by / created_at) + VIEW affect_live (superseded_by IS NULL); date-keyed, deleted+rebuilt in same txn as diary-row on run_day force (no orphan); overturns prior per-event schema AND SCHEMA per-session emotions placeholder · goal3/5 · grill P1 adjudication
 - [verified] affect carries a mention-count column; entry formula default weight 0, config-openable · goal3 · A3
 - [revising] SessionStart backdrop conveys 4 dimensions: ① recent few episodes' emotion ② current emotion ③ recent calm-vs-swing ④ emotional-pending (ONLY emotionally-unresolved-between-us; else → open threads); ≤5 lines ≤350 chars; SessionStart total ≤6000 chars hard · goal3/5 · A1 + handover 2026-05-19
@@ -49,8 +50,9 @@
 - [reasoned] ===DIGEST=== prompt: language register, second-person voice, verbatim conversational (not work-style summary; same gate as DIARY_PROMPT) · goal5 · 2026-05-23
 - [reasoned] SessionEnd async skip ≤5 turns; nightly no reference; threshold pending 1-week sample · goal4/6 · 2026-05-23
 - [reasoned] tasks.tag minimal nullable TEXT; order Study/Project/Appointment/Daily/Others; tag labels pending Lumi · goal4 · 2026-05-23
-- [reasoned] affect Today/Week = rolling 24h/7d (independent of 6AM diary boundary); aggregation = weighted mean v×a (w=imp) -> V band (Low/Neu/High @ 0.4/0.6) × A band (Calm/Active/Intense @ 0.4/0.6) -> 9-label lookup; CN labels pending (黯淡/烦躁/痛苦 · 平淡/平稳/焦虑 · 温暖/愉悦/兴奋) · goal3/5 · 2026-05-23
-- [reasoned] affect variance detect stddev(v)>0.3 -> '(波动)' suffix + 1-2 key ep (importance highest + |v-mean| farthest) · goal3 · 2026-05-23
+- [reasoned] affect render = two-layer; main tone (code lookup, 9 cells V band × A band): (低落/烦躁/痛苦 · 平淡/专注/紧张 · 温暖/愉悦/兴奋); fine label (LLM emit, 2-char CN precision tag, finer than main tone, e.g. 狂怒/恐惧/绝望/委屈); per-ep shows fine label, Today/Week shows main tone; aggregation = weighted mean v×a (w=imp), V/A band thresholds 0.4/0.6 on [0,1] scale · goal3/5 · 2026-05-23
+- [reasoned] affect variance: stddev(v)>0.3 → Week main tone uses half-week shift expression (A → B, mean first 3.5d vs last 3.5d); key ep selection by |v-mean| descending, imp as tiebreak; Today renders 2 key ep (1 eph + 1 epl), Week renders ~4 key ep · goal3 · 2026-05-23
+- [reasoned] affect render format: ephN / eplN where N = imp (1-5), h = highest V, l = lowest V; ep line = "ephN fine-label | description" (no parens, | separator); Today/Week/Pending three sections only (no Last session, no Now) · goal3/5 · 2026-05-23
 - [reasoned] handover template LOCKED 2026-05-23 at marrow/handover_template.md: top sync 4 sections (Alerts / Tasks / Milestone candidate / Affect) + handover-only 3 sections (This Session / Next Session / Reference); Completed [N]/To-Do [N] = render-time numeric fill · goal4/5 · 2026-05-23
 
 ## Doc system (this round C)

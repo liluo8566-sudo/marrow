@@ -30,13 +30,21 @@ Later
 - [YYYY-MM-DD] {{CJK title}} (Nh ago)
 
 ## Affect
-> Affect 渲染 - dashboard 可见
-> 计算法 (code, 不走 LLM): weighted mean v × a (权重 = importance) → V band (Low/Neu/High @ 0.4/0.6) × A band (Calm/Active/Intense @ 0.4/0.6) → 9 中文标签查表 (Pending Lumi 明天 unify 语言; 草案: 黯淡/烦躁/痛苦 · 平淡/平稳/焦虑 · 温暖/愉悦/兴奋)
-> 波动检测: stddev(v) > 0.3 → 加 "(波动)" 后缀 + 拎 1-2 个 key ep (importance 最高 + |v - mean| 最远)
-- Last session [Nh ago]: 先给一个心情标签（比如说上个session整体calm high之类的）；然后list ep{{N}} {{label}} {{V-band}}/{{A-band}} imp={{N}}
-- ② **Today** 过去 24h 的整体趋势 (rolling) - 整体如何（如果有很大的波动要写key ep
-- ③ **Week** 过去 7d 的整体趋势 (rolling) - 考虑怎么表达更合理，大概的感受就是本周总体平稳，就跟天气预报播报一样，没啥大事1一句话就好了，如果有台风来就解释一下background ep
-- ④ **Pending** emotional carryover
+> 渲染 - dashboard / handover top 同步
+> 计算法 (code, 不走 LLM): weighted mean v×a (权重 = importance) → V band (Low/Neu/High @ 0.4/0.6) × A band (Calm/Active/Intense @ 0.4/0.6) → 9 主调查表
+> 主调表: 低落/烦躁/痛苦 · 平淡/专注/紧张 · 温暖/愉悦/兴奋
+> ep 细 label: LLM emit 2 字精准词 (狂怒/恐惧/绝望/委屈 等), 比主调精细
+> 波动: stddev(v) > 0.3 → Week 主调换半周转折 (A → B); key ep 按 |v - mean| 排序, imp tiebreak
+> ephN / eplN: N = imp; h = V 最高, l = V 最低
+
+### Today
+- 【主调】 · ephN 细label | 描述 · eplN 细label | 描述
+
+### This Week
+- 【主调】或【主调A → 主调B】 · 4 个 key ep (eph/epl 按 outlier 排)
+
+### Pending
+- emotional carryover (unresolved 写这里)
 
 —————以上这一段应该是跟dashboard的top一模一样的—————
 

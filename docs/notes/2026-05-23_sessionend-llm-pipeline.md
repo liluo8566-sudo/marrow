@@ -1,7 +1,7 @@
 # Marrow Phase 2.5 — SessionEnd async LLM pipeline (design landing draft)
 
 > 2026-05-23. Reset core: diary → P2 byproduct; main spine = recall + affect-now + handover + task + entity.
-> Source: handover.md 2026-05-23 · `~/Desktop/2026-05-22_marrow-reset-brainstorm.md` · 2026-05-23 grill round + Lumi mid-window patches.
+> Source: handover.md 2026-05-23 · `~/Desktop/brainstorm-future.md` · 2026-05-23 grill round + Lumi mid-window patches.
 
 ## 1. Spine inversion
 

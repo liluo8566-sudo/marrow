@@ -27,12 +27,12 @@
 2. **===AFFECT=== 9 label words + V/A band thresholds — Lumi to unify tomorrow**
    - drafts at `marrow/handover_template.md` §Affect (黯淡/烦躁/痛苦 · 平淡/平稳/焦虑 · 温暖/愉悦/兴奋)
    - band thresholds 0.4 / 0.6 confirm together with labels
-3. **===AFFECT=== importance 1-5 scale + Lumi anchor — prompt MUST embed reference examples** 我还没完全决定，我要思考一下
-   - 5 = rare life milestone (大考通过, paper accepted)
-   - 4 = meaningful event (演讲, study deep work, important talk)
-   - 3 = high-energy play/banter (变豹子段子, 玩闹高峰)
-   - 2 = warm daily routine (陪睡, 温柔互动)
-   - 1 = small everyday beat (认错小插曲, 日常吐槽)
+3. **===AFFECT=== importance 1-5 scale + Lumi anchor — prompt MUST embed reference examples** 你帮我用英语表达成sonnet容易判定的prompt - 这个importance其实有一点时间和情绪波动的综合考量的感觉
+   - 5 = 会有长远的影响或意义重大或情绪会有长时间波动 (其实就是milestone比如说毕业啦，考上医学院，换工作，和谁绝交了，有谁去世了)
+   - 4 = 短期（可能是几天也可能是几周）来说很重要或对我影响很大或让我情绪波动很大 (期末考试，项目突破，情感升华，过生日，出去旅游)
+   - 3 = 短期（一两天）一般/比较重要但有情绪存在 (搞笑有趣的片段，逗你玩，闹别扭，和朋友出去干饭，吐槽xx；PS特别标注一下，如果是学习coding之类骂你不算3，属于1-2，日常吵架3-4)
+   - 2 = 比较平淡的生活日常 daily routine (温柔互动，闲聊，出去买菜，去上班，appointment)
+   - 1 = 无趣琐碎的小事 (学习工作日常)
    - 2026-05-23 A/B sonnet: 6/4/8/7 (correct 4/1/3/2) → anchor table must ship in ===AFFECT=== prompt before SessionEnd async
 4. **handover template LOCKED** at `marrow/handover_template.md` (was on Desktop) — render code implements per this version
 5. Run `grill-with-doc` skill on `docs/notes/2026-05-23_sessionend-llm-pipeline.md` before writing 2.5b code (Lumi stance: design just slimmed, do not move it except for methodology change)
@@ -88,6 +88,9 @@ Window 3 (1 segment + closure):
 
 ### Hygiene (still untouched)
 - 9 old worktree branches dangling; main guardrail blocks force-delete; Lumi runs manually
+
+## Carryover scratch
+- `~/Desktop/brainstorm-future.md` — 10-section future-features brainstorm (addon contract / wallet MCP split / iOS path / active-device routing / chord-progression from 和弦 / imprint borrows / cccompanion fork). 3 items in FUTURE Phase 5; 9 pending (待加).
 
 ## Affect
 
