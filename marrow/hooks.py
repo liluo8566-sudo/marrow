@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import config, dashboard, repo, storage, subpages, transcript
+from .popen_detach import popen_detach
 
 # ── affect label lookup ──────────────────────────────────────────────────────
 # valence: Low ≤ -0.3 < Neu ≤ 0.3 < High
@@ -190,6 +191,16 @@ def _handoff_text(conn) -> str:
 
 
 def session_start() -> int:
+    try:
+        log = config.DATA_DIR / "logs" / "sessionstart_catchup.log"
+        popen_detach([sys.executable, "-m", "marrow.sessionstart_catchup"], log_path=log)
+    except Exception as e:
+        try:
+            repo.add_alert("warn", "catchup",
+                           f"session_start catchup spawn failed: {e}",
+                           source="hooks.py", db=config.db_path())
+        except Exception:
+            pass
     _read_input()
     db = config.db_path()
     conn = storage.connect(db)
@@ -278,6 +289,25 @@ def session_end() -> int:
                 f"session_end embed_pending failed: {e}",
                 source="hooks.py", db=db,
             )
+        # Fire async LLM extraction (SessionEnd async). Skip gate and audit
+        # trail live inside sessionend_async — hook stays dumb (§2.5b design).
+        try:
+            sid = rows[0]["session_id"] if rows else None
+            if sid:
+                log = config.DATA_DIR / "logs" / f"sessionend_async_{sid}.log"
+                popen_detach(
+                    [sys.executable, "-m", "marrow.sessionend_async", "--sid", sid],
+                    log_path=log,
+                )
+        except Exception as e:
+            try:
+                repo.add_alert(
+                    "warn", "sessionend_async",
+                    f"session_end async spawn failed: {e}",
+                    source="hooks.py", db=db,
+                )
+            except Exception:
+                pass
     finally:
         conn.close()
     return 0

@@ -66,6 +66,11 @@ w_recency = 0.15
 w_affect = 0.10
 min_score = 0.35
 
+[sessionend]
+# Sessions with ≤ this many user turns skip async LLM extraction (§2.7).
+# Threshold tunes after 1-week sample.
+skip_turn_threshold = 5
+
 [transcript]
 # ADR-0004 single source of truth for the headless-spawn signal. A jsonl
 # whose assistant models are all (prefix-match) in this set is a spawned
