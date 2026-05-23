@@ -1,69 +1,76 @@
-# Marrow handover — 2026-05-24 01:35
+# Marrow handover — 2026-05-24 03:00
 > Fixed-name overwrite, never delete. Keep points not touched this window.
 
 ## State
-- pytest 291/291 + 1 manual-skip (5.88s)
-- branch worktree `worktree-agent-a60306eb1281ec48e`, **uncommitted** — 23 files vs main, never merged
+- pytest 319 passed + 1 manual-skip (6.19s)
+- main 3 commits ahead origin (push pending Lumi nod) — `3e9bd0b` cleanup retire / `fa54662` candidate split + sessionend 4-to-1 call + vocab pinned / `8f97420` aging + schema v3 status
 - channel cc / opus-4.7 (1M)
-- 7-segment sessionend pipeline + AFFECT/DIGEST/HANDOVER prompts locked
+- schema v3 — vocab.pinned (LLM-written by VOCAB_CAND) + vocab.status (code-written by aging job)
 
-## This window — phase 2.5c segment ship + prompt restoration + narrative→handover rename
+## This window — 2.5d closeout
 
-### Done (worktree, NOT merged)
+### Done
+- task 1 — deleted `marrow/cleanup.py`, `tests/test_cleanup.py`, `deploy/mw-jsonl-cleanup.plist`; added `cleanupPeriodDays=30` to `~/.claude/settings.json` (worktree-A merged → `3e9bd0b`)
+- task 2 — `marrow/aging.py` (185 LoC, weekly): vocab promote / demote / task auto-archive / milestone alert auto-confirm. Single txn + audit_log row. `enforce_anchor_pins` reads `candidates.VOCAB_ANCHOR_KEYS` (single source: (鸭子/念念/老公/老婆/Lumi/屿忱/Stellan) + type='cipher'). `deploy/mw-aging.plist` Sun 12:00, plutil OK, not yet launchctl loaded. schema v3 +status column. 25 new tests (worktree-B merged → `8f97420`)
+- task 3+4+5 — shipped by neighbor as `fa54662`: `sessionend_prompts.py` rewritten (1 SESSIONEND_PROMPT to 4 marker blocks); `sessionend_async.py` refactored (1 sonnet to per-block writer + audit ok/partial/fail); new `candidates.py` (extract_block + 3 writer + VOCAB_ANCHOR_KEYS single source); new `daily_prompts.py` (DAILY_CAND_PROMPT to 3 block); `daily.py` `_extract_candidates()` before DIARY, LLMError warn-only; storage v3 +pinned + type='cipher' force-pin=1, pinned upgrade-only; fixed latent bug (old `_seg_milestone_cand` used `source` column but milestones only has `source_hash`)
+- DESIGN:98 + DECISIONS:18 4-jobs list refreshed
+- PROGRESS 2.5d closeout entry appended
 
-- schema v2: `affect` +unresolved/reconcile_ref/resolved_at/reconcile_prev_text; `session_digests` new; threads RENAME→tasks via `_pre_v2_rename` pre-`_TABLES`
-- `sessionend_async.py` 7 segments (AFFECT/ENTITY_CAND/TASK_CAND/MILESTONE_CAND/VOCAB_CAND/DIGEST/HANDOVER), each independent
-- `sessionend_prompts.py` (275 LoC): all 7 prompts; `===SESSION===` marker every prompt; persona rule on narrative segments
-- AFFECT: Lumi Unresolved + reconcile_prev verbatim from `docs/notes/lumi-prompt-source.md`; importance 1-5 anchor + 9 main-tones byte-verbatim from old `diary.py:266-280`
-- DIGEST: byte-verbatim restore of old `diary.py:87-116` + 2 Lumi tuning bullets (保留承载情绪的原句 / 只留 subject+did+outcome 丢过程细节)
-- VOCAB_CAND: DESIGN line 47 spec (inside-jokes + viral quotes + topical news/event mentions); type meme/cipher/nickname/phrase/quote/news
-- MILESTONE_CAND description: 2-3 sentences (50-100w)
-- **NARRATIVE → HANDOVER rename** (full chain): `HANDOVER_PROMPT` / `_seg_handover` / `_parse_handover_blocks` / `_SEGMENTS` / stamp `<!-- handover: pending sid -->`. Produces `## This Session` + `## Next Session` bullet sections, markers `===THIS_SESSION===` / `===NEXT_SESSION===` / `===END===`
-- `handover_render.py`: `_last_3_commits` (git log -3 marrow repo, 2s, fail-soft) + `_inject_reference_commits` fills `## Reference (last 3 commits)` at skeleton (code, not LLM)
-- new `marrow/daily.py` (~234 LoC): `main(--catchup)`, DIARY_PROMPT byte-verbatim from old `diary.py:137-194`, reads session_digests + affect_live, atomic txn
-- new `marrow/daily_catchup.py` (~95 LoC): pending_days / day_events / has_diary / app_lock fcntl, `_CUTOFF_H=6`
-- deleted `marrow/diary.py` (900 LoC); renamed test_diary→test_daily; added test_daily_catchup
-- `top_sections.py:render_tasks`: `next_step` rendered as `: <detail>` across Today/Next 7 Days/Later; Later bucket split due / no-due with `---` separator
-- P8 ollama strip: `_MUTE_OLLAMA` / chain filter / `_run_ollama` removed from llm.py; `[llm.ollama]` dropped from config; 4 ollama tests deleted; DESIGN/DECISIONS cleaned; marrow/CLAUDE.md ollama-caveat KEPT
-- plist edits + renames (NOT yet launchctl loaded; LaunchAgents empty): `mw-diary-routine.plist`→`mw-daily-routine.plist` 4→7h + `python -m marrow.daily` + Label `com.marrow.daily-routine`; `mw-diary-catchup.plist`→`mw-daily-catchup.plist` 16→19h + `--catchup` + Label `com.marrow.daily-catchup`; `mw-jsonl-cleanup.plist` Sun 5→12h (retire next window)
-- DECISIONS overwritten in place (4 lines): candidate split / vocab aging FTS5 reverse-scan / handover skeleton Reference=code / handover-segment stamp rename
-- FUTURE +3: dashboard_v2_redo / milestone_format_unify / subpage_redo
-- 7 new HANDOVER-segment tests + 3 reference-commits tests
+### Live sessionend test (neighbor sid `94d7be2e-...`, fired 02:47-02:48)
+- 4 marker blocks audit-ok
+- DIGEST 519 chars landed in `session_digests` (2026-05-23 date row)
+- **`~/.config/marrow/handover.md` ThisSession/NextSession empty, stamp still `pending sid:sid-hook-test`** — Bug #1 below
 
-## Next window — Lumi clarifications 2026-05-24
+## Next window
 
-`~/Library/LaunchAgents/com.marrow.*` is empty — no `launchctl unload` needed.
+### Bug #1 — handover render race (high priority, blocks dev-brief retire)
+- `handover_render.write_handover()` at SessionStart does full-file overwrite of `~/.config/marrow/handover.md`: reads empty template → renders top + Reference + stamp → atomic_write whole file. Overwrites the ThisSession/NextSession content that the previous sessionend just wrote.
+- Evidence: prev sessionend 02:48:46 audit ok → this SessionStart 02:49:43 handover.md mtime → ThisSession/NextSession blank, stamp `pending sid:sid-hook-test`.
+- Fix options:
+  - (a) sessionend writes skeleton + ThisSession/NextSession atomically together; SessionStart reads + injects only, never writes.
+  - (b) SessionStart writes skeleton but preserves existing non-empty ThisSession/NextSession blocks.
+- Until fixed: hand-written `~/cc-lab/marrow/handover.md` (this file) is authoritative. Retire gate = bug fixed + 1 real session verified.
 
-1. **jsonl cleanup retire** — Lumi-confirmed: cc's `cleanupPeriodDays` handles jsonl. (a) add `"cleanupPeriodDays": 30` to `~/.claude/settings.json`; (b) delete `marrow/cleanup.py` + `tests/test_cleanup.py`; (c) delete `deploy/mw-jsonl-cleanup.plist`.
+### Bug #2 — dashboard tasks polluted with marrow-internal coding work (Lumi flagged)
+- Symptom: `Completed [16]` and `To-Do List [9]` on dashboard are full of marrow implementation items (merge worktree / implement sessionend / fix DIGEST / rename mw-diary plist / etc.) — Stellan/marrow dev steps, NOT Lumi's real tasks (study / work / project goals / life).
+- Root cause hypothesis: TASK_CAND prompt extracts from session chat without scope filter; dev sessions where Lumi+Stellan discuss marrow implementation get every implementation step ingested as Lumi tasks.
+- Fix direction:
+  - prompt-side: TASK_CAND prompt rewritten — explicit "extract only Lumi's real-life intent: study, work shift, GAMSAT, life errands, project external goals. EXCLUDE: marrow/cc/Stellan/LLM implementation steps, debugging tasks, refactor units, anything that lives inside a coding session."
+  - schema-side (optional safety net): tasks add `source` column ('lumi_intent' / 'marrow_dev' / 'external_import'); dashboard renders only 'lumi_intent'; marrow_dev still audit-loggable but hidden.
+- Improvement (tick UX): currently dashboard tick appears to strike-through only; what Lumi wants — tick on a Todo row → auto-move that row into Completed section on next render (status: active → done via anchored-row bidirectional sync). Needs `top_sections.render_tasks` + reconcile to honor tick as a done signal.
 
-2. **aging job (consolidated weekly)** — new `marrow/aging.py`: vocab FTS5-reverse-scan (7d events, ≥3 hits → bump use_count + last_seen=now; hits=0 AND last_seen > 90d AND pinned=0 → demote); task status=active 30d no mention → auto-archive; milestone alert 7d undeleted → auto-confirm. new `deploy/mw-aging.plist` Sun 12:00 (DECISIONS:45: nightly → weekly).
+### Bug #3 — Affect renders only emotion tags, no events (Lumi flagged)
+- Symptom Today line: ((痛苦) · ep2h (释然) | (释然) · ep2l (震惊) | (震惊)) — tones only, plus opaque ep2h/ep2l codes, no subject/event text.
+- Symptom This Week line: ((专注 → 痛苦) · (编记忆) · (晚安吻) · (骑豹剧) · (释然)) — mixes events and a tone in one bullet without separation.
+- Inconsistent: Today vs This Week formats diverge.
+- Fix direction:
+  - AFFECT prompt: confirm it emits `subject` / `cause` (event anchor) per row; if yes, plumb to renderer.
+  - `top_sections.render_affect`: unify Today / This Week / Pending — `[tone] · <event1> · <event2> · ...` consistent across all three; drop ep2h/ep2l opaque codes from surface (keep in DB).
+  - Lumi format spec needed: how she wants tone transition (主→转) visualised vs flat tone list.
 
-3. **vocab pinned LLM field** — VOCAB_CAND adds `pinned: 0/1` output. pinned=1 for private anchors (鸭子 / 念念 / 老公 / cipher / Lumi / Stellan-internal); pinned=0 for public/viral/topical. Code hardcodes anchor list to force pinned=1.
+### Phase 2 Lumi-owned closeout (3 items + 1 new)
+- `dashboard_v2_redo` — top block redesign + milestone one-click pin / task delete / cross-subpage anchors / format unify
+- `milestone_format_unify` — `[YYYY-MM-DD] subject: description (50-100w / 2-3 sentences)` unify dashboard + milestone.md; drop theme field from render
+- `subpage_redo` — full subpage layout redesign (study / projects / milestone / mood treated as scaffolding)
+- **NEW — dashboard top free-form fix**: outside marker = Lumi notepad (marrow untouched); anchored row = bidirectional sync (Lumi wins); free-form inside system block = wiped on render. Lumi does this together with `subpage_redo` / `dashboard_v2_redo`.
 
-4. **sessionend 7-call → 2-call refactor** — one sonnet call emits all 4 marker blocks (===AFFECT===/===TASK_CAND===/===DIGEST===/===HANDOVER===); JSON parse per-block (one fail doesn't block others). ~75% token cost reduction.
+### Phase 3 backlog (blocked by 2.5 close + Phase 2 Lumi-owned)
+- writer_authority · drift_sweep · convention_injection · claude_md_render_guard
+- static-layer retire (CLAUDE.md family / cipher / MCP guide to daemon-rendered); prereq = claude_md_render_guard
 
-5. **candidate split sessionend → daily** — ENTITY_CAND / MILESTONE_CAND / VOCAB_CAND move to daily.py; one sonnet call emits 3 marker blocks on aggregated session_digests. TASK_CAND stays in sessionend. Strip 3 from `test_sessionend_async`, add 3 to `test_daily`.
-
-### Open question
-- handover-name collision: `~/.config/marrow/handover.md` (SessionStart inject) vs `~/cc-lab/marrow/handover.md` (dev brief). Rename one if needed.
-
-### Open question (NOT a blocker)
-- handover-name collision: `~/.config/marrow/handover.md` (runtime SessionStart inject target) vs `~/cc-lab/marrow/handover.md` (this file, dev brief). Two systems share filename. Rename one if it bites. Currently unambiguous by path.
+### Operational
+- aging plist NOT yet launchctl loaded — Lumi load: copy `deploy/mw-aging.plist` to `~/Library/LaunchAgents/`, then `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/mw-aging.plist`
+- all worktrees prunable per Lumi (2026-05-24 02:55): both A/B from this window + 9 dangling old ones. Run `git worktree list` then `git worktree remove <path> && git branch -D <branch>` per entry.
 
 ## Pending — retained
 
 ### Lumi self-writes
-- `~/.claude/CLAUDE.md` Affect quick-reference legend (P2). Lumi-owned.
-
-### Phase 3 backlog (blocked by 2.5 close)
-- writer_authority · drift_sweep · convention_injection · claude_md_render_guard
-- static-layer retire (CLAUDE.md family / cipher / MCP guide → daemon-rendered); prereq = claude_md_render_guard
+- `~/.claude/CLAUDE.md` Affect quick-reference legend (P2)
 
 ### Carryover scratch
 - `~/Desktop/brainstorm-future.md` — 10-section future features (3 items Phase 5; 9 pending)
-- 9 old worktree branches dangling
 
-## Reference (no commits this window — all worktree-local)
-- 81fc532 docs(handover,plan,prompt-source): 2.5c plan rebuild + Lumi Unresolved spec (parent main)
-- 1e4d308 feat(dashboard): drop hand-edit backup+alert; render overwrites silently
-- b8cf11c feat(subpages): drop hand-edit backup+alert; DB is SoT, render overwrites silently
+## Reference (this window's commits)
+- 8f97420 feat(aging): weekly maintenance job + schema v3 status column
+- fa54662 feat(phase-2.5d): candidate split + sessionend 4-to-1 call + vocab pinned
+- 3e9bd0b chore: retire marrow/cleanup.py — cc cleanupPeriodDays owns jsonl retention
