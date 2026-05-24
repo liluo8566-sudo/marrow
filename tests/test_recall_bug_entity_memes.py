@@ -1,7 +1,7 @@
-"""TDD red tests for entity-recall + vocab-leg + milestone reverse-substring bugs.
+"""TDD red tests for entity-recall + memes-leg + milestone reverse-substring bugs.
 
 - entity_recall.entity_force_include must match 2-CJK-char names (南南, 小胖).
-- recall_fusion must surface vocab rows (cipher / nickname / phrase) when key
+- recall_fusion must surface memes rows (cipher / nickname / phrase) when key
   appears in query (substring).
 - _milestone_candidates must also reverse-match title against query (fallback).
 """
@@ -45,9 +45,9 @@ def seeded_db(tmp_path):
         "VALUES ('person', 'Amber', 3, 'test')"
     )
 
-    # Vocab row: cipher Plan price.
+    # Memes row: cipher Plan price.
     conn.execute(
-        "INSERT INTO vocab (type, key, value, context, use_count, status) "
+        "INSERT INTO memes (type, key, value, context, use_count, status) "
         "VALUES ('cipher', 'Plan', 'Max 5x · $100/mo', "
         "'Anthropic plan tier', 4, 'active')"
     )
@@ -93,17 +93,17 @@ def test_entity_force_include_does_not_match_unrelated_query(seeded_db):
     assert rows == []
 
 
-def test_vocab_leg_returns_cipher_on_query_match(seeded_db):
-    """recall_fusion must surface vocab row when key matches query (substring)."""
+def test_memes_leg_returns_cipher_on_query_match(seeded_db):
+    """recall_fusion must surface memes row when key matches query (substring)."""
     conn, _, _ = seeded_db
     with patch.object(rm, "_ensure_embedder", return_value=None):
         results = rm.recall_fusion(conn, "我的 plan 是什么价钱", limit=10)
-    vocab_hits = [
+    memes_hits = [
         r for r in results
-        if r.get("kind") == "vocab" and "Plan" in (r.get("content") or "")
+        if r.get("kind") == "memes" and "Plan" in (r.get("content") or "")
     ]
-    assert len(vocab_hits) >= 1, (
-        f"Expected vocab kind row containing (Plan), got: "
+    assert len(memes_hits) >= 1, (
+        f"Expected memes kind row containing (Plan), got: "
         f"{[(r.get('kind'), r.get('content')) for r in results]}"
     )
 

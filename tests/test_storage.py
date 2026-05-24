@@ -5,7 +5,7 @@ import pytest
 from marrow import storage
 
 PHASE1_TABLES = {
-    "events", "tasks", "milestones", "vocab", "stickers",
+    "events", "tasks", "milestones", "memes", "stickers",
     "pit", "diary", "goose_bites", "alerts", "audit_log",
 }
 PHASE2_ABSENT = {"emotions", "people", "preferences", "dir", "threads"}
@@ -71,14 +71,14 @@ def test_init_idempotent(tmp_path):
     conn.close()
 
 
-def test_foreign_key_set_null_on_vocab_delete(db):
-    db.execute("INSERT INTO vocab(type,key) VALUES('cipher','P')")
-    vid = db.execute("SELECT id FROM vocab").fetchone()[0]
-    db.execute("INSERT INTO stickers(vocab_id,key,asset_path) VALUES(?,?,?)",
-               (vid, "P", "/tmp/x.png"))
-    db.execute("DELETE FROM vocab WHERE id=?", (vid,))
+def test_foreign_key_set_null_on_memes_delete(db):
+    db.execute("INSERT INTO memes(type,key) VALUES('cipher','P')")
+    mid = db.execute("SELECT id FROM memes").fetchone()[0]
+    db.execute("INSERT INTO stickers(meme_id,key,asset_path) VALUES(?,?,?)",
+               (mid, "P", "/tmp/x.png"))
+    db.execute("DELETE FROM memes WHERE id=?", (mid,))
     db.commit()
-    assert db.execute("SELECT vocab_id FROM stickers").fetchone()[0] is None
+    assert db.execute("SELECT meme_id FROM stickers").fetchone()[0] is None
 
 
 # --- Phase 2 schema freeze (Step 0) ---

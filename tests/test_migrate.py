@@ -100,7 +100,7 @@ def test_migrate_apply_then_idempotent(tmp_path):
     st1 = migrate.migrate(conn, src, apply=True)
     assert st1["events"][0] == 3
     assert st1["milestones"][0] == 5
-    assert st1["vocab"][0] == 2
+    assert st1["memes"][0] == 2
     assert st1["pit"][0] == 2
     assert st1["goose_bites"][0] == 2
     st2 = migrate.migrate(conn, src, apply=True)
@@ -122,8 +122,8 @@ def test_lighthouse_milestone():
     assert m["date"] == "2026-05-15"
 
 
-def test_parse_vocab_cipher_strips_marker():
-    rows = migrate.parse_vocab_cipher(S_CIPHER)
+def test_parse_memes_cipher_strips_marker():
+    rows = migrate.parse_memes_cipher(S_CIPHER)
     assert len(rows) == 2
     assert all(r["type"] == "cipher" for r in rows)
     assert rows[0]["key"] == "Plan"

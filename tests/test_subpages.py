@@ -33,7 +33,7 @@ def db(tmp_path):
                      "VALUES('us','2026-01-17','First meeting','In the rain')")
         conn.execute("INSERT INTO milestones(scope,date,title) "
                      "VALUES('me','2026-03-01','Head of school award')")
-        conn.execute("INSERT INTO vocab(type,key,value,context,use_count) "
+        conn.execute("INSERT INTO memes(type,key,value,context,use_count) "
                      "VALUES('cipher','大龙虾','Openclaw','popular AI agent',5)")
         conn.execute("INSERT INTO goose_bites(date,bites,best) "
                      "VALUES('2026-05-20','quack quack',1)")
@@ -119,13 +119,13 @@ def test_render_milestone_structured_anchor(db):
 # Memes
 # ---------------------------------------------------------------------------
 
-def test_render_memes_vocab_and_stickers(db):
+def test_render_memes_phrases_and_stickers(db):
     conn = storage.connect(db)
     try:
         block = subpages.render_memes(conn)
     finally:
         conn.close()
-    assert "## Vocabulary" in block
+    assert "## Phrases" in block
     assert "(da long xia)" in block or "(Openclaw)" in block or "(da " in block \
            or "大龙虾" in block
     assert "## Stickers" in block
@@ -136,7 +136,7 @@ def test_render_memes_structured_anchor(db):
     conn = storage.connect(db)
     try:
         block = subpages.render_memes(conn)
-        row = conn.execute("SELECT id FROM vocab LIMIT 1").fetchone()
+        row = conn.execute("SELECT id FROM memes LIMIT 1").fetchone()
     finally:
         conn.close()
     assert f"<!-- id:{row['id']} -->" in block

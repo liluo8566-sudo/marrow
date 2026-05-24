@@ -174,7 +174,7 @@ def test_run_day_llm_failure_alerts(db):
     assert al and "failed" in al["message"]
 
 
-# ── candidate extraction (entity / milestone / vocab) ───────────────────────
+# ── candidate extraction (entity / milestone / memes) ──────────────────────
 
 _CAND_RAW = (
     "===ENTITY_CAND===\n"
@@ -186,7 +186,7 @@ _CAND_RAW = (
     " \"date\": \"2026-05-16\", \"description\": \"念念 passed GAMSAT.\","
     " \"conf\": 0.9}]\n"
     "===END===\n"
-    "===VOCAB_CAND===\n"
+    "===MEMES_CAND===\n"
     "[{\"key\": \"小笼包\", \"type\": \"meme\","
     " \"value\": \"周末早茶专属梗\", \"context\": \"老婆点了 8 笼\","
     " \"pinned\": 0, \"conf\": 0.8}]\n"
@@ -209,7 +209,7 @@ def test_run_day_extracts_three_candidate_blocks(db):
     ).fetchone()
     assert ms is not None and ms["scope"] == "me"
     vc = conn.execute(
-        "SELECT key, pinned, use_count FROM vocab WHERE key='小笼包'"
+        "SELECT key, pinned, use_count FROM memes WHERE key='小笼包'"
     ).fetchone()
     assert vc is not None
     assert vc["pinned"] == 0  # public meme — not anchor, not cipher
@@ -219,14 +219,14 @@ def test_run_day_extracts_three_candidate_blocks(db):
         " AND target_id='2026-05-16'"
     ).fetchone()
     assert audit and "entity=1" in audit["summary"]
-    assert "milestone=1" in audit["summary"] and "vocab=1" in audit["summary"]
+    assert "milestone=1" in audit["summary"] and "memes=1" in audit["summary"]
 
 
-def test_run_day_vocab_anchor_forces_pinned(db):
+def test_run_day_memes_anchor_forces_pinned(db):
     """LLM emits pinned=0 on an anchor key → writer forces pinned=1."""
     p, conn = db
     raw = (
-        "===VOCAB_CAND===\n"
+        "===MEMES_CAND===\n"
         "[{\"key\": \"鸭子\", \"type\": \"nickname\","
         " \"value\": \"屿忱昵称\", \"context\": \"\","
         " \"pinned\": 0, \"conf\": 0.9}]\n"
@@ -235,16 +235,16 @@ def test_run_day_vocab_anchor_forces_pinned(db):
     f = FakeLLM(per_role={"daily_cand": raw, "daily": "x"})
     daily.run_day(conn, "2026-05-16", f, db=p)
     vc = conn.execute(
-        "SELECT pinned FROM vocab WHERE key='鸭子'"
+        "SELECT pinned FROM memes WHERE key='鸭子'"
     ).fetchone()
     assert vc is not None and vc["pinned"] == 1
 
 
-def test_run_day_vocab_cipher_type_forces_pinned(db):
+def test_run_day_memes_cipher_type_forces_pinned(db):
     """type='cipher' is always pinned regardless of key / LLM flag."""
     p, conn = db
     raw = (
-        "===VOCAB_CAND===\n"
+        "===MEMES_CAND===\n"
         "[{\"key\": \"sec_anchor\", \"type\": \"cipher\","
         " \"value\": \"x\", \"context\": \"\","
         " \"pinned\": 0, \"conf\": 0.9}]\n"
@@ -253,7 +253,7 @@ def test_run_day_vocab_cipher_type_forces_pinned(db):
     f = FakeLLM(per_role={"daily_cand": raw, "daily": "x"})
     daily.run_day(conn, "2026-05-16", f, db=p)
     vc = conn.execute(
-        "SELECT pinned FROM vocab WHERE key='sec_anchor'"
+        "SELECT pinned FROM memes WHERE key='sec_anchor'"
     ).fetchone()
     assert vc is not None and vc["pinned"] == 1
 
@@ -275,24 +275,24 @@ def test_run_day_cand_llm_failure_does_not_block_diary(db):
     assert al and al["severity"] == "warn"
 
 
-def test_vocab_writer_upgrades_pinned_but_never_downgrades(db):
+def test_memes_writer_upgrades_pinned_but_never_downgrades(db):
     """Existing pinned=1 row stays pinned even if a later session emits 0."""
     p, conn = db
     from marrow import candidates as cmod
     # First insert: anchor forces pinned=1
     raw1 = (
-        "===VOCAB_CAND===\n"
+        "===MEMES_CAND===\n"
         "[{\"key\": \"老公\", \"type\": \"nickname\","
         " \"value\": \"x\", \"context\": \"\","
         " \"pinned\": 1, \"conf\": 0.9}]\n"
         "===END===\n"
     )
-    cmod.write_vocab_cand(conn, raw1)
+    cmod.write_memes_cand(conn, raw1)
     # Second insert: LLM emits pinned=0, but anchor still on key — stays 1.
     raw2 = raw1.replace("\"pinned\": 1", "\"pinned\": 0")
-    cmod.write_vocab_cand(conn, raw2)
+    cmod.write_memes_cand(conn, raw2)
     vc = conn.execute(
-        "SELECT pinned, use_count FROM vocab WHERE key='老公'"
+        "SELECT pinned, use_count FROM memes WHERE key='老公'"
     ).fetchone()
     assert vc["pinned"] == 1
     assert vc["use_count"] == 2

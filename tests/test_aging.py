@@ -17,10 +17,10 @@ def db(tmp_path):
     conn.close()
 
 
-def _ins_vocab(conn, key, *, vtype="meme", use_count=0, last_seen=None,
+def _ins_memes(conn, key, *, vtype="meme", use_count=0, last_seen=None,
                pinned=0, status="active"):
     conn.execute(
-        "INSERT INTO vocab (type, key, use_count, last_seen, pinned, status)"
+        "INSERT INTO memes (type, key, use_count, last_seen, pinned, status)"
         " VALUES (?, ?, ?, ?, ?, ?)",
         (vtype, key, use_count, last_seen, pinned, status),
     )
@@ -66,10 +66,10 @@ def _ins_alert(conn, atype, message, *, resolved=0, age_days=0):
         )
 
 
-# ── schema v3 vocab columns ──────────────────────────────────────────────────
+# ── schema v3 memes columns ──────────────────────────────────────────────────
 
-def test_v3_vocab_columns_present(db):
-    cols = {r["name"] for r in db.execute("PRAGMA table_info(vocab)")}
+def test_v3_memes_columns_present(db):
+    cols = {r["name"] for r in db.execute("PRAGMA table_info(memes)")}
     assert "pinned" in cols
     assert "status" in cols
     assert db.execute("PRAGMA user_version").fetchone()[0] >= 3
@@ -78,141 +78,141 @@ def test_v3_vocab_columns_present(db):
 # ── enforce_anchor_pins ───────────────────────────────────────────────────────
 
 def test_enforce_anchor_pins_flips_unpinned_anchors(db):
-    _ins_vocab(db, "鸭子", pinned=0)
-    _ins_vocab(db, "念念", pinned=0)
-    _ins_vocab(db, "老公", pinned=1)  # already pinned
-    _ins_vocab(db, "随便", pinned=0)  # not anchor
+    _ins_memes(db, "鸭子", pinned=0)
+    _ins_memes(db, "念念", pinned=0)
+    _ins_memes(db, "老公", pinned=1)  # already pinned
+    _ins_memes(db, "随便", pinned=0)  # not anchor
     db.commit()
     flipped = aging.enforce_anchor_pins(db)
     assert flipped == 2
     pinned_keys = {r["key"] for r in db.execute(
-        "SELECT key FROM vocab WHERE pinned = 1")}
+        "SELECT key FROM memes WHERE pinned = 1")}
     assert {"鸭子", "念念", "老公"} <= pinned_keys
     assert "随便" not in pinned_keys
 
 
 def test_enforce_anchor_pins_idempotent(db):
-    _ins_vocab(db, "鸭子", pinned=0)
+    _ins_memes(db, "鸭子", pinned=0)
     db.commit()
     assert aging.enforce_anchor_pins(db) == 1
     assert aging.enforce_anchor_pins(db) == 0
 
 
-# ── promote_vocab ─────────────────────────────────────────────────────────────
+# ── promote_memes ─────────────────────────────────────────────────────────────
 
-def test_promote_vocab_three_distinct_hits_promotes(db):
-    vid = _ins_vocab(db, "marrow", use_count=0, status="dormant")
+def test_promote_memes_three_distinct_hits_promotes(db):
+    vid = _ins_memes(db, "marrow", use_count=0, status="dormant")
     for i in range(3):
         _ins_event(db, f"talking about marrow today round {i}", sid=f"s{i}")
     db.commit()
-    n = aging.promote_vocab(db)
+    n = aging.promote_memes(db)
     assert n == 1
     row = db.execute(
-        "SELECT use_count, status, last_seen FROM vocab WHERE id=?", (vid,)
+        "SELECT use_count, status, last_seen FROM memes WHERE id=?", (vid,)
     ).fetchone()
     assert row["use_count"] == 3
     assert row["status"] == "active"
     assert row["last_seen"] is not None
 
 
-def test_promote_vocab_below_threshold_skips(db):
-    vid = _ins_vocab(db, "marrow", use_count=0, status="dormant")
+def test_promote_memes_below_threshold_skips(db):
+    vid = _ins_memes(db, "marrow", use_count=0, status="dormant")
     _ins_event(db, "marrow once", sid="s1")
     _ins_event(db, "marrow twice", sid="s2")
     db.commit()
-    n = aging.promote_vocab(db)
+    n = aging.promote_memes(db)
     assert n == 0
     row = db.execute(
-        "SELECT use_count, status FROM vocab WHERE id=?", (vid,)
+        "SELECT use_count, status FROM memes WHERE id=?", (vid,)
     ).fetchone()
     assert row["use_count"] == 0
     assert row["status"] == "dormant"
 
 
-def test_promote_vocab_skips_pinned(db):
-    vid = _ins_vocab(db, "鸭子", pinned=1, status="dormant", use_count=0)
+def test_promote_memes_skips_pinned(db):
+    vid = _ins_memes(db, "鸭子", pinned=1, status="dormant", use_count=0)
     for i in range(5):
         _ins_event(db, f"鸭子 says hi {i}", sid=f"s{i}")
     db.commit()
-    n = aging.promote_vocab(db)
+    n = aging.promote_memes(db)
     assert n == 0
     row = db.execute(
-        "SELECT use_count, status FROM vocab WHERE id=?", (vid,)
+        "SELECT use_count, status FROM memes WHERE id=?", (vid,)
     ).fetchone()
     assert row["use_count"] == 0
     assert row["status"] == "dormant"
 
 
-def test_promote_vocab_ignores_old_events(db):
-    vid = _ins_vocab(db, "ancient", use_count=0)
+def test_promote_memes_ignores_old_events(db):
+    vid = _ins_memes(db, "ancient", use_count=0)
     for i in range(5):
         _ins_event(db, f"ancient ref {i}",
                    ts="2026-01-01T00:00:00Z", sid=f"s{i}")
     db.commit()
-    assert aging.promote_vocab(db) == 0
+    assert aging.promote_memes(db) == 0
     row = db.execute(
-        "SELECT use_count FROM vocab WHERE id=?", (vid,)
+        "SELECT use_count FROM memes WHERE id=?", (vid,)
     ).fetchone()
     assert row["use_count"] == 0
 
 
-def test_promote_vocab_no_events_noop(db):
-    _ins_vocab(db, "lonely", status="dormant")
+def test_promote_memes_no_events_noop(db):
+    _ins_memes(db, "lonely", status="dormant")
     db.commit()
-    assert aging.promote_vocab(db) == 0
+    assert aging.promote_memes(db) == 0
 
 
-# ── demote_vocab ──────────────────────────────────────────────────────────────
+# ── demote_memes ──────────────────────────────────────────────────────────────
 
-def test_demote_vocab_old_last_seen_demotes(db):
-    vid = _ins_vocab(
+def test_demote_memes_old_last_seen_demotes(db):
+    vid = _ins_memes(
         db, "stale", pinned=0, status="active",
         last_seen="2020-01-01T00:00:00Z",
     )
     db.commit()
-    n = aging.demote_vocab(db)
+    n = aging.demote_memes(db)
     assert n == 1
     row = db.execute(
-        "SELECT status FROM vocab WHERE id=?", (vid,)
+        "SELECT status FROM memes WHERE id=?", (vid,)
     ).fetchone()
     assert row["status"] == "dormant"
 
 
-def test_demote_vocab_skips_pinned(db):
-    vid = _ins_vocab(
+def test_demote_memes_skips_pinned(db):
+    vid = _ins_memes(
         db, "鸭子", pinned=1, status="active",
         last_seen="2020-01-01T00:00:00Z",
     )
     db.commit()
-    assert aging.demote_vocab(db) == 0
+    assert aging.demote_memes(db) == 0
     row = db.execute(
-        "SELECT status FROM vocab WHERE id=?", (vid,)
+        "SELECT status FROM memes WHERE id=?", (vid,)
     ).fetchone()
     assert row["status"] == "active"
 
 
-def test_demote_vocab_skips_recent(db):
-    _ins_vocab(
+def test_demote_memes_skips_recent(db):
+    _ins_memes(
         db, "fresh", pinned=0, status="active",
         last_seen="2026-05-20T00:00:00Z",
     )
     db.commit()
-    assert aging.demote_vocab(db) == 0
+    assert aging.demote_memes(db) == 0
 
 
-def test_demote_vocab_skips_null_last_seen(db):
-    _ins_vocab(db, "unseen", pinned=0, status="active", last_seen=None)
+def test_demote_memes_skips_null_last_seen(db):
+    _ins_memes(db, "unseen", pinned=0, status="active", last_seen=None)
     db.commit()
-    assert aging.demote_vocab(db) == 0
+    assert aging.demote_memes(db) == 0
 
 
-def test_demote_vocab_already_dormant_noop(db):
-    _ins_vocab(
+def test_demote_memes_already_dormant_noop(db):
+    _ins_memes(
         db, "old", pinned=0, status="dormant",
         last_seen="2020-01-01T00:00:00Z",
     )
     db.commit()
-    assert aging.demote_vocab(db) == 0
+    assert aging.demote_memes(db) == 0
 
 
 # ── archive_tasks ─────────────────────────────────────────────────────────────
@@ -337,7 +337,7 @@ def test_main_writes_audit_log(db, monkeypatch):
 
 def test_main_force_pins_anchors_each_pass(db, monkeypatch):
     p = db.execute("PRAGMA database_list").fetchone()["file"]
-    _ins_vocab(db, "鸭子", pinned=0)
+    _ins_memes(db, "鸭子", pinned=0)
     db.commit()
     db.close()
     _route_init_db(monkeypatch, p)
@@ -346,7 +346,7 @@ def test_main_force_pins_anchors_each_pass(db, monkeypatch):
     fresh.row_factory = sqlite3.Row
     try:
         row = fresh.execute(
-            "SELECT pinned FROM vocab WHERE key='鸭子'"
+            "SELECT pinned FROM memes WHERE key='鸭子'"
         ).fetchone()
         assert row["pinned"] == 1
     finally:
