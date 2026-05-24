@@ -18,7 +18,7 @@ import tempfile
 from pathlib import Path
 
 from . import repo, top_sections
-from .reconcile import reconcile_milestone_candidates
+from .reconcile import reconcile_milestone_candidates, reconcile_tasks
 
 M0 = "<!-- marrow:top:start -->"
 M1 = "<!-- marrow:top:end -->"
@@ -54,7 +54,7 @@ def _atomic_write(path: str, data: str) -> None:
 
 def write_dashboard(path: str, conn, *, state_dir: str,
                     db: str | None = None) -> None:
-    # Reconcile candidate-row votes BEFORE render so Lumi's ✅/❌ flows back.
+    # Reconcile md edits BEFORE render so Lumi's ✅/❌ + tick/untick flow back.
     # Fail-soft: a reconcile error must never block dashboard refresh.
     if os.path.exists(path):
         try:
@@ -63,6 +63,14 @@ def write_dashboard(path: str, conn, *, state_dir: str,
             repo.add_alert(
                 "warn", "dashboard",
                 f"candidate reconcile failed: {e}; falling through to render",
+                source="dashboard.py", db=db,
+            )
+        try:
+            reconcile_tasks(conn, Path(path))
+        except Exception as e:
+            repo.add_alert(
+                "warn", "dashboard",
+                f"task reconcile failed: {e}; falling through to render",
                 source="dashboard.py", db=db,
             )
     block = render_top(conn, dashboard_path=path)
