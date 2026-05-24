@@ -28,7 +28,7 @@ _LOGS_DIR = Path.home() / ".config" / "marrow" / "logs"
 _CC_PROJECTS = Path.home() / ".claude" / "projects"
 
 WINDOW_HOURS = 24
-IDLE_SECONDS = 300  # jsonl untouched ≥5min → treat as closed; alive sessions still flushing skip this turn
+IDLE_SECONDS = 600  # jsonl untouched ≥10min → treat as closed; alive sessions still flushing skip this turn
 MAX_FIRE = 2
 
 
@@ -97,17 +97,31 @@ def main(argv: list[str] | None = None) -> int:  # noqa: ARG001
         conn.close()
 
     spawned = 0
+    failures: list[str] = []
     for sid in pending[:MAX_FIRE]:
         log_path = _LOGS_DIR / f"sessionend_async_{sid}.log"
-        popen_detach(
-            [sys.executable, "-m", "marrow.sessionend_async", "--sid", sid],
-            log_path=log_path,
-        )
-        spawned += 1
+        try:
+            popen_detach(
+                [sys.executable, "-m", "marrow.sessionend_async", "--sid", sid],
+                log_path=log_path,
+            )
+            spawned += 1
+        except Exception as e:  # noqa: BLE001
+            failures.append(f"{sid[:8]}:{type(e).__name__}")
+
+    if failures:
+        try:
+            repo.add_alert(
+                "warn", "catchup",
+                f"catchup spawn failed: {', '.join(failures)}",
+                source="sessionstart_catchup.py", db=db,
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     print(
         f"catchup: spawned {spawned} of {len(pending)} pending workers"
-        f" (cap={MAX_FIRE}, window={WINDOW_HOURS}h)",
+        f" (cap={MAX_FIRE}, window={WINDOW_HOURS}h, idle={IDLE_SECONDS}s)",
         file=sys.stderr,
     )
     return 0

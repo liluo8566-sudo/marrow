@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from . import candidates, config, handover_render, storage
+from . import candidates, config, handover_render, repo, storage
 from .llm import LLMClient, LLMError
 from .sessionend_prompts import SESSIONEND_PROMPT, fence
 
@@ -117,6 +117,18 @@ def _write_final_audit(conn, sid: str, summary: str) -> None:
             " VALUES ('events', ?, 'sessionend_extract', ?)",
             (sid, summary),
         )
+    # Surface fail / partial outcomes — silent audit was easy to miss.
+    # skip:short_session + ok stay silent.
+    if summary.startswith(("fail:", "partial:")):
+        try:
+            sev = "critical" if summary.startswith("fail:") else "warn"
+            repo.add_alert(
+                sev, "sessionend_async",
+                f"sid={sid[:8]} {summary}",
+                source="sessionend_async.py", db=config.db_path(),
+            )
+        except Exception:  # noqa: BLE001 — alert is best-effort
+            pass
 
 
 # ── segment writers ─────────────────────────────────────────────────────────
