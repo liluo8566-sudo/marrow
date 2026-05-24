@@ -593,7 +593,7 @@ def test_sessionend_single_call_routes_to_four_writers(db_env, tmp_path,
         "===END===\n"
         "===HANDOVER===\n"
         "===THIS_SESSION===\n- shipped 4→1 call refactor\n"
-        "===NEXT_SESSION===\n- verify pytest + plist reload\n"
+        "===NEXT_NEW===\n- verify pytest + plist reload\n"
         "===END===\n"
     )
 
@@ -669,24 +669,28 @@ def test_load_prior_handover_returns_placeholder_when_missing(tmp_path, monkeypa
     assert sessionend_async._load_prior_handover_for_sonnet() == "(no prior handover)"
 
 
-def test_handover_parses_three_blocks():
+def test_handover_parses_four_blocks():
     from marrow.sessionend_async import _parse_handover_blocks
     raw = ("intro\n===THIS_SESSION===\n- did A\n- did B\n"
-           "===NEXT_SESSION===\n- pick up C\n"
+           "===THIS_DONE===\n- carry-over X cleared\n"
+           "===NEXT_NEW===\n- pick up C\n"
            "===REFERENCE===\n- `path/foo.py:10` — entry\n===END===\n")
-    this_s, next_s, ref_s = _parse_handover_blocks(raw)
+    this_s, this_done, next_new, ref_s = _parse_handover_blocks(raw)
     assert this_s == "- did A\n- did B"
-    assert next_s == "- pick up C"
+    assert this_done == "- carry-over X cleared"
+    assert next_new == "- pick up C"
     assert ref_s == "- `path/foo.py:10` — entry"
 
 
-def test_handover_parses_legacy_no_reference():
+def test_handover_parses_legacy_next_session_marker():
+    """Old prompt in flight still falls into next_new with empty this_done."""
     from marrow.sessionend_async import _parse_handover_blocks
     raw = ("===THIS_SESSION===\n- did A\n"
            "===NEXT_SESSION===\n- pick up B\n===END===\n")
-    this_s, next_s, ref_s = _parse_handover_blocks(raw)
+    this_s, this_done, next_new, ref_s = _parse_handover_blocks(raw)
     assert this_s == "- did A"
-    assert next_s == "- pick up B"
+    assert this_done == ""
+    assert next_new == "- pick up B"
     assert ref_s == ""
 
 
@@ -696,7 +700,7 @@ def test_seg_handover_composes_full_file(db_env, tmp_path, monkeypatch):
     h = tmp_path / "handover.md"
     monkeypatch.setattr("marrow.handover_render._RENDERED_PATH", h)
     raw = ("===THIS_SESSION===\n- shipped phase 2.5c\n"
-           "===NEXT_SESSION===\n- launchctl + commit\n===END===\n")
+           "===NEXT_NEW===\n- launchctl + commit\n===END===\n")
     conn = storage.connect(db)
     try:
         from marrow import sessionend_async

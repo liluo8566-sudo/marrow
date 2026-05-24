@@ -525,18 +525,56 @@ def test_strip_instruction_preserves_trailing_newline():
 
 # ── Phase A: multi-session merge ─────────────────────────────────────────────
 
-def _write_via(env, sid: str, this_s: str, next_s: str, now_epoch: int):
+def _write_via(env, sid: str, this_s: str, next_s: str, now_epoch: int,
+               *, this_done: str = ""):
     db, _, _, rendered_path = env
     import time as _time
     real_time = _time.time
     try:
         _time.time = lambda: now_epoch  # type: ignore[assignment]
         conn = _conn(db)
-        handover_render.write_handover_full(conn, sid, this_s, next_s)
+        handover_render.write_handover_full(
+            conn, sid, this_s, next_s, this_done=this_done)
         conn.close()
     finally:
         _time.time = real_time  # type: ignore[assignment]
     return rendered_path.read_text(encoding="utf-8")
+
+
+def test_apply_this_done_drops_matching_prior_bullet():
+    from marrow.handover_render import _apply_this_done
+    old = ("- bug recall_cross_table_vec_gap (structural) — memes/entities "
+           "missing vec lane\n"
+           "- entity_card_recency_tiebreaker (low) — 19 rows null ts")
+    done = ("- bug recall_cross_table_vec_gap (structural) — memes/entities "
+            "missing vec lane")
+    out = _apply_this_done(old, done)
+    assert "recall_cross_table_vec_gap" not in out
+    assert "entity_card_recency_tiebreaker" in out
+
+
+def test_apply_this_done_ignores_short_or_na_lines():
+    from marrow.handover_render import _apply_this_done
+    old = "- real carry-over bullet that is long enough to match\n- short"
+    done_short = "- short"
+    done_na = "- N/A"
+    assert _apply_this_done(old, done_short) == old, "short stub must not delete"
+    assert _apply_this_done(old, done_na) == old, "N/A must not delete"
+
+
+def test_handover_ghost_carry_over_cleared_via_this_done(env):
+    """E2E: prior NEXT has X+Y, this_done verbatim-copies X, next_new empty
+    → final NEXT only Y. Stops sonnet's repetition loop."""
+    base = int(datetime(2026, 5, 24, 10, 0).timestamp())
+    ghost = ("- bug recall_cross_table_vec_gap (structural) — memes/entities "
+             "missing vec lane")
+    keep = "- entity_card_recency_tiebreaker (low) — 19 rows null ts"
+    _write_via(env, "s1", "- prior work", f"{ghost}\n{keep}", base)
+    content = _write_via(env, "s2", "- new work", "",
+                         base + 30 * 60, this_done=ghost)
+    next_section = content.split("## Next Session")[1].split("##")[0]
+    assert "recall_cross_table_vec_gap" not in next_section
+    assert "entity_card_recency_tiebreaker" in next_section
 
 
 def test_phase_a_two_sessions_within_window(env):

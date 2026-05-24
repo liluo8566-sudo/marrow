@@ -100,22 +100,40 @@ reconcile_prev:
 SEGMENT 2 — TASK_CAND
 ═══════════════════════════════════════════
 
+Currently active tasks in the system (db snapshot — use this list to \
+tick completions; do not invent titles):
+
+===ACTIVE_TASKS===
+{active_tasks}
+===END===
+
+Tick rule:
+- If 念念 completed any task from the ACTIVE_TASKS list during this \
+session, emit it as a TASK_CAND row with:
+  * title: copy EXACTLY from the list (no rephrase, no translate, no \
+truncation)
+  * status: "done"
+  * category: keep the category shown in the list
+- New tasks discovered this session (not in the list) → emit with \
+status: "active" as before.
+- Do not emit a row for an active task that 念念 did NOT touch / complete \
+this session — silence = still active, code keeps it.
+
 Extract task-like items from the session.
 Both completed (today only) and active tasks.
 Do not make things up. If not sure, discard the task.
 
-Include — by category:
-- Appointment: GP / physio / 跟朋友吃饭 / 体检
-- Assignment: 单元作业 (370AT2 / SCH3060 essay)
-- Study: 考试 / GAMSAT / 一整门课
-- Project: marrow / coding / 较大产出单位
-- Daily: 打疫苗 / 充电话费 / 买 xxx
+Include — by category: examples
+- Appointment: GP / physio / Dining with friend
+- Assignment: 370AT2 Essay, exams
+- Study: Lec note 3, GAMSAT S1 20 MCQs
+  - Title prefix Uni-/Gamsat-, e.g. Uni-370 AT2 essay
+- Project: Record large task or project phase only. Exclude single steps.
+  - Title prefix project tag, e.g. mw-phase 2: ...
+  - Max per session: 1 todo + 1 done (Project category only — Study / \
+Daily / etc. unbounded)
+- Daily: Flu vac / recharge SIM / buy hand cream
 - Others: anything not above
-
-Exclude (Study / Project): dev steps / debug fragments / sub-process.
-- e.g. (Marrow Phase 2) is a task; (debug recall.py) / (clean folder) \
-are dev steps — drop them.
-- Rule: if it lives inside a larger task, it is a step, not a task.
 
 Field semantics:
 - title: short imperative phrase
@@ -124,7 +142,7 @@ Others. Unknown → Others. Required.
 - status: active / done
 - due: ISO date string or null
 - completed_at: ISO timestamp if status=done, else null
-- note: optional context. May be "".
+- note: optional. Write leftover / plan in 1 to 2 short sentences.
 
 ===TASK_CAND===
 [
@@ -177,19 +195,19 @@ still alive vs done vs abandoned this session):
 {prior_handover}
 ===END===
 
-Write the handover for the next session. Produce three bullet sections \
+Write the handover for the next session. Produce four bullet sections \
 that drop into `## This Session`, `## Next Session`, `## Reference` of \
-the handover document. `## Previous Sessions` is owned by code — DO NOT \
-emit it; rotation by ≥2h timestamp is handled outside.
+the handover document, plus a `THIS_DONE` delete list consumed by code. \
+`## Previous Sessions` is owned by code — DO NOT emit it; rotation by \
+≥2h timestamp is handled outside.
 
 Global rules:
 - Bullet blocks, concise and dense.
 - Language: default English; CN OK for pure casual chat.
-- Remove completed/resolved items and carry-over unresolved items.
-- If items overlap or conflict, rephrase in to one block.
-- Do NOT restate content already captured in other artifacts ( \
-plans, commits, diffs, instruction, rubric). Point to them \
-in the REFERENCE section.
+- If items overlap or conflict, rephrase into one block.
+- Do NOT restate content already captured in other artifacts (plans, \
+commits, diffs, instruction, rubric). Point to them in the REFERENCE \
+section.
 - If a section has no content, output a single bullet `- N/A`.
 
 THIS_SESSION:
@@ -198,34 +216,38 @@ topic / work / study.
 - Include: key decisions, findings, completed tasks, essential context.
 - Exclude: routine code / config detail, finished tasks no longer needed.
 
-NEXT_SESSION (inclusion rule — DEFAULT DENY):
-- Include only items 念念 explicitly committed to (「下次接着做 X」 / \
-「下个 session 处理 Y」 / 「明天继续聊 Z」).
+THIS_DONE (carry-over cleanup — verbatim copy required):
+- For every item in PRIOR_HANDOVER's `## Next Session` that 念念 \
+completed / resolved / abandoned in THIS session, copy that bullet \
+**verbatim** (first 80 chars are enough; longer is fine).
+- Code deletes prior Next-Session lines by prefix match on this list \
+— any rephrasing / translation / typo breaks the match.
+- If nothing was cleared, output `- N/A`.
+
+NEXT_NEW (inclusion rule — DEFAULT DENY):
+- Emit ONLY new commitments born THIS session that 念念 explicitly \
+agreed to ((下次接着做 X) / (下个 session 处理 Y) / (明天继续聊 Z)).
 - Silence after an assistant proposal = abandon. DO NOT include.
-  e.g. assistant 说「要不要把 A 也处理一下」, 念念 无回应 → DROP.
-- If 念念 exits without confirming the assistant's last suggestion, \
-treat as abandoned.
-- Can be casual ("出去玩回来接着聊 xxx") or task-related; urgent or \
-non-urgent.
+- DO NOT restate any item from PRIOR_HANDOVER's `## Next Session` — \
+code preserves prior carry-over automatically.
 - Sort by priority when multiple.
 
 REFERENCE:
-- Useful materials for the next session: file path, URL, skill \
-name, commit hash. Include lines N if relevant.
-- Remove when all done; leave if still unresolve
+- Useful materials for the next session: file path, URL, skill name, \
+commit hash. Include lines N if relevant.
+- Remove when all done; leave if still unresolved.
 - One per line, with a 4–6 word hint of what / why.
 - e.g. - `marrow/handover_render.py:60` — `_last_3_commits` retire site
-- e.g. - `docs/notes/2026-05-24_marrow-pulse-design.md` — Pulse draft
 
 ===HANDOVER===
 ===THIS_SESSION===
 - bullet
 - bullet
-===NEXT_SESSION===
-- bullet
-- bullet
+===THIS_DONE===
+- (verbatim prior Next-Session bullet that is now done)
+===NEXT_NEW===
+- (new commitment born this session)
 ===REFERENCE===
-- bullet
 - bullet
 ===END===
 

@@ -303,6 +303,18 @@ def _seg_digest(conn, raw: str, sid: str, date: str) -> int:
     return 1
 
 
+def _load_active_tasks_for_sonnet(conn) -> str:
+    """db active task snapshot for sonnet's tick decisions. Title is the
+    match key — sonnet must copy verbatim so _seg_task_cand flips by title."""
+    rows = conn.execute(
+        "SELECT title, category FROM tasks WHERE status='active'"
+        " ORDER BY id"
+    ).fetchall()
+    if not rows:
+        return "_none_"
+    return "\n".join(f"- {r['title']} ({r['category']})" for r in rows)
+
+
 def _load_prior_handover_for_sonnet() -> str:
     """Read prior handover.md and extract the narrative sections (Previous /
     This / Next / Reference) for sonnet carry-over judgement. Alerts / Tasks /
@@ -319,35 +331,54 @@ def _load_prior_handover_for_sonnet() -> str:
     return "\n\n".join(parts)
 
 
-def _parse_handover_blocks(raw: str) -> tuple[str, str, str]:
-    """Pull THIS_SESSION, NEXT_SESSION, REFERENCE bullet blocks out of LLM \
-output. Each defaults to empty if its marker is missing."""
-    def _slice(open_tag: str, close_tag: str) -> str:
+def _parse_handover_blocks(raw: str) -> tuple[str, str, str, str]:
+    """Pull THIS_SESSION, THIS_DONE, NEXT_NEW, REFERENCE bullet blocks out
+    of LLM output. Each defaults to empty if its marker is missing.
+
+    Legacy fallback: if LLM still emits the old `NEXT_SESSION` marker,
+    treat it as NEXT_NEW (no carry-over removal possible — best-effort
+    until the new prompt fully lands)."""
+    def _slice(open_tag: str, *close_tags: str) -> str:
         i = raw.find(open_tag)
         if i < 0:
             return ""
-        j = raw.find(close_tag, i + len(open_tag))
-        if j < 0:
-            return ""
-        return raw[i + len(open_tag):j].strip()
-    this_s = _slice("===THIS_SESSION===", "===NEXT_SESSION===")
-    next_s = _slice("===NEXT_SESSION===", "===REFERENCE===")
-    if not next_s:
-        next_s = _slice("===NEXT_SESSION===", "===END===")
+        start = i + len(open_tag)
+        end = len(raw)
+        for close in close_tags:
+            j = raw.find(close, start)
+            if 0 <= j < end:
+                end = j
+        return raw[start:end].strip()
+
+    this_s = _slice("===THIS_SESSION===",
+                    "===THIS_DONE===", "===NEXT_NEW===",
+                    "===NEXT_SESSION===", "===REFERENCE===", "===END===")
+    this_done = _slice("===THIS_DONE===",
+                       "===NEXT_NEW===", "===REFERENCE===", "===END===")
+    next_new = _slice("===NEXT_NEW===", "===REFERENCE===", "===END===")
+    if not next_new:
+        next_new = _slice("===NEXT_SESSION===",
+                          "===REFERENCE===", "===END===")
     ref_s = _slice("===REFERENCE===", "===END===")
-    return this_s, next_s, ref_s
+    return this_s, this_done, next_new, ref_s
 
 
 def _seg_handover(conn, raw: str, sid: str) -> int:
     """Build full handover.md (skeleton + LLM bullets + ready stamp) in ONE
     atomic write — single-writer rule per Bug #1 fix. SessionStart hooks are
     read-only and never invoke this path.
+
+    NEXT_NEW + THIS_DONE replace the old single NEXT_SESSION block:
+    handover_render filters prior Next-Session lines by THIS_DONE prefix
+    match, then unions NEXT_NEW on top — stops sonnet's ghost carry-over
+    repetition.
     """
-    this_s, next_s, ref_s = _parse_handover_blocks(raw)
-    if not this_s and not next_s and not ref_s:
+    this_s, this_done, next_new, ref_s = _parse_handover_blocks(raw)
+    if not this_s and not this_done and not next_new and not ref_s:
         return 0
     handover_render.write_handover_full(
-        conn, sid, this_s, next_s, reference=ref_s)
+        conn, sid, this_s, next_new, reference=ref_s,
+        this_done=this_done)
     return 1
 
 
@@ -391,11 +422,13 @@ def main(argv: list[str] | None = None) -> int:
         # One sonnet call emits all 4 segment blocks.
         try:
             prior_handover = _load_prior_handover_for_sonnet()
+            active_tasks = _load_active_tasks_for_sonnet(conn)
             raw = client.call(
                 role="sessionend",
                 body=SESSIONEND_PROMPT.format(
                     sid=sid, events=events_text,
-                    prior_handover=prior_handover),
+                    prior_handover=prior_handover,
+                    active_tasks=active_tasks),
                 tier="mid",
             )
         except (LLMError, ValueError, RuntimeError) as e:

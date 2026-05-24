@@ -152,6 +152,29 @@ def _normalize_bullets(text: str) -> list[str]:
     return [ln for ln in (text or "").splitlines() if ln.strip()]
 
 
+def _apply_this_done(old_next: str, this_done: str) -> str:
+    """Drop prior Next-Session bullets whose verbatim prefix matches any
+    THIS_DONE bullet. Sonnet must copy the prior bullet verbatim (≥ first
+    80 chars) — anything shorter than 20 chars is ignored to avoid mass
+    delete on stub `- N/A` style lines."""
+    done_lines = _normalize_bullets(this_done)
+    done_prefixes: list[str] = []
+    for ln in done_lines:
+        body = ln.lstrip("-* ").strip()
+        if len(body) < 20 or body.upper() in {"N/A", "NONE"}:
+            continue
+        done_prefixes.append(body[:80])
+    if not done_prefixes:
+        return old_next
+    kept: list[str] = []
+    for ln in _normalize_bullets(old_next):
+        ln_body = ln.lstrip("-* ").strip()
+        if any(ln_body.startswith(p) for p in done_prefixes):
+            continue
+        kept.append(ln)
+    return "\n".join(kept)
+
+
 def _merge_next_session_union(old_next: str, new_next: str) -> str:
     """Union of bullets, dedup by exact-line. Newest (new_next) first."""
     new_lines = _normalize_bullets(new_next)
@@ -182,8 +205,13 @@ def _none_or(body: str) -> str:
 
 
 def _merge_sections(prior_text: str, this_new: str, next_new: str,
-                    now_epoch: int) -> tuple[str, str, str]:
-    """Compute (this_body, next_body, prev_body) merged with prior file."""
+                    now_epoch: int,
+                    this_done: str = "") -> tuple[str, str, str]:
+    """Compute (this_body, next_body, prev_body) merged with prior file.
+
+    `this_done` (LLM-emitted verbatim copies of prior Next-Session bullets
+    cleared THIS session) is applied to prior Next-Session BEFORE union
+    with next_new — stops sonnet's ghost carry-over accumulation."""
     new_label = _now_label(now_epoch)
     this_clean = _none_or(this_new)
     next_clean = _none_or(next_new)
@@ -226,7 +254,8 @@ def _merge_sections(prior_text: str, this_new: str, next_new: str,
 
     this_body = _format_segments(merged_this) if merged_this else "- None"
     prev_body = _format_segments(merged_prev) if merged_prev else "- None"
-    next_body = _merge_next_session_union(old_next_body, next_clean)
+    filtered_old_next = _apply_this_done(old_next_body, this_done)
+    next_body = _merge_next_session_union(filtered_old_next, next_clean)
     next_body = next_body if next_body.strip() else "- None"
 
     return this_body, next_body, prev_body
@@ -287,13 +316,15 @@ def _release_flock(fd) -> None:
 def render_full(conn: sqlite3.Connection, sid: str,
                 this_session: str, next_session: str,
                 *, reference: str = "",
-                prior_text: str = "", now_epoch: int | None = None) -> str:
+                prior_text: str = "", now_epoch: int | None = None,
+                this_done: str = "") -> str:
     """Compose skeleton + merged ThisSession/Previous/Next + Reference \
 + ready stamp."""
     if now_epoch is None:
         now_epoch = int(time.time())
     this_body, next_body, prev_body = _merge_sections(
-        prior_text, this_session, next_session, now_epoch)
+        prior_text, this_session, next_session, now_epoch,
+        this_done=this_done)
     ref_body = (reference or "").strip() or "- N/A"
     text = render_skeleton(conn)
     text = _inject_section(text, "Previous Sessions", prev_body)
@@ -306,7 +337,8 @@ def render_full(conn: sqlite3.Connection, sid: str,
 
 def write_handover_full(conn: sqlite3.Connection, sid: str,
                         this_session: str, next_session: str,
-                        *, reference: str = "") -> Path:
+                        *, reference: str = "",
+                        this_done: str = "") -> Path:
     """Sessionend_async single-writer: flock + merge + atomic write. Lock-loss
     falls back to handover.md.partial.<sid> with audit row, never crashes."""
     now_epoch = int(time.time())
@@ -315,7 +347,8 @@ def write_handover_full(conn: sqlite3.Connection, sid: str,
         partial = _RENDERED_PATH.with_suffix(f".md.partial.{sid}")
         text = render_full(conn, sid, this_session, next_session,
                            reference=reference,
-                           prior_text="", now_epoch=now_epoch)
+                           prior_text="", now_epoch=now_epoch,
+                           this_done=this_done)
         _atomic_write(str(partial), text)
         try:
             with conn:
@@ -335,7 +368,8 @@ def write_handover_full(conn: sqlite3.Connection, sid: str,
         _write_snapshot_audit(conn, sid, prior_text)
         text = render_full(conn, sid, this_session, next_session,
                            reference=reference,
-                           prior_text=prior_text, now_epoch=now_epoch)
+                           prior_text=prior_text, now_epoch=now_epoch,
+                           this_done=this_done)
         _atomic_write(str(_RENDERED_PATH), text)
     finally:
         _release_flock(fd)
