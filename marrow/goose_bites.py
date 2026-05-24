@@ -9,7 +9,7 @@ from pathlib import Path
 from .llm import LLMClient, LLMError  # noqa: F401 — re-exported for patching
 
 _LOG = logging.getLogger(__name__)
-_QUOTE_DIR = Path.home() / "Desktop" / "NY" / "铁锅" / "语录"
+_QUOTE_DIR = Path.home() / ".config" / "marrow" / "goose_log"
 _LINE_RE = re.compile(r"^- `\d{2}:\d{2}` (.+)$")
 
 _SYSTEM_PROMPT = (

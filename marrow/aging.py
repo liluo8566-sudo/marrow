@@ -15,7 +15,7 @@ Passes (single txn):
 3. confirm_milestone_alerts — alerts.type='milestone_added' AND created_at
    > 7d ago AND resolved=0 → set resolved=1, resolved_at=now.
 4. prune_goose_quotes — delete ### YYYY-MM-DD blocks older than 7d from
-   ~/Desktop/NY/铁锅/语录/*.md; delete empty monthly files.
+   ~/.config/marrow/goose_log/*.md; delete empty monthly files.
 """
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ from zoneinfo import ZoneInfo
 from . import storage
 
 _MEL_TZ = ZoneInfo("Australia/Melbourne")
-_GOOSE_DIR = Path.home() / "Desktop" / "NY" / "铁锅" / "语录"
+_GOOSE_DIR = Path.home() / ".config" / "marrow" / "goose_log"
 _BANNER_RE = re.compile(r"^!\[\[")
 _DAY_RE = re.compile(r"^### (\d{4}-\d{2}-\d{2})\s*$")
 
