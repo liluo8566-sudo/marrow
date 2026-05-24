@@ -371,11 +371,16 @@ def test_main_force_flag_routes_to_run_day(db, monkeypatch, tmp_path):
             Path(daily.config.DATA_DIR) / "daily.lock")
         return real(path, blocking=blocking)
 
+    sub_folder = tmp_path / "sub_pages"
+    sub_state = tmp_path / "sub_state"
     monkeypatch.setattr(daily.daily_catchup, "app_lock", spy)
     monkeypatch.setattr(daily.config, "db_path", lambda: p)
     monkeypatch.setattr(daily.config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(daily.config, "sub_pages_path", lambda: str(sub_folder))
+    monkeypatch.setattr(daily.config, "sub_pages_state_path", lambda: str(sub_state))
     monkeypatch.setattr(daily, "LLMClient", lambda **k: FakeLLM(prose="forced"))
     assert daily.main(["--day", "2026-05-16", "--force"]) == 0
+    assert (sub_folder / "diary.md").exists()
     assert "path" in seen and seen["path"].endswith(".lock")
     fresh = real_connect(p)
     try:
