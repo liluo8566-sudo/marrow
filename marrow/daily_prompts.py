@@ -36,6 +36,15 @@ People / preferences / places mentioned with clear evidence in the text.
 - kind: one of person / pref / place
 - conf: 0.0 to 1.0 — how certain this is a real entity vs casual mention
 - note: optional short fact (role, location). May be "".
+- aliases: list of every other way 念念 might refer to this entity in a \
+query — CN translation if name is EN, EN translation if name is CN, \
+nicknames, abbreviations, sport / brand / topic terms, singular & plural \
+variants, common shorthand. Cross-language coverage is mandatory: an EN \
+name (e.g. Colours) must include CN ("颜色") and the singular form \
+("colour"); a CN nickname (e.g. 南南) must include the real name (Allen) \
+and any relationship label (gay bestie). Be liberal — false positives \
+are cheap, misses are expensive. May be [] only when no plausible \
+alternate term exists.
 
 ─────────── MILESTONE_CAND ───────────
 Life-shaping events: graduation, breakup, job change, major move, family \
@@ -71,7 +80,8 @@ Output markers (machine-parsed — do NOT skip, rename, or merge):
 
 ===ENTITY_CAND===
 [
-  {{"name": "...", "kind": "person", "conf": 0.9, "note": "..."}}
+  {{"name": "...", "kind": "person", "conf": 0.9, "note": "...", \
+"aliases": ["...", "..."]}}
 ]
 ===END===
 ===MILESTONE_CAND===

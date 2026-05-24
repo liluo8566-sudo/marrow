@@ -32,17 +32,29 @@ def entity_force_include(
         return []
 
     rows = conn.execute(
-        "SELECT id, name, mention_count FROM entities_live"
+        "SELECT id, kind, name, fact, aliases, mention_count FROM entities_live"
     ).fetchall()
     matched: list[dict] = []
     for r in rows:
         name = r["name"] or ""
         if not name:
             continue
-        if name.lower() in q_lower:
+        triggers = [name]
+        raw_aliases = r["aliases"] if "aliases" in r.keys() else None
+        if raw_aliases:
+            try:
+                import json as _json
+                parsed = _json.loads(raw_aliases)
+                if isinstance(parsed, list):
+                    triggers.extend(str(a) for a in parsed if a)
+            except Exception:
+                pass
+        if any(t and t.lower() in q_lower for t in triggers):
             matched.append({
                 "id": r["id"],
+                "kind": r["kind"] or "",
                 "name": name,
+                "fact": r["fact"] or "",
                 "mention_count": r["mention_count"] or 0,
             })
 
@@ -60,7 +72,32 @@ def entity_force_include(
         if len(results) >= force_cap:
             break
         name = entity["name"]
-        score = 1.0 + 0.1 * math.log1p(entity["mention_count"])
+        ekind = entity["kind"]
+        fact = entity["fact"]
+        mc = entity["mention_count"]
+        score = 1.0 + 0.1 * math.log1p(mc)
+
+        # Entity-card: the entity row's own fact field. Outranks event score so
+        # the identity sheet always lands first in the recall block.
+        if fact:
+            card_content = f"{name} ({ekind}): {fact}" if ekind else f"{name}: {fact}"
+            results.append({
+                "kind": "entity",
+                "id": entity["id"],
+                "session_id": None,
+                "timestamp": "",
+                "role": "entity",
+                "content": card_content,
+                "channel": None,
+                "compressed": 0,
+                "bm25": 1.0,
+                "vec": 0.0,
+                "fts_hit": True,
+                "score": score + 0.5,
+                "force_include": True,
+            })
+            if len(results) >= force_cap:
+                break
 
         event_rows: list = []
         if len(name) >= 3:

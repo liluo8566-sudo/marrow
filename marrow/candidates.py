@@ -67,11 +67,17 @@ def write_entity_cand(conn, raw: str, source: str = "daily") -> int:
         if exists:
             continue
         fact = (it.get("note") or "").strip() or None
+        raw_aliases = it.get("aliases")
+        aliases_json = None
+        if isinstance(raw_aliases, list):
+            cleaned = [str(a).strip() for a in raw_aliases if str(a).strip()]
+            if cleaned:
+                aliases_json = json.dumps(cleaned, ensure_ascii=False)
         with conn:
             conn.execute(
-                "INSERT INTO entities (kind, name, fact, source)"
-                " VALUES (?, ?, ?, ?)",
-                (kind, name, fact, source),
+                "INSERT INTO entities (kind, name, fact, aliases, source)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (kind, name, fact, aliases_json, source),
             )
         n += 1
     return n

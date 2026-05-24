@@ -13,7 +13,7 @@ import sqlite_vec
 
 from . import config
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # Phase 1 first-class tables + Phase 2 affect/entities (DECISIONS Phase 2).
 # The retired emotions/people/preferences/dir placeholders stay absent.
@@ -142,6 +142,7 @@ CREATE TABLE IF NOT EXISTS entities (
   kind TEXT NOT NULL,
   name TEXT NOT NULL,
   fact TEXT,
+  aliases TEXT,
   mention_count INTEGER NOT NULL DEFAULT 0,
   source TEXT,
   superseded_by INTEGER REFERENCES entities(id) ON DELETE SET NULL,
@@ -280,6 +281,7 @@ def init_db(path: str | None = None) -> sqlite3.Connection:
         _migrate_to_v3(conn)
         _migrate_to_v4(conn)
         _migrate_to_v5(conn)
+        _migrate_to_v6(conn)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     return conn
 
@@ -403,3 +405,17 @@ def _migrate_to_v5(conn: sqlite3.Connection) -> None:
     v = conn.execute("PRAGMA user_version").fetchone()[0]
     if v >= 5:
         return
+
+
+def _migrate_to_v6(conn: sqlite3.Connection) -> None:
+    """v6: entities.aliases TEXT — JSON list of CN/EN alias strings so
+    reverse-match in entity_recall hits cross-language queries
+    (Colours <-> 颜色 / colour; 南南 <-> Allen). Idempotent.
+    """
+    v = conn.execute("PRAGMA user_version").fetchone()[0]
+    if v >= 6:
+        return
+    try:
+        conn.execute("ALTER TABLE entities ADD COLUMN aliases TEXT")
+    except sqlite3.OperationalError:
+        pass
