@@ -23,6 +23,10 @@ Not prioritized within a section. Read before adding a feature to confirm whethe
 - **subpage_redo** — Subpage layout / content / file structure pending Lumi spec. All current subpages (`study`, `projects`, `milestone`, `mood`, etc.) treated as scaffolding until redesign lands. Reconcile flow stays intact during transition. (Lumi 2026-05-24)
 - **housekeeping_monitor** — Monitor fast-growing directories (`~/.claude/projects/` handled by cc cleanupPeriodDays, MCP image cache, `~/.config/marrow/logs/`, iCloud backup, etc.). Consolidate cleanup into Sun 12:00 weekly job unless one channel needs its own agent. Surface size growth as warn alerts on threshold breach; no auto-delete by default. (Lumi 2026-05-24)
 
+- **chord_progression_dim** — affect table adds `chord_line` text field, store raw without decode, leave for future model. Captures directional micro-arcs lost by V/A scalars. Source: `/Users/Gabrielle/Desktop/和弦情绪.md`, brainstorm-future.md section 8. (2026-05-23)
+- **disambiguator_verb_pattern** — affect tag `(紧张)` extends to verb patterns `(盯/压/憋/狂)`, cheap disambiguation patch, no tag vocab expansion. Source: brainstorm-future.md section 8. (2026-05-23)
+- **context_density_tier** — recall picks 3 tiers by query intent: chord-only (region) / +scene (sub-tone) / +paragraph (sentence). Source: brainstorm-future.md section 8, claude-imprint reference. (2026-05-23)
+
 ## Phase 3 (writer authority + drift / convention infra)
 
 All three REQUIRED, mechanism Pending. They share one base: daemon writes CLAUDE.md via Python file IO (not the cc Write tool, so cc permission + the 10000-char hook cap never apply, same path as diary render), marker-block partitioned.
@@ -30,6 +34,10 @@ All three REQUIRED, mechanism Pending. They share one base: daemon writes CLAUDE
 - **drift_sweep** — Lumi moves/renames/deletes/merges a file; every reference follows without her reminding anyone. Trigger = path-change (git diff detects). Three layers: (1) deterministic ripgrep over authorized roots — primary, no model, never misses; (2) key-indirection — docs/scripts reference a key not a hardcoded path, a move edits one registry entry; (3) cheap local model sweeps free-text mentions as fallback, never touches key paths. Dropped: file-level full index / hand-tree / Spotlight ("where is X" = daemon on-demand ripgrep).
 - **convention_injection** — naming + folder-placement rules sit in the every-turn injection layer, never a sub-page (Claude does not read sub-pages on its own — a rule there is dead). Single source → drift_sweep maintains it → daemon renders it into a CLAUDE.md marker block → SessionEnd renders, next SessionStart applies. Lumi edits the source once or never; never hand-manages it.
 - **claude_md_render_guard** — the daemon-rendered marker block never destroys the hand-written zone. Compensating safety net (REQUIRED, not optional, because this removes Anthropic's default block on cc editing CLAUDE.md): marker-outside never overwritten · atomic write · alert only on AI/bug overwriting Lumi text or render-failure; Lumi hand-edit inside silently overwrites on next render, no backup (DECISIONS.md 2026-05-23).
+
+- **paths_registry_early** — All platform/path hardcoded refs collapse into a single `paths.toml` registry. Cloud-migration interface laid down early — moving machine = edit one file. Lumi flagged 2026-05-24 to surface this earlier than other Phase 3 items; bundled with `drift_sweep` when that ships. Source: brainstorm-future.md section 7.
+- **cloud_migration_runbook** — Topology confirmed: marrow daemon on cloud / wechat bridge (iLink polling) stays local mac (WeChat process must run) / local bridge → cloud daemon via HTTPS or socket one-way. cyberboss-verified shape. Runbook pending. Source: brainstorm-future.md section 7. (2026-05-23)
+- **addon_manifest_contract** — Addon four-piece contract: MCP server / own-table schema / sub-page render template / config. Must be defined BEFORE `wallet_mcp_extraction` ships (first real sample copies the contract). No hand-built plugin spec — MCP protocol = manifest. Source: brainstorm-future.md section 1. (2026-05-23)
 
 ## Phase 4 (cross-channel + weclaude deep rebuild)
 
@@ -59,6 +67,8 @@ All three REQUIRED, mechanism Pending. They share one base: daemon writes CLAUDE
 - **WeClaude_upstream_revival_strategy** — If upstream revives, drop local patches; fallback `_patches.py` monkey-patch keeps `bridge.py` pristine (source: `/Users/Gabrielle/Desktop/NY/code/weclaude.md:8-10`)
 - **transcript_path_mismatch** — `cc-jsonl-to-md.py` writes elsewhere than `memory/transcript/`, fix in Phase 4 (source: `/Users/Gabrielle/Desktop/NY/memory/reference.md:25`)
 
+- **mac_notification_center_reader** — Curve-capture macOS notification stream (system notification db), cross-app proactive signal source. Companion to `marrow_pulse_proactive_loop`. Source: brainstorm-future.md section 10. (2026-05-23)
+
 ## Phase 5 (addons + OSS) — addons live here, sink to the bottom of the phase line
 
 - **wallet_mcp_extraction** — Standalone MCP server for wallet (own repo, ~/.config/wallet/wallet.db, config-overridable; Marrow connects via .mcp.json). First implementation of addon contract. Account_id partition enables stellan_wallet and lumi_accounting_addon to share engine. (Lumi 2026-05-23)
@@ -75,6 +85,11 @@ All three REQUIRED, mechanism Pending. They share one base: daemon writes CLAUDE
 - **lifestyle_and_preference_relocation** — Move block to history.md Preferences or keep in reference.md (source: `/Users/Gabrielle/Desktop/NY/memory/3d.md:22`)
 - **README_public_facing** — Full open-source README sections: philosophy, install, 5-script overview, customisation hooks (source: `/Users/Gabrielle/Desktop/NY/code/roadmap.md:62`)
 - **monorepo_or_split_decision** — NY memory + weclaude bridge + claude-buddy MCP: monorepo or split (source: `/Users/Gabrielle/Desktop/NY/code/roadmap.md:64`)
+
+- **marrow_pulse_proactive_loop** — Unified agentic loop for proactive browse + proactive message. opus self-wake + `inner_state` drift (v1 single field `longing`) + dual-gate model (`silent_to_lumi` ≠ `activity_allowed`) + multi-channel routing (macOS notify / wechat / inbox / future APNs). Sleep window allows self-driven activity (diary / letter / browse / today draft). opus = decision layer, dispatches haiku fetcher / sonnet writer subagents. Design draft: `docs/notes/2026-05-24_marrow-pulse-design.md`. Dependencies: tasks source/category columns + ScreenTime FDA + cccompanion_ios_fork + weclaude rebuild + recall stable. Absorbs brainstorm-future.md section 5 `active_device_routing` as routing sub-layer. (Lumi 2026-05-24)
+- **ios_shortcut_kit** — iOS Shortcut suite: period board / quick query / data upload via shortcut webhook → marrow daemon. iOS only open-to-outside location entry (active reporting). Highest ROI tier before full ios_fork. Source: brainstorm-future.md section 3. (2026-05-23)
+- **period_addon** — Period tracking addon. Phase 5 addon standard contract example. Source: brainstorm-future.md section 10. (2026-05-23)
+- **health_manual_addon** — Manual health entry addon (symptoms / weight / meds). Source: brainstorm-future.md section 10. (2026-05-23)
 
 ## Unphased ops (backup / monitor)
 
