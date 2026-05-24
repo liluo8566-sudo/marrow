@@ -25,6 +25,8 @@ Not prioritized within a section. Read before adding a feature to confirm whethe
 - **chord_progression_dim** — affect table adds `chord_line` text field, store raw without decode, leave for future model. Captures directional micro-arcs lost by V/A scalars. Source: `/Users/Gabrielle/Desktop/和弦情绪.md`, brainstorm-future.md section 8. (2026-05-23)
 - **disambiguator_verb_pattern** — affect tag `(紧张)` extends to verb patterns `(盯/压/憋/狂)`, cheap disambiguation patch, no tag vocab expansion. Source: brainstorm-future.md section 8. (2026-05-23)
 - **context_density_tier** — recall picks 3 tiers by query intent: chord-only (region) / +scene (sub-tone) / +paragraph (sentence). Source: brainstorm-future.md section 8, claude-imprint reference. (2026-05-23)
+- **diary_chunked_embedding** — diary lane wired (schema v8, diary_vec, full backfill) but cosine sim < 0.40 due to bge-m3 512-token truncation + CLS-pooling whole diary to 1 vector. Fix: paragraph-split `\n\n`, embed chunks, max-pool per-date. Adds chunk-id→date map, ~150 LOC. Source: agent backfill probes 2026-05-25.
+- **anchor_bias_tuning** — milestone + memes rows: +0.10 anchor bias (_ANCHOR_BIAS in marrow/recall.py) on bm25+vec, keeps identity/lore ahead. Entity force-include +0.50, untouched. Follow-up: tier by row class (pinned > regular > weak vec hit). Source: Lumi 2026-05-25.
 
 ## Phase 3 (writer authority + drift / convention infra)
 

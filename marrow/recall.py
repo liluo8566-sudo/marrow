@@ -190,6 +190,26 @@ _LANES: dict[str, dict[str, str]] = {
             "ORDER BY d.rowid DESC LIMIT ?"
         ),
     },
+    # Tasks lane covers study + projects (both live in `tasks` filtered by
+    # category). Embed active + done so finished work stays surfaceable;
+    # skip archived (aging.py auto-applies after 30d of zero mentions).
+    "tasks": {
+        "vec_table": "tasks_vec",
+        "meta_table": "tasks_vec_meta",
+        "pending_sql": (
+            "SELECT t.id AS id, "
+            "  TRIM(COALESCE(t.category,'') || ': ' || COALESCE(t.title,'') || "
+            "       CASE WHEN COALESCE(t.next_step,'')!='' "
+            "            THEN ' — ' || t.next_step ELSE '' END || "
+            "       CASE WHEN COALESCE(t.last_session_summary,'')!='' "
+            "            THEN ' (' || t.last_session_summary || ')' ELSE '' END"
+            "  ) AS text "
+            "FROM tasks t WHERE t.status IN ('active','done') "
+            "AND NOT EXISTS (SELECT 1 FROM tasks_vec_meta x "
+            "                WHERE x.rowid=t.id) "
+            "ORDER BY t.id DESC LIMIT ?"
+        ),
+    },
 }
 
 
@@ -290,6 +310,17 @@ def embed_diary(
     return _embed_one(conn, "diary", int(row["rowid"]), text, embedder_id, dim)
 
 
+def embed_task(
+    conn: sqlite3.Connection,
+    task_id: int,
+    text: str,
+    embedder_id: str = "bge-m3",
+    dim: int = 1024,
+) -> bool:
+    """Embed one task row into tasks_vec + tasks_vec_meta. Idempotent."""
+    return _embed_one(conn, "tasks", task_id, text, embedder_id, dim)
+
+
 def _sweep_diary_orphans(conn: sqlite3.Connection) -> None:
     """Drop diary_vec / diary_vec_meta rows whose rowid no longer maps to a
     diary row. daily.run_day rewrites diary by DELETE+INSERT, which reassigns
@@ -355,7 +386,8 @@ def embed_pending(
     embedder_id: str = "bge-m3",
     dim: int = 1024,
 ) -> int:
-    """Backfill all five lanes (events + memes + entities + milestones + diary).
+    """Backfill all six lanes (events + memes + entities + milestones + diary
+    + tasks).
 
     Per-lane budget = `batch` so a large events backlog cannot starve the
     cross-table lanes on a single hook firing. Returns total rows written.
@@ -485,6 +517,42 @@ def _diary_vec_hits(
     return out
 
 
+def _tasks_vec_hits(
+    conn: sqlite3.Connection, qblob: bytes, k: int
+) -> list[dict]:
+    """Return task cards (live: active/done) matched by qblob, with vec_score.
+
+    Mirrors _diary_vec_hits: vec-only lane (no kw scan). Status filter keeps
+    archived rows out — aging.py archives stale work, and surfacing it would
+    crowd the cap.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT t.id, t.category, t.title, t.next_step, t.status, "
+            "       t.created_at, v.distance "
+            "FROM tasks_vec v JOIN tasks t ON t.id = v.rowid "
+            "WHERE t.status IN ('active','done') "
+            "  AND embedding MATCH ? AND k = ? "
+            "ORDER BY v.distance",
+            (qblob, k),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    out: list[dict] = []
+    for r in rows:
+        vs = max(0.0, 1.0 - r["distance"])
+        out.append({
+            "id": r["id"],
+            "category": r["category"] or "",
+            "title": r["title"] or "",
+            "next_step": r["next_step"] or "",
+            "status": r["status"] or "",
+            "created_at": r["created_at"] or "",
+            "vec_score": vs,
+        })
+    return out
+
+
 def _entities_vec_hits(
     conn: sqlite3.Connection, qblob: bytes, k: int
 ) -> list[dict]:
@@ -521,6 +589,12 @@ def _entities_vec_hits(
 _TOKEN_RE = re.compile(r"[A-Za-z0-9]+|[一-鿿]")
 # Milestone pinned-row boost added to raw fusion score before min_score gate.
 _MILESTONE_PINNED_BOOST = 0.10
+# Anchor bias: small additive lift for milestone + memes rows so identity /
+# stake / lore anchors stay ahead of similarly-scored events on borderline
+# queries. Conservative first pass (2026-05-25 Lumi); raise / drop after
+# observing prod recall. Entity force-include cards already carry +0.5 and
+# do not need this lift.
+_ANCHOR_BIAS = 0.10
 
 
 def _query_tokens(q: str) -> list[str]:
@@ -667,6 +741,7 @@ def recall_fusion(
     w_entities_vec: float = 0.55,
     w_milestones_vec: float = 0.55,
     w_diary_vec: float = 0.55,
+    w_tasks_vec: float = 0.55,
     min_score: float = 0.35,
 ) -> list[dict]:
     """Single weighted scalar fusion: vec + bm25 + recency + affect.
@@ -757,12 +832,14 @@ def recall_fusion(
     milestones_vec_map: dict[int, float] = {}
     entities_vec_cards: list[dict] = []
     diary_vec_cards: list[dict] = []
+    tasks_vec_cards: list[dict] = []
     if vec_available:
         k_lane = max(limit * 2, 5)
         memes_vec_map = _memes_vec_hits(conn, qblob, k_lane)
         milestones_vec_map = _milestones_vec_hits(conn, qblob, k_lane)
         entities_vec_cards = _entities_vec_hits(conn, qblob, k_lane)
         diary_vec_cards = _diary_vec_hits(conn, qblob, k_lane)
+        tasks_vec_cards = _tasks_vec_hits(conn, qblob, k_lane)
 
     # Memes: merge vec hits into the substring pool by id.
     memes_by_id = {c["id"]: c for c in memes_cands}
@@ -934,16 +1011,25 @@ def recall_fusion(
 
     # ── milestone scoring (recency/affect dropped — evergreen anchor —
     # bm25 + vec drive rank; no min_score gate so long queries don't dilute
-    # the match into oblivion). ──────────────────────────────────────────────
+    # the match into oblivion). Anchor bias adds a small static lift so
+    # identity / lore stays ahead of similarly-scored events.
     for mc in milestone_cands:
-        raw = w_bm25 * mc["bm25"] + w_milestones_vec * mc.get("vec", 0.0)
+        raw = (
+            w_bm25 * mc["bm25"]
+            + w_milestones_vec * mc.get("vec", 0.0)
+            + _ANCHOR_BIAS
+        )
         if mc["pinned"]:
             raw += _MILESTONE_PINNED_BOOST
         scored.append((raw, {**mc, "score": raw}))
 
-    # ── memes scoring (mirror milestone: bm25 + vec + pinned boost) ──────────
+    # ── memes scoring (mirror milestone: bm25 + vec + anchor bias + pinned) ─
     for vc in memes_cands:
-        raw = w_bm25 * vc["bm25"] + w_memes_vec * vc.get("vec", 0.0)
+        raw = (
+            w_bm25 * vc["bm25"]
+            + w_memes_vec * vc.get("vec", 0.0)
+            + _ANCHOR_BIAS
+        )
         if vc["pinned"]:
             raw += _MILESTONE_PINNED_BOOST
         scored.append((raw, {**vc, "score": raw}))
