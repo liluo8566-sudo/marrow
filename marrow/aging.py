@@ -1,4 +1,4 @@
-"""Weekly maintenance: memes decay, task auto-archive, milestone auto-confirm.
+"""Weekly maintenance: memes decay, task auto-archive, milestone auto-confirm, goose prune.
 
 No LLM. Triggered by deploy/mw-aging.plist (Sun 12:00 local).
 
@@ -14,13 +14,25 @@ Passes (single txn):
    → status = 'archived'.
 3. confirm_milestone_alerts — alerts.type='milestone_added' AND created_at
    > 7d ago AND resolved=0 → set resolved=1, resolved_at=now.
+4. prune_goose_quotes — delete ### YYYY-MM-DD blocks older than 7d from
+   ~/Desktop/NY/铁锅/语录/*.md; delete empty monthly files.
 """
 from __future__ import annotations
 
+import glob
+import re
 import sqlite3
 import sys
+from datetime import date, timedelta
+from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from . import storage
+
+_MEL_TZ = ZoneInfo("Australia/Melbourne")
+_GOOSE_DIR = Path.home() / "Desktop" / "NY" / "铁锅" / "语录"
+_BANNER_RE = re.compile(r"^!\[\[")
+_DAY_RE = re.compile(r"^### (\d{4}-\d{2}-\d{2})\s*$")
 
 
 def _fts_phrase(q: str) -> str:
@@ -96,24 +108,69 @@ def confirm_milestone_alerts(conn: sqlite3.Connection) -> int:
     return cur.rowcount or 0
 
 
+def prune_goose_quotes(quote_dir: Path | None = None) -> int:
+    """Delete ### YYYY-MM-DD blocks older than 7d; remove empty monthly files. Returns blocks pruned."""
+    d = quote_dir or _GOOSE_DIR
+    if not d.exists():
+        return 0
+    cutoff = (date.today() - timedelta(days=7))
+    pruned = 0
+    for md_path in sorted(d.glob("*.md")):
+        try:
+            lines = md_path.read_text(encoding="utf-8").splitlines(keepends=True)
+        except OSError:
+            continue
+        out: list[str] = []
+        skip = False
+        for line in lines:
+            m = _DAY_RE.match(line.rstrip("\n"))
+            if m:
+                block_date = date.fromisoformat(m.group(1))
+                if block_date < cutoff:
+                    skip = True
+                    pruned += 1
+                    continue
+                else:
+                    skip = False
+            if skip:
+                continue
+            out.append(line)
+        # Remove trailing blank lines after pruning, keep banner
+        banner_lines = [l for l in out if _BANNER_RE.match(l.lstrip())]
+        content_lines = [l for l in out if not _BANNER_RE.match(l.lstrip())]
+        has_content = any(l.strip() for l in content_lines)
+        if not has_content:
+            try:
+                md_path.unlink()
+            except OSError:
+                pass
+        else:
+            try:
+                md_path.write_text("".join(out), encoding="utf-8")
+            except OSError:
+                pass
+    return pruned
+
+
 def main() -> None:
-    """Single entrypoint: run all three passes inside one txn, log summary."""
+    """Single entrypoint: run all four passes, log summary."""
     conn = storage.init_db()
     try:
         with conn:
             retired = retire_memes(conn)
             archived = archive_tasks(conn)
             confirmed = confirm_milestone_alerts(conn)
+            pruned = prune_goose_quotes()
             conn.execute(
                 "INSERT INTO audit_log "
                 "(target_table, target_id, action, summary) "
                 "VALUES ('aging', NULL, 'weekly', ?)",
                 (f"retired={retired} archived={archived} "
-                 f"confirmed={confirmed}",),
+                 f"confirmed={confirmed} pruned={pruned}",),
             )
         sys.stderr.write(
             f"[aging] retired={retired} archived={archived} "
-            f"confirmed={confirmed}\n"
+            f"confirmed={confirmed} pruned={pruned}\n"
         )
     finally:
         conn.close()

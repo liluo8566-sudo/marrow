@@ -3,6 +3,8 @@ Each pass: happy path + edge (pinned bypass / no-op empty / boundary)."""
 from __future__ import annotations
 
 import sqlite3
+from datetime import date, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -230,5 +232,85 @@ def test_main_writes_audit_log(db, monkeypatch):
         assert row is not None
         assert row["action"] == "weekly"
         assert "retired=" in row["summary"]
+        assert "pruned=" in row["summary"]
     finally:
         fresh.close()
+
+
+# ── prune_goose_quotes ────────────────────────────────────────────────────────
+
+def _write_monthly(d: Path, month: str, blocks: list[tuple[str, list[str]]],
+                   banner: bool = True) -> Path:
+    """Write a monthly md file with optional banner and day blocks."""
+    d.mkdir(parents=True, exist_ok=True)
+    lines = []
+    if banner:
+        lines.append("![[铁锅传奇版.png|524]]\n\n")
+    for day, quotes in blocks:
+        lines.append(f"### {day}\n")
+        for q in quotes:
+            lines.append(f"- `00:01` {q}\n")
+    p = d / f"{month}.md"
+    p.write_text("".join(lines), encoding="utf-8")
+    return p
+
+
+def test_prune_goose_old_block_deleted(tmp_path):
+    d = tmp_path / "语录"
+    old_date = (date.today() - timedelta(days=8)).isoformat()
+    p = _write_monthly(d, old_date[:7], [(old_date, ["old quote"])])
+    n = aging.prune_goose_quotes(d)
+    assert n == 1
+    # File should be deleted (only banner remains after pruning)
+    # Banner-only → file deleted
+    assert not p.exists()
+
+
+def test_prune_goose_recent_block_kept(tmp_path):
+    d = tmp_path / "语录"
+    new_date = (date.today() - timedelta(days=3)).isoformat()
+    p = _write_monthly(d, new_date[:7], [(new_date, ["fresh quote"])])
+    n = aging.prune_goose_quotes(d)
+    assert n == 0
+    assert p.exists()
+    assert "fresh quote" in p.read_text(encoding="utf-8")
+
+
+def test_prune_goose_mixed_keeps_recent_deletes_old(tmp_path):
+    d = tmp_path / "语录"
+    today = date.today()
+    old = (today - timedelta(days=10)).isoformat()
+    new = (today - timedelta(days=2)).isoformat()
+    month = today.strftime("%Y-%m")
+    p = _write_monthly(d, month, [(old, ["old"]), (new, ["new"])])
+    n = aging.prune_goose_quotes(d)
+    assert n == 1
+    content = p.read_text(encoding="utf-8")
+    assert "new" in content
+    assert "old" not in content
+    assert p.exists()
+
+
+def test_prune_goose_banner_preserved_when_content_remains(tmp_path):
+    d = tmp_path / "语录"
+    today = date.today()
+    new = (today - timedelta(days=1)).isoformat()
+    month = today.strftime("%Y-%m")
+    p = _write_monthly(d, month, [(new, ["quote"])], banner=True)
+    aging.prune_goose_quotes(d)
+    assert p.exists()
+    assert "铁锅传奇版.png" in p.read_text(encoding="utf-8")
+
+
+def test_prune_goose_missing_dir_noop(tmp_path):
+    n = aging.prune_goose_quotes(tmp_path / "nonexistent")
+    assert n == 0
+
+
+def test_prune_goose_empty_after_prune_file_deleted(tmp_path):
+    d = tmp_path / "语录"
+    old = (date.today() - timedelta(days=9)).isoformat()
+    p = _write_monthly(d, old[:7], [(old, ["stale"])], banner=False)
+    n = aging.prune_goose_quotes(d)
+    assert n == 1
+    assert not p.exists()
