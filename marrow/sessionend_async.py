@@ -369,9 +369,10 @@ def _seg_handover(conn, raw: str, sid: str) -> int:
     read-only and never invoke this path.
 
     NEXT_NEW + THIS_DONE replace the old single NEXT_SESSION block:
-    handover_render filters prior Next-Session lines by THIS_DONE prefix
-    match, then unions NEXT_NEW on top — stops sonnet's ghost carry-over
-    repetition.
+    handover_render filters prior Previous + This + Next sessions by
+    THIS_DONE prefix match (stale loops anywhere get cleared), then
+    unions NEXT_NEW on top. Stops sonnet's ghost carry-over and prevents
+    closed-loop events from sitting in the archive forever.
     """
     this_s, this_done, next_new, ref_s = _parse_handover_blocks(raw)
     if not this_s and not this_done and not next_new and not ref_s:

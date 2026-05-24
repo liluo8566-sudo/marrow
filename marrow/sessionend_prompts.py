@@ -216,12 +216,19 @@ topic / work / study.
 - Include: key decisions, findings, completed tasks, essential context.
 - Exclude: routine code / config detail, finished tasks no longer needed.
 
-THIS_DONE (carry-over cleanup — verbatim copy required):
-- For every item in PRIOR_HANDOVER's `## Next Session` that 念念 \
-completed / resolved / abandoned in THIS session, copy that bullet \
-**verbatim** (first 80 chars are enough; longer is fine).
-- Code deletes prior Next-Session lines by prefix match on this list \
-— any rephrasing / translation / typo breaks the match.
+THIS_DONE (cleanup of stale prior content — verbatim copy required):
+- Scan PRIOR_HANDOVER's `## Previous Sessions` + `## This Session` + \
+`## Next Session` and list every bullet that is now stale: closed \
+loops, abandoned plans, fulfilled commitments, events that already \
+played out. Example: prior (Previous: 下午2点晒衣服) + (This: 出去玩 \
+1h ago) — if this session reports (6点回家+收衣服), both prior bullets \
+are stale → list both here.
+- Copy each stale bullet **verbatim** (first 80 chars are enough; \
+longer is fine).
+- Code deletes by prefix match across all three prior sections — any \
+rephrasing / translation / typo breaks the match.
+- Keep ONLY: decisions / findings / reference pointers / still-open \
+loops — these remain useful for the next session.
 - If nothing was cleared, output `- N/A`.
 
 NEXT_NEW (inclusion rule — DEFAULT DENY):

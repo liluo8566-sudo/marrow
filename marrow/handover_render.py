@@ -152,27 +152,49 @@ def _normalize_bullets(text: str) -> list[str]:
     return [ln for ln in (text or "").splitlines() if ln.strip()]
 
 
-def _apply_this_done(old_next: str, this_done: str) -> str:
-    """Drop prior Next-Session bullets whose verbatim prefix matches any
-    THIS_DONE bullet. Sonnet must copy the prior bullet verbatim (≥ first
-    80 chars) — anything shorter than 20 chars is ignored to avoid mass
-    delete on stub `- N/A` style lines."""
-    done_lines = _normalize_bullets(this_done)
-    done_prefixes: list[str] = []
-    for ln in done_lines:
+def _extract_done_prefixes(this_done: str) -> list[str]:
+    """THIS_DONE bullets → 80-char verbatim prefixes for delete match.
+    Skip short / N/A stubs to avoid mass deletion."""
+    out: list[str] = []
+    for ln in _normalize_bullets(this_done):
         body = ln.lstrip("-* ").strip()
         if len(body) < 20 or body.upper() in {"N/A", "NONE"}:
             continue
-        done_prefixes.append(body[:80])
-    if not done_prefixes:
-        return old_next
+        out.append(body[:80])
+    return out
+
+
+def _filter_bullets_by_done(body: str, prefixes: list[str]) -> str:
+    """Drop bullets whose body starts with any done prefix. Used on flat
+    bullet bodies (Next Session)."""
+    if not prefixes:
+        return body
     kept: list[str] = []
-    for ln in _normalize_bullets(old_next):
+    for ln in _normalize_bullets(body):
         ln_body = ln.lstrip("-* ").strip()
-        if any(ln_body.startswith(p) for p in done_prefixes):
+        if any(ln_body.startswith(p) for p in prefixes):
             continue
         kept.append(ln)
     return "\n".join(kept)
+
+
+def _filter_timed_segments(segs: list[tuple[str, str]],
+                           prefixes: list[str]) -> list[tuple[str, str]]:
+    """Drop matched bullets inside each timed segment; drop entire segment
+    if its bullet body becomes empty after filtering."""
+    if not prefixes:
+        return segs
+    out: list[tuple[str, str]] = []
+    for ts, body in segs:
+        kept_body = _filter_bullets_by_done(body, prefixes)
+        if kept_body.strip():
+            out.append((ts, kept_body))
+    return out
+
+
+def _apply_this_done(old_next: str, this_done: str) -> str:
+    """Back-compat wrapper: Next-Session-only filter."""
+    return _filter_bullets_by_done(old_next, _extract_done_prefixes(this_done))
 
 
 def _merge_next_session_union(old_next: str, new_next: str) -> str:
@@ -232,8 +254,12 @@ def _merge_sections(prior_text: str, this_new: str, next_new: str,
     old_prev_body = _split_section_body(prior_text, "Previous Sessions")
     old_next_body = _split_section_body(prior_text, "Next Session")
 
+    done_prefixes = _extract_done_prefixes(this_done)
+
     old_this_segs = _split_timed_segments(old_this_body, fallback_label)
     old_prev_segs = _split_timed_segments(old_prev_body, fallback_label)
+    old_this_segs = _filter_timed_segments(old_this_segs, done_prefixes)
+    old_prev_segs = _filter_timed_segments(old_prev_segs, done_prefixes)
 
     fresh_this: list[tuple[str, str]] = []
     pushed_prev: list[tuple[str, str]] = []
@@ -254,7 +280,7 @@ def _merge_sections(prior_text: str, this_new: str, next_new: str,
 
     this_body = _format_segments(merged_this) if merged_this else "- None"
     prev_body = _format_segments(merged_prev) if merged_prev else "- None"
-    filtered_old_next = _apply_this_done(old_next_body, this_done)
+    filtered_old_next = _filter_bullets_by_done(old_next_body, done_prefixes)
     next_body = _merge_next_session_union(filtered_old_next, next_clean)
     next_body = next_body if next_body.strip() else "- None"
 

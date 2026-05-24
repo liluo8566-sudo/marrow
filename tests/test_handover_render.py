@@ -577,6 +577,50 @@ def test_handover_ghost_carry_over_cleared_via_this_done(env):
     assert "entity_card_recency_tiebreaker" in next_section
 
 
+def test_this_done_also_clears_prior_this_session(env):
+    """Stale event in prior This Session segment gets dropped when verbatim
+    THIS_DONE bullet matches. (Example: 出去玩 listed in This, this session
+    reports 回家了 + lists 出去玩 in done.)"""
+    base = int(datetime(2026, 5, 24, 10, 0).timestamp())
+    stale = "- 出去玩 with friends — leaving 2pm, back later tonight maybe"
+    _write_via(env, "s1", stale, "- 洗澡", base)
+    content = _write_via(env, "s2", "- 6pm 回家了 + 收衣服了", "",
+                         base + 30 * 60, this_done=stale)
+    this_section = content.split("## This Session")[1].split("## Next Session")[0]
+    assert "出去玩 with friends" not in this_section
+    assert "回家了" in this_section
+
+
+def test_this_done_drops_empty_timed_segment_entirely(env):
+    """If every bullet inside a prior This-Session timed segment matches
+    THIS_DONE, drop the whole `### [ts]` segment — no orphan headings."""
+    base = int(datetime(2026, 5, 24, 10, 0).timestamp())
+    only_bullet = "- single closed loop event long enough to be a real anchor"
+    _write_via(env, "s1", only_bullet, "- 洗澡", base)
+    content = _write_via(env, "s2", "- new unrelated work", "",
+                         base + 30 * 60, this_done=only_bullet)
+    this_section = content.split("## This Session")[1].split("## Next Session")[0]
+    assert "single closed loop event" not in this_section
+    assert "### [2026-05-24 10:00]" not in this_section
+    assert "new unrelated work" in this_section
+
+
+def test_this_done_clears_prior_previous_session(env):
+    """Stale bullet sitting in Previous Sessions also gets pruned by
+    THIS_DONE — the (晒衣服) Previous + (出去玩) This + (收衣服) now case."""
+    base = int(datetime(2026, 5, 24, 10, 0).timestamp())
+    # s1 writes (晒衣服) into This; s2 happens 4h later → s1's This rolls
+    # into Previous; s3 30min after s2 with THIS_DONE = 晒衣服.
+    stale = "- 下午2点晒衣服 out on the balcony before heading out"
+    _write_via(env, "s1", stale, "- 洗澡", base)
+    _write_via(env, "s2", "- 出去玩 (1h ago)", "", base + 4 * 3600)
+    content = _write_via(env, "s3", "- 6pm 回家 + 收衣服了", "",
+                         base + 4 * 3600 + 30 * 60, this_done=stale)
+    prev_section = content.split("## Previous Sessions")[1].split("## This Session")[0]
+    assert "下午2点晒衣服" not in prev_section
+    assert "收衣服了" in content
+
+
 def test_phase_a_two_sessions_within_window(env):
     """Two sessions 30min apart → both segments live under ## This Session."""
     base = int(datetime(2026, 5, 24, 10, 0).timestamp())
