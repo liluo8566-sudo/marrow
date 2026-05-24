@@ -503,15 +503,19 @@ def _milestone_candidates(
 def _memes_candidates(
     conn: sqlite3.Connection, query: str, limit: int
 ) -> list[dict]:
-    """Reverse-substring scan over active memes rows.
+    """Two-way keyword scan over active memes rows.
 
-    Matches when key.lower() is a substring of query.lower(). Used so memes /
-    cipher / nickname / phrase rows surface alongside events + milestones.
+    Forward (kw=1.0): key.lower() is substring of query.lower() — short
+    key inside long query (e.g. (Plan) in (我的 plan 是什么)).
+    Reverse (kw=hits/tokens): any query token appears in key/value/context —
+    long key with short query (e.g. query (大龙虾) hits key
+    (Openclaw / 大龙虾)).
     Shape parallels milestone candidates; kind="memes".
     """
     q_lower = query.lower().strip()
     if not q_lower:
         return []
+    tokens = _query_tokens(query)
     rows = conn.execute(
         "SELECT id, type, key, value, context, pinned, use_count "
         "FROM memes WHERE status='active'"
@@ -521,10 +525,15 @@ def _memes_candidates(
     out: list[dict] = []
     for r in rows:
         key = r["key"] or ""
-        if not key or key.lower() not in q_lower:
-            continue
         value = r["value"] or ""
         ctx = r["context"] or ""
+        key_l = key.lower()
+        hay = (key + " " + value + " " + ctx).lower()
+        forward = bool(key_l) and key_l in q_lower
+        token_hits = sum(1 for t in tokens if t in hay) if tokens else 0
+        if not forward and not token_hits:
+            continue
+        kw_score = 1.0 if forward else (token_hits / max(1, len(tokens)))
         content = f"{key}: {value}" if value else key
         if ctx:
             content = f"{content} ({ctx})"
@@ -537,14 +546,17 @@ def _memes_candidates(
             "content": content,
             "channel": None,
             "compressed": 0,
-            "bm25": 1.0,
+            "bm25": kw_score,
             "vec": 0.0,
             "fts_hit": True,
             "pinned": int(r["pinned"] or 0),
             "type": r["type"],
             "use_count": int(r["use_count"] or 0),
         })
-    out.sort(key=lambda c: (c["pinned"], c["use_count"]), reverse=True)
+    out.sort(
+        key=lambda c: (c["pinned"], c["bm25"], c["use_count"]),
+        reverse=True,
+    )
     return out[: limit * 2]
 
 
@@ -874,10 +886,15 @@ def recall_fusion(
     # fts_hit). Reserve slots so anchor rows aren't starved on long queries.
     # Adaptive: when >=3 strong FTS hits exist, drop both caps so entity-dense
     # queries don't waste budget on anchors.
+    # Strong-FTS count: real bm25 hits only. Force-include rows carry
+    # bm25=1.0 as a marker, not an FTS rank — exclude so a noisy query
+    # whose only signal is entity force-include doesn't starve memes/milestone
+    # reservation.
     strong_fts_count = sum(
         1 for _, r in scored
         if r.get("kind") not in ("milestone", "memes")
         and r.get("bm25", 0.0) >= 0.5
+        and not r.get("force_include")
     )
     if strong_fts_count >= 3:
         ms_cap = 1
