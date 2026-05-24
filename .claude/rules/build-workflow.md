@@ -29,3 +29,11 @@ One-shot: `/rr <phase>` runs step 0 then steps 1 + 2a + 2b concurrently; main se
 - Parallelize after (one worktree subagent each): feature modules on a frozen schema. Main merges in report order; main adjudicates conflicts.
 - Review steps 1 / 2a / 2b run as concurrent subagents in one message; main only adjudicates.
 - Context: implementation never expands in main; long diff / test output / research scratch stay in subagent → `docs/notes/`; main at ~200k → /handoff.
+
+## Housekeeping
+
+- After each agent worktree merges into main: `git worktree remove -f -f <path> && git branch -D <branch>`. Safe gate = `git merge-base --is-ancestor <worktree-head> main`. Never delete an un-merged worktree.
+- Drop empty / stale stash entries (`git stash list` then `git stash drop`) once their content is verified landed or irrelevant.
+- Sweep abandoned `/tmp/*.py`, `/tmp/*.db` scratch files created mid-session at session end.
+- Prune local-only branches that have no commits ahead of main.
+- Untracked `docs/notes/` scratch belongs to the author session — do not delete from another window without owner confirmation.
