@@ -338,8 +338,14 @@ def content_list(*, folder: str | None = None) -> dict:
             if key in hidden or key not in _REGISTRY:
                 continue
             label = _DISPLAY.get(key, key.capitalize())
-            out[section].append((label, str(base / f"{key}.md")))
+            filename = _FILENAME.get(key, f"{key}.md")
+            out[section].append((label, str(base / filename)))
     return out
+
+
+# Filename override for keys whose written file != "<key>.md".
+# Historical: goose key writes to goose-bites.md (see _REGISTRY).
+_FILENAME = {"goose": "goose-bites.md"}
 
 
 # Display names for dashboard Content section. Falls back to key.capitalize().
