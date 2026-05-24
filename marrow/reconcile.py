@@ -1,13 +1,15 @@
-"""md->DB reconcile for sub-pages + dashboard candidate rows.
+"""md->DB reconcile for sub-pages + dashboard top sections.
 
 Scope today:
 - milestone subpage (reconcile_milestones)
 - dashboard `## Milestone candidate` rows with anchor buttons
   (reconcile_milestone_candidates) — ✅ pin · ❌ delete+tombstone · ✏️ edit
+- dashboard `## Tasks` block (reconcile_tasks) — tick/untick/archive
+  via `<!-- id:N -->` anchors + `<!-- cand:task:ids=[...] -->` trail.
 
-Vocab/pit/tasks plug in later via the same shape (parse(md)->rows,
-diff against DB, apply). reconcile_* are the public entries; the
-dashboard writer wires the candidate pass via write_dashboard.
+Vocab/pit plug in later via the same shape (parse(md)->rows, diff
+against DB, apply). reconcile_* are the public entries; the dashboard
+writer wires the candidate + task passes via write_dashboard.
 """
 from __future__ import annotations
 
@@ -461,4 +463,127 @@ def reconcile_milestone_candidates(conn: sqlite3.Connection,
                 continue
             _drop_milestone_candidate(conn, rid, "dashboard row deleted")
             rpt.deleted += 1
+    return rpt
+
+
+# ── task reconcile ────────────────────────────────────────────────────────────
+
+_TASK_ROW_RE = re.compile(
+    r"^- \[(?P<check>[ x])\] .*<!-- id:(?P<id>\d+) -->\s*$"
+)
+_TASK_TRAIL_RE = re.compile(
+    r"<!-- cand:task:ids=\[(?P<ids>[^\]]*)\] -->"
+)
+_TASKS_H2 = "## Tasks"
+
+
+def _task_audit(conn, tid: int, action: str, summary: str) -> None:
+    conn.execute(
+        "INSERT INTO audit_log (target_table, target_id, action, summary) "
+        "VALUES ('tasks', ?, ?, ?)",
+        (str(tid), action, summary),
+    )
+
+
+def reconcile_tasks(conn: sqlite3.Connection,
+                    dashboard_path: str | Path) -> ReconcileReport:
+    """Apply tick/untick edits from the dashboard Tasks block back to DB.
+
+    Contract:
+    - Row with <!-- id:N -->: [x] + active in DB -> UPDATE status='done'.
+    - Row with <!-- id:N -->: [ ] + done in DB -> UPDATE status='active'.
+    - id in trail marker but absent from rendered rows this pass -> archived.
+    - No-op when trail marker is absent (legacy dashboard, no anchors yet).
+    - Anchored id not found in DB -> conflict (logged, not fatal).
+    """
+    rpt = ReconcileReport()
+    dashboard_path = Path(dashboard_path)
+    if not dashboard_path.exists():
+        return rpt
+
+    text = dashboard_path.read_text(encoding="utf-8")
+
+    # Locate ## Tasks block: from the heading to the next ## heading (or EOF).
+    start = text.find(_TASKS_H2)
+    if start == -1:
+        return rpt
+    after_h2 = text[start + len(_TASKS_H2):]
+    next_h2 = re.search(r"\n##\s", after_h2)
+    block = after_h2[: next_h2.start()] if next_h2 else after_h2
+
+    # Require trail marker — no-op on legacy dashboards.
+    trail_m = _TASK_TRAIL_RE.search(block)
+    if not trail_m:
+        return rpt
+
+    trail_ids: set[int] = set()
+    raw_ids = trail_m.group("ids").strip()
+    if raw_ids:
+        for part in raw_ids.split(","):
+            part = part.strip()
+            if part.isdigit():
+                trail_ids.add(int(part))
+
+    # Parse rows with anchors.
+    anchored: dict[int, str] = {}  # id -> "x" or " "
+    for line in block.splitlines():
+        m = _TASK_ROW_RE.match(line)
+        if m:
+            anchored[int(m.group("id"))] = m.group("check")
+
+    if not trail_ids and not anchored:
+        return rpt
+
+    # Load all tasks referenced by anchored ids in one query.
+    all_ids = trail_ids | set(anchored.keys())
+    placeholders = ",".join("?" for _ in all_ids)
+    db_rows: dict[int, str] = {}
+    if all_ids:
+        for row in conn.execute(
+            f"SELECT id, status FROM tasks WHERE id IN ({placeholders})",
+            list(all_ids),
+        ).fetchall():
+            db_rows[row["id"]] = row["status"]
+
+    with conn:
+        # tick / untick anchored rows
+        for tid, check in anchored.items():
+            if tid not in db_rows:
+                rpt.conflicts.append(f"anchored id {tid} not in db")
+                continue
+            current = db_rows[tid]
+            if check == "x" and current == "active":
+                conn.execute(
+                    "UPDATE tasks SET status='done', updated_at=? WHERE id=?",
+                    (_now(), tid),
+                )
+                _task_audit(conn, tid, "tick", "md-reconcile: ticked done")
+                rpt.updated += 1
+            elif check == " " and current == "done":
+                conn.execute(
+                    "UPDATE tasks SET status='active', updated_at=? WHERE id=?",
+                    (_now(), tid),
+                )
+                _task_audit(conn, tid, "untick", "md-reconcile: unticked active")
+                rpt.updated += 1
+            else:
+                rpt.unchanged += 1
+
+        # archive: ids in trail but not present as anchored rows in this block
+        for tid in trail_ids:
+            if tid in anchored:
+                continue  # still rendered
+            current = db_rows.get(tid)
+            if current is None:
+                continue  # already gone
+            if current in ("done", "archived"):
+                continue  # already terminal
+            conn.execute(
+                "UPDATE tasks SET status='archived', updated_at=? WHERE id=?",
+                (_now(), tid),
+            )
+            _task_audit(conn, tid, "archive",
+                        "md-reconcile: removed from dashboard")
+            rpt.deleted += 1
+
     return rpt
