@@ -134,15 +134,15 @@ def render_tasks(conn: sqlite3.Connection) -> str:
     out.append("Later")
     l_due = [r for r in buckets["l"] if r[2]]
     l_nodue = [r for r in buckets["l"] if not r[2]]
-    if not l_due and not l_nodue:
+    if l_due:
+        out += [_row(r, r[2][:10]) for r in l_due]
+    elif not l_nodue:
         out.append("- (none)")
+    out.append("No date")
+    if l_nodue:
+        out += [_row(r, r[3][:10] if r[3] else None) for r in l_nodue]
     else:
-        if l_due:
-            out += [_row(r, r[2][:10]) for r in l_due]
-        if l_due and l_nodue:
-            out.append("---")
-        if l_nodue:
-            out += [_row(r, r[3][:10] if r[3] else None) for r in l_nodue]
+        out.append("- (none)")
     return "\n".join(out)
 
 

@@ -22,6 +22,7 @@ Today
 Next 7 Days
 - [ ] [Tag] {{title}} (:detail optional) [Due date]
 Later
+---
 没有due date写录入时间
 - [ ] [Tag] {{title}} (:detail optional) [date]
 
@@ -65,6 +66,6 @@ Later
 - Can be urgent/nonurgent
 - Can be follow up tasks, or any casual topics seems unfinished - e.g. 老婆出去玩回来接着聊xxx
 
-## Reference (last 3 commits)
-> Do not duplicate content already captured in other artifacts (PRDs, plans, ADRs, issues, commits, diffs)(instruction, rubric). Reference them by path or URL instead.
-> Suggest any useful resource here - instruction, note, skills, commit, path, anything
+## Reference
+> Materials next session may reach for: path, doc URL, skill, commit, note. One per line with a short hint.
+> sonnet emits ===REFERENCE=== bullets; code inserts here.

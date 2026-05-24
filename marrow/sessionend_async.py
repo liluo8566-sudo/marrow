@@ -190,8 +190,21 @@ def _seg_affect(conn, raw: str, sid: str, date: str) -> int:
     return n
 
 
+_TASK_CATEGORIES = (
+    "Appointment", "Assignment", "Study", "Project", "Daily", "Others",
+)
+
+
+def _normalise_category(raw: str | None) -> str:
+    if not raw:
+        return "Others"
+    cleaned = raw.strip().title()
+    return cleaned if cleaned in _TASK_CATEGORIES else "Others"
+
+
 def _seg_task_cand(conn, raw: str) -> int:
-    """tasks table: dedup on (title, status='active'); category='task'."""
+    """tasks table: dedup on (title, status='active'); category from LLM \
+(whitelist fallback Others)."""
     items = candidates.extract_block(raw, "TASK_CAND")
     if not items:
         return 0
@@ -205,6 +218,7 @@ def _seg_task_cand(conn, raw: str) -> int:
         status = it.get("status") or "active"
         if status not in ("active", "done", "archived"):
             status = "active"
+        category = _normalise_category(it.get("category"))
         due = it.get("due") or None
         note = (it.get("note") or "").strip() or None
         exists = conn.execute(
@@ -217,7 +231,7 @@ def _seg_task_cand(conn, raw: str) -> int:
             conn.execute(
                 "INSERT INTO tasks (category, title, due, status, next_step)"
                 " VALUES (?, ?, ?, ?, ?)",
-                ("task", title, due, status, note),
+                (category, title, due, status, note),
             )
         n += 1
     return n
@@ -239,8 +253,25 @@ def _seg_digest(conn, raw: str, sid: str, date: str) -> int:
     return 1
 
 
-def _parse_handover_blocks(raw: str) -> tuple[str, str]:
-    """Pull THIS_SESSION and NEXT_SESSION bullet blocks out of LLM output."""
+def _load_prior_handover_for_sonnet() -> str:
+    """Read prior handover.md and extract the narrative sections (Previous /
+    This / Next / Reference) for sonnet carry-over judgement. Alerts / Tasks /
+    Affect / Milestone candidate are code-owned and not included."""
+    try:
+        text = handover_render._RENDERED_PATH.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError):
+        return "(no prior handover)"
+    parts: list[str] = []
+    for header in ("Previous Sessions", "This Session",
+                   "Next Session", "Reference"):
+        body = handover_render._split_section_body(text, header).strip()
+        parts.append(f"## {header}\n{body or '- N/A'}")
+    return "\n\n".join(parts)
+
+
+def _parse_handover_blocks(raw: str) -> tuple[str, str, str]:
+    """Pull THIS_SESSION, NEXT_SESSION, REFERENCE bullet blocks out of LLM \
+output. Each defaults to empty if its marker is missing."""
     def _slice(open_tag: str, close_tag: str) -> str:
         i = raw.find(open_tag)
         if i < 0:
@@ -250,8 +281,11 @@ def _parse_handover_blocks(raw: str) -> tuple[str, str]:
             return ""
         return raw[i + len(open_tag):j].strip()
     this_s = _slice("===THIS_SESSION===", "===NEXT_SESSION===")
-    next_s = _slice("===NEXT_SESSION===", "===END===")
-    return this_s, next_s
+    next_s = _slice("===NEXT_SESSION===", "===REFERENCE===")
+    if not next_s:
+        next_s = _slice("===NEXT_SESSION===", "===END===")
+    ref_s = _slice("===REFERENCE===", "===END===")
+    return this_s, next_s, ref_s
 
 
 def _seg_handover(conn, raw: str, sid: str) -> int:
@@ -259,10 +293,11 @@ def _seg_handover(conn, raw: str, sid: str) -> int:
     atomic write — single-writer rule per Bug #1 fix. SessionStart hooks are
     read-only and never invoke this path.
     """
-    this_s, next_s = _parse_handover_blocks(raw)
-    if not this_s and not next_s:
+    this_s, next_s, ref_s = _parse_handover_blocks(raw)
+    if not this_s and not next_s and not ref_s:
         return 0
-    handover_render.write_handover_full(conn, sid, this_s, next_s)
+    handover_render.write_handover_full(
+        conn, sid, this_s, next_s, reference=ref_s)
     return 1
 
 
@@ -305,9 +340,12 @@ def main(argv: list[str] | None = None) -> int:
         client = LLMClient(cfg=cfg)
         # One sonnet call emits all 4 segment blocks.
         try:
+            prior_handover = _load_prior_handover_for_sonnet()
             raw = client.call(
                 role="sessionend",
-                body=SESSIONEND_PROMPT.format(sid=sid, events=events_text),
+                body=SESSIONEND_PROMPT.format(
+                    sid=sid, events=events_text,
+                    prior_handover=prior_handover),
                 tier="mid",
             )
         except (LLMError, ValueError, RuntimeError) as e:

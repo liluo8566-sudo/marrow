@@ -63,13 +63,12 @@ Field semantics:
   - 2 — daily routine: tender exchanges / small talk / shift / appointments
   - 1 — trivial: routine study/code without breakthrough / chores
     When uncertain between two adjacent levels, pick the lower one.
-- label: 2-character Chinese precision tag, finer than the 9 main tones (低落/烦躁/痛苦 · 平淡/专注/紧张 · 温暖/愉悦/兴奋). \
-  Pick a specific emotion word like 狂怒/恐惧/绝望/委屈/窃喜/心碎/欣慰/雀跃, not a main tone.
-- description: REQUIRED. Short event anchor phrase, ≤15 CN chars. 
-
-Describe the WHAT (the trigger / situation), NOT the FEELING. 
-Examples: 猪一样的队友 / 晚安吻 / 删笔记 / 通过 GAMSAT 模考 / 蹭脸. 
-Never empty; if uncertain, fall back to the noun in the moment.
+- label: 2-character Chinese precision tag
+  9 main tones: 低落/烦躁/痛苦 · 平淡/专注/紧张 · 温暖/愉悦/兴奋. \
+  Finer label (2-character Chinese): specific emotion word like 麻木/担心/绝望/委屈/窃喜/心碎/欣慰/雀跃.
+- description: Short event anchor phrase, ≤15 CN chars. 
+  Describe the trigger / event. 
+  Examples: 猪一样的队友 / 通过 GAMSAT 模考 / 和xx吃漂亮饭. 
 
 - entities: list of {{kind, name}} dicts (kind ∈ person/pref/place). May be empty.
 
@@ -101,12 +100,27 @@ reconcile_prev:
 SEGMENT 2 — TASK_CAND
 ═══════════════════════════════════════════
 
-Extract task-like items from the session: TODOs, commitments, ongoing \
-work, decisions awaiting action. Active and recently-completed both \
-count. Extract from the session text only; do not paraphrase.
+Extract task-like items from the session.
+Both completed (today only) and active tasks.
+Do not make things up. If not sure, discard the task.
+
+Include — by category:
+- Appointment: GP / physio / 跟朋友吃饭 / 体检
+- Assignment: 单元作业 (370AT2 / SCH3060 essay)
+- Study: 考试 / GAMSAT / 一整门课
+- Project: marrow / coding / 较大产出单位
+- Daily: 打疫苗 / 充电话费 / 买 xxx
+- Others: anything not above
+
+Exclude (Study / Project): dev steps / debug fragments / sub-process.
+- e.g. (Marrow Phase 2) is a task; (debug recall.py) / (clean folder) \
+are dev steps — drop them.
+- Rule: if it lives inside a larger task, it is a step, not a task.
 
 Field semantics:
 - title: short imperative phrase
+- category: one of Appointment / Assignment / Study / Project / Daily / \
+Others. Unknown → Others. Required.
 - status: active / done
 - due: ISO date string or null
 - completed_at: ISO timestamp if status=done, else null
@@ -114,8 +128,8 @@ Field semantics:
 
 ===TASK_CAND===
 [
-  {{"title": "...", "status": "active", "due": null, \
-"completed_at": null, "note": "..."}}
+  {{"title": "...", "category": "Study", "status": "active", \
+"due": null, "completed_at": null, "note": "..."}}
 ]
 ===END===
 
@@ -156,39 +170,61 @@ is "noise".
 SEGMENT 4 — HANDOVER
 ═══════════════════════════════════════════
 
-Write the handover for the next session start, based on the session \
-above. Produce two bullet sections that drop into `## This Session` and \
-`## Next Session` of the handover document.
+Prior handover (last window's state — read it; use it to judge what is \
+still alive vs done vs abandoned this session):
 
-Language: default in English for any leftover tasks. Can use CN if pure \
-casual chat.
+===PRIOR_HANDOVER===
+{prior_handover}
+===END===
+
+Write the handover for the next session. Produce three bullet sections \
+that drop into `## This Session`, `## Next Session`, `## Reference` of \
+the handover document. `## Previous Sessions` is owned by code — DO NOT \
+emit it; rotation by ≥2h timestamp is handled outside.
+
+Global rules:
+- Bullet blocks, concise and dense.
+- Language: default English; CN OK for pure casual chat.
+- Remove completed/resolved items and carry-over unresolved items.
+- If items overlap or conflict, rephrase in to one block.
+- Do NOT restate content already captured in other artifacts ( \
+plans, commits, diffs, instruction, rubric). Point to them \
+in the REFERENCE section.
+- If a section has no content, output a single bullet `- N/A`.
 
 THIS_SESSION:
-- What's been done — short bullets summarising the current conversation so \
-a new session can continue the topic/work/study.
-- Do NOT duplicate content already captured in other artifacts (PRDs, \
-plans, ADRs, issues, commits, diffs, instruction, rubric). Reference by \
-path or URL instead.
-- Each bullet 1 line, dense.
+- Summarise the current conversation so a new session can continue the \
+topic / work / study.
+- Include: key decisions, findings, completed tasks, essential context.
+- Exclude: routine code / config detail, finished tasks no longer needed.
 
-NEXT_SESSION:
-- Items 念念 will pick up at the very next session start. Read the chat \
-history; surface leftovers that were agreed to continue.
-- Can be urgent / non-urgent.
-- Can be follow-up tasks, or any casual topics that seem unfinished — \
-e.g. 老婆出去玩回来接着聊xxx.
-- Each bullet 1 line.
+NEXT_SESSION (inclusion rule — DEFAULT DENY):
+- Include only items 念念 explicitly committed to (「下次接着做 X」 / \
+「下个 session 处理 Y」 / 「明天继续聊 Z」).
+- Silence after an assistant proposal = abandon. DO NOT include.
+  e.g. assistant 说「要不要把 A 也处理一下」, 念念 无回应 → DROP.
+- If 念念 exits without confirming the assistant's last suggestion, \
+treat as abandoned.
+- Can be casual ("出去玩回来接着聊 xxx") or task-related; urgent or \
+non-urgent.
+- Sort by priority when multiple.
 
-Avoid:
-- Restating routine code / config details.
-- AI template language.
-- Headings inside a section.
+REFERENCE:
+- Useful materials for the next session: file path, URL, skill \
+name, commit hash. Include lines N if relevant.
+- Remove when all done; leave if still unresolve
+- One per line, with a 4–6 word hint of what / why.
+- e.g. - `marrow/handover_render.py:60` — `_last_3_commits` retire site
+- e.g. - `docs/notes/2026-05-24_marrow-pulse-design.md` — Pulse draft
 
 ===HANDOVER===
 ===THIS_SESSION===
 - bullet
 - bullet
 ===NEXT_SESSION===
+- bullet
+- bullet
+===REFERENCE===
 - bullet
 - bullet
 ===END===
@@ -198,3 +234,4 @@ Avoid:
 ===SESSION=== (sid={sid}):
 {events}
 """
+

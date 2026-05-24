@@ -485,30 +485,40 @@ def test_session_end_does_not_write_handover(env, monkeypatch, tmp_path):
     assert rendered_path.read_bytes() == before
 
 
-# ── _inject_reference_commits / _last_3_commits ──────────────────────────────
+# ── Reference section (sonnet-owned) ────────────────────────────────────────
 
-def test_inject_reference_commits_replaces_body():
-    text = ("## Reference (last 3 commits)\n"
-            "old body\n"
-            "more old\n\n"
-            "<!-- handover: pending -->\n")
-    out = handover_render._inject_reference_commits(text, "- abc one\n- def two")
-    assert "## Reference (last 3 commits)\n- abc one\n- def two\n\n" in out
-    assert "old body" not in out
-    assert "<!-- handover: pending -->" in out
+def test_render_full_injects_reference_body(env):
+    db, _, _, _ = env
+    conn = storage.connect(db)
+    out = handover_render.render_full(
+        conn, sid="s1",
+        this_session="- did X",
+        next_session="- pick up Y",
+        reference="- `marrow/foo.py:42` — entry point\n- skill: tdd",
+        prior_text="", now_epoch=1700000000,
+    )
+    assert "## Reference\n" in out
+    assert "`marrow/foo.py:42` — entry point" in out
+    assert "skill: tdd" in out
 
 
-def test_inject_reference_commits_noop_on_empty():
-    text = "## Reference (last 3 commits)\nkeep me\n"
-    assert handover_render._inject_reference_commits(text, "") == text
+def test_render_full_reference_defaults_to_na(env):
+    db, _, _, _ = env
+    conn = storage.connect(db)
+    out = handover_render.render_full(
+        conn, sid="s2",
+        this_session="- did X",
+        next_session="- pick up Y",
+        reference="",
+        prior_text="", now_epoch=1700000000,
+    )
+    assert "## Reference\n- N/A" in out
 
 
-def test_last_3_commits_returns_bullets():
-    out = handover_render._last_3_commits()
-    # marrow repo has commits; expect bullet lines starting with "- "
-    if out:
-        for ln in out.splitlines():
-            assert ln.startswith("- ")
+def test_strip_instruction_preserves_trailing_newline():
+    src = "## A\n> hide\n> hide2\n"
+    out = handover_render._strip_instruction_lines(src)
+    assert out.endswith("\n"), "trailing \\n must survive so regex inject sites still match"
 
 
 # ── Phase A: multi-session merge ─────────────────────────────────────────────

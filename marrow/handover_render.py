@@ -10,7 +10,6 @@ import fcntl
 import hashlib
 import re
 import sqlite3
-import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
@@ -37,13 +36,13 @@ _LOCK_BACKOFF = 0.05
 
 
 def _strip_instruction_lines(text: str) -> str:
-    """Remove lines starting with '> ' (system instruction lines)."""
-    kept = []
-    for line in text.splitlines():
-        if line.startswith("> "):
-            continue
-        kept.append(line)
-    return "\n".join(kept)
+    """Remove lines starting with '> ' (system instruction lines). Preserve \
+trailing newline so downstream regex inject points keep their `\\n` anchor."""
+    kept = [ln for ln in text.splitlines() if not ln.startswith("> ")]
+    out = "\n".join(kept)
+    if text.endswith("\n") and not out.endswith("\n"):
+        out += "\n"
+    return out
 
 
 def _replace_top_sections(text: str, rendered: str) -> str:
@@ -55,31 +54,6 @@ def _replace_top_sections(text: str, rendered: str) -> str:
     before = text[:i + len(_SEP_OPEN)]
     after = text[j:]
     return before + "\n" + rendered + "\n" + after
-
-
-def _last_3_commits() -> str:
-    """git log -3 --oneline from the marrow repo, empty on any failure."""
-    repo = Path(__file__).resolve().parent.parent
-    try:
-        out = subprocess.check_output(
-            ["git", "log", "-3", "--oneline"],
-            cwd=str(repo), text=True, timeout=2,
-            stderr=subprocess.DEVNULL,
-        )
-        return "\n".join(f"- {ln}" for ln in out.strip().splitlines())
-    except (subprocess.SubprocessError, FileNotFoundError, OSError):
-        return ""
-
-
-def _inject_reference_commits(text: str, commits: str) -> str:
-    """Insert commit list under `## Reference (last 3 commits)`."""
-    if not commits:
-        return text
-    pat = re.compile(
-        r"(^## Reference \(last 3 commits\)[ \t]*\n)(.*?)(?=^## |^<!--|\Z)",
-        re.MULTILINE | re.DOTALL,
-    )
-    return pat.sub(lambda m: f"{m.group(1)}{commits}\n\n", text, count=1)
 
 
 def _inject_section(text: str, header: str, body: str) -> str:
@@ -101,7 +75,6 @@ def render_skeleton(conn: sqlite3.Connection) -> str:
     template = template.replace("{{YYYY-MM-DD HH:MM}}", now_str)
     top = top_sections.render_top(conn)
     template = _replace_top_sections(template, top)
-    template = _inject_reference_commits(template, _last_3_commits())
     return template
 
 
@@ -313,22 +286,27 @@ def _release_flock(fd) -> None:
 
 def render_full(conn: sqlite3.Connection, sid: str,
                 this_session: str, next_session: str,
-                *, prior_text: str = "", now_epoch: int | None = None) -> str:
-    """Compose skeleton + merged ThisSession/Previous/Next + ready stamp."""
+                *, reference: str = "",
+                prior_text: str = "", now_epoch: int | None = None) -> str:
+    """Compose skeleton + merged ThisSession/Previous/Next + Reference \
++ ready stamp."""
     if now_epoch is None:
         now_epoch = int(time.time())
     this_body, next_body, prev_body = _merge_sections(
         prior_text, this_session, next_session, now_epoch)
+    ref_body = (reference or "").strip() or "- N/A"
     text = render_skeleton(conn)
     text = _inject_section(text, "Previous Sessions", prev_body)
     text = _inject_section(text, "This Session", this_body)
     text = _inject_section(text, "Next Session", next_body)
+    text = _inject_section(text, "Reference", ref_body)
     stamp = f"<!-- handover: ready sid:{sid} ts:{now_epoch} -->"
     return _append_stamp(text, stamp)
 
 
 def write_handover_full(conn: sqlite3.Connection, sid: str,
-                        this_session: str, next_session: str) -> Path:
+                        this_session: str, next_session: str,
+                        *, reference: str = "") -> Path:
     """Sessionend_async single-writer: flock + merge + atomic write. Lock-loss
     falls back to handover.md.partial.<sid> with audit row, never crashes."""
     now_epoch = int(time.time())
@@ -336,6 +314,7 @@ def write_handover_full(conn: sqlite3.Connection, sid: str,
     if fd is None:
         partial = _RENDERED_PATH.with_suffix(f".md.partial.{sid}")
         text = render_full(conn, sid, this_session, next_session,
+                           reference=reference,
                            prior_text="", now_epoch=now_epoch)
         _atomic_write(str(partial), text)
         try:
@@ -355,6 +334,7 @@ def write_handover_full(conn: sqlite3.Connection, sid: str,
             prior_text = ""
         _write_snapshot_audit(conn, sid, prior_text)
         text = render_full(conn, sid, this_session, next_session,
+                           reference=reference,
                            prior_text=prior_text, now_epoch=now_epoch)
         _atomic_write(str(_RENDERED_PATH), text)
     finally:

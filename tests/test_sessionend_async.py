@@ -409,17 +409,51 @@ def test_seg_task_cand_writes_tasks_table(db_env):
     try:
         raw = (
             "===TASK_CAND===\n"
-            "[{\"title\": \"Ship 2.5c\", \"status\": \"active\","
+            "[{\"title\": \"Ship 2.5c\", \"category\": \"Project\","
+            " \"status\": \"active\","
             " \"due\": null, \"completed_at\": null, \"note\": \"\"}]\n"
             "===END===\n"
         )
         n = sessionend_async._seg_task_cand(conn, raw)
         assert n == 1
         row = conn.execute(
-            "SELECT title, status FROM tasks WHERE title='Ship 2.5c'"
+            "SELECT title, status, category FROM tasks WHERE title='Ship 2.5c'"
         ).fetchone()
         assert row is not None
         assert row["status"] == "active"
+        assert row["category"] == "Project"
+    finally:
+        conn.close()
+
+
+def test_seg_task_cand_category_whitelist(db_env):
+    """Unknown / missing / lowercase categories fall back to Others or canonical."""
+    db, _ = db_env
+    from marrow import sessionend_async
+    conn = storage.connect(db)
+    try:
+        raw = (
+            "===TASK_CAND===\n"
+            "[{\"title\": \"flu vac\", \"category\": \"daily\","
+            " \"status\": \"active\", \"due\": null, \"completed_at\": null,"
+            " \"note\": \"\"},"
+            " {\"title\": \"random thing\", \"category\": \"banana\","
+            " \"status\": \"active\", \"due\": null, \"completed_at\": null,"
+            " \"note\": \"\"},"
+            " {\"title\": \"no cat field\","
+            " \"status\": \"active\", \"due\": null, \"completed_at\": null,"
+            " \"note\": \"\"}]\n"
+            "===END===\n"
+        )
+        n = sessionend_async._seg_task_cand(conn, raw)
+        assert n == 3
+        rows = {r["title"]: r["category"] for r in conn.execute(
+            "SELECT title, category FROM tasks"
+            " WHERE title IN ('flu vac','random thing','no cat field')"
+        ).fetchall()}
+        assert rows["flu vac"] == "Daily"
+        assert rows["random thing"] == "Others"
+        assert rows["no cat field"] == "Others"
     finally:
         conn.close()
 
@@ -531,13 +565,52 @@ def test_sessionend_single_call_routes_to_four_writers(db_env, tmp_path,
     assert "## Tasks" in body
 
 
-def test_handover_parses_two_blocks():
+def test_load_prior_handover_extracts_four_sections(tmp_path, monkeypatch):
+    from marrow import sessionend_async, handover_render
+    h = tmp_path / "handover.md"
+    h.write_text(
+        "# title\n\n"
+        "## Alerts (active)\n- warn x\n\n"
+        "## Tasks\n- [ ] foo\n\n"
+        "## Previous Sessions\n- old A\n\n"
+        "## This Session\n- did B\n\n"
+        "## Next Session\n- pick C\n\n"
+        "## Reference\n- `path/x.py:1` — y\n\n"
+        "<!-- stamp -->\n", encoding="utf-8")
+    monkeypatch.setattr(handover_render, "_RENDERED_PATH", h)
+    out = sessionend_async._load_prior_handover_for_sonnet()
+    assert "## Previous Sessions\n- old A" in out
+    assert "## This Session\n- did B" in out
+    assert "## Next Session\n- pick C" in out
+    assert "## Reference\n- `path/x.py:1` — y" in out
+    assert "Alerts" not in out and "Tasks" not in out
+
+
+def test_load_prior_handover_returns_placeholder_when_missing(tmp_path, monkeypatch):
+    from marrow import sessionend_async, handover_render
+    monkeypatch.setattr(handover_render, "_RENDERED_PATH", tmp_path / "nope.md")
+    assert sessionend_async._load_prior_handover_for_sonnet() == "(no prior handover)"
+
+
+def test_handover_parses_three_blocks():
     from marrow.sessionend_async import _parse_handover_blocks
     raw = ("intro\n===THIS_SESSION===\n- did A\n- did B\n"
-           "===NEXT_SESSION===\n- pick up C\n===END===\n")
-    this_s, next_s = _parse_handover_blocks(raw)
+           "===NEXT_SESSION===\n- pick up C\n"
+           "===REFERENCE===\n- `path/foo.py:10` — entry\n===END===\n")
+    this_s, next_s, ref_s = _parse_handover_blocks(raw)
     assert this_s == "- did A\n- did B"
     assert next_s == "- pick up C"
+    assert ref_s == "- `path/foo.py:10` — entry"
+
+
+def test_handover_parses_legacy_no_reference():
+    from marrow.sessionend_async import _parse_handover_blocks
+    raw = ("===THIS_SESSION===\n- did A\n"
+           "===NEXT_SESSION===\n- pick up B\n===END===\n")
+    this_s, next_s, ref_s = _parse_handover_blocks(raw)
+    assert this_s == "- did A"
+    assert next_s == "- pick up B"
+    assert ref_s == ""
 
 
 def test_seg_handover_composes_full_file(db_env, tmp_path, monkeypatch):
