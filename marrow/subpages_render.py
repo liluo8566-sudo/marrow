@@ -35,7 +35,9 @@ def render_diary(conn: sqlite3.Connection) -> str:
     rows = conn.execute(
         "SELECT date, content, mood FROM diary ORDER BY date DESC"
     ).fetchall()
-    out = [_m0(key), "# Diary", ""]
+    # No internal H1 — Obsidian shows the filename as the title; an in-file
+    # H1 duplicates it. Same rule applies to every render fn below.
+    out = [_m0(key), ""]
     cur_month = None
     for r in rows:
         month = r["date"][:7]
@@ -60,10 +62,17 @@ def render_diary(conn: sqlite3.Connection) -> str:
 # -- Milestone (structured, ## Us / ## Me) ----------------------------------
 
 def render_milestone(conn: sqlite3.Connection) -> str:
-    """Render format (FUTURE milestone_format_unify, 2026-05-24):
-        - [YYYY-MM-DD] subject: description  <!-- id:N -->
-    `title` column = subject. `theme` column kept nullable but unused in
-    render. Us and Me share format.
+    """Render format (H5 + paragraph, 2026-05-24):
+
+        ##### [YYYY-MM-DD] subject
+        description paragraph. <!-- id:N -->
+
+    Me rows carry year-only dates (no fake month-day padding):
+        ##### [YYYY] subject
+
+    `title` column = subject. `theme` kept nullable but unused.
+    Confirmed rows (pinned=1) are clean — no `Nh ago`, no `✅❌✏️`
+    buttons (those decorate candidate rows in top_sections only).
     """
     key = "milestone"
     rows = conn.execute(
@@ -81,14 +90,19 @@ def render_milestone(conn: sqlite3.Connection) -> str:
             return lines
         for r in entries:
             subject = r["title"] or "(untitled)"
-            desc = f": {r['description']}" if r["description"] else ""
-            lines.append(
-                f"- [{r['date']}] {subject}{desc}" + _anchor(r["id"])
-            )
-        lines.append("")
+            lines.append(f"##### [{r['date']}] {subject}")
+            desc = (r["description"] or "").strip()
+            # Anchor sits inline at the tail of the description paragraph.
+            # When description is empty, anchor goes on its own line — still
+            # inside the H5 block so reconcile can parse the boundary.
+            if desc:
+                lines.append(f"{desc}{_anchor(r['id'])}")
+            else:
+                lines.append(_anchor(r["id"]).lstrip())
+            lines.append("")
         return lines
 
-    out = [_m0(key), "# Milestones", ""]
+    out = [_m0(key), ""]
     out += _section("Us", us)
     out += _section("Me", me)
     out.append(_m1(key))
@@ -101,9 +115,11 @@ def render_milestone(conn: sqlite3.Connection) -> str:
 # Stickers reuses memes.stickers section for now.
 
 def _stub_block(key: str, title: str, note: str) -> str:
+    # `title` kept in the signature for callsite clarity but not rendered —
+    # the filename already labels the page.
+    del title
     return "\n".join([
         _m0(key),
-        f"# {title}",
         "",
         f"_{note}_",
         "",
@@ -149,7 +165,7 @@ def render_memes(conn: sqlite3.Connection) -> str:
         "ORDER BY s.use_count DESC, s.created_at DESC"
     ).fetchall()
 
-    out = [_m0(key), "# Memes", ""]
+    out = [_m0(key), ""]
     out.append("## Phrases")
     out.append("")
     if memes_rows:
@@ -182,7 +198,7 @@ def render_goose(conn: sqlite3.Connection) -> str:
     rows = conn.execute(
         "SELECT id, date, bites, best FROM goose_bites ORDER BY date DESC"
     ).fetchall()
-    out = [_m0(key), "# (Tieguo) Best of the Day", ""]
+    out = [_m0(key), ""]
     cur_month = None
     for r in rows:
         month = r["date"][:7]
@@ -208,7 +224,7 @@ def render_goose(conn: sqlite3.Connection) -> str:
 
 def render_study_index(units: list[dict]) -> str:
     key = "study"
-    out = [_m0(key), "# Study", ""]
+    out = [_m0(key), ""]
     if not units:
         out.append("_No study units yet._")
         out.append("")
@@ -222,7 +238,7 @@ def render_study_index(units: list[dict]) -> str:
 
 def render_study_unit(name: str, tasks: list[dict]) -> str:
     key = f"study-{name}"
-    out = [_m0(key), f"# Study — {name}", ""]
+    out = [_m0(key), ""]
     if not tasks:
         out.append("_No active tasks for this unit._")
         out.append("")
@@ -251,7 +267,7 @@ def render_projects_index(conn: sqlite3.Connection) -> str:
     active = [r for r in rows if r["status"] == "active"]
     done = [r for r in rows if r["status"] != "active"]
 
-    out = [_m0(key), "# Projects", "", "## Active", ""]
+    out = [_m0(key), "", "## Active", ""]
     if active:
         for r in active:
             nxt = f" — {r['next_step']}" if r["next_step"] else ""
@@ -278,7 +294,7 @@ def render_pit(conn: sqlite3.Connection) -> str:
         "SELECT id, title, description, status, related_files "
         "FROM pit ORDER BY status, created_at DESC"
     ).fetchall()
-    out = [_m0(key), "# Pit — Deferred Backlog", ""]
+    out = [_m0(key), ""]
     if rows:
         for r in rows:
             desc = f" — {r['description']}" if r["description"] else ""
@@ -296,7 +312,7 @@ def render_pit(conn: sqlite3.Connection) -> str:
 def render_project_page(thread: dict) -> str:
     name = thread["title"]
     key = f"project-{name}"
-    out = [_m0(key), f"# {name}", ""]
+    out = [_m0(key), ""]
     nxt = thread.get("next_step") or "_no next step recorded_"
     due = f"\n**Due:** {thread['due']}" if thread.get("due") else ""
     summ = thread.get("last_session_summary") or "_no session summary yet_"
@@ -324,7 +340,7 @@ def render_cheatsheet(conn: sqlite3.Connection) -> str:
     config_dir = home / ".config" / "marrow"
     ny_dir = home / "Desktop" / "NY"
 
-    out = [_m0(key), "# Cheatsheet", "",
+    out = [_m0(key), "",
            "> Read-only — disk is source of truth. Hand-edits are overwritten.", ""]
 
     out += ["## Skills", ""]

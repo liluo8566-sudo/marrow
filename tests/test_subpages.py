@@ -258,7 +258,8 @@ def test_cheatsheet_render_no_anchor(db):
         block = subpages.render_cheatsheet(conn)
     finally:
         conn.close()
-    assert "# Cheatsheet" in block
+    # Internal H1 stripped — Obsidian shows filename as title. H2+ structure
+    # (Directory map, Skills, Hooks, Aliases) is the visible spine.
     assert "## Directory map" in block
     assert "<!-- id:" not in block
 
@@ -428,19 +429,25 @@ def test_content_list_excludes_hidden(db, tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Milestone format (milestone_format_unify, 2026-05-24)
+# Milestone format (H5 + paragraph, 2026-05-24)
 # ---------------------------------------------------------------------------
 
-def test_milestone_format_brackets_and_colon(db):
+def test_milestone_h5_paragraph_format(db):
     conn = storage.connect(db)
     try:
         block = subpages.render_milestone(conn)
     finally:
         conn.close()
-    # Expected: `- [2026-01-17] First meeting: In the rain  <!-- id:N -->`
-    assert "[2026-01-17] First meeting: In the rain" in block
-    # Me row has no description, so no colon expected.
-    assert "[2026-03-01] Head of school award" in block
+    # H5 heading carries `[date] subject`; description sits on the next
+    # line with the inline-tail anchor.
+    assert "##### [2026-01-17] First meeting" in block
+    assert "In the rain <!-- id:" in block
+    # Me row has no description — anchor lands on its own line.
+    assert "##### [2026-03-01] Head of school award" in block
+    # Old bullet format is gone.
+    assert "- [2026-01-17]" not in block
     assert "Head of school award:" not in block
-    # Theme dropped from render even if column non-null.
-    assert "[theme]" not in block
+    # No `Nh ago` timestamp on confirmed rows.
+    assert "ago)" not in block
+    # No candidate buttons on confirmed rows.
+    assert "✅" not in block and "❌" not in block and "✏️" not in block
