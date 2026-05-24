@@ -215,12 +215,14 @@ def _normalise_category(raw: str | None) -> str:
 
 
 def _seg_task_cand(conn, raw: str) -> int:
-    """tasks table: dedup on (title, status='active'); category from LLM \
+    """tasks table: dedup on title across active/done/archived; category from LLM \
 (whitelist fallback Others)."""
     items = candidates.extract_block(raw, "TASK_CAND")
     if not items:
         return 0
     n = 0
+    _24h_ago = (_dt.datetime.now(_dt.timezone.utc)
+                - _dt.timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
     for it in items:
         if not isinstance(it, dict):
             continue
@@ -233,12 +235,38 @@ def _seg_task_cand(conn, raw: str) -> int:
         category = _normalise_category(it.get("category"))
         due = it.get("due") or None
         note = (it.get("note") or "").strip() or None
-        exists = conn.execute(
-            "SELECT 1 FROM tasks WHERE title=? AND status='active' LIMIT 1",
+
+        # Skip insert: active exists, archived exists (don't revive), or
+        # done within last 24h exists (avoid duplicate near same task).
+        active_row = conn.execute(
+            "SELECT id FROM tasks WHERE title=? AND status='active' LIMIT 1",
             (title,),
         ).fetchone()
-        if exists and status == "active":
+        if active_row:
+            if status == "done":
+                # Flip the active row to done instead of inserting a parallel one.
+                with conn:
+                    conn.execute(
+                        "UPDATE tasks SET status='done', updated_at=? WHERE id=?",
+                        (_dt.datetime.now(_dt.timezone.utc)
+                         .strftime("%Y-%m-%dT%H:%M:%SZ"),
+                         active_row["id"]),
+                    )
+                n += 1
+            # status == "active": already active, skip
             continue
+
+        # No active row — check archived / recent done to prevent re-creation.
+        blocking = conn.execute(
+            "SELECT 1 FROM tasks WHERE title=? AND ("
+            "  status='archived'"
+            "  OR (status='done' AND updated_at>=?)"
+            ") LIMIT 1",
+            (title, _24h_ago),
+        ).fetchone()
+        if blocking:
+            continue
+
         with conn:
             conn.execute(
                 "INSERT INTO tasks (category, title, due, status, next_step)"
