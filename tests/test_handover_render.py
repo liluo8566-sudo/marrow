@@ -44,12 +44,16 @@ def _conn(db: str):
 
 def _insert_affect(conn, date: str, ep: int, valence: float, arousal: float,
                    importance: int = 3, label: str | None = None,
-                   source: str | None = None, created_at: str | None = None):
+                   source: str | None = None, created_at: str | None = None,
+                   description: str | None = None,
+                   unresolved: int = 0, resolved_at: str | None = None):
     conn.execute(
-        "INSERT INTO affect (date, ep, valence, arousal, importance, label, source, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (date, ep, valence, arousal, importance, label, source,
-         created_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")),
+        "INSERT INTO affect (date, ep, valence, arousal, importance, label, "
+        "description, source, created_at, unresolved, resolved_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (date, ep, valence, arousal, importance, label, description, source,
+         created_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+         unresolved, resolved_at),
     )
     conn.commit()
 
@@ -183,14 +187,17 @@ def test_render_milestone_candidate_empty(env):
 # ── Unit: render_affect ───────────────────────────────────────────────────────
 
 def test_render_affect_today_band_excited(env):
-    """v=0.7 a=0.7 → 兴奋 (High/Active)."""
+    """v=0.7 a=0.7 → 兴奋 (High/Active). 中文【】brackets."""
     db, _, _, _ = env
     conn = _conn(db)
     today = datetime.now(timezone.utc).date().isoformat()
-    _insert_affect(conn, today, 1, 0.7, 0.7, importance=3, label="开心")
+    _insert_affect(conn, today, 1, 0.7, 0.7, importance=3,
+                   label="开心", description="项目过审")
     out = top_sections.render_affect(conn)
     conn.close()
-    assert "兴奋" in out
+    assert "【兴奋】" in out
+    # English [兴奋] must NOT appear (spec change to 中文 brackets).
+    assert "[兴奋]" not in out
 
 
 def test_render_affect_today_band_low(env):
@@ -198,34 +205,100 @@ def test_render_affect_today_band_low(env):
     db, _, _, _ = env
     conn = _conn(db)
     today = datetime.now(timezone.utc).date().isoformat()
-    _insert_affect(conn, today, 1, 0.2, 0.2, importance=3, label="难过")
+    _insert_affect(conn, today, 1, 0.2, 0.2, importance=3,
+                   label="难过", description="删笔记")
     out = top_sections.render_affect(conn)
     conn.close()
-    assert "低落" in out
+    assert "【低落】" in out
+
+
+def test_render_affect_today_single_ep_dedup(env):
+    """One today-ep → ep_h == ep_l, dedup to one side, no '· eplN' tail."""
+    db, _, _, _ = env
+    conn = _conn(db)
+    today = datetime.now(timezone.utc).date().isoformat()
+    _insert_affect(conn, today, 1, 0.5, 0.5, importance=2,
+                   label="平静", description="散步")
+    out = top_sections.render_affect(conn)
+    conn.close()
+    today_line = [
+        ln for ln in out.splitlines()
+        if ln.startswith("- 【")
+    ][0]
+    assert "eph2" in today_line
+    assert "epl" not in today_line  # no second side
+    assert "平静 | 散步" in today_line
+
+
+def test_render_affect_today_multi_ep_phrase_format(env):
+    """Multi-ep day → ephN <label> | <description> · eplN <label> | <description>."""
+    db, _, _, _ = env
+    conn = _conn(db)
+    today = datetime.now(timezone.utc).date().isoformat()
+    _insert_affect(conn, today, 1, 0.85, 0.6, importance=4,
+                   label="雀跃", description="拿到 HD")
+    _insert_affect(conn, today, 2, 0.15, 0.7, importance=3,
+                   label="委屈", description="猪一样的队友")
+    out = top_sections.render_affect(conn)
+    conn.close()
+    today_line = [
+        ln for ln in out.splitlines() if ln.startswith("- 【")
+    ][0]
+    assert "eph4 雀跃 | 拿到 HD" in today_line
+    assert "epl3 委屈 | 猪一样的队友" in today_line
 
 
 def test_render_affect_week_variance_label(env):
-    """stddev(v) > 0.3 → A → B arrow in week line."""
+    """stddev(v) > 0.3 → 主调A → 主调B in week line, 中文 brackets."""
     db, _, _, _ = env
     conn = _conn(db)
     today = datetime.now(timezone.utc).date()
-    # Alternate between very high and very low valence
     for i in range(6):
         d = (today - timedelta(days=i)).isoformat()
         v = 0.9 if i % 2 == 0 else 0.1
-        _insert_affect(conn, d, 1, v, 0.5, importance=3)
+        _insert_affect(conn, d, 1, v, 0.5, importance=3,
+                       label=("雀跃" if v > 0.5 else "低落"),
+                       description=("高峰" if v > 0.5 else "低谷"))
     out = top_sections.render_affect(conn)
     conn.close()
     week_section = out.split("### This Week")[1].split("### Pending")[0]
     assert "→" in week_section
+    assert "【" in week_section and "】" in week_section
+    # 4 key eps formatted with eph/epl prefix and description.
+    assert week_section.count("eph") + week_section.count("epl") >= 4
+    assert "高峰" in week_section or "低谷" in week_section
 
 
-def test_render_affect_pending_empty_until_2_5c(env):
-    """Pending block body must be '- (none)' — unresolved column not yet in schema."""
+def test_render_affect_pending_unresolved_and_resolved(env):
+    """Pending: open row → '- [ ] <desc>'; resolved row → '- [x] <desc>'."""
     db, _, _, _ = env
     conn = _conn(db)
     today = datetime.now(timezone.utc).date().isoformat()
-    _insert_affect(conn, today, 1, 0.5, 0.5, importance=2)
+    yesterday = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
+    # Unresolved still open.
+    _insert_affect(conn, today, 1, 0.3, 0.8, importance=3,
+                   label="焦虑", description="演讲前夜",
+                   unresolved=1, resolved_at=None)
+    # Previously unresolved but resolved within the week.
+    resolved_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _insert_affect(conn, yesterday, 1, 0.2, 0.7, importance=4,
+                   label="争执", description="吵架",
+                   unresolved=1, resolved_at=resolved_ts)
+    out = top_sections.render_affect(conn)
+    conn.close()
+    pending_section = out.split("### Pending")[1]
+    assert "- [ ] 演讲前夜" in pending_section
+    assert "- [x] 吵架" in pending_section
+    assert "- (none)" not in pending_section
+
+
+def test_render_affect_pending_empty_when_no_unresolved(env):
+    """No unresolved rows → '- (none)'."""
+    db, _, _, _ = env
+    conn = _conn(db)
+    today = datetime.now(timezone.utc).date().isoformat()
+    _insert_affect(conn, today, 1, 0.5, 0.5, importance=2,
+                   label="平静", description="散步")
     out = top_sections.render_affect(conn)
     conn.close()
     pending_section = out.split("### Pending")[1]
@@ -245,38 +318,43 @@ def test_render_affect_empty_tables(env):
 
 # ── Unit: handover_render ─────────────────────────────────────────────────────
 
-def test_handover_write_atomic_and_handover_stamp(env, monkeypatch, tmp_path):
-    """write_handover produces file at _RENDERED_PATH with sid stamp + 4 sections."""
+def test_handover_write_full_atomic_and_ready_stamp(env):
+    """write_handover_full produces file at _RENDERED_PATH with ready stamp + 4 sections + bullets."""
     db, _, _, rendered_path = env
     conn = _conn(db)
-    result_path = handover_render.write_handover(conn, "abc123")
+    result_path = handover_render.write_handover_full(
+        conn, "abc123", "- did X\n- did Y", "- pick up Z")
     conn.close()
 
     assert result_path == rendered_path
     assert rendered_path.exists()
     content = rendered_path.read_text(encoding="utf-8")
 
-    # Narrative stamp present
-    assert "<!-- handover: pending sid:abc123 -->" in content
+    # Ready stamp present (not pending) — single-writer atomic flow
+    assert f"<!-- handover: ready sid:abc123 ts:" in content
+    assert "pending sid:" not in content
     # All 4 section headers present
     assert "## Alerts (active)" in content
     assert "## Tasks" in content
     assert "## Milestone candidate" in content
     assert "## Affect" in content
+    # LLM bullets injected
+    assert "- did X" in content
+    assert "- pick up Z" in content
 
 
-def test_handover_write_strips_instruction_lines(env):
+def test_handover_write_full_strips_instruction_lines(env):
     """Lines starting with '> ' must not appear in the rendered output."""
     db, _, _, rendered_path = env
     conn = _conn(db)
-    handover_render.write_handover(conn, "s1")
+    handover_render.write_handover_full(conn, "s1", "- a", "- b")
     conn.close()
     content = rendered_path.read_text(encoding="utf-8")
     for line in content.splitlines():
         assert not line.startswith("> "), f"Instruction line leaked: {line!r}"
 
 
-def test_handover_write_atomic_via_replace(env, monkeypatch, tmp_path):
+def test_handover_write_full_atomic_via_replace(env, monkeypatch):
     """Atomic write uses os.replace (rename). Verify via monkeypatch."""
     db, _, _, rendered_path = env
     replace_calls = []
@@ -288,11 +366,10 @@ def test_handover_write_atomic_via_replace(env, monkeypatch, tmp_path):
 
     monkeypatch.setattr(os, "replace", tracking_replace)
     conn = _conn(db)
-    handover_render.write_handover(conn, "s-atomic")
+    handover_render.write_handover_full(conn, "s-atomic", "- a", "- b")
     conn.close()
 
     assert len(replace_calls) >= 1
-    # The destination must be the rendered path
     assert any(str(rendered_path) in str(dst) for _, dst in replace_calls)
 
 
@@ -300,13 +377,52 @@ def test_handover_timestamp_replaced(env):
     """{{YYYY-MM-DD HH:MM}} placeholder is replaced with current time."""
     db, _, _, rendered_path = env
     conn = _conn(db)
-    handover_render.write_handover(conn, "s-ts")
+    handover_render.write_handover_full(conn, "s-ts", "- a", "- b")
     conn.close()
     content = rendered_path.read_text(encoding="utf-8")
     assert "{{YYYY-MM-DD HH:MM}}" not in content
-    # Should contain a date in YYYY-MM-DD format
     import re
     assert re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", content)
+
+
+def test_handover_full_single_write_populates_both_sections(env):
+    """Acceptance test for Bug #1: one atomic write contains skeleton + both
+    ThisSession + NextSession + ready stamp — no pending stamp ever appears.
+    """
+    db, _, _, rendered_path = env
+    conn = _conn(db)
+    handover_render.write_handover_full(
+        conn, "sid-acceptance",
+        this_session="- shipped Bug #1 fix",
+        next_session="- verify pytest + ship merge",
+    )
+    conn.close()
+    content = rendered_path.read_text(encoding="utf-8")
+    assert "## This Session\n- shipped Bug #1 fix" in content
+    assert "## Next Session\n- verify pytest + ship merge" in content
+    assert "<!-- handover: ready sid:sid-acceptance ts:" in content
+    assert "pending sid:" not in content
+
+
+def test_session_start_is_readonly_for_handover(env, monkeypatch, tmp_path):
+    """SessionStart hook must NEVER mutate handover.md — file mtime unchanged."""
+    import io, json as _json
+    db, _, _, rendered_path = env
+    conn = _conn(db)
+    handover_render.write_handover_full(
+        conn, "pre-existing", "- prior session content", "- next plan")
+    conn.close()
+    before_bytes = rendered_path.read_bytes()
+    before_mtime = rendered_path.stat().st_mtime_ns
+
+    monkeypatch.setattr("sys.stdin", io.StringIO(_json.dumps({})))
+    monkeypatch.setattr("sys.stdout", io.StringIO())
+    rc = hooks.main(["session_start"])
+    assert rc == 0
+
+    # File untouched.
+    assert rendered_path.read_bytes() == before_bytes
+    assert rendered_path.stat().st_mtime_ns == before_mtime
 
 
 # ── Unit: dashboard swap ──────────────────────────────────────────────────────
@@ -342,61 +458,28 @@ def test_dashboard_top_markers_present(env):
 
 # ── Unit: hook wiring ─────────────────────────────────────────────────────────
 
-def test_handover_render_hook_invoked_on_session_end(env, monkeypatch, tmp_path):
-    """session_end must call handover_render.write_handover once with the session_id."""
-    db, dash, _, _ = env
+def test_session_end_does_not_write_handover(env, monkeypatch, tmp_path):
+    """Bug #1 fix: session_end MUST NOT touch handover.md — sessionend_async
+    (spawned detached) is now the single writer.
+    """
+    db, dash, _, rendered_path = env
+
+    # Pre-seed handover.md with content the hook must leave alone.
+    rendered_path.write_text("PRE-EXISTING CONTENT", encoding="utf-8")
+    before = rendered_path.read_bytes()
 
     jl = tmp_path / "s.jsonl"
     jl.write_text(json.dumps({
-        "type": "user", "sessionId": "sid-handover-test",
+        "type": "user", "sessionId": "sid-end-noop",
         "timestamp": "2026-05-23T10:00:00Z",
         "message": {"role": "user", "content": "hello"},
     }))
-
-    write_calls = []
-
-    def fake_write(conn, session_id):
-        write_calls.append(session_id)
-        return tmp_path / "handover.md"
-
-    monkeypatch.setattr(hooks.handover_render, "write_handover", fake_write)
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(
-        {"session_id": "sid-handover-test", "transcript_path": str(jl)})))
+        {"session_id": "sid-end-noop", "transcript_path": str(jl)})))
 
     rc = hooks.main(["session_end"])
     assert rc == 0
-    assert write_calls == ["sid-handover-test"]
-
-
-def test_handover_render_hook_fail_soft(env, monkeypatch, tmp_path):
-    """If write_handover raises, session_end still returns 0 and adds an alert."""
-    db, dash, _, _ = env
-
-    jl = tmp_path / "s.jsonl"
-    jl.write_text(json.dumps({
-        "type": "user", "sessionId": "sid-softerr",
-        "timestamp": "2026-05-23T10:00:00Z",
-        "message": {"role": "user", "content": "hello"},
-    }))
-
-    def boom(conn, session_id):
-        raise RuntimeError("simulated render failure")
-
-    monkeypatch.setattr(hooks.handover_render, "write_handover", boom)
-    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(
-        {"session_id": "sid-softerr", "transcript_path": str(jl)})))
-
-    rc = hooks.main(["session_end"])
-    assert rc == 0
-
-    conn = _conn(db)
-    try:
-        alerts = conn.execute(
-            "SELECT message FROM alerts WHERE type='handover_render'"
-        ).fetchall()
-    finally:
-        conn.close()
-    assert alerts, "expected an alert for the render failure"
+    assert rendered_path.read_bytes() == before
 
 
 # ── _inject_reference_commits / _last_3_commits ──────────────────────────────

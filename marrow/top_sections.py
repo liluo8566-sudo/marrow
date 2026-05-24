@@ -155,27 +155,47 @@ def render_milestone_candidate(conn: sqlite3.Connection, n: int = 5) -> str:
     return "\n".join(out)
 
 
+def _ep_phrase(row: dict, side: str) -> str:
+    """Format one ep as `ephN <label> | <description>` (or eplN).
+    N = importance. label / description fall back to ep number / label.
+    """
+    n = row.get("importance") or 0
+    label = row.get("label") or f"ep{row.get('ep', '?')}"
+    desc = row.get("description") or label
+    return f"ep{side}{n} {label} | {desc}"
+
+
 def render_affect(conn: sqlite3.Connection) -> str:
     cutoff_utc = _day_cutoff_utc()
     cutoff_iso = cutoff_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
 
     today_rows = [dict(r) for r in conn.execute(
-        "SELECT valence, arousal, importance, label, ep FROM affect "
-        "WHERE superseded_by IS NULL AND date>=? AND created_at>=? ORDER BY ep",
+        "SELECT id, valence, arousal, importance, label, description, ep "
+        "FROM affect "
+        "WHERE superseded_by IS NULL AND date>=? AND created_at>=? "
+        "ORDER BY ep",
         (cutoff_utc.date().isoformat(), cutoff_iso)).fetchall()]
 
+    week_iso = _week_iso()
     week_rows = [dict(r) for r in conn.execute(
-        "SELECT valence, arousal, importance, label, ep, date FROM affect "
-        "WHERE superseded_by IS NULL AND date>=?", (_week_iso(),)).fetchall()]
+        "SELECT id, valence, arousal, importance, label, description, ep, "
+        "date FROM affect "
+        "WHERE superseded_by IS NULL AND date>=?", (week_iso,)).fetchall()]
 
     out = ["## Affect", "### Today"]
     if today_rows:
         mv, ma = _wmean(today_rows, "valence"), _wmean(today_rows, "arousal")
         ep_h = max(today_rows, key=lambda r: (r["valence"], r["importance"]))
         ep_l = min(today_rows, key=lambda r: (r["valence"], -r["importance"]))
-        lh = ep_h.get("label") or f"ep{ep_h['ep']}"
-        ll = ep_l.get("label") or f"ep{ep_l['ep']}"
-        out.append(f"- [{_tone(mv, ma)}] · ep{ep_h['importance']}h {lh} | {lh} · ep{ep_l['importance']}l {ll} | {ll}")
+        tone = _tone(mv, ma)
+        if ep_h["id"] == ep_l["id"]:
+            # Single ep (or all eps share extreme V); dedup to one side.
+            out.append(f"- 【{tone}】 · {_ep_phrase(ep_h, 'h')}")
+        else:
+            out.append(
+                f"- 【{tone}】 · {_ep_phrase(ep_h, 'h')} · "
+                f"{_ep_phrase(ep_l, 'l')}"
+            )
     else:
         out.append("- (none)")
 
@@ -183,27 +203,50 @@ def render_affect(conn: sqlite3.Connection) -> str:
     if week_rows:
         mv, ma = _wmean(week_rows, "valence"), _wmean(week_rows, "arousal")
         simple_mean = sum(r["valence"] for r in week_rows) / len(week_rows)
-        std_v = math.sqrt(sum((r["valence"] - simple_mean) ** 2 for r in week_rows) / len(week_rows))
+        std_v = math.sqrt(
+            sum((r["valence"] - simple_mean) ** 2 for r in week_rows)
+            / len(week_rows)
+        )
         if std_v > 0.3:
             srt = sorted(week_rows, key=lambda r: (r["date"], r.get("ep", 0)))
             mid = len(srt) // 2
+
             def ht(rs: list[dict]) -> str:
                 ws = sum(r["importance"] for r in rs)
-                mv2 = sum(r["valence"] * r["importance"] for r in rs) / ws if ws else 0.5
-                ma2 = sum(r["arousal"] * r["importance"] for r in rs) / ws if ws else 0.5
+                mv2 = (sum(r["valence"] * r["importance"] for r in rs) / ws
+                       if ws else 0.5)
+                ma2 = (sum(r["arousal"] * r["importance"] for r in rs) / ws
+                       if ws else 0.5)
                 return _tone(mv2, ma2)
             tone_label = f"{ht(srt[:mid] or srt)} → {ht(srt[mid:] or srt)}"
         else:
             tone_label = _tone(mv, ma)
-        outliers = sorted(week_rows, key=lambda r: (-abs(r["valence"] - simple_mean), -r["importance"]))[:4]
-        keys = " · ".join(r.get("label") or f"ep{r.get('ep','?')}" for r in outliers)
-        out.append(f"- [{tone_label}] · {keys}")
+        outliers = sorted(
+            week_rows,
+            key=lambda r: (-abs(r["valence"] - simple_mean), -r["importance"]),
+        )[:4]
+        parts = [
+            _ep_phrase(r, "h" if r["valence"] >= simple_mean else "l")
+            for r in outliers
+        ]
+        out.append(f"- 【{tone_label}】 · {' · '.join(parts)}")
     else:
         out.append("- (none)")
 
     out.append("### Pending")
-    # Pending body renders empty until affect.unresolved column lands in 2.5c (P4).
-    out.append("- (none)")
+    pending_rows = conn.execute(
+        "SELECT description, label, resolved_at FROM affect "
+        "WHERE superseded_by IS NULL AND unresolved=1 AND date>=? "
+        "ORDER BY created_at, id",
+        (week_iso,),
+    ).fetchall()
+    if pending_rows:
+        for r in pending_rows:
+            text = r["description"] or r["label"] or "(ep)"
+            box = "x" if r["resolved_at"] else " "
+            out.append(f"- [{box}] {text}")
+    else:
+        out.append("- (none)")
     return "\n".join(out)
 
 

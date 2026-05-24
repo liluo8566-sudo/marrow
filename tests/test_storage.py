@@ -284,6 +284,12 @@ def test_v2_affect_unresolved_cols(db):
             "reconcile_prev_text"} <= cols
 
 
+def test_v4_affect_description_col(db):
+    """v4: affect.description — short anchor phrase per ep."""
+    assert "description" in _cols(db, "affect")
+    assert db.execute("PRAGMA user_version").fetchone()[0] >= 4
+
+
 def test_v2_legacy_threads_rename_preserves_rows(tmp_path):
     """Legacy DB (user_version<2) with `threads` rows → rename to `tasks`."""
     p = str(tmp_path / "legacy.db")

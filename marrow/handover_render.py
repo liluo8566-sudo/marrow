@@ -1,17 +1,22 @@
-"""Sync handover.md skeleton renderer — §4.1, zero LLM calls, <500ms.
+"""Handover renderer — §4.1, zero LLM in skeleton, one atomic write per write.
 
 Rendered output goes to ~/.config/marrow/handover.md (NOT ~/cc-lab/marrow/handover.md).
 Split rationale: ~/cc-lab/marrow/handover.md is hand-edited by Lumi each session;
-writing there would clobber her content. The rendered skeleton is a separate
-machine-written artifact read by SessionStart for inject.
+writing there would clobber her content. The rendered artifact is a separate
+machine-written file read by SessionStart for inject.
+
+Single-writer rule (Bug #1): sessionend_async is the only writer that hits
+handover.md in production. It calls write_handover_full() once, building
+skeleton + LLM-filled ThisSession / NextSession + stamp in a single atomic
+write. SessionStart is read-only — it MUST NOT call any function here that
+mutates the file.
 """
 from __future__ import annotations
 
 import re
 import sqlite3
 import subprocess
-import tempfile
-import os
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -43,7 +48,6 @@ def _replace_top_sections(text: str, rendered: str) -> str:
     i = text.find(_SEP_OPEN)
     j = text.find(_SEP_CLOSE)
     if i == -1 or j == -1 or j <= i:
-        # Markers not found — prepend rendered block
         return rendered + "\n\n" + text
     before = text[:i + len(_SEP_OPEN)]
     after = text[j:]
@@ -75,29 +79,53 @@ def _inject_reference_commits(text: str, commits: str) -> str:
     return pat.sub(lambda m: f"{m.group(1)}{commits}\n\n", text, count=1)
 
 
-def write_handover(conn: sqlite3.Connection, session_id: str) -> Path:
-    """Atomic write of handover.md sync skeleton per §4.1."""
+def _inject_section(text: str, header: str, body: str) -> str:
+    """Replace body under `## <header>` up to next `## ` or HTML comment."""
+    if not body:
+        return text
+    pat = re.compile(
+        rf"(^## {re.escape(header)}[ \t]*\n)(.*?)(?=^## |^<!--|\Z)",
+        re.MULTILINE | re.DOTALL,
+    )
+    return pat.sub(lambda m: f"{m.group(1)}{body}\n\n", text, count=1)
+
+
+def render_skeleton(conn: sqlite3.Connection) -> str:
+    """Build template body with top sections + commits, no stamp, empty bullets."""
     template = _TEMPLATE_PATH.read_text(encoding="utf-8")
-
-    # Strip system instruction lines (lines starting with '> ')
     template = _strip_instruction_lines(template)
-
-    # Replace {{YYYY-MM-DD HH:MM}} with current local time
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
     template = template.replace("{{YYYY-MM-DD HH:MM}}", now_str)
-
-    # Render the 4 top sections and splice into the sandwich block
     top = top_sections.render_top(conn)
     template = _replace_top_sections(template, top)
-
-    # Inject last-3-commits (code-fetched fact, not LLM)
     template = _inject_reference_commits(template, _last_3_commits())
+    return template
 
-    # Stamp handover slot just before EOF
-    if not template.endswith("\n"):
-        template += "\n"
-    template += f"<!-- handover: pending sid:{session_id} -->\n"
 
-    out_path = _RENDERED_PATH
-    _atomic_write(str(out_path), template)
-    return out_path
+def _append_stamp(text: str, stamp: str) -> str:
+    if not text.endswith("\n"):
+        text += "\n"
+    return text + stamp + "\n"
+
+
+def render_full(conn: sqlite3.Connection, sid: str,
+                this_session: str, next_session: str) -> str:
+    """Compose skeleton + ThisSession + NextSession + ready stamp."""
+    text = render_skeleton(conn)
+    text = _inject_section(text, "This Session", this_session)
+    text = _inject_section(text, "Next Session", next_session)
+    ts = int(time.time())
+    stamp = f"<!-- handover: ready sid:{sid} ts:{ts} -->"
+    return _append_stamp(text, stamp)
+
+
+def write_handover_full(conn: sqlite3.Connection, sid: str,
+                        this_session: str, next_session: str) -> Path:
+    """Single-writer atomic write of complete handover.md (Bug #1 fix).
+
+    Called exclusively from sessionend_async — never from session_start hooks
+    or any other path. SessionStart must read this file, never overwrite it.
+    """
+    text = render_full(conn, sid, this_session, next_session)
+    _atomic_write(str(_RENDERED_PATH), text)
+    return _RENDERED_PATH

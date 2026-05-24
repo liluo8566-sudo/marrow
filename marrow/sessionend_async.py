@@ -16,13 +16,11 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
-import re
 import sys
-import time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from . import candidates, config, storage
+from . import candidates, config, handover_render, storage
 from .llm import LLMClient, LLMError
 from .sessionend_prompts import SESSIONEND_PROMPT, fence
 
@@ -137,6 +135,15 @@ def _seg_affect(conn, raw: str, sid: str, date: str) -> int:
         arousal = float(it.get("arousal", 0.3))
         importance = _clamp_importance(it.get("importance", 3))
         label = it.get("label") or None
+        desc_raw = it.get("description")
+        description = desc_raw.strip() if isinstance(desc_raw, str) else None
+        if not description:
+            description = label
+            print(
+                f"[sessionend_async] warn: affect ep={ep} missing description,"
+                f" fallback to label={label!r}",
+                file=sys.stderr,
+            )
         ents = it.get("entities")
         entities = (json.dumps(ents, ensure_ascii=False)
                     if isinstance(ents, list) and ents else None)
@@ -165,11 +172,11 @@ def _seg_affect(conn, raw: str, sid: str, date: str) -> int:
         with conn:
             conn.execute(
                 "INSERT INTO affect (date, ep, valence, arousal, importance,"
-                " label, entities, source, unresolved, reconcile_ref,"
-                " reconcile_prev_text)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (date, ep, valence, arousal, importance, label, entities,
-                 "sessionend_async", unresolved, reconcile_ref,
+                " label, description, entities, source, unresolved,"
+                " reconcile_ref, reconcile_prev_text)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (date, ep, valence, arousal, importance, label, description,
+                 entities, "sessionend_async", unresolved, reconcile_ref,
                  reconcile_prev),
             )
             if reconcile_ref:
@@ -232,9 +239,6 @@ def _seg_digest(conn, raw: str, sid: str, date: str) -> int:
     return 1
 
 
-_HANDOVER_PATH = Path.home() / ".config" / "marrow" / "handover.md"
-
-
 def _parse_handover_blocks(raw: str) -> tuple[str, str]:
     """Pull THIS_SESSION and NEXT_SESSION bullet blocks out of LLM output."""
     def _slice(open_tag: str, close_tag: str) -> str:
@@ -250,50 +254,15 @@ def _parse_handover_blocks(raw: str) -> tuple[str, str]:
     return this_s, next_s
 
 
-def _inject_section(text: str, header: str, body: str) -> str:
-    """Replace content under `## <header>` up to the next `## ` or HTML
-    comment with body. Stops before `<!-- ...` to preserve handover stamps.
-    """
-    pat = re.compile(
-        rf"(^## {re.escape(header)}[ \t]*\n)(.*?)(?=^## |^<!--|\Z)",
-        re.MULTILINE | re.DOTALL,
-    )
-    return pat.sub(lambda m: f"{m.group(1)}{body}\n\n", text, count=1)
-
-
-def _seg_handover(raw: str, sid: str) -> int:
-    """Inject LLM bullets into `## This Session` / `## Next Session` of
-    ~/.config/marrow/handover.md. Stamps pending → ready so SessionStart
-    can detect sid alignment.
+def _seg_handover(conn, raw: str, sid: str) -> int:
+    """Build full handover.md (skeleton + LLM bullets + ready stamp) in ONE
+    atomic write — single-writer rule per Bug #1 fix. SessionStart hooks are
+    read-only and never invoke this path.
     """
     this_s, next_s = _parse_handover_blocks(raw)
     if not this_s and not next_s:
         return 0
-    if not _HANDOVER_PATH.exists():
-        return 0
-    text = _HANDOVER_PATH.read_text(encoding="utf-8")
-    if this_s:
-        text = _inject_section(text, "This Session", this_s)
-    if next_s:
-        text = _inject_section(text, "Next Session", next_s)
-    pending_re = re.compile(r"<!--\s*handover:\s*pending\s+sid:(\S+)\s*-->")
-    m = pending_re.search(text)
-    ts_unix = int(time.time())
-    if m:
-        cur_sid = m.group(1)
-        lag = ("" if cur_sid == sid
-               else f" (handover sid={sid}, skeleton sid={cur_sid})")
-        text = pending_re.sub(
-            f"<!-- handover: ready sid:{sid} ts:{ts_unix} -->{lag}",
-            text, count=1,
-        )
-    else:
-        text = text.rstrip() + (
-            f"\n<!-- handover: ready sid:{sid} ts:{ts_unix} -->\n"
-        )
-    tmp = _HANDOVER_PATH.with_suffix(".md.tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(_HANDOVER_PATH)
+    handover_render.write_handover_full(conn, sid, this_s, next_s)
     return 1
 
 
@@ -349,7 +318,7 @@ def main(argv: list[str] | None = None) -> int:
             ("affect", lambda r: _seg_affect(conn, r, sid, date)),
             ("task_cand", lambda r: _seg_task_cand(conn, r)),
             ("digest", lambda r: _seg_digest(conn, r, sid, date)),
-            ("handover", lambda r: _seg_handover(r, sid)),
+            ("handover", lambda r: _seg_handover(conn, r, sid)),
         )
         failures: list[str] = []
         for name, writer in writers:

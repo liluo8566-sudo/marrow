@@ -13,7 +13,7 @@ import sqlite_vec
 
 from . import config
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Phase 1 first-class tables + Phase 2 affect/entities (DECISIONS Phase 2).
 # The retired emotions/people/preferences/dir placeholders stay absent.
@@ -130,6 +130,7 @@ CREATE TABLE IF NOT EXISTS affect (
   arousal REAL NOT NULL,
   importance INTEGER NOT NULL,
   label TEXT,
+  description TEXT,
   entities TEXT,
   mention_count INTEGER NOT NULL DEFAULT 0,
   source TEXT,
@@ -276,6 +277,7 @@ def init_db(path: str | None = None) -> sqlite3.Connection:
         )
         _migrate_to_v2(conn)
         _migrate_to_v3(conn)
+        _migrate_to_v4(conn)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     return conn
 
@@ -344,3 +346,17 @@ def _migrate_to_v3(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE vocab ADD COLUMN {col} {decl}")
         except sqlite3.OperationalError:
             pass
+
+
+def _migrate_to_v4(conn: sqlite3.Connection) -> None:
+    """v4 schema: affect.description — short event anchor phrase per ep,
+    surface field for Today/Week render. Existing rows backfill NULL.
+    Idempotent — duplicate ALTER swallowed; user_version short-circuits.
+    """
+    v = conn.execute("PRAGMA user_version").fetchone()[0]
+    if v >= 4:
+        return
+    try:
+        conn.execute("ALTER TABLE affect ADD COLUMN description TEXT")
+    except sqlite3.OperationalError:
+        pass

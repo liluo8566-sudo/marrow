@@ -39,6 +39,7 @@ Later
 
 ### Today
 - 【主调】 · ephN 细label | 描述 · eplN 细label | 描述
+举例：【平淡】 · epl2 无语 | 猪一样的队友 
 
 ### This Week
 - 【主调】或【主调A → 主调B】 · 4 个 key ep (eph/epl 按 outlier 排)
