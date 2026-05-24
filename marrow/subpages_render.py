@@ -173,7 +173,16 @@ def render_memes(conn: sqlite3.Connection) -> str:
     key = "memes"
     memes_rows = conn.execute(
         "SELECT id, type, key, value, context, use_count "
-        "FROM memes ORDER BY use_count DESC, created_at DESC"
+        "FROM memes ORDER BY "
+        "CASE type "
+        "  WHEN 'paw' THEN 1 "
+        "  WHEN 'fact' THEN 2 "
+        "  WHEN 'meme' THEN 3 "
+        "  WHEN 'event' THEN 4 "
+        "  WHEN 'news' THEN 5 "
+        "  ELSE 6 "
+        "END, "
+        "created_at ASC"
     ).fetchall()
     sticker_rows = conn.execute(
         "SELECT s.id, s.key, s.asset_path, s.mime_type, m.key AS meme_key "

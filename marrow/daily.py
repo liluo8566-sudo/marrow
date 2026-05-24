@@ -97,26 +97,53 @@ def _read_digests(conn, date: str) -> list[tuple[str, str]]:
     return [(r["sid"], r["text"]) for r in rows if r["text"]]
 
 
-def _read_affect_summary(conn, date: str) -> list[str]:
+def _read_affect_summary(conn, date: str) -> list[dict]:
+    """Structured affect episodes for the date — feeds sonnet so it can
+    honour the importance=5 → force-milestone rule. Empty rows skipped.
+    """
     rows = conn.execute(
-        "SELECT label, valence, importance FROM affect_live"
-        " WHERE date=? ORDER BY ep", (date,),
+        "SELECT ep, importance, label, description, valence, arousal"
+        " FROM affect_live WHERE date=? ORDER BY ep", (date,),
     ).fetchall()
     out = []
     for r in rows:
-        if r["label"]:
-            out.append(f"{r['label']}(v={r['valence']:.1f},imp={r['importance']})")
+        if not (r["label"] or r["description"]):
+            continue
+        out.append({
+            "ep": r["ep"],
+            "importance": r["importance"],
+            "label": r["label"] or "",
+            "description": r["description"] or "",
+            "valence": r["valence"],
+            "arousal": r["arousal"],
+        })
     return out
 
 
+def _format_affect_block(date: str, episodes: list[dict]) -> str:
+    if not episodes:
+        return ""
+    lines = [f"AFFECT episodes for {date}:"]
+    for e in episodes:
+        label = f"[{e['label']}]" if e["label"] else ""
+        desc = e["description"]
+        head = f"- ep{e['ep']} importance={e['importance']}"
+        body = f" {label} {desc}".rstrip()
+        tail = f" (v={e['valence']:.2f}, a={e['arousal']:.2f})"
+        lines.append(f"{head}{body}{tail}")
+    return "\n".join(lines)
+
+
 def _assemble_material(digests: list[tuple[str, str]],
-                       affect_labels: list[str]) -> str:
+                       affect_episodes: list[dict],
+                       date: str) -> str:
     parts = []
     for sid, text in digests:
         parts.append(f"[session {sid}]\n{text}")
     body = "\n\n---\n\n".join(parts) if parts else "(no digests)"
-    if affect_labels:
-        body += f"\n\nAFFECT summary: {', '.join(affect_labels)}"
+    block = _format_affect_block(date, affect_episodes)
+    if block:
+        body += "\n\n" + block
     return body
 
 
@@ -145,7 +172,8 @@ def _extract_candidates(conn, llm: LLMClient, date: str,
         ("entity_cand", lambda r: candidates.write_entity_cand(conn, r)),
         ("milestone_cand",
          lambda r: candidates.write_milestone_cand(conn, r, date)),
-        ("memes_cand", lambda r: candidates.write_memes_cand(conn, r)),
+        ("memes_cand",
+         lambda r: candidates.write_memes_cand(conn, r, date=date)),
     ):
         try:
             counts[name] = writer(raw)
@@ -162,9 +190,9 @@ def run_day(conn, date: str, llm: LLMClient, *, db: str | None = None,
     _act = "update" if existed else "insert"
 
     digests = _read_digests(conn, date)
-    affect_labels = _read_affect_summary(conn, date)
+    affect_episodes = _read_affect_summary(conn, date)
 
-    if not digests and not affect_labels:
+    if not digests and not affect_episodes:
         with conn:
             conn.execute("DELETE FROM diary WHERE date = ?", (date,))
             conn.execute(
@@ -176,7 +204,7 @@ def run_day(conn, date: str, llm: LLMClient, *, db: str | None = None,
                 (date, _act, f"daily stub for {date} (no digests, no affect)"))
         return True
 
-    material = _assemble_material(digests, affect_labels)
+    material = _assemble_material(digests, affect_episodes, date)
     sids = ",".join(sorted(sid for sid, _ in digests if sid))
 
     # Candidate extraction (1 sonnet call) — best-effort, never blocks diary.
@@ -214,7 +242,7 @@ def run_day(conn, date: str, llm: LLMClient, *, db: str | None = None,
             "INSERT INTO audit_log (target_table, target_id, action, summary)"
             " VALUES ('diary', ?, ?, ?)",
             (date, _act, f"daily written for {date} "
-                         f"(digests={len(digests)}, affect={len(affect_labels)})"),
+                         f"(digests={len(digests)}, affect={len(affect_episodes)})"),
         )
     return True
 

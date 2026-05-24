@@ -187,7 +187,7 @@ _CAND_RAW = (
     " \"conf\": 0.9}]\n"
     "===END===\n"
     "===MEMES_CAND===\n"
-    "[{\"key\": \"小笼包\", \"type\": \"meme\","
+    "[{\"key\": \"小笼包\", \"type\": \"paw\","
     " \"value\": \"周末早茶专属梗\", \"context\": \"老婆点了 8 笼\","
     " \"pinned\": 0, \"conf\": 0.8}]\n"
     "===END===\n"
@@ -212,7 +212,8 @@ def test_run_day_extracts_three_candidate_blocks(db):
         "SELECT key, pinned, use_count FROM memes WHERE key='小笼包'"
     ).fetchone()
     assert vc is not None
-    assert vc["pinned"] == 0  # public meme — not anchor, not cipher
+    # type=paw is auto-pinned by the writer (dyad-exclusive inside joke)
+    assert vc["pinned"] == 1
     assert vc["use_count"] == 1
     audit = conn.execute(
         "SELECT summary FROM audit_log WHERE action='cand_extract'"
@@ -223,11 +224,14 @@ def test_run_day_extracts_three_candidate_blocks(db):
 
 
 def test_run_day_memes_anchor_forces_pinned(db):
-    """LLM emits pinned=0 on an anchor key → writer forces pinned=1."""
+    """LLM emits pinned=0 on an anchor key → writer forces pinned=1.
+    Using type=others so the anchor list is the sole pinning trigger
+    (paw/fact would auto-pin regardless and obscure the assertion).
+    """
     p, conn = db
     raw = (
         "===MEMES_CAND===\n"
-        "[{\"key\": \"鸭子\", \"type\": \"nickname\","
+        "[{\"key\": \"鸭子\", \"type\": \"others\","
         " \"value\": \"屿忱昵称\", \"context\": \"\","
         " \"pinned\": 0, \"conf\": 0.9}]\n"
         "===END===\n"
@@ -240,12 +244,12 @@ def test_run_day_memes_anchor_forces_pinned(db):
     assert vc is not None and vc["pinned"] == 1
 
 
-def test_run_day_memes_cipher_type_forces_pinned(db):
-    """type='cipher' is always pinned regardless of key / LLM flag."""
+def test_run_day_memes_fact_type_forces_pinned(db):
+    """type='fact' is always pinned regardless of LLM flag / anchor list."""
     p, conn = db
     raw = (
         "===MEMES_CAND===\n"
-        "[{\"key\": \"sec_anchor\", \"type\": \"cipher\","
+        "[{\"key\": \"sec_anchor\", \"type\": \"fact\","
         " \"value\": \"x\", \"context\": \"\","
         " \"pinned\": 0, \"conf\": 0.9}]\n"
         "===END===\n"
@@ -279,16 +283,16 @@ def test_memes_writer_upgrades_pinned_but_never_downgrades(db):
     """Existing pinned=1 row stays pinned even if a later session emits 0."""
     p, conn = db
     from marrow import candidates as cmod
-    # First insert: anchor forces pinned=1
+    # First insert: anchor + paw both pin → pinned=1
     raw1 = (
         "===MEMES_CAND===\n"
-        "[{\"key\": \"老公\", \"type\": \"nickname\","
+        "[{\"key\": \"老公\", \"type\": \"paw\","
         " \"value\": \"x\", \"context\": \"\","
         " \"pinned\": 1, \"conf\": 0.9}]\n"
         "===END===\n"
     )
     cmod.write_memes_cand(conn, raw1)
-    # Second insert: LLM emits pinned=0, but anchor still on key — stays 1.
+    # Second insert: LLM emits pinned=0, but paw auto-pins → stays 1.
     raw2 = raw1.replace("\"pinned\": 1", "\"pinned\": 0")
     cmod.write_memes_cand(conn, raw2)
     vc = conn.execute(
