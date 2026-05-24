@@ -1,8 +1,13 @@
-"""md->DB reconcile for sub-pages.
+"""md->DB reconcile for sub-pages + dashboard candidate rows.
 
-Scope: milestone only. Vocab/pit/tasks plug in later via the same shape
-(parse(md)->rows, diff against DB, apply). reconcile_milestones is the
-public entry; write_subpage wires it via SubPageConfig.reconcile.
+Scope today:
+- milestone subpage (reconcile_milestones)
+- dashboard `## Milestone candidate` rows with anchor buttons
+  (reconcile_milestone_candidates) — ✅ pin · ❌ delete+tombstone · ✏️ edit
+
+Vocab/pit/tasks plug in later via the same shape (parse(md)->rows,
+diff against DB, apply). reconcile_* are the public entries; the
+dashboard writer wires the candidate pass via write_dashboard.
 """
 from __future__ import annotations
 
@@ -212,4 +217,115 @@ def reconcile_milestones(conn: sqlite3.Connection,
         if rpt.destructive() and not backup_taken:
             _backup_once()
 
+    return rpt
+
+
+# ── dashboard candidate-row reconcile (✅ ❌ ✏️) ───────────────────────────
+
+_PIN_CHAR = "✅"      # ✅
+_DROP_CHAR = "❌"     # ❌
+_EDIT_CHAR = "✏️"  # ✏️ (pencil + emoji selector)
+
+# Candidate row produced by top_sections.render_milestone_candidate:
+#   - [YYYY-MM-DD] <title> (Nh ago)  ✅ ❌ ✏️  <!-- id:N -->
+# We tolerate the user leaving a single char (the "vote"). The button block
+# may be edited/reordered; we look for the presence of a single decision char
+# (✅ or ❌) — pencil edits are not destructive, treated as no-op for now
+# (md reflects DB on next render either way).
+_CAND_ID_RE = re.compile(r"<!-- id:(\d+) -->")
+
+
+def _parse_dashboard_candidates(text: str) -> list[dict]:
+    """Scan dashboard md for milestone-candidate rows with vote chars.
+
+    Returns a list of {id, vote} where vote ∈ {"pin", "drop", "edit"}.
+    Rows missing a decision char are skipped. Multiple chars on one row
+    resolve in priority: drop > pin > edit (destructive wins so a Lumi
+    "❌ + leftover ✅" still drops).
+    """
+    found: list[dict] = []
+    in_block = False
+    for raw in text.splitlines():
+        s = raw.rstrip()
+        if "## Milestone candidate" in s:
+            in_block = True
+            continue
+        if in_block and s.startswith("## "):
+            in_block = False
+            continue
+        if not in_block:
+            continue
+        m = _CAND_ID_RE.search(s)
+        if not m:
+            continue
+        try:
+            rid = int(m.group(1))
+        except ValueError:
+            continue
+        # All three chars are template defaults; require the user to remove
+        # the other two for a vote to register. If all three remain, no vote.
+        has_pin = _PIN_CHAR in s
+        has_drop = _DROP_CHAR in s
+        has_edit = _EDIT_CHAR in s
+        present = sum([has_pin, has_drop, has_edit])
+        if present != 1:
+            continue
+        if has_drop:
+            vote = "drop"
+        elif has_pin:
+            vote = "pin"
+        else:
+            vote = "edit"
+        found.append({"id": rid, "vote": vote})
+    return found
+
+
+def reconcile_milestone_candidates(conn: sqlite3.Connection,
+                                    dashboard_path: Path) -> ReconcileReport:
+    """Apply ✅/❌ votes on dashboard milestone-candidate rows.
+
+    ✅ → pinned=1 (row moves to subpage on next render — scope already on row).
+    ❌ → DELETE + audit_log tombstone (anti-revive on next extraction pass).
+    ✏️ → no-op for now (md re-rendered to DB state; HTML layer realises edits).
+    """
+    rpt = ReconcileReport()
+    dashboard_path = Path(dashboard_path)
+    if not dashboard_path.exists():
+        return rpt
+    text = dashboard_path.read_text(encoding="utf-8")
+    votes = _parse_dashboard_candidates(text)
+    if not votes:
+        return rpt
+    with conn:
+        for v in votes:
+            rid = v["id"]
+            row = conn.execute(
+                "SELECT id, pinned, source_hash, title FROM milestones"
+                " WHERE id=?", (rid,)
+            ).fetchone()
+            if row is None:
+                rpt.conflicts.append(f"candidate id {rid} not in db")
+                continue
+            if v["vote"] == "pin":
+                if row["pinned"]:
+                    rpt.unchanged += 1
+                    continue
+                conn.execute(
+                    "UPDATE milestones SET pinned=1, updated_at=? WHERE id=?",
+                    (_now(), rid),
+                )
+                _audit(conn, rid, "pin",
+                       f"dashboard ✅: {(row['title'] or '')[:60]}")
+                rpt.updated += 1
+            elif v["vote"] == "drop":
+                conn.execute("DELETE FROM milestones WHERE id=?", (rid,))
+                # Tombstone in audit_log keyed on source_hash so future
+                # candidate extraction can skip the same upstream row.
+                tomb = f"sha={row['source_hash'] or ''}|" \
+                       f"title={(row['title'] or '')[:80]}"
+                _audit(conn, rid, "tombstone", f"dashboard ❌: {tomb}")
+                rpt.deleted += 1
+            else:  # edit — no-op until HTML layer realises in-place edits
+                _audit(conn, rid, "edit_noop", "dashboard ✏️ (no md edit path)")
+                rpt.unchanged += 1
     return rpt

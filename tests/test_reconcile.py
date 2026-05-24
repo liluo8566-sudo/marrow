@@ -159,6 +159,94 @@ def test_reconcile_deletes_when_row_removed(db, tmp_path):
 
 # ── 5. unchanged md -> no audit_log, no backup ──────────────────────────────
 
+# ── candidate buttons (✅ ❌ ✏️) ────────────────────────────────────────────
+
+def test_candidate_pin_promotes(tmp_path):
+    p = str(tmp_path / "t.db")
+    conn = storage.init_db(p)
+    with conn:
+        cur = conn.execute(
+            "INSERT INTO milestones(scope,date,title,pinned) "
+            "VALUES('us','2026-05-22','Test cand',0)"
+        )
+        rid = cur.lastrowid
+    dash = tmp_path / "dashboard.md"
+    dash.write_text(
+        "<!-- marrow:top:start -->\n"
+        "## Milestone candidate [1]\n"
+        f"- [2026-05-22] Test cand (1h ago)  ✅  <!-- id:{rid} -->\n"
+        "## Affect\n"
+        "<!-- marrow:top:end -->\n"
+    )
+    rpt = reconcile.reconcile_milestone_candidates(conn, dash)
+    row = conn.execute(
+        "SELECT pinned FROM milestones WHERE id=?", (rid,)
+    ).fetchone()
+    conn.close()
+    assert rpt.updated == 1
+    assert row["pinned"] == 1
+
+
+def test_candidate_drop_deletes_and_tombstones(tmp_path):
+    p = str(tmp_path / "t.db")
+    conn = storage.init_db(p)
+    with conn:
+        cur = conn.execute(
+            "INSERT INTO milestones(scope,date,title,pinned,source_hash) "
+            "VALUES('us','2026-05-22','Doomed','sh-abc',0)"
+        )
+        rid = cur.lastrowid
+    dash = tmp_path / "dashboard.md"
+    dash.write_text(
+        "<!-- marrow:top:start -->\n"
+        "## Milestone candidate [1]\n"
+        f"- [2026-05-22] Doomed (1h ago)  ❌  <!-- id:{rid} -->\n"
+        "## Affect\n"
+        "<!-- marrow:top:end -->\n"
+    )
+    rpt = reconcile.reconcile_milestone_candidates(conn, dash)
+    row = conn.execute(
+        "SELECT id FROM milestones WHERE id=?", (rid,)
+    ).fetchone()
+    audit = conn.execute(
+        "SELECT action, summary FROM audit_log WHERE target_table='milestones'"
+        " AND target_id=? ORDER BY id DESC LIMIT 1", (str(rid),)
+    ).fetchone()
+    conn.close()
+    assert rpt.deleted == 1
+    assert row is None
+    assert audit["action"] == "tombstone"
+
+
+def test_candidate_no_vote_is_inert(tmp_path):
+    p = str(tmp_path / "t.db")
+    conn = storage.init_db(p)
+    with conn:
+        cur = conn.execute(
+            "INSERT INTO milestones(scope,date,title,pinned) "
+            "VALUES('us','2026-05-22','Unchosen',0)"
+        )
+        rid = cur.lastrowid
+    dash = tmp_path / "dashboard.md"
+    # All three chars present = no decision yet.
+    dash.write_text(
+        "<!-- marrow:top:start -->\n"
+        "## Milestone candidate [1]\n"
+        f"- [2026-05-22] Unchosen (1h ago)  ✅ ❌ ✏️"
+        f"  <!-- id:{rid} -->\n"
+        "## Affect\n"
+        "<!-- marrow:top:end -->\n"
+    )
+    rpt = reconcile.reconcile_milestone_candidates(conn, dash)
+    row = conn.execute(
+        "SELECT pinned FROM milestones WHERE id=?", (rid,)
+    ).fetchone()
+    conn.close()
+    assert rpt.updated == 0
+    assert rpt.deleted == 0
+    assert row["pinned"] == 0
+
+
 def test_reconcile_unchanged_is_inert(db, tmp_path):
     folder = tmp_path / "ny"
     state = tmp_path / "state"

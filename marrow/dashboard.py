@@ -1,8 +1,13 @@
-"""Code-only dashboard top render. 4 top sections (Alerts/Tasks/Milestone/Affect)
-between markers; hand-written zone outside markers untouched; atomic write.
+"""Code-only dashboard top render. 5 top sections
+(Alerts/Tasks/Milestone/Affect/Content) between markers; hand-written
+zone outside markers untouched; atomic write.
 
 Free-form hand-edits inside the rendered block are silently overwritten
 on next render (DB is SoT; non-anchored text is not preserved). No LLM.
+
+Anchor-button votes on candidate rows (✅ pin · ❌ drop · ✏️ edit) are
+absorbed by reconcile.reconcile_milestone_candidates BEFORE re-render
+so Lumi's vote flows back to DB and the new render reflects it.
 
 Section renderers live in top_sections.py — shared with handover_render.py.
 """
@@ -12,7 +17,8 @@ import os
 import tempfile
 from pathlib import Path
 
-from . import top_sections
+from . import repo, top_sections
+from .reconcile import reconcile_milestone_candidates
 
 M0 = "<!-- marrow:top:start -->"
 M1 = "<!-- marrow:top:end -->"
@@ -48,6 +54,17 @@ def _atomic_write(path: str, data: str) -> None:
 
 def write_dashboard(path: str, conn, *, state_dir: str,
                     db: str | None = None) -> None:
+    # Reconcile candidate-row votes BEFORE render so Lumi's ✅/❌ flows back.
+    # Fail-soft: a reconcile error must never block dashboard refresh.
+    if os.path.exists(path):
+        try:
+            reconcile_milestone_candidates(conn, Path(path))
+        except Exception as e:
+            repo.add_alert(
+                "warn", "dashboard",
+                f"candidate reconcile failed: {e}; falling through to render",
+                source="dashboard.py", db=db,
+            )
     block = render_top(conn, dashboard_path=path)
     Path(state_dir).mkdir(parents=True, exist_ok=True)
 

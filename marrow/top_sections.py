@@ -149,12 +149,27 @@ def render_tasks(conn: sqlite3.Connection) -> str:
     return "\n".join(out)
 
 
+# Candidate anchor buttons (DESIGN L60). md shows visible chars; the HTML
+# layer wires real clicks. Reconcile semantics (see reconcile.py):
+#   ✅ <id>  → pin (move to subpage, scope-aware for milestone)
+#   ❌ <id>  → delete + tombstone
+#   ✏️ <id>  → edit-in-place
+_BUTTONS = "✅ ❌ ✏️"
+
+
 def render_milestone_candidate(conn: sqlite3.Connection, n: int = 5) -> str:
     rows = conn.execute(
-        "SELECT date, title, created_at FROM milestones WHERE pinned=0 "
+        "SELECT id, date, title, created_at FROM milestones WHERE pinned=0 "
         "ORDER BY created_at DESC LIMIT ?", (n,)).fetchall()
     out = [f"## Milestone candidate [{len(rows)}]"]
-    out += [f"- [{r[0]}] {r[1]} ({_rel_time(r[2])})" for r in rows] if rows else ["- (none)"]
+    if rows:
+        for r in rows:
+            out.append(
+                f"- [{r[1]}] {r[2]} ({_rel_time(r[3])})  "
+                f"{_BUTTONS}  <!-- id:{r[0]} -->"
+            )
+    else:
+        out.append("- (none)")
     return "\n".join(out)
 
 
