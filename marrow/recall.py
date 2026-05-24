@@ -110,23 +110,86 @@ def _blob_to_vec(b: bytes) -> NDArray[np.float32]:
 
 # ── write path ────────────────────────────────────────────────────────────────
 
-def embed_event(
-    conn: sqlite3.Connection,
-    event_id: int,
-    text: str,
-    embedder_id: str = "bge-m3",
-    dim: int = 1024,
-) -> bool:
-    """Embed one event and write events_vec + events_vec_meta.
+# Cross-table vec lane recipes (2026-05-25). Each lane = (vec_table, meta_table,
+# pending SQL). The pending query MUST select `id`, `text` columns; rowid in
+# the vec/meta tables maps to id in the main table.
+_LANES: dict[str, dict[str, str]] = {
+    "events": {
+        "vec_table": "events_vec",
+        "meta_table": "events_vec_meta",
+        "pending_sql": (
+            "SELECT e.id AS id, e.content AS text FROM events e "
+            "WHERE NOT EXISTS (SELECT 1 FROM events_vec_meta m "
+            "                  WHERE m.rowid=e.id) "
+            "ORDER BY e.id DESC LIMIT ?"
+        ),
+    },
+    "memes": {
+        "vec_table": "memes_vec",
+        "meta_table": "memes_vec_meta",
+        "pending_sql": (
+            "SELECT m.id AS id, "
+            "  TRIM(COALESCE(m.key,'') || "
+            "       CASE WHEN COALESCE(m.value,'')!='' "
+            "            THEN ': ' || m.value ELSE '' END || "
+            "       CASE WHEN COALESCE(m.context,'')!='' "
+            "            THEN ' (' || m.context || ')' ELSE '' END) AS text "
+            "FROM memes m WHERE m.status='active' "
+            "AND NOT EXISTS (SELECT 1 FROM memes_vec_meta x "
+            "                WHERE x.rowid=m.id) "
+            "ORDER BY m.id DESC LIMIT ?"
+        ),
+    },
+    "entities": {
+        "vec_table": "entities_vec",
+        "meta_table": "entities_vec_meta",
+        "pending_sql": (
+            "SELECT e.id AS id, "
+            "  TRIM(COALESCE(e.name,'') || "
+            "       CASE WHEN COALESCE(e.kind,'')!='' "
+            "            THEN ' (' || e.kind || ')' ELSE '' END || "
+            "       CASE WHEN COALESCE(e.fact,'')!='' "
+            "            THEN ': ' || e.fact ELSE '' END || "
+            "       CASE WHEN COALESCE(e.aliases,'') NOT IN ('','[]') "
+            "            THEN ' aliases:' || e.aliases ELSE '' END) AS text "
+            "FROM entities e WHERE e.superseded_by IS NULL "
+            "AND NOT EXISTS (SELECT 1 FROM entities_vec_meta x "
+            "                WHERE x.rowid=e.id) "
+            "ORDER BY e.id DESC LIMIT ?"
+        ),
+    },
+    "milestones": {
+        "vec_table": "milestones_vec",
+        "meta_table": "milestones_vec_meta",
+        "pending_sql": (
+            "SELECT mi.id AS id, "
+            "  TRIM(COALESCE(mi.title,'') || "
+            "       CASE WHEN COALESCE(mi.description,'')!='' "
+            "            THEN ': ' || mi.description ELSE '' END) AS text "
+            "FROM milestones mi "
+            "WHERE NOT EXISTS (SELECT 1 FROM milestones_vec_meta x "
+            "                  WHERE x.rowid=mi.id) "
+            "ORDER BY mi.id DESC LIMIT ?"
+        ),
+    },
+}
 
-    Idempotent: skips if rowid already in events_vec_meta.
-    Returns True if written, False if skipped or embedder unavailable.
-    """
+
+def _embed_one(
+    conn: sqlite3.Connection,
+    lane: str,
+    rowid: int,
+    text: str,
+    embedder_id: str,
+    dim: int,
+) -> bool:
+    """Idempotent single-row embed for any lane."""
     emb = _ensure_embedder()
     if emb is None:
         return False
+    cfg = _LANES[lane]
     exists = conn.execute(
-        "SELECT 1 FROM events_vec_meta WHERE rowid=?", (event_id,)
+        f"SELECT 1 FROM {cfg['meta_table']} WHERE rowid=?", (rowid,)
     ).fetchone()
     if exists:
         return False
@@ -134,14 +197,95 @@ def embed_event(
     blob = _vec_to_blob(vec)
     with conn:
         conn.execute(
-            "INSERT INTO events_vec(rowid, embedding) VALUES(?, ?)",
-            (event_id, blob),
+            f"INSERT INTO {cfg['vec_table']}(rowid, embedding) VALUES(?, ?)",
+            (rowid, blob),
         )
         conn.execute(
-            "INSERT INTO events_vec_meta(rowid, embedder_id, dim) VALUES(?, ?, ?)",
-            (event_id, embedder_id, dim),
+            f"INSERT INTO {cfg['meta_table']}(rowid, embedder_id, dim) "
+            f"VALUES(?, ?, ?)",
+            (rowid, embedder_id, dim),
         )
     return True
+
+
+def embed_event(
+    conn: sqlite3.Connection,
+    event_id: int,
+    text: str,
+    embedder_id: str = "bge-m3",
+    dim: int = 1024,
+) -> bool:
+    """Embed one event and write events_vec + events_vec_meta. Idempotent."""
+    return _embed_one(conn, "events", event_id, text, embedder_id, dim)
+
+
+def embed_meme(
+    conn: sqlite3.Connection,
+    meme_id: int,
+    text: str,
+    embedder_id: str = "bge-m3",
+    dim: int = 1024,
+) -> bool:
+    """Embed one meme row into memes_vec + memes_vec_meta. Idempotent."""
+    return _embed_one(conn, "memes", meme_id, text, embedder_id, dim)
+
+
+def embed_entity(
+    conn: sqlite3.Connection,
+    entity_id: int,
+    text: str,
+    embedder_id: str = "bge-m3",
+    dim: int = 1024,
+) -> bool:
+    """Embed one entity row into entities_vec + entities_vec_meta. Idempotent."""
+    return _embed_one(conn, "entities", entity_id, text, embedder_id, dim)
+
+
+def embed_milestone(
+    conn: sqlite3.Connection,
+    milestone_id: int,
+    text: str,
+    embedder_id: str = "bge-m3",
+    dim: int = 1024,
+) -> bool:
+    """Embed one milestone into milestones_vec + milestones_vec_meta. Idempotent."""
+    return _embed_one(conn, "milestones", milestone_id, text, embedder_id, dim)
+
+
+def _embed_pending_lane(
+    conn: sqlite3.Connection,
+    lane: str,
+    batch: int,
+    embedder_id: str,
+    dim: int,
+) -> int:
+    """Backfill one lane. Returns count written. Caller ensures embedder loaded."""
+    emb = _ensure_embedder()
+    if emb is None:
+        return 0
+    cfg = _LANES[lane]
+    rows = conn.execute(cfg["pending_sql"], (batch,)).fetchall()
+    if not rows:
+        return 0
+    ids = [r["id"] for r in rows]
+    texts = [(r["text"] or "") for r in rows]
+    vecs = emb.embed(texts)
+    written = 0
+    vt = cfg["vec_table"]
+    mt = cfg["meta_table"]
+    with conn:
+        for rid, vec in zip(ids, vecs):
+            conn.execute(
+                f"INSERT OR IGNORE INTO {vt}(rowid, embedding) VALUES(?, ?)",
+                (rid, _vec_to_blob(vec)),
+            )
+            conn.execute(
+                f"INSERT OR IGNORE INTO {mt}(rowid, embedder_id, dim) "
+                f"VALUES(?, ?, ?)",
+                (rid, embedder_id, dim),
+            )
+            written += 1
+    return written
 
 
 def embed_pending(
@@ -150,35 +294,17 @@ def embed_pending(
     embedder_id: str = "bge-m3",
     dim: int = 1024,
 ) -> int:
-    """Embed events not yet in events_vec. Returns count written."""
-    emb = _ensure_embedder()
-    if emb is None:
+    """Backfill all four lanes (events + memes + entities + milestones).
+
+    Per-lane budget = `batch` so a large events backlog cannot starve the
+    cross-table lanes on a single hook firing. Returns total rows written.
+    """
+    if _ensure_embedder() is None:
         return 0
-    rows = conn.execute(
-        "SELECT e.id, e.content FROM events e "
-        "WHERE NOT EXISTS (SELECT 1 FROM events_vec_meta m WHERE m.rowid=e.id) "
-        "ORDER BY e.id DESC LIMIT ?",
-        (batch,),
-    ).fetchall()
-    if not rows:
-        return 0
-    ids = [r["id"] for r in rows]
-    texts = [r["content"] or "" for r in rows]
-    vecs = emb.embed(texts)
-    written = 0
-    with conn:
-        for eid, vec in zip(ids, vecs):
-            conn.execute(
-                "INSERT OR IGNORE INTO events_vec(rowid, embedding) VALUES(?, ?)",
-                (eid, _vec_to_blob(vec)),
-            )
-            conn.execute(
-                "INSERT OR IGNORE INTO events_vec_meta(rowid, embedder_id, dim) "
-                "VALUES(?, ?, ?)",
-                (eid, embedder_id, dim),
-            )
-            written += 1
-    return written
+    total = 0
+    for lane in _LANES:
+        total += _embed_pending_lane(conn, lane, batch, embedder_id, dim)
+    return total
 
 
 # ── decay helpers ─────────────────────────────────────────────────────────────
@@ -224,6 +350,79 @@ def _is_dormant(importance: int | None, age_days: float) -> bool:
     """Demote-sink: excluded from recall candidate pool."""
     imp = importance or 0
     return imp <= 3 and age_days > 90
+
+
+# ── cross-table vec lane lookups ──────────────────────────────────────────────
+
+# Minimum cosine similarity for a vec-only (no keyword match) row to surface.
+# Stops bge-m3 noise (~0.25-0.35 sim on unrelated CN/EN queries) from polluting
+# the candidate pool.
+_VEC_ONLY_FLOOR = 0.40
+
+
+def _memes_vec_hits(
+    conn: sqlite3.Connection, qblob: bytes, k: int
+) -> dict[int, float]:
+    """Return {id: vec_score} for active memes matched by qblob."""
+    try:
+        rows = conn.execute(
+            "SELECT m.id AS id, v.distance AS distance "
+            "FROM memes_vec v JOIN memes m ON m.id = v.rowid "
+            "WHERE m.status='active' AND embedding MATCH ? AND k = ? "
+            "ORDER BY v.distance",
+            (qblob, k),
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    return {r["id"]: max(0.0, 1.0 - r["distance"]) for r in rows}
+
+
+def _milestones_vec_hits(
+    conn: sqlite3.Connection, qblob: bytes, k: int
+) -> dict[int, float]:
+    """Return {id: vec_score} for milestones matched by qblob."""
+    try:
+        rows = conn.execute(
+            "SELECT mi.id AS id, v.distance AS distance "
+            "FROM milestones_vec v JOIN milestones mi ON mi.id = v.rowid "
+            "WHERE embedding MATCH ? AND k = ? "
+            "ORDER BY v.distance",
+            (qblob, k),
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    return {r["id"]: max(0.0, 1.0 - r["distance"]) for r in rows}
+
+
+def _entities_vec_hits(
+    conn: sqlite3.Connection, qblob: bytes, k: int
+) -> list[dict]:
+    """Return entity cards (live only) matched by qblob, including vec_score."""
+    try:
+        rows = conn.execute(
+            "SELECT e.id, e.kind, e.name, e.fact, e.mention_count, "
+            "       e.created_at, v.distance "
+            "FROM entities_vec v JOIN entities e ON e.id = v.rowid "
+            "WHERE e.superseded_by IS NULL "
+            "  AND embedding MATCH ? AND k = ? "
+            "ORDER BY v.distance",
+            (qblob, k),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    out: list[dict] = []
+    for r in rows:
+        vs = max(0.0, 1.0 - r["distance"])
+        out.append({
+            "id": r["id"],
+            "kind": r["kind"] or "",
+            "name": r["name"] or "",
+            "fact": r["fact"] or "",
+            "mention_count": r["mention_count"] or 0,
+            "created_at": r["created_at"] or "",
+            "vec_score": vs,
+        })
+    return out
 
 
 # ── milestone keyword scan ────────────────────────────────────────────────────
@@ -361,6 +560,9 @@ def recall_fusion(
     w_bm25: float = 0.30,
     w_recency: float = 0.15,
     w_affect: float = 0.10,
+    w_memes_vec: float = 0.55,
+    w_entities_vec: float = 0.55,
+    w_milestones_vec: float = 0.55,
     min_score: float = 0.35,
 ) -> list[dict]:
     """Single weighted scalar fusion: vec + bm25 + recency + affect.
@@ -443,7 +645,81 @@ def recall_fusion(
     milestone_cands = _milestone_candidates(conn, q, limit)
     memes_cands = _memes_candidates(conn, q, limit)
 
-    if not candidates and not milestone_cands and not memes_cands:
+    # ── cross-table vec lanes ────────────────────────────────────────────────
+    # Vec hits fill in semantic matches the substring scans miss (e.g.
+    # (我的猫) → entity (小胖)). Vec-only adds (no kw match) gated by
+    # _VEC_ONLY_FLOOR to keep bge-m3 noise out.
+    memes_vec_map: dict[int, float] = {}
+    milestones_vec_map: dict[int, float] = {}
+    entities_vec_cards: list[dict] = []
+    if vec_available:
+        k_lane = max(limit * 2, 5)
+        memes_vec_map = _memes_vec_hits(conn, qblob, k_lane)
+        milestones_vec_map = _milestones_vec_hits(conn, qblob, k_lane)
+        entities_vec_cards = _entities_vec_hits(conn, qblob, k_lane)
+
+    # Memes: merge vec hits into the substring pool by id.
+    memes_by_id = {c["id"]: c for c in memes_cands}
+    for mid, vs in memes_vec_map.items():
+        if mid in memes_by_id:
+            memes_by_id[mid]["vec"] = vs
+        elif vs >= _VEC_ONLY_FLOOR:
+            r = conn.execute(
+                "SELECT id, type, key, value, context, pinned, use_count "
+                "FROM memes WHERE id=? AND status='active'",
+                (mid,),
+            ).fetchone()
+            if not r:
+                continue
+            key = r["key"] or ""
+            value = r["value"] or ""
+            ctx = r["context"] or ""
+            content = f"{key}: {value}" if value else key
+            if ctx:
+                content = f"{content} ({ctx})"
+            memes_by_id[mid] = {
+                "kind": "memes", "id": mid,
+                "session_id": None, "timestamp": "",
+                "role": "memes", "content": content,
+                "channel": None, "compressed": 0,
+                "bm25": 0.0, "vec": vs, "fts_hit": False,
+                "pinned": int(r["pinned"] or 0),
+                "type": r["type"],
+                "use_count": int(r["use_count"] or 0),
+            }
+    memes_cands = list(memes_by_id.values())
+
+    # Milestones: merge vec hits into the keyword pool by id.
+    ms_by_id = {c["id"]: c for c in milestone_cands}
+    for mid, vs in milestones_vec_map.items():
+        if mid in ms_by_id:
+            ms_by_id[mid]["vec"] = vs
+        elif vs >= _VEC_ONLY_FLOOR:
+            r = conn.execute(
+                "SELECT id, scope, date, title, description, pinned "
+                "FROM milestones WHERE id=?",
+                (mid,),
+            ).fetchone()
+            if not r:
+                continue
+            title = r["title"] or ""
+            desc = r["description"] or ""
+            date = r["date"] or ""
+            ts = date if "T" in date else (date + "T00:00:00Z" if date else "")
+            content = title if not desc else f"{title}: {desc}"
+            ms_by_id[mid] = {
+                "kind": "milestone", "id": mid,
+                "session_id": None, "timestamp": ts,
+                "role": "milestone", "content": content,
+                "channel": None, "compressed": 0,
+                "bm25": 0.0, "vec": vs, "fts_hit": False,
+                "pinned": int(r["pinned"] or 0),
+                "scope": r["scope"],
+            }
+    milestone_cands = list(ms_by_id.values())
+
+    if (not candidates and not milestone_cands and not memes_cands
+            and not entities_vec_cards):
         return []
 
     # ── dormant revive + scoring ──────────────────────────────────────────────
@@ -530,18 +806,18 @@ def recall_fusion(
         if final >= min_score:
             scored.append((final, {**c, "score": final}))
 
-    # ── milestone scoring (no vec/recency/affect; evergreen anchor —
-    # any token hit enters, kw_score+pinned only decide rank, no min_score
-    # gate so long queries don't dilute the match into oblivion). ─────────────
+    # ── milestone scoring (recency/affect dropped — evergreen anchor —
+    # bm25 + vec drive rank; no min_score gate so long queries don't dilute
+    # the match into oblivion). ──────────────────────────────────────────────
     for mc in milestone_cands:
-        raw = w_bm25 * mc["bm25"]
+        raw = w_bm25 * mc["bm25"] + w_milestones_vec * mc.get("vec", 0.0)
         if mc["pinned"]:
             raw += _MILESTONE_PINNED_BOOST
         scored.append((raw, {**mc, "score": raw}))
 
-    # ── memes scoring (mirror milestone: w_bm25 * 1.0 + pinned boost) ────────
+    # ── memes scoring (mirror milestone: bm25 + vec + pinned boost) ──────────
     for vc in memes_cands:
-        raw = w_bm25 * vc["bm25"]
+        raw = w_bm25 * vc["bm25"] + w_memes_vec * vc.get("vec", 0.0)
         if vc["pinned"]:
             raw += _MILESTONE_PINNED_BOOST
         scored.append((raw, {**vc, "score": raw}))
@@ -549,8 +825,42 @@ def recall_fusion(
     scored.sort(key=lambda x: x[0], reverse=True)
 
     # ── entity force-include (prepend before ms_cap reservation) ─────────────
+    # Two streams: substring/LIKE via entity_recall, semantic via entities_vec.
+    # Dedup by entity id; substring score wins when both fire (it carries the
+    # +0.5 card boost already).
     from .entity_recall import entity_force_include
     force_rows = entity_force_include(conn, q, limit)
+    seen_entity_ids = {
+        r["id"] for r in force_rows if r.get("kind") == "entity"
+    }
+    for card in entities_vec_cards:
+        if card["id"] in seen_entity_ids:
+            continue
+        vs = card["vec_score"]
+        if vs < _VEC_ONLY_FLOOR:
+            continue
+        fact = card["fact"]
+        if not fact:
+            continue
+        name = card["name"]
+        ekind = card["kind"]
+        content = f"{name} ({ekind}): {fact}" if ekind else f"{name}: {fact}"
+        score = (
+            w_entities_vec * vs
+            + 0.5
+            + 0.1 * math.log1p(card["mention_count"])
+        )
+        force_rows.append({
+            "kind": "entity", "id": card["id"],
+            "session_id": None,
+            "timestamp": card["created_at"],
+            "role": "entity", "content": content,
+            "channel": None, "compressed": 0,
+            "bm25": 0.0, "vec": vs, "fts_hit": False,
+            "score": score, "force_include": True,
+        })
+        seen_entity_ids.add(card["id"])
+
     force_ids = {r["id"] for r in force_rows}
     # Remove any fusion duplicates that force-include already covers.
     scored = [(s, r) for s, r in scored if r.get("id") not in force_ids]
@@ -637,5 +947,8 @@ def recall_with_config(
         w_bm25=float(rcfg.get("w_bm25", 0.30)),
         w_recency=float(rcfg.get("w_recency", 0.15)),
         w_affect=float(rcfg.get("w_affect", 0.10)),
+        w_memes_vec=float(rcfg.get("w_memes_vec", 0.55)),
+        w_entities_vec=float(rcfg.get("w_entities_vec", 0.55)),
+        w_milestones_vec=float(rcfg.get("w_milestones_vec", 0.55)),
         min_score=float(rcfg.get("min_score", 0.35)),
     )

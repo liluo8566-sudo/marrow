@@ -167,6 +167,15 @@ _VEC_384 = ("CREATE VIRTUAL TABLE IF NOT EXISTS events_vec "
             "USING vec0(embedding float[384])")
 
 
+def _patched_vec_table(d, name="events_vec"):
+    """Force events_vec to 384d while still creating cross-table lanes (v7+)
+    with the requested dim. Tests below pin the events_vec dim only."""
+    if name == "events_vec":
+        return _VEC_384
+    return (f"CREATE VIRTUAL TABLE IF NOT EXISTS {name} "
+            f"USING vec0(embedding float[{d}])")
+
+
 def _force_dim(monkeypatch, st, d):
     """init_db reads config.load(); pin embedding.dim for the test."""
     real = st.config.load
@@ -251,7 +260,7 @@ def test_events_vec_dim_follows_config(tmp_path, monkeypatch):
 def test_vec_dim_migration_rebuilds_when_empty(tmp_path, monkeypatch):
     import marrow.storage as st
     p = str(tmp_path / "m.db")
-    monkeypatch.setattr(st, "_vec_table", lambda d: _VEC_384)
+    monkeypatch.setattr(st, "_vec_table", _patched_vec_table)
     _force_dim(monkeypatch, st, 384)
     st.init_db(p).close()
     monkeypatch.undo()
@@ -322,7 +331,7 @@ def test_v2_legacy_threads_rename_preserves_rows(tmp_path):
 def test_vec_dim_migration_preserves_when_nonempty(tmp_path, monkeypatch):
     import marrow.storage as st
     p = str(tmp_path / "n.db")
-    monkeypatch.setattr(st, "_vec_table", lambda d: _VEC_384)
+    monkeypatch.setattr(st, "_vec_table", _patched_vec_table)
     _force_dim(monkeypatch, st, 384)
     conn = st.init_db(p)
     conn.execute(

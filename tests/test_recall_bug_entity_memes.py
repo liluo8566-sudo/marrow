@@ -108,6 +108,33 @@ def test_memes_leg_returns_cipher_on_query_match(seeded_db):
     )
 
 
+def test_entity_force_include_tiebreaker_newest_first(tmp_path):
+    """Equal mention_count cards sort newest-first by created_at."""
+    conn = storage.init_db(str(tmp_path / "tb.db"))
+    try:
+        conn.execute(
+            "INSERT INTO entities(kind, name, fact, mention_count, source, created_at)"
+            " VALUES('person', 'Aki', 'older card', 5, 'test', "
+            "'2026-01-01T00:00:00Z')"
+        )
+        conn.execute(
+            "INSERT INTO entities(kind, name, fact, mention_count, source, created_at)"
+            " VALUES('person', 'Bea', 'newer card', 5, 'test', "
+            "'2026-05-01T00:00:00Z')"
+        )
+        conn.commit()
+        rows = er.entity_force_include(conn, "Aki and Bea both showed up", limit=10)
+        cards = [r for r in rows if r.get("kind") == "entity"]
+        assert len(cards) == 2
+        assert cards[0]["content"].startswith("Bea"), (
+            f"Expected newer (Bea) first, got order: "
+            f"{[c['content'] for c in cards]}"
+        )
+        assert cards[0]["score"] == cards[1]["score"]
+    finally:
+        conn.close()
+
+
 def test_milestone_reverse_substring_match(seeded_db):
     """Milestone title (Bendigo placement) must hit with kw_score=1.0 even
     when query has extra noise tokens — reverse substring is strongest signal."""

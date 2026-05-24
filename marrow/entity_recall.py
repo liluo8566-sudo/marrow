@@ -32,7 +32,8 @@ def entity_force_include(
         return []
 
     rows = conn.execute(
-        "SELECT id, kind, name, fact, aliases, mention_count FROM entities_live"
+        "SELECT id, kind, name, fact, aliases, mention_count, created_at "
+        "FROM entities_live"
     ).fetchall()
     matched: list[dict] = []
     for r in rows:
@@ -56,6 +57,7 @@ def entity_force_include(
                 "name": name,
                 "fact": r["fact"] or "",
                 "mention_count": r["mention_count"] or 0,
+                "created_at": r["created_at"] or "",
             })
 
     if not matched:
@@ -79,13 +81,15 @@ def entity_force_include(
 
         # Entity-card: the entity row's own fact field. Outranks event score so
         # the identity sheet always lands first in the recall block.
+        # Timestamp = entities.created_at so same-score cards order newest-first
+        # (Outcome 2, 2026-05-25 goal).
         if fact:
             card_content = f"{name} ({ekind}): {fact}" if ekind else f"{name}: {fact}"
             results.append({
                 "kind": "entity",
                 "id": entity["id"],
                 "session_id": None,
-                "timestamp": "",
+                "timestamp": entity.get("created_at", ""),
                 "role": "entity",
                 "content": card_content,
                 "channel": None,
@@ -144,4 +148,25 @@ def entity_force_include(
                 "force_include": True,
             })
 
+    # Tiebreaker: equal-score rows sort newest-first by timestamp (Outcome 2).
+    # Empty / unparseable timestamps sort oldest (back of the tie).
+    results.sort(
+        key=lambda r: (
+            -float(r.get("score") or 0.0),
+            -_ts_sort_key(r.get("timestamp") or ""),
+        ),
+    )
     return results
+
+
+def _ts_sort_key(ts: str) -> float:
+    """Map an ISO timestamp to a sortable float; empty/bad ts sorts oldest."""
+    if not ts:
+        return 0.0
+    import datetime as _dt
+    try:
+        return _dt.datetime.fromisoformat(
+            ts.replace("Z", "+00:00")
+        ).timestamp()
+    except Exception:
+        return 0.0

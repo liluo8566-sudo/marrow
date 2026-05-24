@@ -60,6 +60,11 @@ w_vec = 0.55
 w_bm25 = 0.30
 w_recency = 0.15
 w_affect = 0.10
+# Cross-table vec lanes (2026-05-25). Same default weight as w_vec; tune
+# per-lane if a lane drowns the events score.
+w_memes_vec = 0.55
+w_entities_vec = 0.55
+w_milestones_vec = 0.55
 min_score = 0.35
 
 [sessionend]

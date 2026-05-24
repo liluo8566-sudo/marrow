@@ -13,7 +13,7 @@ import sqlite_vec
 
 from . import config
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # Phase 1 first-class tables + Phase 2 affect/entities (DECISIONS Phase 2).
 # The retired emotions/people/preferences/dir placeholders stay absent.
@@ -153,6 +153,21 @@ CREATE TABLE IF NOT EXISTS events_vec_meta (
   embedder_id TEXT NOT NULL,
   dim INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS memes_vec_meta (
+  rowid INTEGER PRIMARY KEY,
+  embedder_id TEXT NOT NULL,
+  dim INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS entities_vec_meta (
+  rowid INTEGER PRIMARY KEY,
+  embedder_id TEXT NOT NULL,
+  dim INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS milestones_vec_meta (
+  rowid INTEGER PRIMARY KEY,
+  embedder_id TEXT NOT NULL,
+  dim INTEGER NOT NULL
+);
 """
 
 # superseded_by IS NULL = the current row. Recall/backdrop read the live view.
@@ -185,16 +200,23 @@ END;
 """
 
 
-def _vec_table(dim: int) -> str:
+def _vec_table(dim: int, name: str = "events_vec") -> str:
     return (
-        f"CREATE VIRTUAL TABLE IF NOT EXISTS events_vec "
+        f"CREATE VIRTUAL TABLE IF NOT EXISTS {name} "
         f"USING vec0(embedding float[{dim}])"
     )
 
 
-def _ondisk_vec_dim(conn: sqlite3.Connection) -> int | None:
+# Cross-table vec lanes (Phase 2 cross-table recall, 2026-05-25). Each row in
+# the named main table can have a 1024d row in <name>_vec; tracked by
+# <name>_vec_meta. Same shape as events_vec so the embed write path stays one
+# helper.
+_VEC_LANES = ("memes_vec", "entities_vec", "milestones_vec")
+
+
+def _ondisk_vec_dim(conn: sqlite3.Connection, name: str = "events_vec") -> int | None:
     r = conn.execute(
-        "SELECT sql FROM sqlite_master WHERE name='events_vec'"
+        "SELECT sql FROM sqlite_master WHERE name=?", (name,)
     ).fetchone()
     if not r:
         return None
@@ -260,6 +282,25 @@ def init_db(path: str | None = None) -> sqlite3.Connection:
                      "storage.py:init_db"),
                 )
         conn.execute(_vec_table(dim))
+        # Cross-table vec lanes (memes/entities/milestones). Same dim as
+        # events_vec; mismatch handling mirrors above (empty -> drop+rebuild,
+        # non-empty -> leave + alert).
+        for lane in _VEC_LANES:
+            cur_lane_dim = _ondisk_vec_dim(conn, lane)
+            if cur_lane_dim is not None and cur_lane_dim != dim:
+                n = conn.execute(f"SELECT count(*) FROM {lane}").fetchone()[0]
+                if n == 0:
+                    conn.execute(f"DROP TABLE {lane}")
+                else:
+                    conn.execute(
+                        "INSERT INTO alerts (severity, type, message, source)"
+                        " VALUES (?, ?, ?, ?)",
+                        ("warn", "embedding_dim_mismatch",
+                         f"{lane} dim={cur_lane_dim} != config {dim}; "
+                         f"{n} rows preserved, manual re-embed required",
+                         "storage.py:init_db"),
+                    )
+            conn.execute(_vec_table(dim, lane))
         # Schema-evolution backfill: a column added after a db already
         # exists is not applied by CREATE IF NOT EXISTS. Idempotent —
         # duplicate-column ALTER is swallowed; add a row per new column.
@@ -282,6 +323,7 @@ def init_db(path: str | None = None) -> sqlite3.Connection:
         _migrate_to_v4(conn)
         _migrate_to_v5(conn)
         _migrate_to_v6(conn)
+        _migrate_to_v7(conn)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     return conn
 
@@ -419,3 +461,14 @@ def _migrate_to_v6(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE entities ADD COLUMN aliases TEXT")
     except sqlite3.OperationalError:
         pass
+
+
+def _migrate_to_v7(conn: sqlite3.Connection) -> None:
+    """v7: cross-table vec lanes (memes_vec / entities_vec / milestones_vec).
+    Tables are created unconditionally in init_db (via _VEC_LANES loop), so
+    this bump is a version sentinel only. Backfill happens on the next
+    embed_pending() call.
+    """
+    v = conn.execute("PRAGMA user_version").fetchone()[0]
+    if v >= 7:
+        return
