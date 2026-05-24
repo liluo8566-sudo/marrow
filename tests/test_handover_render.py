@@ -398,7 +398,10 @@ def test_handover_full_single_write_populates_both_sections(env):
     )
     conn.close()
     content = rendered_path.read_text(encoding="utf-8")
-    assert "## This Session\n- shipped Bug #1 fix" in content
+    # Phase A: ThisSession now wraps each segment in `### [ts]` sub-heading.
+    this_section = content.split("## This Session")[1].split("## Next Session")[0]
+    assert "- shipped Bug #1 fix" in this_section
+    assert "### [" in this_section
     assert "## Next Session\n- verify pytest + ship merge" in content
     assert "<!-- handover: ready sid:sid-acceptance ts:" in content
     assert "pending sid:" not in content
@@ -506,3 +509,171 @@ def test_last_3_commits_returns_bullets():
     if out:
         for ln in out.splitlines():
             assert ln.startswith("- ")
+
+
+# ── Phase A: multi-session merge ─────────────────────────────────────────────
+
+def _write_via(env, sid: str, this_s: str, next_s: str, now_epoch: int):
+    db, _, _, rendered_path = env
+    import time as _time
+    real_time = _time.time
+    try:
+        _time.time = lambda: now_epoch  # type: ignore[assignment]
+        conn = _conn(db)
+        handover_render.write_handover_full(conn, sid, this_s, next_s)
+        conn.close()
+    finally:
+        _time.time = real_time  # type: ignore[assignment]
+    return rendered_path.read_text(encoding="utf-8")
+
+
+def test_phase_a_two_sessions_within_window(env):
+    """Two sessions 30min apart → both segments live under ## This Session."""
+    base = int(datetime(2026, 5, 24, 10, 0).timestamp())
+    _write_via(env, "s1", "- did A", "- next A", base)
+    content = _write_via(env, "s2", "- did B", "- next B", base + 30 * 60)
+
+    this_section = content.split("## This Session")[1].split("## Next Session")[0]
+    prev_section = content.split("## Previous Sessions")[1].split("## This Session")[0]
+    # Newest on top
+    assert this_section.index("- did B") < this_section.index("- did A")
+    # Both have time sub-headings
+    assert "### [2026-05-24 10:30]" in this_section
+    assert "### [2026-05-24 10:00]" in this_section
+    # Previous Sessions still empty
+    assert "- None" in prev_section
+
+
+def test_phase_a_two_sessions_outside_window(env):
+    """Two sessions 4h apart → old ThisSession pushed to Previous Sessions."""
+    base = int(datetime(2026, 5, 24, 6, 0).timestamp())
+    _write_via(env, "s1", "- old work", "- old plan", base)
+    content = _write_via(env, "s2", "- new work", "- new plan", base + 4 * 3600)
+
+    this_section = content.split("## This Session")[1].split("## Next Session")[0]
+    prev_section = content.split("## Previous Sessions")[1].split("## This Session")[0]
+
+    assert "- new work" in this_section
+    assert "- old work" not in this_section
+    assert "- old work" in prev_section
+    assert "### [2026-05-24 06:00]" in prev_section
+    assert "### [2026-05-24 10:00]" in this_section
+
+
+def test_phase_a_three_sessions_mix(env):
+    """3 sessions: 4h ago, 30min ago, now → previous=[4h], this=[now, 30min]."""
+    base = int(datetime(2026, 5, 24, 6, 0).timestamp())
+    _write_via(env, "s1", "- four hr ago", "- np1", base)
+    _write_via(env, "s2", "- thirty min ago", "- np2", base + 3 * 3600 + 30 * 60)
+    content = _write_via(env, "s3", "- right now", "- np3", base + 4 * 3600)
+
+    this_section = content.split("## This Session")[1].split("## Next Session")[0]
+    prev_section = content.split("## Previous Sessions")[1].split("## This Session")[0]
+    next_section = content.split("## Next Session")[1].split("## Reference")[0]
+
+    assert "- four hr ago" in prev_section
+    assert "- thirty min ago" in this_section
+    assert "- right now" in this_section
+    assert this_section.index("- right now") < this_section.index("- thirty min ago")
+    # NextSession union — all three preserved
+    for marker in ("- np1", "- np2", "- np3"):
+        assert marker in next_section
+
+
+def test_phase_a_next_session_union_dedup(env):
+    base = int(datetime(2026, 5, 24, 10, 0).timestamp())
+    _write_via(env, "s1", "- a", "- shared\n- only-old", base)
+    content = _write_via(env, "s2", "- b", "- shared\n- only-new", base + 30 * 60)
+    next_section = content.split("## Next Session")[1].split("## Reference")[0]
+    # `- shared` appears exactly once
+    assert next_section.count("- shared") == 1
+    assert "- only-old" in next_section
+    assert "- only-new" in next_section
+    # New on top
+    assert next_section.index("- only-new") < next_section.index("- only-old")
+
+
+def test_phase_a_empty_inputs_render_none(env):
+    base = int(datetime(2026, 5, 24, 10, 0).timestamp())
+    content = _write_via(env, "s1", "", "N/A", base)
+    this_section = content.split("## This Session")[1].split("## Next Session")[0]
+    next_section = content.split("## Next Session")[1].split("## Reference")[0]
+    prev_section = content.split("## Previous Sessions")[1].split("## This Session")[0]
+    assert "- None" in this_section
+    assert "- None" in next_section
+    assert "- None" in prev_section
+
+
+def test_phase_a_snapshot_audit_row_written(env):
+    db, _, _, rendered_path = env
+    base = int(datetime(2026, 5, 24, 10, 0).timestamp())
+    _write_via(env, "s1", "- first body", "- next1", base)
+    _write_via(env, "s2", "- second body", "- next2", base + 30 * 60)
+
+    conn = _conn(db)
+    rows = conn.execute(
+        "SELECT target_id, summary FROM audit_log"
+        " WHERE action='handover_snapshot' ORDER BY id"
+    ).fetchall()
+    conn.close()
+    # Second write should have captured the first write as snapshot.
+    assert len(rows) >= 1
+    assert any("- first body" in r["summary"] for r in rows)
+    assert any("sha256=" in r["summary"] for r in rows)
+
+
+def test_phase_a_flock_retry_then_partial(env, monkeypatch):
+    """flock contention → 3x retry then partial file + audit row, no crash."""
+    db, _, _, rendered_path = env
+    # Pre-seed file so flock target exists.
+    rendered_path.parent.mkdir(parents=True, exist_ok=True)
+    rendered_path.write_text("seed", encoding="utf-8")
+
+    calls = {"n": 0}
+    real_flock = handover_render.fcntl.flock
+
+    def flaky_flock(fd, op):
+        if op & handover_render.fcntl.LOCK_EX:
+            calls["n"] += 1
+            raise BlockingIOError("locked")
+        return real_flock(fd, op)
+
+    monkeypatch.setattr(handover_render.fcntl, "flock", flaky_flock)
+    monkeypatch.setattr(handover_render.time, "sleep", lambda s: None)
+
+    conn = _conn(db)
+    result = handover_render.write_handover_full(
+        conn, "sid-lock", "- new", "- next")
+    # Audit row for lock failure exists.
+    rows = conn.execute(
+        "SELECT summary FROM audit_log WHERE action='handover_lock_failed'"
+    ).fetchall()
+    conn.close()
+    assert calls["n"] >= 3
+    assert "partial" in result.name
+    assert result.exists()
+    assert len(rows) == 1
+
+
+def test_phase_a_legacy_format_treated_as_single_segment(env):
+    """Old handover.md without ### sub-headings folds into one segment using footer ts."""
+    db, _, _, rendered_path = env
+    base = int(datetime(2026, 5, 24, 10, 0).timestamp())
+    legacy = (
+        "# Marrow handover — 2026-05-24 09:00\n\n"
+        "## Previous Sessions\n- None\n\n"
+        "## This Session\n- legacy bullet without timestamp\n\n"
+        "## Next Session\n- legacy next\n\n"
+        "## Reference (last 3 commits)\n\n"
+        f"<!-- handover: ready sid:old ts:{base - 30 * 60} -->\n"
+    )
+    rendered_path.parent.mkdir(parents=True, exist_ok=True)
+    rendered_path.write_text(legacy, encoding="utf-8")
+
+    content = _write_via(env, "s-new", "- new bullet", "- new next", base)
+    this_section = content.split("## This Session")[1].split("## Next Session")[0]
+    # Both legacy + new live in ThisSession (legacy was 30min ago, within window).
+    assert "- new bullet" in this_section
+    assert "- legacy bullet without timestamp" in this_section
+    assert "### [2026-05-24 09:30]" in this_section  # footer ts label
+    assert "### [2026-05-24 10:00]" in this_section

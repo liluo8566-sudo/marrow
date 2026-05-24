@@ -4,7 +4,7 @@
 > dashboard render 同步改
 > handover 是 all-project all-in-one, 不仅 coding; coding 太长拆 PROGRESS
 
-—————以下这一段应该是跟dashboard的top一模一样的—————
+<!-- marrow:top:start -->
 ## Alerts (active)
 - {{severity}}: {{message}}
 
@@ -47,10 +47,13 @@ Later
 ### Pending
 - emotional carryover (unresolved 写这里; use `- [ ]` to mark resolved)
 
-—————以上这一段应该是跟dashboard的top一模一样的—————
+<!-- marrow:top:end -->
 
 > If anything from the previous session still pending (not touched) in this session. Do not just drop. Carry over.
 > As each session weight differently, there is no fix length. Depend on how much detail you need to handover. Do not overfill  or underfill this doc.
+
+## Previous Sessions
+> 2h+ old session blocks land here (2h+ 旧 session 推这里，最新在上)
 
 ## This Session
 > What's been done - Write a handoff document summarising the current conversation so a new session can continue the topic/work/study.
