@@ -6,7 +6,7 @@
 
 ## Phase 1 (shipped, pytest 132)
 - [verified] is_headless = assistant model-set non-empty AND ⊆ config worker_models; entrypoint marker abandoned · goal6 · PROGRESS 2026-05-19 blocker#1
-- [verified] diary = 04:00 routine writes just-closed day + 16:00 catchup backfills ≤7d (cap3 + overflow alert); local-04:00 day boundary; per-session map → haiku stitch → sonnet write · goal4 · PROGRESS 2026-05-17/18
+- [verified] diary = 07:00 routine writes just-closed day + 19:00 catchup backfills ≤7d (cap3 + overflow alert); 6AM local day boundary; per-session digest → daily sonnet write · goal4 · PROGRESS 2026-05-17/18, DECISIONS 2026-05-24 schedule realign
 - [verified] LLM calls default stream-json subscription window / claude -p fallback; intent-only client(role,body,tier), default→fallback chain + per-step alert · goal1 · PROGRESS 2026-05-17
 - [revising] SessionEnd = sync code skeleton (clean+archive+dashboard+handover-skeleton, ≤2s, no-LLM) + async Popen sonnet single call (multi-seg AFFECT/ENTITY_CAND/THREAD_CAND/MILESTONE_CAND/MEMES_CAND/DIGEST/NARRATIVE); raw 1×LLM only; 04:00 → 07:00 nightly read-only roll-up; Popen detach hard constraint: stdin/stdout/stderr=DEVNULL + start_new_session=True + close_fds=True · goal4/6 · 2026-05-23
 - [verified] 4 hooks at Phase-1 subset shipped; PreToolUse = global prompt-guard scope-extended to marrow, not a local copy · goal6
