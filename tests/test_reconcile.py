@@ -232,7 +232,7 @@ def test_candidate_row_deleted_drops_and_tombstones(tmp_path):
     with conn:
         cur = conn.execute(
             "INSERT INTO milestones(scope,date,title,pinned,source_hash) "
-            "VALUES('us','2026-05-22','Bye','sh-x',0)"
+            "VALUES('us','2026-05-22','Bye',0,'sh-x')"
         )
         rid = cur.lastrowid
     dash = tmp_path / "dashboard.md"
@@ -271,7 +271,7 @@ def test_candidate_drop_blocks_revive_via_write_milestone_cand(tmp_path):
     with conn:
         cur = conn.execute(
             "INSERT INTO milestones(scope,date,title,pinned,source_hash) "
-            "VALUES('me','2026-05-22','Killed','sh-x',0)"
+            "VALUES('me','2026-05-22','Killed',0,'sh-x')"
         )
         rid = cur.lastrowid
     dash = tmp_path / "dashboard.md"
