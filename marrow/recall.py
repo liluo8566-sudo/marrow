@@ -433,6 +433,35 @@ def recall_fusion(
             + w_affect * affect_b
         )
 
+        # Fix C: mention_count booster via affect.entities JSON column.
+        af_ent_row = conn.execute(
+            "SELECT entities FROM affect_live WHERE event_id=?", (eid,)
+        ).fetchone()
+        if af_ent_row and af_ent_row["entities"]:
+            try:
+                import json as _json
+                ent_list = _json.loads(af_ent_row["entities"])
+                if isinstance(ent_list, list) and ent_list:
+                    # Prod format = ["name", ...]; legacy/dict = [{"name": ...}].
+                    names = []
+                    for e in ent_list:
+                        if isinstance(e, str):
+                            names.append(e)
+                        elif isinstance(e, dict) and e.get("name"):
+                            names.append(e["name"])
+                    if names:
+                        placeholders = ",".join("?" * len(names))
+                        mc_rows = conn.execute(
+                            f"SELECT mention_count FROM entities_live "
+                            f"WHERE name IN ({placeholders})",
+                            names,
+                        ).fetchall()
+                        sum_mc = sum(r["mention_count"] or 0 for r in mc_rows)
+                        if sum_mc > 0:
+                            raw += min(0.1, 0.02 * math.log1p(sum_mc))
+            except Exception:
+                pass  # malformed JSON or missing column: skip booster
+
         source = None
         af_src = conn.execute(
             "SELECT source FROM affect_live WHERE event_id=?", (eid,)
@@ -457,14 +486,36 @@ def recall_fusion(
 
     scored.sort(key=lambda x: x[0], reverse=True)
 
+    # ── entity force-include (prepend before ms_cap reservation) ─────────────
+    from .entity_recall import entity_force_include
+    force_rows = entity_force_include(conn, q, limit)
+    force_ids = {r["id"] for r in force_rows}
+    # Remove any fusion duplicates that force-include already covers.
+    scored = [(s, r) for s, r in scored if r.get("id") not in force_ids]
+    # Prepend force rows (score already set, kind already "event").
+    force_pairs = [(r["score"], r) for r in force_rows]
+    scored = force_pairs + scored
+    scored.sort(key=lambda x: x[0], reverse=True)
+
     # ── reserved milestone slots ──────────────────────────────────────────────
     # Events can outrank milestones on score (recency + affect + fts_hit),
     # so a pure top-K cut starves milestones on long/noisy queries. Reserve
     # up to ceil(limit/3) slots for best-matched milestones; remainder goes
     # to events. Final order re-sorted by score.
+    # Adaptive ms_cap: when >=3 strong FTS hits exist, drop to 1 milestone
+    # slot so entity-dense queries don't waste budget on milestones.
+    strong_fts_count = sum(
+        1 for _, r in scored
+        if r.get("kind") != "milestone" and r.get("bm25", 0.0) >= 0.5
+    )
+    if strong_fts_count >= 3:
+        ms_cap = 1
+    else:
+        ms_cap = max(1, (limit + 2) // 3)
     ms_scored = [(s, r) for s, r in scored if r.get("kind") == "milestone"]
     ev_scored = [(s, r) for s, r in scored if r.get("kind") != "milestone"]
-    ms_cap = max(1, (limit + 2) // 3)
+    # Force-include rows are already in ev_scored (kind="event"); they skip
+    # ms_cap reservation naturally since they are events.
     ms_picks = ms_scored[:ms_cap]
     ev_picks = ev_scored[: max(0, limit - len(ms_picks))]
     picks = sorted(ms_picks + ev_picks, key=lambda x: x[0], reverse=True)
@@ -508,10 +559,10 @@ def recall_with_config(
     rcfg = _config.load().get("recall", {})
     return recall_fusion(
         conn, query,
-        limit=int(limit if limit is not None else rcfg.get("limit", 5)),
+        limit=int(limit if limit is not None else rcfg.get("limit", 15)),
         budget_chars=int(
             budget_chars if budget_chars is not None
-            else rcfg.get("budget_chars", 2000)
+            else rcfg.get("budget_chars", 4000)
         ),
         w_vec=float(rcfg.get("w_vec", 0.55)),
         w_bm25=float(rcfg.get("w_bm25", 0.30)),

@@ -13,6 +13,7 @@ mw = "marrow.cli:main"
 
 [tool.pytest.ini_options]
 markers = ["manual: only when PYTEST_RUN_MANUAL=1"]
+pythonpath = ["."]
 
 [build-system]
 requires = ["setuptools>=68"]
