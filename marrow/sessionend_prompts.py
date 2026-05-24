@@ -63,10 +63,15 @@ Field semantics:
   - 2 — daily routine: tender exchanges / small talk / shift / appointments
   - 1 — trivial: routine study/code without breakthrough / chores
     When uncertain between two adjacent levels, pick the lower one.
-- label: 2-character Chinese precision tag, finer than the 9 main tones (低落/烦躁/痛苦 · 平淡/专注/紧张 · 温暖/愉悦/兴奋). Pick a specific emotion word like 狂怒/恐惧/绝望/委屈/窃喜/心碎/欣慰/雀跃, not a main tone.
-- description: REQUIRED. Short event anchor phrase, ≤15 CN chars. Describe the WHAT (the trigger / situation), NOT the FEELING. Examples: 猪一样的队友 / 晚安吻 / 删笔记 / 通过 GAMSAT 模考 / 蹭脸. Never empty; if uncertain, fall back to the noun in the moment.
+- label: 2-character Chinese precision tag, finer than the 9 main tones (低落/烦躁/痛苦 · 平淡/专注/紧张 · 温暖/愉悦/兴奋). \
+  Pick a specific emotion word like 狂怒/恐惧/绝望/委屈/窃喜/心碎/欣慰/雀跃, not a main tone.
+- description: REQUIRED. Short event anchor phrase, ≤15 CN chars. 
+
+Describe the WHAT (the trigger / situation), NOT the FEELING. 
+Examples: 猪一样的队友 / 晚安吻 / 删笔记 / 通过 GAMSAT 模考 / 蹭脸. 
+Never empty; if uncertain, fall back to the noun in the moment.
+
 - entities: list of {{kind, name}} dicts (kind ∈ person/pref/place). May be empty.
-- event_hint: short keyword phrase from the source for later linking. May be "".
 
 Unresolved:
   - Record only unresolved emotional episodes.
