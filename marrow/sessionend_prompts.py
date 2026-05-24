@@ -2,7 +2,7 @@
 
 One sonnet call per session emits four marker blocks: AFFECT, TASK_CAND,
 DIGEST, HANDOVER. Per-block JSON / text parse — one block failing does
-not block the others. ENTITY/MILESTONE/VOCAB candidates moved to
+not block the others. ENTITY/MILESTONE/MEMES candidates moved to
 daily.py + daily_prompts.py (day-aggregate input is cheaper / dedupes).
 
 Persona contract for narrative outputs (DIGEST, HANDOVER, AFFECT free-

@@ -1,6 +1,6 @@
 """Shared candidate-block parser + writers.
 
-Used by daily.py (ENTITY/MILESTONE/VOCAB candidate extraction on day-
+Used by daily.py (ENTITY/MILESTONE/MEMES candidate extraction on day-
 aggregated digests) and sessionend_async.py (AFFECT/TASK_CAND block
 parser via extract_block). Writers are idempotent on their natural key.
 """
@@ -12,9 +12,9 @@ import json
 _ENTITY_KINDS = {"person", "pref", "place"}
 _MILESTONE_SCOPES = {"me", "us"}
 
-# Vocab keys that must never age out — persona names, intimate shorthand.
+# Memes keys that must never age out — persona names, intimate shorthand.
 # Type='cipher' is force-pinned regardless of key.
-VOCAB_ANCHOR_KEYS: frozenset[str] = frozenset({
+MEMES_ANCHOR_KEYS: frozenset[str] = frozenset({
     "鸭子", "念念", "老公", "老婆", "Lumi", "屿忱", "Stellan",
 })
 
@@ -110,15 +110,15 @@ def write_milestone_cand(conn, raw: str, date: str,
     return n
 
 
-def write_vocab_cand(conn, raw: str, source: str = "daily",
-                     anchor_keys: frozenset[str] = VOCAB_ANCHOR_KEYS) -> int:
-    """Insert / bump vocab rows from a VOCAB_CAND block.
+def write_memes_cand(conn, raw: str, source: str = "daily",
+                     anchor_keys: frozenset[str] = MEMES_ANCHOR_KEYS) -> int:
+    """Insert / bump memes rows from a MEMES_CAND block.
 
     pinned = 1 if anchor_keys hit OR type='cipher' OR LLM emitted pinned=1.
     For existing rows, pinned is upgraded (0→1) but never downgraded —
     once anchored, stays anchored even if a later session forgets the flag.
     """
-    items = extract_block(raw, "VOCAB_CAND")
+    items = extract_block(raw, "MEMES_CAND")
     if not items:
         return 0
     n = 0
@@ -144,7 +144,7 @@ def write_vocab_cand(conn, raw: str, source: str = "daily",
         forced = key in anchor_keys or vtype == "cipher"
         pinned = 1 if (llm_pinned or forced) else 0
         row = conn.execute(
-            "SELECT id, use_count, pinned FROM vocab WHERE type=? AND key=?"
+            "SELECT id, use_count, pinned FROM memes WHERE type=? AND key=?"
             " LIMIT 1", (vtype, key),
         ).fetchone()
         ts_now = _dt.datetime.now(_dt.timezone.utc).strftime(
@@ -153,13 +153,13 @@ def write_vocab_cand(conn, raw: str, source: str = "daily",
             if row:
                 new_pinned = 1 if (row["pinned"] or pinned) else 0
                 conn.execute(
-                    "UPDATE vocab SET use_count=use_count+1, last_seen=?,"
+                    "UPDATE memes SET use_count=use_count+1, last_seen=?,"
                     " pinned=? WHERE id=?",
                     (ts_now, new_pinned, row["id"]),
                 )
             else:
                 conn.execute(
-                    "INSERT INTO vocab (type, key, value, context,"
+                    "INSERT INTO memes (type, key, value, context,"
                     " use_count, last_seen, pinned, source_hash)"
                     " VALUES (?, ?, ?, ?, 1, ?, ?, ?)",
                     (vtype, key, value, context, ts_now, pinned, source),

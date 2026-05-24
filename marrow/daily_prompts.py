@@ -2,10 +2,10 @@
 
 Runs in daily.py after sessionend writes session_digests. One sonnet call
 on aggregated digest text emits three marker blocks: ENTITY_CAND,
-MILESTONE_CAND, VOCAB_CAND. Each block is parsed and written independently;
+MILESTONE_CAND, MEMES_CAND. Each block is parsed and written independently;
 one block failing to parse does not block the others.
 
-Persona contract: extraction prompts pull entities / events / vocab from
+Persona contract: extraction prompts pull entities / events / memes from
 the source text — no Stellan-voice rewriting.
 """
 from __future__ import annotations
@@ -21,7 +21,7 @@ def fence(s: str) -> str:
 
 # ── DAILY_CAND ───────────────────────────────────────────────────────────────
 # Combined 3-block extraction on day-aggregated digests. Replaces the per-
-# session ENTITY/MILESTONE/VOCAB CAND segments that used to live in sessionend.
+# session ENTITY/MILESTONE/MEMES CAND segments that used to live in sessionend.
 # Aggregating at day-level reduces duplicate inserts and is cheaper (1 call
 # per day vs N calls per N sessions).
 
@@ -47,9 +47,9 @@ death, illness diagnosis, major achievement. Conservative — gate is high \
 - description: 2-3 sentences (50-100 words) — what happened, why it matters
 - conf: 0.0 to 1.0
 
-─────────── VOCAB_CAND ───────────
+─────────── MEMES_CAND ───────────
 Memes / inside jokes / coined terms / viral quotes / topical news (DESIGN \
-line 47). Hot vocab first.
+line 47). Hot memes first.
 Include:
 - inside jokes, coined terms, persona shorthand, recurring private phrases \
 between 念念 and 屿忱.
@@ -63,7 +63,7 @@ events, named happenings 念念 brings up.
 - value: what it means or refers to
 - context: short example of how it was used
 - pinned: 0 or 1 — 1 for private anchors (persona names, ciphers, intimate \
-relationship vocab that should never decay); 0 for public / viral / topical \
+relationship memes that should never decay); 0 for public / viral / topical \
 items that may age out. When in doubt, 0.
 - conf: 0.0 to 1.0
 
@@ -80,7 +80,7 @@ Output markers (machine-parsed — do NOT skip, rename, or merge):
 "description": "...", "conf": 0.9}}
 ]
 ===END===
-===VOCAB_CAND===
+===MEMES_CAND===
 [
   {{"key": "...", "type": "meme", "value": "...", \
 "context": "...", "pinned": 0, "conf": 0.8}}

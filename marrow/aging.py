@@ -1,13 +1,13 @@
-"""Weekly maintenance: vocab decay, task auto-archive, milestone auto-confirm.
+"""Weekly maintenance: memes decay, task auto-archive, milestone auto-confirm.
 
 No LLM. Triggered by deploy/mw-aging.plist (Sun 12:00 local). Rules locked
 in DECISIONS.md:46 — pinned=1 rows are never aged (full bypass for identity
 anchors); hardcoded anchor list is force-pinned every pass (idempotent).
 
 Passes (single txn):
-1. promote_vocab — ≥3 distinct event hits over last 7d → use_count += hits,
+1. promote_memes — ≥3 distinct event hits over last 7d → use_count += hits,
    last_seen = now, status = 'active' (revives dormant rows).
-2. demote_vocab — last_seen > 90d AND pinned=0 → status = 'dormant'.
+2. demote_memes — last_seen > 90d AND pinned=0 → status = 'dormant'.
 3. archive_tasks — status='active' AND 0 mentions in events over last 30d
    → status = 'archived'.
 4. confirm_milestone_alerts — alerts.type='milestone_added' AND created_at
@@ -19,7 +19,7 @@ import sqlite3
 import sys
 
 from . import storage
-from .candidates import VOCAB_ANCHOR_KEYS as _IDENTITY_ANCHORS
+from .candidates import MEMES_ANCHOR_KEYS as _IDENTITY_ANCHORS
 
 
 def _fts_phrase(q: str) -> str:
@@ -28,23 +28,23 @@ def _fts_phrase(q: str) -> str:
 
 
 def enforce_anchor_pins(conn: sqlite3.Connection) -> int:
-    """Force pinned=1 on every vocab row whose key is in the anchor list.
+    """Force pinned=1 on every memes row whose key is in the anchor list.
     Idempotent: returns rows newly flipped (was pinned=0)."""
     if not _IDENTITY_ANCHORS:
         return 0
     placeholders = ",".join("?" * len(_IDENTITY_ANCHORS))
     cur = conn.execute(
-        f"UPDATE vocab SET pinned = 1 "
+        f"UPDATE memes SET pinned = 1 "
         f"WHERE key IN ({placeholders}) AND pinned = 0",
         tuple(_IDENTITY_ANCHORS),
     )
     return cur.rowcount or 0
 
 
-def promote_vocab(conn: sqlite3.Connection) -> int:
+def promote_memes(conn: sqlite3.Connection) -> int:
     """≥3 distinct event hits over last 7d → bump + revive.
 
-    For each non-pinned vocab row (pinned=0 — pinned rows skip aging
+    For each non-pinned memes row (pinned=0 — pinned rows skip aging
     entirely), FTS5-match its key against events from the last 7d. Count
     distinct event_id hits. ≥3 → use_count += hits, last_seen = now,
     status = 'active'. Returns rows promoted.
@@ -52,7 +52,7 @@ def promote_vocab(conn: sqlite3.Connection) -> int:
     Pinned rows are skipped — they never age (DECISIONS:46).
     """
     rows = conn.execute(
-        "SELECT id, key FROM vocab WHERE pinned = 0"
+        "SELECT id, key FROM memes WHERE pinned = 0"
     ).fetchall()
     promoted = 0
     for r in rows:
@@ -72,7 +72,7 @@ def promote_vocab(conn: sqlite3.Connection) -> int:
             continue
         if hits >= 3:
             conn.execute(
-                "UPDATE vocab SET use_count = use_count + ?, "
+                "UPDATE memes SET use_count = use_count + ?, "
                 "last_seen = strftime('%Y-%m-%dT%H:%M:%SZ','now'), "
                 "status = 'active' WHERE id = ?",
                 (hits, r["id"]),
@@ -81,14 +81,14 @@ def promote_vocab(conn: sqlite3.Connection) -> int:
     return promoted
 
 
-def demote_vocab(conn: sqlite3.Connection) -> int:
+def demote_memes(conn: sqlite3.Connection) -> int:
     """last_seen > 90d ago AND pinned=0 AND status != 'dormant' → dormant.
 
     Rows with NULL last_seen are skipped — never auto-demoted until they
     have at least been seen once. Pinned rows are skipped (DECISIONS:46).
     """
     cur = conn.execute(
-        "UPDATE vocab SET status = 'dormant' "
+        "UPDATE memes SET status = 'dormant' "
         "WHERE pinned = 0 "
         "AND status != 'dormant' "
         "AND last_seen IS NOT NULL "
@@ -156,8 +156,8 @@ def main() -> None:
     try:
         with conn:
             enforce_anchor_pins(conn)
-            promoted = promote_vocab(conn)
-            demoted = demote_vocab(conn)
+            promoted = promote_memes(conn)
+            demoted = demote_memes(conn)
             archived = archive_tasks(conn)
             confirmed = confirm_milestone_alerts(conn)
             conn.execute(

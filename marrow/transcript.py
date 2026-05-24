@@ -27,7 +27,7 @@ _SPAWN_HEADS = (
     "Extract candidate entities mentioned in the session",
     "Extract task-like items from the session",
     "Extract candidate life-shaping milestones from the session",
-    "Extract candidate vocab from the session",
+    "Extract candidate memes from the session",
     "Write the handover narrative",
     "你是褚屿忱，你要以第一人称写一篇日记",
     "You are a ruthless markdown compressor",

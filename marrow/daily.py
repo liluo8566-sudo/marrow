@@ -8,7 +8,7 @@ CLI:
 
 Per day, two sonnet calls:
   1. DAILY_CAND_PROMPT on aggregated session_digests → 3 marker blocks
-     (ENTITY_CAND / MILESTONE_CAND / VOCAB_CAND). Idempotent — gated on
+     (ENTITY_CAND / MILESTONE_CAND / MEMES_CAND). Idempotent — gated on
      has_diary like the diary write itself.
   2. DIARY_PROMPT on the same aggregate + affect_live → diary prose.
 
@@ -127,7 +127,7 @@ def _extract_candidates(conn, llm: LLMClient, date: str,
     block the others. Returns {segment: rows_written}. Logs a non-
     blocking alert on LLM-level failure.
     """
-    counts = {"entity_cand": 0, "milestone_cand": 0, "vocab_cand": 0}
+    counts = {"entity_cand": 0, "milestone_cand": 0, "memes_cand": 0}
     try:
         raw = llm.call(
             "daily_cand",
@@ -143,7 +143,7 @@ def _extract_candidates(conn, llm: LLMClient, date: str,
         ("entity_cand", lambda r: candidates.write_entity_cand(conn, r)),
         ("milestone_cand",
          lambda r: candidates.write_milestone_cand(conn, r, date)),
-        ("vocab_cand", lambda r: candidates.write_vocab_cand(conn, r)),
+        ("memes_cand", lambda r: candidates.write_memes_cand(conn, r)),
     ):
         try:
             counts[name] = writer(raw)
@@ -187,7 +187,7 @@ def run_day(conn, date: str, llm: LLMClient, *, db: str | None = None,
                 (date,
                  f"entity={cand_counts['entity_cand']} "
                  f"milestone={cand_counts['milestone_cand']} "
-                 f"vocab={cand_counts['vocab_cand']}"),
+                 f"memes={cand_counts['memes_cand']}"),
             )
 
     try:

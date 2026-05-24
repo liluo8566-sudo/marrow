@@ -92,39 +92,39 @@ def render_milestone(conn: sqlite3.Connection) -> str:
     return "\n".join(out)
 
 
-# -- Memes (vocab + sticker thumbnails) ------------------------------------
+# -- Memes (memes table + sticker thumbnails) ------------------------------
 
 def render_memes(conn: sqlite3.Connection) -> str:
     key = "memes"
-    vocab_rows = conn.execute(
+    memes_rows = conn.execute(
         "SELECT id, type, key, value, context, use_count "
-        "FROM vocab ORDER BY use_count DESC, created_at DESC"
+        "FROM memes ORDER BY use_count DESC, created_at DESC"
     ).fetchall()
     sticker_rows = conn.execute(
-        "SELECT s.id, s.key, s.asset_path, s.mime_type, v.key AS vocab_key "
-        "FROM stickers s LEFT JOIN vocab v ON v.id = s.vocab_id "
+        "SELECT s.id, s.key, s.asset_path, s.mime_type, m.key AS meme_key "
+        "FROM stickers s LEFT JOIN memes m ON m.id = s.meme_id "
         "ORDER BY s.use_count DESC, s.created_at DESC"
     ).fetchall()
 
     out = [_m0(key), "# Memes", ""]
-    out.append("## Vocabulary")
+    out.append("## Phrases")
     out.append("")
-    if vocab_rows:
-        for r in vocab_rows:
+    if memes_rows:
+        for r in memes_rows:
             ctx = f" _{r['context']}_" if r["context"] else ""
             val = f" → {r['value']}" if r["value"] else ""
             out.append(
                 f"- [{r['type']}] **{r['key']}**{val}{ctx}" + _anchor(r["id"])
             )
     else:
-        out.append("_No vocab yet._")
+        out.append("_No memes yet._")
     out.append("")
     out.append("## Stickers")
     out.append("")
     if sticker_rows:
         for r in sticker_rows:
-            vk = f" ({r['vocab_key']})" if r["vocab_key"] else ""
-            out.append(f"- ![[{r['asset_path']}]]{vk}" + _anchor(r["id"]))
+            mk = f" ({r['meme_key']})" if r["meme_key"] else ""
+            out.append(f"- ![[{r['asset_path']}]]{mk}" + _anchor(r["id"]))
     else:
         out.append("_No stickers yet._")
     out.append("")

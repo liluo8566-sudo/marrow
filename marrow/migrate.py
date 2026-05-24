@@ -91,7 +91,7 @@ def lighthouse_milestone() -> dict:
             "theme": None, "pinned": 1}
 
 
-def parse_vocab_cipher(text: str) -> list[dict]:
+def parse_memes_cipher(text: str) -> list[dict]:
     rows, inblk = [], False
     for line in text.splitlines():
         s = line.strip()
@@ -178,7 +178,7 @@ def _insert(conn: sqlite3.Connection, table: str, rows: list[dict],
 _PLAN = {
     "events_2026": ("events", parse_events_2026),
     "timeline": ("milestones", parse_milestones_timeline),
-    "cipher": ("vocab", parse_vocab_cipher),
+    "cipher": ("memes", parse_memes_cipher),
     "pit": ("pit", parse_pit),
     "goose": ("goose_bites", parse_goose_bites),
 }

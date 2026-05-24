@@ -299,23 +299,23 @@ def _milestone_candidates(
     return scored[: limit * 3]
 
 
-# ── vocab keyword scan ───────────────────────────────────────────────────────
+# ── memes keyword scan ───────────────────────────────────────────────────────
 
-def _vocab_candidates(
+def _memes_candidates(
     conn: sqlite3.Connection, query: str, limit: int
 ) -> list[dict]:
-    """Reverse-substring scan over active vocab rows.
+    """Reverse-substring scan over active memes rows.
 
     Matches when key.lower() is a substring of query.lower(). Used so memes /
     cipher / nickname / phrase rows surface alongside events + milestones.
-    Shape parallels milestone candidates; kind="vocab".
+    Shape parallels milestone candidates; kind="memes".
     """
     q_lower = query.lower().strip()
     if not q_lower:
         return []
     rows = conn.execute(
         "SELECT id, type, key, value, context, pinned, use_count "
-        "FROM vocab WHERE status='active'"
+        "FROM memes WHERE status='active'"
     ).fetchall()
     if not rows:
         return []
@@ -330,11 +330,11 @@ def _vocab_candidates(
         if ctx:
             content = f"{content} ({ctx})"
         out.append({
-            "kind": "vocab",
+            "kind": "memes",
             "id": r["id"],
             "session_id": None,
             "timestamp": "",
-            "role": "vocab",
+            "role": "memes",
             "content": content,
             "channel": None,
             "compressed": 0,
@@ -439,11 +439,11 @@ def recall_fusion(
                     "bm25": 0.0, "vec": vec_score, "fts_hit": False,
                 }
 
-    # ── milestone + vocab candidates (small tables, LIKE / substring scan) ──
+    # ── milestone + memes candidates (small tables, LIKE / substring scan) ──
     milestone_cands = _milestone_candidates(conn, q, limit)
-    vocab_cands = _vocab_candidates(conn, q, limit)
+    memes_cands = _memes_candidates(conn, q, limit)
 
-    if not candidates and not milestone_cands and not vocab_cands:
+    if not candidates and not milestone_cands and not memes_cands:
         return []
 
     # ── dormant revive + scoring ──────────────────────────────────────────────
@@ -539,8 +539,8 @@ def recall_fusion(
             raw += _MILESTONE_PINNED_BOOST
         scored.append((raw, {**mc, "score": raw}))
 
-    # ── vocab scoring (mirror milestone: w_bm25 * 1.0 + pinned boost) ────────
-    for vc in vocab_cands:
+    # ── memes scoring (mirror milestone: w_bm25 * 1.0 + pinned boost) ────────
+    for vc in memes_cands:
         raw = w_bm25 * vc["bm25"]
         if vc["pinned"]:
             raw += _MILESTONE_PINNED_BOOST
@@ -559,34 +559,34 @@ def recall_fusion(
     scored = force_pairs + scored
     scored.sort(key=lambda x: x[0], reverse=True)
 
-    # ── reserved milestone + vocab slots ──────────────────────────────────────
-    # Events can outrank milestones / vocab on score (recency + affect +
+    # ── reserved milestone + memes slots ──────────────────────────────────────
+    # Events can outrank milestones / memes on score (recency + affect +
     # fts_hit). Reserve slots so anchor rows aren't starved on long queries.
     # Adaptive: when >=3 strong FTS hits exist, drop both caps so entity-dense
     # queries don't waste budget on anchors.
     strong_fts_count = sum(
         1 for _, r in scored
-        if r.get("kind") not in ("milestone", "vocab")
+        if r.get("kind") not in ("milestone", "memes")
         and r.get("bm25", 0.0) >= 0.5
     )
     if strong_fts_count >= 3:
         ms_cap = 1
-        vocab_cap = 0
+        memes_cap = 0
     else:
         ms_cap = max(1, (limit + 2) // 3)
-        vocab_cap = 1 if limit <= 5 else 2
+        memes_cap = 1 if limit <= 5 else 2
     ms_scored = [(s, r) for s, r in scored if r.get("kind") == "milestone"]
-    vocab_scored = [(s, r) for s, r in scored if r.get("kind") == "vocab"]
+    memes_scored = [(s, r) for s, r in scored if r.get("kind") == "memes"]
     ev_scored = [
         (s, r) for s, r in scored
-        if r.get("kind") not in ("milestone", "vocab")
+        if r.get("kind") not in ("milestone", "memes")
     ]
     ms_picks = ms_scored[:ms_cap]
-    vocab_picks = vocab_scored[:vocab_cap]
-    reserved = len(ms_picks) + len(vocab_picks)
+    memes_picks = memes_scored[:memes_cap]
+    reserved = len(ms_picks) + len(memes_picks)
     ev_picks = ev_scored[: max(0, limit - reserved)]
     picks = sorted(
-        ms_picks + vocab_picks + ev_picks, key=lambda x: x[0], reverse=True
+        ms_picks + memes_picks + ev_picks, key=lambda x: x[0], reverse=True
     )
 
     # ── budget truncation ─────────────────────────────────────────────────────

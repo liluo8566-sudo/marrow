@@ -9,7 +9,7 @@ to parse does not block the others. Audit row per block + final summary
 
 Skip rule: sessions with ≤ skip_turn_threshold user turns extract nothing.
 
-ENTITY/MILESTONE/VOCAB candidate extraction lives in daily.py (day-
+ENTITY/MILESTONE/MEMES candidate extraction lives in daily.py (day-
 aggregated input is cheaper and dedupes naturally).
 """
 from __future__ import annotations
