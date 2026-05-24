@@ -166,30 +166,66 @@ def test_sessionend_async_writes_fail_audit_on_exception(db_env):
 
 # ── Unit 3: sessionstart_catchup ─────────────────────────────────────────────
 
-def test_catchup_picks_pending_sids(db_env, monkeypatch):
-    """Only sid='b' is pending; a=ok and c=skip:short_session are handled."""
+def _write_real_jsonl(path: Path, sid: str) -> None:
+    """Minimal real-manual cc transcript: opus model + a user turn."""
+    import json as _json
+    lines = [
+        _json.dumps({
+            "type": "user", "sessionId": sid,
+            "timestamp": "2026-05-24T10:00:00Z",
+            "message": {"role": "user", "content": "hello"},
+        }),
+        _json.dumps({
+            "type": "assistant", "sessionId": sid,
+            "timestamp": "2026-05-24T10:00:01Z",
+            "message": {"role": "assistant", "model": "claude-opus-4-7",
+                        "content": [{"type": "text", "text": "hi"}]},
+        }),
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_catchup_picks_pending_sids(db_env, monkeypatch, tmp_path):
+    """jsonl with no sessionend_extract audit + idle≥5min → spawn.
+    jsonl with any sessionend_extract audit (ok/skip/fail) → skip (no retry).
+    jsonl idle<5min (alive) → skip."""
     db, _ = db_env
+    projects = tmp_path / "projects"
+    proj_dir = projects / "-Users-test"
+    proj_dir.mkdir(parents=True)
 
-    for sid in ["a", "b", "c"]:
-        _insert_events(db, sid, count=1)
+    sid_done = "aaaaaaaa-done"
+    sid_pending = "bbbbbbbb-pending"
+    sid_failed_once = "cccccccc-failed-once"
+    sid_alive = "dddddddd-alive"
 
-    # Mark 'a' as successfully extracted.
+    for sid in (sid_done, sid_pending, sid_failed_once, sid_alive):
+        _write_real_jsonl(proj_dir / f"{sid}.jsonl", sid)
+
+    # Backdate mtimes so they pass the idle guard; sid_alive stays "fresh".
+    now = time.time()
+    old = now - 3600  # 1h ago, idle ≥ 5min
+    for sid in (sid_done, sid_pending, sid_failed_once):
+        os.utime(proj_dir / f"{sid}.jsonl", (old, old))
+
     conn = storage.connect(db)
     with conn:
         conn.execute(
             "INSERT INTO audit_log (target_table, target_id, action, summary)"
-            " VALUES ('events', 'a', 'sessionend_extract', 'ok')",
-        )
+            " VALUES ('events', ?, 'sessionend_extract', 'ok')", (sid_done,))
         conn.execute(
             "INSERT INTO audit_log (target_table, target_id, action, summary)"
-            " VALUES ('events', 'c', 'sessionend_extract', 'skip:short_session')",
-        )
+            " VALUES ('events', ?, 'sessionend_extract', 'fail:LLMError')",
+            (sid_failed_once,))
     conn.close()
+
+    monkeypatch.setattr(
+        "marrow.sessionstart_catchup._CC_PROJECTS", projects)
 
     spawned: list[list[str]] = []
 
     def fake_popen(args, log_path):  # noqa: ARG001
-        spawned.append(args)
+        spawned.append(list(args))
 
     with patch("marrow.sessionstart_catchup.popen_detach", side_effect=fake_popen):
         from marrow import sessionstart_catchup
@@ -197,9 +233,38 @@ def test_catchup_picks_pending_sids(db_env, monkeypatch):
 
     assert rc == 0
     assert len(spawned) == 1, f"expected 1 spawn, got {len(spawned)}: {spawned}"
-    assert "--sid" in spawned[0]
     sid_idx = spawned[0].index("--sid") + 1
-    assert spawned[0][sid_idx] == "b"
+    assert spawned[0][sid_idx] == sid_pending
+
+
+def test_catchup_cap_caps_at_max_fire(db_env, monkeypatch, tmp_path):
+    """3 pending jsonls but MAX_FIRE=2 → only 2 spawn; newest mtime wins."""
+    db, _ = db_env  # noqa: F841
+    projects = tmp_path / "projects"
+    proj_dir = projects / "-Users-test"
+    proj_dir.mkdir(parents=True)
+
+    sids = ["sid-oldest", "sid-mid", "sid-newest"]
+    for sid in sids:
+        _write_real_jsonl(proj_dir / f"{sid}.jsonl", sid)
+
+    now = time.time()
+    os.utime(proj_dir / "sid-oldest.jsonl",  (now - 7200, now - 7200))
+    os.utime(proj_dir / "sid-mid.jsonl",     (now - 3600, now - 3600))
+    os.utime(proj_dir / "sid-newest.jsonl",  (now - 1800, now - 1800))
+
+    monkeypatch.setattr(
+        "marrow.sessionstart_catchup._CC_PROJECTS", projects)
+
+    spawned: list[list[str]] = []
+    with patch("marrow.sessionstart_catchup.popen_detach",
+               side_effect=lambda a, log_path: spawned.append(list(a))):
+        from marrow import sessionstart_catchup
+        sessionstart_catchup.main()
+
+    assert len(spawned) == 2
+    fired = [args[args.index("--sid") + 1] for args in spawned]
+    assert fired == ["sid-newest", "sid-mid"]
 
 
 # ── Unit 4: hooks integration ─────────────────────────────────────────────────
