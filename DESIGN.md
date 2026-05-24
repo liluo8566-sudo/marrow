@@ -44,7 +44,7 @@
 - Profile — personal facts beyond CLAUDE.md: interests, lifestyle, family & friends. Backed by entities (Phase 2).
 - Milestone — life events (## Us + ## Me).
 - Diary — one page per month, drill into per-day narrative.
-- Memes — private inside-jokes + viral quotes + topical news/event mentions; hot vocab first.
+- Memes — private inside-jokes + viral quotes + topical news/event mentions; hot memes first.
 - Stickers — WeChat-sticker-style gallery, bidirectional: drop a file in → system auto-writes description + trigger from chat context; remove from md or via chat → gone.
 - `铁锅` goose-bites — Best of the day.
 - Study — one page per unit (progress / due / submitted). Notion stays primary, this is the CC-visible mirror.
@@ -65,7 +65,7 @@
 ## Hooks (four)
 - SessionStart — inject open threads + alerts; Phase 2 adds emotion backdrop. No persona (static CLAUDE.md owns it).
 - UserPromptSubmit — must-never-fade injection + optional deterministic recall fallback (local-embedding vector search, config-gated).
-- SessionEnd — sync code (clean transcript → events archive → dashboard regen → handover skeleton, <2s, no LLM) + async sonnet (AFFECT / ENTITY_CAND / THREAD_CAND / MILESTONE_CAND / VOCAB_CAND / DIGEST / NARRATIVE; raw transcript LLM 1×, nightly never re-reads).
+- SessionEnd — sync code (clean transcript → events archive → dashboard regen → handover skeleton, <2s, no LLM) + async sonnet (AFFECT / ENTITY_CAND / THREAD_CAND / MILESTONE_CAND / MEMES_CAND / DIGEST / NARRATIVE; raw transcript LLM 1×, nightly never re-reads).
 - PreToolUse — write_guard. Phase 1 reuses global prompt-guard. Phase 3 routes prompt-class md writes to writer sub-Claude.
 
 ## Injection — pull, not push

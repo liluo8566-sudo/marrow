@@ -50,7 +50,7 @@ File: `marrow/sessionend_async.py`
 ### 2a Structure
 
 Replace ping-pong block (current L82-107) with:
-- 7 module-top prompt constants: `_PROMPT_AFFECT`, `_PROMPT_ENTITY_CAND`, `_PROMPT_THREAD_CAND`, `_PROMPT_MILESTONE_CAND`, `_PROMPT_VOCAB_CAND`, `_PROMPT_DIGEST`, `_PROMPT_NARRATIVE`
+- 7 module-top prompt constants: `_PROMPT_AFFECT`, `_PROMPT_ENTITY_CAND`, `_PROMPT_THREAD_CAND`, `_PROMPT_MILESTONE_CAND`, `_PROMPT_MEMES_CAND`, `_PROMPT_DIGEST`, `_PROMPT_NARRATIVE`
 - `_TX_OPEN` / `_TX_CLOSE` / `_fence` transcript fence helpers (port from `diary.py:32-42`)
 - `_events_text(conn, sid)` → fenced sessions string
 - 7 segment functions: `_seg_affect(conn, client, sid, text)` etc — each: prompt call → parse → DB write → returns (ok, err_str)
@@ -87,9 +87,9 @@ Replace ping-pong block (current L82-107) with:
 - Prompt body: extract life-shaping events (graduation, breakup, job change, major move, family death). Output JSON `[{title, ts, conf, note}]`.
 - DB write: `milestones` — INSERT WHERE conf ≥ 0.85. Add dashboard alert via `repo.add_alert(priority='warn', source='milestone_candidate', label=title)`. Auto-confirm 7d undeleted lands in Phase 5 aging code — out of scope here.
 
-**`_seg_vocab_cand`** — vocab conf ≥ 0.7 + use_count
+**`_seg_memes_cand`** — memes conf ≥ 0.7 + use_count
 - Prompt body: extract memes / inside jokes / coined terms / persona shorthand. Output JSON `[{key, definition, conf}]`.
-- DB write: `vocab` — INSERT IF NOT EXISTS; if exists increment `use_count`. Auto-promote dormant→active on use_count ≥ 3.
+- DB write: `memes` — INSERT IF NOT EXISTS; if exists increment `use_count`. Auto-promote dormant→active on use_count ≥ 3.
 
 **`_seg_digest`** — flexible-length narrative per §16.1
 - Prompt body: Stellan drafts by **merging old `diary.py:55-85` `DIGEST_SHORT` + `diary.py:87-116` `DIGEST_LONG`**, replace haiku-specific lines, apply §16.1 density:
@@ -113,7 +113,7 @@ After EACH segment ship: paste full prompt body + `marrow/sessionend_async.py:L<
 Live test after all 7 wired:
 - Pick latest real sid: `sqlite3 ~/.config/marrow/marrow.db "SELECT DISTINCT session_id FROM events ORDER BY ts DESC LIMIT 1"`
 - `python -m marrow.sessionend_async --sid <sid>` → check audit row `'ok'` or `'partial:<segs>'`
-- Spot check: `sqlite3 ~/.config/marrow/marrow.db "SELECT * FROM session_digests WHERE sid='<sid>'"` and similar for affect/entities/tasks/milestones/vocab
+- Spot check: `sqlite3 ~/.config/marrow/marrow.db "SELECT * FROM session_digests WHERE sid='<sid>'"` and similar for affect/entities/tasks/milestones/memes
 
 ## Step 3 — daily.py (~150 LoC)
 
@@ -228,7 +228,7 @@ Verify: `launchctl list | grep mw-` shows all 3 loaded.
   feat(2.5c): daily rewrite + sessionend 7-seg + threads→tasks + ollama strip + 6AM + plist realign
 
   - daily.py (read-only diary writer) + daily_catchup.py replace 900-LoC diary.py
-  - sessionend_async.py: 7 sonnet segments (AFFECT/ENTITY_CAND/THREAD_CAND/MILESTONE_CAND/VOCAB_CAND/DIGEST/NARRATIVE) with per-seg parse + DB write + idempotent audit
+  - sessionend_async.py: 7 sonnet segments (AFFECT/ENTITY_CAND/THREAD_CAND/MILESTONE_CAND/MEMES_CAND/DIGEST/NARRATIVE) with per-seg parse + DB write + idempotent audit
   - storage._migrate_to_v2: affect +3 cols (unresolved/reconcile_ref/resolved_at) + threads→tasks rename + session_digests table
   - 6AM day boundary, importance 1-5 clamp, ollama tier removed
   - 3 plists Hour 4/16/Sun5 → 7/19/Sun12 + path → marrow.daily

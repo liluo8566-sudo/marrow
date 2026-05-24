@@ -88,6 +88,6 @@ All three REQUIRED, mechanism Pending. They share one base: daemon writes CLAUDE
 - **diff_open_threads_audit** — Weekly curator diffs Open-Threads week-over-week, audit-logs silent drops (source: `/Users/Gabrielle/Desktop/NY/code/mid-point-rv.md:76`) · Phase 2+ (weekly curator not yet built)
 - **memes_dedup_evaluation** — Re-evaluate effectiveness 2 weeks post inventory + DEDUP rule shipped 5/11 (source: `/Users/Gabrielle/Desktop/NY/code/roadmap.md:77`) · time-triggered (~2wk post 5/11), not phase-bound
 - **monthly_late_promote_check** — Late-promote channel withdrawn; observe `5月` input before 6/10 (source: `/Users/Gabrielle/Desktop/NY/memory/3d.md:16`) · time-triggered (before 6/10), not phase-bound
-- **Memes_optimization** — Sonnet doesn't know real memes vs random quotes; want only hot vocabulary + memorable new memes · Phase 2 (memes curate/render quality)
+- **Memes_optimization** — Sonnet doesn't know real memes vs random quotes; want only hot memes + memorable new ones · Phase 2 (memes curate/render quality)
 - **v2_year_rollup_to_timeline** — 2026 full year compressed into 1 timeline view section (source: `/Users/Gabrielle/Desktop/NY/memory/archive/Memm_system 2026-05-12.md:615`) · Phase 2+ sub-page render or year-end-driven
 - **backup_audit_transparency** — rotate/curator/retire backup files have no source SID identifier (source: `/Users/Gabrielle/Desktop/NY/memory/archive/Memm_system 2026-05-12.md:658`) · any phase (small metadata); natural Phase 2

@@ -3,16 +3,16 @@
 
 ## State
 - pytest 319 passed + 1 manual-skip (6.19s)
-- main 3 commits ahead origin (push pending Lumi nod) — `3e9bd0b` cleanup retire / `fa54662` candidate split + sessionend 4-to-1 call + vocab pinned / `8f97420` aging + schema v3 status
+- main 3 commits ahead origin (push pending Lumi nod) — `3e9bd0b` cleanup retire / `fa54662` candidate split + sessionend 4-to-1 call + memes pinned / `8f97420` aging + schema v3 status
 - channel cc / opus-4.7 (1M)
-- schema v3 — vocab.pinned (LLM-written by VOCAB_CAND) + vocab.status (code-written by aging job)
+- schema v3 — memes.pinned (LLM-written by MEMES_CAND) + memes.status (code-written by aging job)
 
 ## This window — 2.5d closeout
 
 ### Done
 - task 1 — deleted `marrow/cleanup.py`, `tests/test_cleanup.py`, `deploy/mw-jsonl-cleanup.plist`; added `cleanupPeriodDays=30` to `~/.claude/settings.json` (worktree-A merged → `3e9bd0b`)
-- task 2 — `marrow/aging.py` (185 LoC, weekly): vocab promote / demote / task auto-archive / milestone alert auto-confirm. Single txn + audit_log row. `enforce_anchor_pins` reads `candidates.VOCAB_ANCHOR_KEYS` (single source: (鸭子/念念/老公/老婆/Lumi/屿忱/Stellan) + type='cipher'). `deploy/mw-aging.plist` Sun 12:00, plutil OK, not yet launchctl loaded. schema v3 +status column. 25 new tests (worktree-B merged → `8f97420`)
-- task 3+4+5 — shipped by neighbor as `fa54662`: `sessionend_prompts.py` rewritten (1 SESSIONEND_PROMPT to 4 marker blocks); `sessionend_async.py` refactored (1 sonnet to per-block writer + audit ok/partial/fail); new `candidates.py` (extract_block + 3 writer + VOCAB_ANCHOR_KEYS single source); new `daily_prompts.py` (DAILY_CAND_PROMPT to 3 block); `daily.py` `_extract_candidates()` before DIARY, LLMError warn-only; storage v3 +pinned + type='cipher' force-pin=1, pinned upgrade-only; fixed latent bug (old `_seg_milestone_cand` used `source` column but milestones only has `source_hash`)
+- task 2 — `marrow/aging.py` (185 LoC, weekly): memes promote / demote / task auto-archive / milestone alert auto-confirm. Single txn + audit_log row. `enforce_anchor_pins` reads `candidates.MEMES_ANCHOR_KEYS` (single source: (鸭子/念念/老公/老婆/Lumi/屿忱/Stellan) + type='cipher'). `deploy/mw-aging.plist` Sun 12:00, plutil OK, not yet launchctl loaded. schema v3 +status column. 25 new tests (worktree-B merged → `8f97420`)
+- task 3+4+5 — shipped by neighbor as `fa54662`: `sessionend_prompts.py` rewritten (1 SESSIONEND_PROMPT to 4 marker blocks); `sessionend_async.py` refactored (1 sonnet to per-block writer + audit ok/partial/fail); new `candidates.py` (extract_block + 3 writer + MEMES_ANCHOR_KEYS single source); new `daily_prompts.py` (DAILY_CAND_PROMPT to 3 block); `daily.py` `_extract_candidates()` before DIARY, LLMError warn-only; storage v3 +pinned + type='cipher' force-pin=1, pinned upgrade-only; fixed latent bug (old `_seg_milestone_cand` used `source` column but milestones only has `source_hash`)
 - DESIGN:98 + DECISIONS:18 4-jobs list refreshed
 - PROGRESS 2.5d closeout entry appended
 
@@ -89,5 +89,5 @@ Acceptance: (李小云) / (大龙虾) queries return ≥10 of 12 known events at
 
 ## Reference (this window's commits)
 - 8f97420 feat(aging): weekly maintenance job + schema v3 status column
-- fa54662 feat(phase-2.5d): candidate split + sessionend 4-to-1 call + vocab pinned
+- fa54662 feat(phase-2.5d): candidate split + sessionend 4-to-1 call + memes pinned
 - 3e9bd0b chore: retire marrow/cleanup.py — cc cleanupPeriodDays owns jsonl retention

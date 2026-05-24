@@ -36,7 +36,7 @@ Multi-segment output:
 - `===ENTITY_CAND===` conf ≥0.8 → INSERT entities (kind=person/pref/place, append-only superseded_by)
 - `===THREAD_CAND===` always → INSERT tasks (status=active)
 - `===MILESTONE_CAND===` conf ≥0.85 → INSERT milestones + dashboard alert + 7d undeleted auto-confirm
-- `===VOCAB_CAND===` conf ≥0.7 → INSERT vocab + use_count tracking, ≥3 auto-promote dormant→active
+- `===MEMES_CAND===` conf ≥0.7 → INSERT memes + use_count tracking, ≥3 auto-promote dormant→active
 - `===DIGEST===` — compressed narrative; **length flex by session density** (see §16); fed to 07:00 nightly
 - `===NARRATIVE===` — handover async segment; atomic append after sync skeleton
 
@@ -62,7 +62,7 @@ After write:
 - Does NOT pollute affect schema with a per-session column
 
 ### 2.7 Skip rules (short sessions)
-- ≤5 turns → **skip SessionEnd async sonnet** (no AFFECT / ENTITY / THREAD / MILESTONE / VOCAB / DIGEST / NARRATIVE extraction)
+- ≤5 turns → **skip SessionEnd async sonnet** (no AFFECT / ENTITY / THREAD / MILESTONE / MEMES / DIGEST / NARRATIVE extraction)
 - Nightly diary does NOT reference such sessions
 - Rationale: low signal, avoids spend + noise pollution
 - Turn threshold pending 1-week sample tuning
@@ -134,15 +134,15 @@ Missing any one = 100% reproduces legacy stuck-prompt. Lands in safety-net check
 
 ## 10. Pinned = no-decay
 
-- `vocab.pinned` + `entities.pinned` columns added (2.5c step 2 migration, NOT now)
+- `memes.pinned` + `entities.pinned` columns added (2.5c step 2 migration, NOT now)
 - Current 5 cipher rows backfill `pinned=1`
 - Identity anchors (`鸭子=屿忱` / `念念=Lumi`) permanent pinned
 - Ordinary memes / people `pinned=0` follow aging
 
 ## 11. Aging rules (07:00 nightly, code-only)
 
-- vocab `last_seen > 90d AND pinned=0` → demote dormant (recall excludes)
-  - Revive paths: LLM key-match auto-promote / `mw vocab promote <key>` / never auto-delete
+- memes `last_seen > 90d AND pinned=0` → demote dormant (recall excludes)
+  - Revive paths: LLM key-match auto-promote / `mw memes promote <key>` / never auto-delete
 - task `status=active 0 mention 30d` → auto-archive
 - milestone alert line `7d undeleted` → auto-confirm
 
@@ -157,7 +157,7 @@ Missing any one = 100% reproduces legacy stuck-prompt. Lands in safety-net check
 **Window 2 (3 segments):**
 
 4. `===MILESTONE_CAND===` + dashboard alert + 7d auto-confirm
-5. `===VOCAB_CAND===` + use_count code + `vocab.pinned` + 5 cipher backfill + vocab leg in recall_fusion
+5. `===MEMES_CAND===` + use_count code + `memes.pinned` + 5 cipher backfill + memes leg in recall_fusion
 6. `===DIGEST===` (length flex per §16) — start with prompt confirm
 
 **Window 3 (1 segment + closure):**
@@ -189,7 +189,7 @@ Missing any one = 100% reproduces legacy stuck-prompt. Lands in safety-net check
 - Approval UI / `mw confirm` CLI: never (candidates 0-audit by design)
 - `workflow_reflection_skill`: FUTURE Phase 5 close-out
 - entity 30d no-hit demote backstop: FUTURE
-- vocab leg in recall_fusion: Window 2 step 5
+- memes leg in recall_fusion: Window 2 step 5
 
 ## 15. Sequencing constraints
 

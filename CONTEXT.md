@@ -21,7 +21,7 @@ _Avoid_: log (overloaded), trash
 ### Reconcile
 
 **Structured view**:
-A rendered view whose rows are inherently structured (Open Threads, milestone, vocab, pit, alerts); reconciled by a visible per-row id.
+A rendered view whose rows are inherently structured (Open Threads, milestone, memes, pit, alerts); reconciled by a visible per-row id.
 _Avoid_: table view, list view
 
 **Narrative view**:
@@ -51,10 +51,10 @@ _Avoid_: using "feel" for any Marrow store
 - Every stored record belongs to exactly one of **Permanent keepsake**, **Demote-sink**, or **Raw-stream**.
 - A **Structured view**'s primary correction path is md edit; a **Narrative view**'s primary correction path is the `mw` CLI or telling Claude.
 - **Reconcile** never splits a **Narrative view** block into new rows.
-- **Cold vocab** is **Demote-sink**, not **Permanent keepsake**.
+- **Cold memes** is **Demote-sink**, not **Permanent keepsake**.
 - Only **Raw-stream** is pruned; **Demote-sink** sinks but persists; **Permanent keepsake** is untouched.
 
 ## Flagged ambiguities
 
-- "vocab" was placed in **Permanent keepsake** ("never decays") in DESIGN while also described as cold-decaying — resolved: vocab is **Demote-sink** (decays by use_count / last_seen, revived by keyword).
+- "memes" (formerly "vocab") was placed in **Permanent keepsake** ("never decays") in DESIGN while also described as cold-decaying — resolved: memes is **Demote-sink** (decays by use_count / last_seen, revived by keyword).
 - "model" was used for both the conversation model and the embedding model — resolved: **Conversation model** generates replies and is swappable; **Embedding model** is a fixed local sentence-vector component used only for retrieval, never the conversation model, never a cloud / API embedding.
