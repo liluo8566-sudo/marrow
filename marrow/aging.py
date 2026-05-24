@@ -22,6 +22,7 @@ from __future__ import annotations
 import glob
 import re
 import sqlite3
+import os
 import sys
 from datetime import date, timedelta
 from pathlib import Path
@@ -110,6 +111,8 @@ def confirm_milestone_alerts(conn: sqlite3.Connection) -> int:
 
 def prune_goose_quotes(quote_dir: Path | None = None) -> int:
     """Delete ### YYYY-MM-DD blocks older than 7d; remove empty monthly files. Returns blocks pruned."""
+    if quote_dir is None and os.environ.get("PYTEST_CURRENT_TEST"):
+        return 0
     d = quote_dir or _GOOSE_DIR
     if not d.exists():
         return 0

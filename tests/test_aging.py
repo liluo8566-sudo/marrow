@@ -207,20 +207,22 @@ def _route_init_db(monkeypatch, p):
     )
 
 
-def test_main_runs_clean_on_empty_db(db, monkeypatch, capsys):
+def test_main_runs_clean_on_empty_db(db, monkeypatch, capsys, tmp_path):
     p = db.execute("PRAGMA database_list").fetchone()["file"]
     db.close()
     _route_init_db(monkeypatch, p)
+    monkeypatch.setattr(aging, "_GOOSE_DIR", tmp_path / "fake_goose")
     aging.main()
     cap = capsys.readouterr()
     assert "retired=0" in cap.err
     assert "archived=0" in cap.err
 
 
-def test_main_writes_audit_log(db, monkeypatch):
+def test_main_writes_audit_log(db, monkeypatch, tmp_path):
     p = db.execute("PRAGMA database_list").fetchone()["file"]
     db.close()
     _route_init_db(monkeypatch, p)
+    monkeypatch.setattr(aging, "_GOOSE_DIR", tmp_path / "fake_goose")
     aging.main()
     fresh = sqlite3.connect(p)
     fresh.row_factory = sqlite3.Row
