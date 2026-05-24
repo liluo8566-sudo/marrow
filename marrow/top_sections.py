@@ -272,7 +272,8 @@ def render_content(conn: sqlite3.Connection,
                    *, dashboard_path: str | None = None) -> str:
     """Render the `## Content` section listing subpages with md links.
 
-    Top items numbered, then `---` divider, then bottom items unnumbered.
+    Both top and bottom groups render as dot bullets — the `---` divider
+    is the only thing separating content (top) from utility (bottom).
     Links are relative to the dashboard's own directory so Obsidian +
     plain-md readers both resolve them. Hidden keys excluded by
     content_list().
@@ -297,8 +298,8 @@ def render_content(conn: sqlite3.Connection,
     if not top and not bottom:
         out.append("- (none)")
         return "\n".join(out)
-    for i, (label, path) in enumerate(top, start=1):
-        out.append(f"{i}. [{label}]({_rel(path)})")
+    for label, path in top:
+        out.append(f"- [{label}]({_rel(path)})")
     if bottom:
         out.append("---")
         for label, path in bottom:

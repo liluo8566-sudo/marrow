@@ -94,13 +94,13 @@ def test_render_top_includes_content_section(db, tmp_path, monkeypatch):
     finally:
         conn.close()
     assert "## Content" in block
-    # Top entries numbered
-    assert "1. [Milestone](" in block and "milestone.md" in block
-    assert "2. [Diary](" in block
-    # Divider before bottom
-    assert "---" in block
-    # Bottom entries unnumbered, just bullets
+    # Both top and bottom render as dot bullets; `---` separates them.
+    assert "- [Milestone](" in block and "milestone.md" in block
+    assert "- [Diary](" in block
     assert "- [Cheatsheet](" in block
+    assert "---" in block
+    # Numbered list form is gone.
+    assert "1. [" not in block and "2. [" not in block
     # Affect section precedes Content
     assert block.index("## Affect") < block.index("## Content")
 
