@@ -186,9 +186,8 @@ def _write_real_jsonl(path: Path, sid: str) -> None:
 
 
 def test_catchup_picks_pending_sids(db_env, monkeypatch, tmp_path):
-    """jsonl with no sessionend_extract audit + idle≥5min → spawn.
-    jsonl with any sessionend_extract audit (ok/skip/fail) → skip (no retry).
-    jsonl idle<5min (alive) → skip."""
+    """ok/skip → skip; first fail → retry once; second fail → skip;
+    no audit → spawn; alive (idle<10min) → skip."""
     db, _ = db_env
     projects = tmp_path / "projects"
     proj_dir = projects / "-Users-test"
@@ -197,15 +196,16 @@ def test_catchup_picks_pending_sids(db_env, monkeypatch, tmp_path):
     sid_done = "aaaaaaaa-done"
     sid_pending = "bbbbbbbb-pending"
     sid_failed_once = "cccccccc-failed-once"
+    sid_failed_twice = "eeeeeeee-failed-twice"
     sid_alive = "dddddddd-alive"
 
-    for sid in (sid_done, sid_pending, sid_failed_once, sid_alive):
+    for sid in (sid_done, sid_pending, sid_failed_once,
+                sid_failed_twice, sid_alive):
         _write_real_jsonl(proj_dir / f"{sid}.jsonl", sid)
 
-    # Backdate mtimes so they pass the idle guard; sid_alive stays "fresh".
     now = time.time()
-    old = now - 3600  # 1h ago, idle ≥ 5min
-    for sid in (sid_done, sid_pending, sid_failed_once):
+    old = now - 3600  # 1h ago, well past idle guard
+    for sid in (sid_done, sid_pending, sid_failed_once, sid_failed_twice):
         os.utime(proj_dir / f"{sid}.jsonl", (old, old))
 
     conn = storage.connect(db)
@@ -217,10 +217,19 @@ def test_catchup_picks_pending_sids(db_env, monkeypatch, tmp_path):
             "INSERT INTO audit_log (target_table, target_id, action, summary)"
             " VALUES ('events', ?, 'sessionend_extract', 'fail:LLMError')",
             (sid_failed_once,))
+        conn.execute(
+            "INSERT INTO audit_log (target_table, target_id, action, summary)"
+            " VALUES ('events', ?, 'sessionend_extract', 'fail:LLMError')",
+            (sid_failed_twice,))
+        conn.execute(
+            "INSERT INTO audit_log (target_table, target_id, action, summary)"
+            " VALUES ('events', ?, 'sessionend_extract', 'fail:Other')",
+            (sid_failed_twice,))
     conn.close()
 
     monkeypatch.setattr(
         "marrow.sessionstart_catchup._CC_PROJECTS", projects)
+    monkeypatch.setattr("marrow.sessionstart_catchup.MAX_FIRE", 5)
 
     spawned: list[list[str]] = []
 
@@ -232,9 +241,8 @@ def test_catchup_picks_pending_sids(db_env, monkeypatch, tmp_path):
         rc = sessionstart_catchup.main()
 
     assert rc == 0
-    assert len(spawned) == 1, f"expected 1 spawn, got {len(spawned)}: {spawned}"
-    sid_idx = spawned[0].index("--sid") + 1
-    assert spawned[0][sid_idx] == sid_pending
+    fired = {args[args.index("--sid") + 1] for args in spawned}
+    assert fired == {sid_pending, sid_failed_once}, fired
 
 
 def test_catchup_cap_caps_at_max_fire(db_env, monkeypatch, tmp_path):

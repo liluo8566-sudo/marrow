@@ -111,20 +111,30 @@ def _write_segment_audit(conn, sid: str, segment: str, summary: str) -> None:
 
 
 def _write_final_audit(conn, sid: str, summary: str) -> None:
+    # Count prior fail/partial rows BEFORE inserting this one. First failure
+    # stays silent — catchup retries once. Alert only when this insertion
+    # makes it ≥2 fail rows for the sid (catchup tier already failed).
+    prior_fails = 0
+    if summary.startswith(("fail:", "partial:")):
+        row = conn.execute(
+            "SELECT COUNT(*) c FROM audit_log"
+            " WHERE action='sessionend_extract' AND target_id=?"
+            " AND (summary LIKE 'fail:%' OR summary LIKE 'partial:%')",
+            (sid,),
+        ).fetchone()
+        prior_fails = row["c"] if row else 0
     with conn:
         conn.execute(
             "INSERT INTO audit_log (target_table, target_id, action, summary)"
             " VALUES ('events', ?, 'sessionend_extract', ?)",
             (sid, summary),
         )
-    # Surface fail / partial outcomes — silent audit was easy to miss.
-    # skip:short_session + ok stay silent.
-    if summary.startswith(("fail:", "partial:")):
+    if summary.startswith(("fail:", "partial:")) and prior_fails >= 1:
         try:
             sev = "critical" if summary.startswith("fail:") else "warn"
             repo.add_alert(
                 sev, "sessionend_async",
-                f"sid={sid[:8]} {summary}",
+                f"sid={sid[:8]} {summary} (catchup retry also failed)",
                 source="sessionend_async.py", db=config.db_path(),
             )
         except Exception:  # noqa: BLE001 — alert is best-effort

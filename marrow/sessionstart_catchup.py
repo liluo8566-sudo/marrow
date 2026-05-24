@@ -7,8 +7,9 @@ A jsonl is `pending` iff:
   - mtime within [now-WINDOW_HOURS, now-IDLE_SECONDS]
     (older = stale; newer = session likely still alive, skip this turn)
   - is_headless == False (real manual session, not a worker spawn)
-  - audit_log has zero `sessionend_extract` row for the sid
-    (any status — ok / skip / fail — counts as 'tried once, never again')
+  - audit_log has NO ok / skip:short_session row for the sid AND fewer
+    than RETRY_LIMIT fail/partial rows (catchup gives one retry; second
+    failure raises a critical alert via sessionend_async itself).
 
 For each pending sid we archive_events on the fly (covers the case where
 hooks.session_end never ran because cc dropped SessionEnd), then spawn
@@ -30,15 +31,25 @@ _CC_PROJECTS = Path.home() / ".claude" / "projects"
 WINDOW_HOURS = 24
 IDLE_SECONDS = 600  # jsonl untouched ≥10min → treat as closed; alive sessions still flushing skip this turn
 MAX_FIRE = 2
+RETRY_LIMIT = 2  # max fail/partial extractions before catchup gives up
 
 
-def _has_any_sessionend_audit(conn, sid: str) -> bool:
+def _should_skip(conn, sid: str) -> bool:
+    """Skip iff already succeeded (ok / skip:short_session) or already
+    hit RETRY_LIMIT failures. Otherwise eligible for catchup retry."""
     row = conn.execute(
-        "SELECT 1 FROM audit_log"
-        " WHERE action='sessionend_extract' AND target_id=? LIMIT 1",
+        "SELECT"
+        " SUM(CASE WHEN summary IN ('ok','skip:short_session') THEN 1 ELSE 0 END) AS done,"
+        " SUM(CASE WHEN summary LIKE 'fail:%' OR summary LIKE 'partial:%' THEN 1 ELSE 0 END) AS fails"
+        " FROM audit_log"
+        " WHERE action='sessionend_extract' AND target_id=?",
         (sid,),
     ).fetchone()
-    return row is not None
+    if not row:
+        return False
+    done = row["done"] or 0
+    fails = row["fails"] or 0
+    return done > 0 or fails >= RETRY_LIMIT
 
 
 def _jsonl_orphans(conn) -> list[str]:
@@ -64,7 +75,7 @@ def _jsonl_orphans(conn) -> list[str]:
         except OSError:
             continue
         sid = jsonl.stem
-        if _has_any_sessionend_audit(conn, sid):
+        if _should_skip(conn, sid):
             continue
         candidates.append((m, sid, jsonl))
     candidates.sort(key=lambda t: t[0], reverse=True)
