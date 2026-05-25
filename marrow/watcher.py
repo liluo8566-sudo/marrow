@@ -125,15 +125,6 @@ class _MdHandler(FileSystemEventHandler):
                 return True
         return False
 
-    def _sync(self, path: str) -> None:
-        report = self.store.sync_file(path)
-        if report.inserted or report.updated or report.tombstoned or report.cleared:
-            self.log.info(
-                "sync %s inserted=%d updated=%d tombstoned=%d cleared=%d",
-                path, report.inserted, report.updated,
-                report.tombstoned, report.cleared,
-            )
-
     def on_modified(self, event) -> None:
         if event.is_directory:
             return
@@ -194,7 +185,13 @@ class Watcher:
         self._stop = threading.Event()
 
     def _fire_sync(self, path: str) -> None:
-        self.store.sync_file(path)
+        report = self.store.sync_file(path)
+        if report.inserted or report.updated or report.tombstoned or report.cleared:
+            self.log.info(
+                "sync %s inserted=%d updated=%d tombstoned=%d cleared=%d",
+                path, report.inserted, report.updated,
+                report.tombstoned, report.cleared,
+            )
 
     def _attach_dir(self, handler: _MdHandler, root: str) -> None:
         if not Path(root).is_dir():
