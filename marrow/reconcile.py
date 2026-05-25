@@ -746,23 +746,14 @@ def _insert_unanchored_tasks(conn: sqlite3.Connection,
         status = "done" if check == "x" else "active"
         # Dedup: refuse to insert another active task with the same
         # (category, title) — keeps repeated mw refresh idempotent if Lumi
-        # forgot to delete her hand-typed line.
+        # forgot to delete her hand-typed line. Silent — no alert; the next
+        # render rewrites the hand-typed line as the canonical anchored row.
         dup = conn.execute(
             "SELECT id FROM tasks "
             "WHERE status='active' AND category=? AND title=? LIMIT 1",
             (parsed["category"], parsed["title"]),
         ).fetchone()
         if dup is not None:
-            try:
-                from . import repo as _repo
-                _repo.add_alert(
-                    "info", "tasks",
-                    f"unanchored task dedup: title={parsed['title'][:60]} "
-                    f"matches active id={dup['id']}",
-                    source="reconcile",
-                )
-            except Exception:
-                pass
             continue
         cur = conn.execute(
             "INSERT INTO tasks "
@@ -779,12 +770,15 @@ def _insert_unanchored_tasks(conn: sqlite3.Connection,
 
 # ── affect reconcile ──────────────────────────────────────────────────────────
 
-# Affect rows in the dashboard carry inline `<!-- id:affect.<id> -->` anchors.
-# Bullet shapes:
-#   - 【tone】 · eph<N> label | desc <!-- id:affect.N --> · epl<N> label | desc <!-- id:affect.N --> [<ago>|24h]
-#   - 【tone】 · segA <anchor> · segB <anchor> · segC <anchor> · segD <anchor>     (This Week)
-#   - [ ] <desc> <!-- id:affect.N -->                                              (Pending)
+# Affect rows in the dashboard carry their ids on a trail-marker line below
+# the bullet (`<!-- aff:1,2[,3,4] -->`). Bullet shapes:
+#   - 【tone】 · eph<N> label | desc · epl<N> label | desc [<ago>|24h]
+#     <!-- aff:<id1>,<id2> -->                                              (Today / 24h)
+#   - 【tone】 · segA · segB · segC · segD                                  (This Week)
+#     <!-- aff:<id1>,<id2>,<id3>,<id4> -->
+#   - [ ] <desc> <!-- id:affect.N -->                                       (Pending — inline anchor stays)
 _AFFECT_ID_RE = re.compile(r"<!-- id:affect\.(?P<id>\d+) -->")
+_AFFECT_TRAIL_RE = re.compile(r"<!--\s*aff:(?P<ids>[0-9,\s]*?)\s*-->")
 # Segment parser: `eph<N> <label> | <desc>` or `epl<N> <label> | <desc>`.
 _AFFECT_EP_SEG_RE = re.compile(
     r"^ep[hl]\d+\s+(?P<label>.+?)\s*\|\s*(?P<desc>.+?)\s*$"
@@ -808,34 +802,41 @@ def _affect_audit(conn, aid: int, action: str, summary: str) -> None:
     )
 
 
-def _parse_affect_segments(line: str) -> list[tuple[int, str | None, str | None]]:
-    """Extract (id, label, description) tuples from a Today/Week affect line.
+def _parse_affect_trail_ids(trail_line: str) -> list[int]:
+    """Pull the comma-separated affect ids out of a `<!-- aff:1,2,3 -->` line."""
+    m = _AFFECT_TRAIL_RE.search(trail_line)
+    if not m:
+        return []
+    ids: list[int] = []
+    for tok in m.group("ids").split(","):
+        tok = tok.strip()
+        if tok.isdigit():
+            ids.append(int(tok))
+    return ids
 
-    Line shape (after the leading tone bracket):
-      - 【tone】 · ep{h|l}N <label> | <desc> <!-- id:affect.N --> · ... [<ago>]
 
-    Strategy: strip the trailing ` [<...>]` suffix if present, split by the
-    middle-dot separator ` · `, drop the first segment (tone header), then
-    for each remaining segment pull the inline anchor + parse the ep shape.
-    Segments that don't carry an anchor are skipped (e.g. tone header at
-    position 0). Malformed segments contribute (id, None, None) so caller
-    can mark them unchanged without crashing.
+def _parse_affect_segments(line: str, ids: list[int]
+                           ) -> list[tuple[int, str | None, str | None]]:
+    """Extract (id, label, description) tuples from a Today/Week affect bullet.
+
+    Bullet shape (after the leading tone bracket):
+      - 【tone】 · ep{h|l}N <label> | <desc> · ep{h|l}N <label> | <desc> [<ago>]
+
+    `ids` comes from the trail-marker line directly below the bullet (left-
+    to-right segment order). Strategy: strip the trailing ` [<...>]` suffix,
+    split by middle-dot separator ` · `, drop the first segment (tone
+    header), then pair each remaining segment with the next id from `ids`.
+    Segments that don't match the ep shape contribute (id, None, None) so
+    caller can mark them unchanged without crashing.
     """
     body = line.rstrip()
-    # Strip trailing ` [<...>]` if present (Today line). This Week line has
-    # no trailing bracket so the regex no-ops.
     body = _AFFECT_AGO_SUFFIX_RE.sub("", body)
     parts = body.split(_AFFECT_SEG_SEP)
+    # parts[0] is the tone-header segment (`- 【tone】`) — skip.
+    segments = parts[1:] if len(parts) > 1 else []
     out: list[tuple[int, str | None, str | None]] = []
-    for seg in parts:
-        m_id = _AFFECT_ID_RE.search(seg)
-        if not m_id:
-            continue  # tone-header segment, or stray text
-        try:
-            aid = int(m_id.group("id"))
-        except ValueError:
-            continue
-        inner = _AFFECT_ID_RE.sub("", seg).strip()
+    for seg, aid in zip(segments, ids):
+        inner = seg.strip()
         m = _AFFECT_EP_SEG_RE.match(inner)
         if m:
             out.append((aid, m.group("label").strip(), m.group("desc").strip()))
@@ -884,34 +885,49 @@ def reconcile_affect(conn: sqlite3.Connection,
 
     # Two passes: collect anchored segments + remember section per id so the
     # pending parser (which needs DB context for label-vs-desc) can be applied
-    # after DB rows load.
+    # after DB rows load. Today / This Week bullets carry their ids on the
+    # NEXT line (`<!-- aff:1,2[,3,4] -->`) — pair the bullet body with the
+    # trail line in one forward scan. Pending rows keep the per-row anchor.
     ep_segs: dict[int, tuple[str | None, str | None]] = {}
     pending_lines: dict[int, str] = {}
     in_pending = False
-    for raw in block.splitlines():
-        s = raw.rstrip()
+    lines = block.splitlines()
+    i = 0
+    while i < len(lines):
+        s = lines[i].rstrip()
         stripped = s.lstrip()
         if stripped.startswith("### Pending"):
             in_pending = True
+            i += 1
             continue
         if stripped.startswith("### "):
             in_pending = False
-            continue
-        if not _AFFECT_ID_RE.search(s):
+            i += 1
             continue
         if in_pending:
-            m_id = _AFFECT_ID_RE.search(s)
-            try:
-                aid = int(m_id.group("id"))
-            except ValueError:
-                continue
-            pending_lines[aid] = s
+            if _AFFECT_ID_RE.search(s):
+                m_id = _AFFECT_ID_RE.search(s)
+                try:
+                    aid = int(m_id.group("id"))
+                except ValueError:
+                    i += 1
+                    continue
+                pending_lines[aid] = s
+            i += 1
             continue
-        try:
-            for aid, lbl, desc in _parse_affect_segments(s):
-                ep_segs[aid] = (lbl, desc)
-        except Exception as e:  # noqa: BLE001 — parse must never crash refresh
-            rpt.conflicts.append(f"affect line malformed: {e}")
+        # Today / This Week bullet line — pair with the next trail-marker line.
+        if stripped.startswith("- 【") and i + 1 < len(lines):
+            trail = lines[i + 1].rstrip()
+            ids = _parse_affect_trail_ids(trail)
+            if ids:
+                try:
+                    for aid, lbl, desc in _parse_affect_segments(s, ids):
+                        ep_segs[aid] = (lbl, desc)
+                except Exception as e:  # noqa: BLE001 — never crash refresh
+                    rpt.conflicts.append(f"affect line malformed: {e}")
+                i += 2
+                continue
+        i += 1
 
     all_ids = set(ep_segs) | set(pending_lines)
     if not all_ids:

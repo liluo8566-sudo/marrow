@@ -300,7 +300,10 @@ def test_unanchored_default_category_when_bracket_missing(conn, tmp_path):
 
 
 def test_unanchored_dedup_against_active_title(conn, tmp_path):
-    """Hand-typed line that matches an existing active task → skip insert."""
+    """Hand-typed line that matches an existing active task → skip insert,
+    silently. No info-level alert: the next render replaces the hand-typed
+    line with the canonical anchored row, so the dedup is invisible to Lumi.
+    """
     _insert_task(conn, "dup title", category="Project")
     dash = _render_dashboard(conn, tmp_path)
     dash.write_text(_inject_into_tasks_block(
@@ -313,6 +316,12 @@ def test_unanchored_dedup_against_active_title(conn, tmp_path):
         "SELECT COUNT(*) c FROM tasks WHERE title='dup title'"
     ).fetchone()["c"]
     assert count == 1
+    # No info alert pollutes the dashboard Alerts block.
+    alerts = conn.execute(
+        "SELECT severity, message FROM alerts WHERE resolved=0"
+    ).fetchall()
+    assert not any("dedup" in (a["message"] or "").lower() for a in alerts), \
+        f"silent dedup must not write info-level alert: {alerts}"
 
 
 # ── 9. Completed cutoff: 6AM local boundary ──────────────────────────────────

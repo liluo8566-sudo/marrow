@@ -227,8 +227,10 @@ def test_render_affect_today_single_ep_dedup(env):
     assert "eph2 平静 | 散步" in today_block
     # No second-side segment for dedup case.
     assert "epl" not in today_block
-    # Inline anchor — reconcile_affect relies on `<!-- id:affect.N -->`.
-    assert "<!-- id:affect." in today_block
+    # Bullet body stays anchor-free; trail marker on the next line carries
+    # the id so reconcile_affect can pair the segment back to the DB row.
+    assert "<!-- id:affect." not in today_block
+    assert "<!-- aff:" in today_block
 
 
 def test_render_affect_today_multi_ep_phrase_format(env):
@@ -245,8 +247,15 @@ def test_render_affect_today_multi_ep_phrase_format(env):
     today_block = out.split("### Today")[1].split("###")[0]
     assert "eph4 雀跃 | 拿到 HD" in today_block
     assert "epl3 委屈 | 猪一样的队友" in today_block
-    # Both eps anchored so reconcile can absorb edits on either side.
-    assert today_block.count("<!-- id:affect.") >= 2
+    # Bullet body stays anchor-free; trail marker on the next line carries
+    # both ids so reconcile can pair each segment back to its DB row.
+    assert "<!-- id:affect." not in today_block
+    # Trail marker covers both segments.
+    import re as _re
+    trail = _re.search(r"<!--\s*aff:([0-9,\s]*)-->", today_block)
+    assert trail, "expected aff: trail marker below bullet"
+    ids = [t.strip() for t in trail.group(1).split(",") if t.strip()]
+    assert len(ids) >= 2, f"trail must list both ep ids, got {ids}"
     # eph + epl share the same bullet line (inline format, not sub-bullets).
     bullet = [ln for ln in today_block.splitlines()
               if "eph4" in ln and "epl3" in ln]

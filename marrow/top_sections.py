@@ -206,8 +206,20 @@ def _ep_phrase(row: dict, side: str) -> str:
     return f"ep{side}{n} {label} | {desc}"
 
 
+def _affect_trail(ids: list[int]) -> str:
+    """Trail marker placed on its own line below an affect bullet, listing
+    the ids of each ep segment in left-to-right order. reconcile_affect
+    pairs segments to ids via this trail so the bullet body stays clean.
+    """
+    return f"<!-- aff:{','.join(str(i) for i in ids)} -->"
+
+
 def _affect_anchor(row: dict) -> str:
-    """Stable anchor for one affect record so reconcile_affect can match it."""
+    """Stable anchor for one affect record. Now used only by Pending rows
+    (single-record single-line bullets — anchor at the end stays readable).
+    Today/This Week bullets carry a trail marker on the next line instead;
+    see `_affect_trail`.
+    """
     return f"<!-- id:affect.{row['id']} -->"
 
 
@@ -244,8 +256,9 @@ def render_affect(conn: sqlite3.Connection) -> str:
         (week_floor,)).fetchall()]
 
     # Line 1 — last sessionend batch: tone header + inline eph/epl segments
-    # joined by ` · `, trailing ` [<ago>]`. Each ep segment carries its own
-    # `<!-- id:affect.N -->` anchor inline so reconcile_affect can absorb edits.
+    # joined by ` · `, trailing ` [<ago>]`. ep ids live on a trail-marker
+    # line directly below the bullet so reconcile_affect can pair segments
+    # to ids without polluting the visible body.
     if last_batch:
         tone_row = max(last_batch, key=lambda r: (r["importance"], r["valence"]))
         last_tone = tone_row.get("label") or _tone(
@@ -254,11 +267,14 @@ def render_affect(conn: sqlite3.Connection) -> str:
         ep_h = max(last_batch, key=lambda r: r["valence"])
         ep_l = min(last_batch, key=lambda r: r["valence"])
         ago = _rel_time(last_ts)
-        segs = [f"{_ep_phrase(ep_h, 'h')} {_affect_anchor(ep_h)}"]
+        segs = [_ep_phrase(ep_h, 'h')]
+        ids = [ep_h["id"]]
         if ep_l["id"] != ep_h["id"]:
-            segs.append(f"{_ep_phrase(ep_l, 'l')} {_affect_anchor(ep_l)}")
+            segs.append(_ep_phrase(ep_l, 'l'))
+            ids.append(ep_l["id"])
         body = " · ".join(segs)
         out.append(f"- 【{last_tone}】 · {body} [{ago}]")
+        out.append(_affect_trail(ids))
 
     # Line 2 — 24h aggregate (today, anchored to last_date).
     if today_rows:
@@ -266,11 +282,14 @@ def render_affect(conn: sqlite3.Connection) -> str:
         ep_h = max(today_rows, key=lambda r: (r["valence"], r["importance"]))
         ep_l = min(today_rows, key=lambda r: (r["valence"], -r["importance"]))
         tone = _tone(mv, ma)
-        segs = [f"{_ep_phrase(ep_h, 'h')} {_affect_anchor(ep_h)}"]
+        segs = [_ep_phrase(ep_h, 'h')]
+        ids = [ep_h["id"]]
         if ep_l["id"] != ep_h["id"]:
-            segs.append(f"{_ep_phrase(ep_l, 'l')} {_affect_anchor(ep_l)}")
+            segs.append(_ep_phrase(ep_l, 'l'))
+            ids.append(ep_l["id"])
         body = " · ".join(segs)
         out.append(f"- 【{tone}】 · {body} [24h]")
+        out.append(_affect_trail(ids))
 
     out.append("")
     out.append("### This Week")
@@ -299,12 +318,15 @@ def render_affect(conn: sqlite3.Connection) -> str:
             week_rows,
             key=lambda r: (-abs(r["valence"] - simple_mean), -r["importance"]),
         )[:4]
-        segs = []
+        segs: list[str] = []
+        ids: list[int] = []
         for r in outliers:
             side = "h" if r["valence"] >= simple_mean else "l"
-            segs.append(f"{_ep_phrase(r, side)} {_affect_anchor(r)}")
+            segs.append(_ep_phrase(r, side))
+            ids.append(r["id"])
         if segs:
             out.append(f"- 【{tone_label}】 · " + " · ".join(segs))
+            out.append(_affect_trail(ids))
         else:
             out.append(f"- 【{tone_label}】")
     else:
@@ -405,14 +427,17 @@ RECONCILED_BLOCK_IDS = frozenset({
 
 
 def _stamp_block_id(body: str, block_id: str) -> str:
-    """Append the id marker to the first `## ` heading line. Idempotent."""
+    """Prepend the id marker on its own line just above the first `## `
+    heading. Marker on own line keeps Obsidian's live preview clean — the
+    HTML comment hides while the H2 reads normally. Idempotent.
+    """
     marker = f"<!-- id:{block_id} -->"
     if marker in body:
         return body
     lines = body.splitlines()
     for i, ln in enumerate(lines):
         if ln.startswith("## "):
-            lines[i] = f"{ln} {marker}"
+            lines.insert(i, marker)
             return "\n".join(lines)
     # No H2 heading — prepend marker on its own line (defensive).
     return f"{marker}\n{body}"
