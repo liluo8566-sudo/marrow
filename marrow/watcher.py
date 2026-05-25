@@ -1,0 +1,272 @@
+"""marrow watcher — keep md_index in sync with dashboard.md, db-pages/, handover.md.
+
+Boot: full_scan reconcile (covers crash gap) -> persistent watchdog.Observer
+on three roots. Edits are debounced 200ms per (path, key) to dedup OS event
+storms (one save = 5-7 raw events on macOS). Hash-compare via md_index; no
+mute-lock timing — auto-writer + watcher race-safe by construction.
+"""
+from __future__ import annotations
+
+import logging
+import logging.handlers
+import os
+import signal
+import sys
+import threading
+import time
+from pathlib import Path
+
+from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
+
+import sqlite3
+
+import sqlite_vec
+
+from . import config, storage
+from .md_index import MdIndex
+
+_DEBOUNCE_S = 0.2
+_LOG_NAME = "watcher.log"
+
+
+def _logs_dir() -> Path:
+    d = Path(config.DATA_DIR) / "logs"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _setup_logger() -> logging.Logger:
+    log = logging.getLogger("marrow.watcher")
+    if log.handlers:
+        return log
+    log.setLevel(logging.INFO)
+    handler = logging.handlers.TimedRotatingFileHandler(
+        _logs_dir() / _LOG_NAME, when="midnight", backupCount=7, encoding="utf-8",
+    )
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)sZ %(levelname)s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    ))
+    log.addHandler(handler)
+    log.propagate = False
+    return log
+
+
+def _resolve_roots() -> tuple[list[str], list[str]]:
+    """Returns (file_roots, dir_roots) — both as absolute strings."""
+    cfg = config.load()
+    dash = str(Path(cfg["paths"]["dashboard"]).resolve())
+    db_pages = str(Path(cfg["paths"]["db_pages"]).resolve())
+    handover = str(Path(config.DATA_DIR) / "handover.md")
+    return [dash, handover], [db_pages]
+
+
+class _Debouncer:
+    """Coalesce repeat events per key inside _DEBOUNCE_S window."""
+
+    def __init__(self, delay: float, fire) -> None:
+        self.delay = delay
+        self.fire = fire
+        self._timers: dict[str, threading.Timer] = {}
+        self._lock = threading.Lock()
+
+    def trigger(self, key: str, *args) -> None:
+        with self._lock:
+            t = self._timers.get(key)
+            if t is not None:
+                t.cancel()
+            t = threading.Timer(self.delay, self._run, args=(key, args))
+            t.daemon = True
+            self._timers[key] = t
+            t.start()
+
+    def _run(self, key: str, args: tuple) -> None:
+        with self._lock:
+            self._timers.pop(key, None)
+        try:
+            self.fire(*args)
+        except Exception:  # noqa: BLE001 — log + survive; never kill the observer
+            logging.getLogger("marrow.watcher").exception(
+                "debounced fire failed: key=%s args=%r", key, args)
+
+    def flush(self) -> None:
+        with self._lock:
+            for t in list(self._timers.values()):
+                t.cancel()
+            self._timers.clear()
+
+
+class _MdHandler(FileSystemEventHandler):
+    """One handler instance per watcher run. Routes via debouncer.
+
+    `watched_files` = file-mode targets (full paths). `watched_dirs` = roots
+    monitored recursively. A path qualifies if it ends in .md AND either
+    matches a watched file OR sits under a watched dir. This keeps the
+    file-mode filter from rejecting dir-mode siblings inside the same parent.
+    """
+
+    def __init__(self, store: MdIndex, watched_files: set[str],
+                 watched_dirs: set[str], debouncer: _Debouncer,
+                 log: logging.Logger) -> None:
+        self.store = store
+        self.watched_files = watched_files
+        self.watched_dirs = watched_dirs
+        self.debouncer = debouncer
+        self.log = log
+
+    def _candidate(self, path: str) -> bool:
+        if not path.endswith(".md"):
+            return False
+        if path in self.watched_files:
+            return True
+        for d in self.watched_dirs:
+            if path == d or path.startswith(d + os.sep):
+                return True
+        return False
+
+    def _sync(self, path: str) -> None:
+        report = self.store.sync_file(path)
+        if report.inserted or report.updated or report.tombstoned or report.cleared:
+            self.log.info(
+                "sync %s inserted=%d updated=%d tombstoned=%d cleared=%d",
+                path, report.inserted, report.updated,
+                report.tombstoned, report.cleared,
+            )
+
+    def on_modified(self, event) -> None:
+        if event.is_directory:
+            return
+        path = str(Path(event.src_path).resolve())
+        if not self._candidate(path):
+            return
+        self.debouncer.trigger(path, path)
+
+    def on_created(self, event) -> None:
+        self.on_modified(event)
+
+    def on_moved(self, event) -> None:
+        if event.is_directory:
+            return
+        src = str(Path(event.src_path).resolve())
+        dst = str(Path(event.dest_path).resolve())
+        if self._candidate(src):
+            self.debouncer.trigger(src, src)
+        if self._candidate(dst):
+            self.debouncer.trigger(dst, dst)
+
+    def on_deleted(self, event) -> None:
+        if event.is_directory:
+            return
+        path = str(Path(event.src_path).resolve())
+        if not self._candidate(path):
+            return
+        self.debouncer.trigger(path, path)
+
+
+class Watcher:
+    """Lifecycle wrapper. Build, start, join, stop."""
+
+    def __init__(self) -> None:
+        self.log = _setup_logger()
+        self.file_roots, self.dir_roots = _resolve_roots()
+        # Schema first (default conn, main thread). Then reopen with
+        # check_same_thread=False for the debouncer worker threads.
+        storage.init_db().close()
+        db_path = config.db_path()
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(
+            db_path, timeout=30.0, check_same_thread=False,
+        )
+        self.conn.row_factory = sqlite3.Row
+        self.conn.enable_load_extension(True)
+        sqlite_vec.load(self.conn)
+        self.conn.enable_load_extension(False)
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA foreign_keys=ON")
+        self.conn.execute("PRAGMA busy_timeout=30000")
+        self.store = MdIndex(self.conn)
+        # File-mode and dir-mode tracking. Filled during attach().
+        self.watched_files: set[str] = set()
+        self.watched_dirs: set[str] = set()
+        self.observer = Observer()
+        self.debouncer = _Debouncer(_DEBOUNCE_S, self._fire_sync)
+        self._stop = threading.Event()
+
+    def _fire_sync(self, path: str) -> None:
+        self.store.sync_file(path)
+
+    def _attach_dir(self, handler: _MdHandler, root: str) -> None:
+        if not Path(root).is_dir():
+            self.log.warning("dir root missing, skipped: %s", root)
+            return
+        self.watched_dirs.add(root)
+        self.observer.schedule(handler, root, recursive=True)
+        self.log.info("watching dir %s", root)
+
+    def _attach_file(self, handler: _MdHandler, path: str) -> None:
+        # watchdog can only watch directories; we watch the parent + filter.
+        parent = str(Path(path).parent)
+        if not Path(parent).is_dir():
+            self.log.warning("file parent missing, skipped: %s", path)
+            return
+        self.watched_files.add(path)
+        self.observer.schedule(handler, parent, recursive=False)
+        self.log.info("watching file %s", path)
+
+    def _reconcile_boot(self) -> None:
+        roots = self.file_roots + self.dir_roots
+        report = self.store.full_scan(roots)
+        self.log.info(
+            "boot full_scan scanned_files=%d inserted=%d updated=%d "
+            "tombstoned=%d cleared=%d", report.scanned_files,
+            report.inserted, report.updated, report.tombstoned, report.cleared,
+        )
+        if report.files_without_markers:
+            # Warn once per path, not per scan tick.
+            self.log.warning(
+                "files without id markers (skipped): %s",
+                ", ".join(report.files_without_markers[:10]),
+            )
+
+    def run(self) -> None:
+        self.log.info("watcher pid=%d starting; roots=%s",
+                      os.getpid(), self.file_roots + self.dir_roots)
+        self._reconcile_boot()
+        handler = _MdHandler(self.store, self.watched_files,
+                             self.watched_dirs, self.debouncer, self.log)
+        for d in self.dir_roots:
+            self._attach_dir(handler, d)
+        for f in self.file_roots:
+            self._attach_file(handler, f)
+        # Build watched_files set BEFORE we start — handler already holds the
+        # reference, so additions land in time. (_MdHandler reads it on each
+        # event.)
+        self.observer.start()
+        if threading.current_thread() is threading.main_thread():
+            signal.signal(signal.SIGTERM, self._on_signal)
+            signal.signal(signal.SIGINT, self._on_signal)
+        try:
+            while not self._stop.is_set():
+                time.sleep(0.5)
+        finally:
+            self.log.info("watcher stopping")
+            self.debouncer.flush()
+            self.observer.stop()
+            self.observer.join(timeout=5)
+            try:
+                self.conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _on_signal(self, *_args) -> None:
+        self._stop.set()
+
+
+def main() -> int:
+    Watcher().run()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
