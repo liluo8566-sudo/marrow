@@ -225,36 +225,80 @@ def session_end() -> int:
         rows = transcript.clean(tpath)
         if rows:
             repo.archive_events(conn, rows)
+
+        # ── CRITICAL PATH (must complete within ms of archive) ────────────────
+        # cc reaps the whole hook process group on session close. dashboard
+        # write + embed_pending below run for seconds and routinely get
+        # killed mid-run, which used to also kill the lifecycle:end INSERT
+        # and the popen spawn -> sids stuck with no terminal marker. Keep
+        # this block tight and ahead of every slow side-effect.
+        sid = rows[0]["session_id"] if rows else None
+        if sid:
+            try:
+                with conn:
+                    conn.execute(
+                        "INSERT INTO audit_log"
+                        " (target_table, target_id, action, summary)"
+                        " VALUES ('events', ?, 'session_lifecycle:end', '')",
+                        (sid,),
+                    )
+            except Exception:  # noqa: BLE001
+                pass
+
+            # Idempotent gate: skip popen if events haven't grown since last ok.
+            skip_spawn = False
+            try:
+                last_ok = _last_ok_user_count(conn, sid)
+                if last_ok is not None:
+                    current_user = conn.execute(
+                        "SELECT COUNT(*) c FROM events"
+                        " WHERE session_id=? AND role='user'",
+                        (sid,),
+                    ).fetchone()["c"]
+                    if current_user <= last_ok:
+                        skip_spawn = True
+            except Exception:  # noqa: BLE001 — gate failure → safe to spawn
+                pass
+
+            if not skip_spawn:
+                log = config.DATA_DIR / "logs" / f"sessionend_async_{sid}.log"
+                try:
+                    popen_detach(
+                        [sys.executable, "-m", "marrow.sessionend_async", "--sid", sid],
+                        log_path=log,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    try:
+                        repo.add_alert(
+                            "warn", "sessionend_async",
+                            f"session_end async spawn failed: {e}",
+                            source="hooks.py", db=db,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+
+        # ── SLOW SIDE EFFECTS (best-effort) ────────────────────────────────
+        # Below here may not finish if cc kills the hook group. Each step
+        # has its own fallback: dashboard re-renders at 06:01 launchd tick
+        # + next SessionStart; embed_pending re-runs in sessionstart catchup
+        # and in sessionend_async itself.
+        # Bug #1 fix: handover.md is written ONLY by sessionend_async
+        # (single-writer rule). Sync skeleton write removed - it raced the
+        # async LLM injector and clobbered ThisSession/NextSession content.
+        # SessionStart stays read-only against handover.md.
         state = str(config.DATA_DIR / "state")
         dash = inp.get("marrow_dashboard") or config.dashboard_path()
         try:
             dashboard.write_dashboard(dash, conn, state_dir=state, db=db)
         except PermissionError as e:
             # TCC-protected Desktop / unauthorized context: skip the full
-            # re-render (lossless — next authorized session_end rewrites it).
-            # Alert so the operator sees the TCC block instead of a silent
-            # stale dashboard (DESIGN L33: every step writes alert on fail).
+            # re-render (lossless - next authorized session_end rewrites it).
             repo.add_alert(
                 "warn", "dashboard",
                 f"session_end skipped dashboard write: {e}",
                 source="hooks.py", db=db,
             )
-        # Sub-pages are owned by daily.py (07:00 routine + 19:00 catchup).
-        # session_end used to call write_all_subpages here unconditionally,
-        # which (a) re-rendered milestone.md every session even though no
-        # session-scoped data feeds it, (b) ran reconcile_milestones N times
-        # per day for no reason, (c) coupled with the old pinned=0 leak made
-        # the dashboard `Milestone candidate` block re-grow after manual
-        # deletes. session_end now only owns dashboard top (alerts/tasks/
-        # affect) + sessionend_async (handover + LLM extraction).
-        # Bug #1 fix: handover.md is written ONLY by sessionend_async
-        # (single-writer rule). Sync skeleton write removed — it raced the
-        # async LLM injector and clobbered ThisSession/NextSession content.
-        # SessionStart stays read-only against handover.md.
 
-        # Auto-embed events freshly archived this session so recall stays
-        # current without a manual MCP call. Fail-soft: embedder absence or
-        # any runtime error must never block session_end.
         try:
             from . import recall as recall_mod
             recall_mod.embed_pending(conn, batch=200)
@@ -264,53 +308,6 @@ def session_end() -> int:
                 f"session_end embed_pending failed: {e}",
                 source="hooks.py", db=db,
             )
-        # Fire async LLM extraction (SessionEnd async). Lifecycle markers and
-        # idempotent gate live here; sessionend_async owns its own skip gate too.
-        try:
-            sid = rows[0]["session_id"] if rows else None
-            if sid:
-                # 1. Write lifecycle:end marker (always, best-effort).
-                try:
-                    with conn:
-                        conn.execute(
-                            "INSERT INTO audit_log"
-                            " (target_table, target_id, action, summary)"
-                            " VALUES ('events', ?, 'session_lifecycle:end', '')",
-                            (sid,),
-                        )
-                except Exception:  # noqa: BLE001
-                    pass
-
-                # 2. Idempotent gate: skip popen if events haven't grown since last ok.
-                skip_spawn = False
-                try:
-                    last_ok = _last_ok_user_count(conn, sid)
-                    if last_ok is not None:
-                        current_user = conn.execute(
-                            "SELECT COUNT(*) c FROM events"
-                            " WHERE session_id=? AND role='user'",
-                            (sid,),
-                        ).fetchone()["c"]
-                        if current_user <= last_ok:
-                            skip_spawn = True
-                except Exception:  # noqa: BLE001 — gate failure → safe to spawn
-                    pass
-
-                if not skip_spawn:
-                    log = config.DATA_DIR / "logs" / f"sessionend_async_{sid}.log"
-                    popen_detach(
-                        [sys.executable, "-m", "marrow.sessionend_async", "--sid", sid],
-                        log_path=log,
-                    )
-        except Exception as e:
-            try:
-                repo.add_alert(
-                    "warn", "sessionend_async",
-                    f"session_end async spawn failed: {e}",
-                    source="hooks.py", db=db,
-                )
-            except Exception:
-                pass
     finally:
         conn.close()
     return 0
