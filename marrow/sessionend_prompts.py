@@ -123,7 +123,9 @@ instruction, rubric). Point to them in REFERENCE.
 - If a section is totally empty, output a single bullet `- N/A`.
 
 Marker bodies:
-> Do not repeat each other. If no clear plan -> open only.
+> Do not duplicate points into both open and plan. Choose one that fits best.
+> Exclude ideas / plan user ignored or rejected during the session.
+> Exclude plan that sounds too broad / vague / far away.
 - DONE: decisions, findings, work useful for next session.
 - OPEN: unfinished / blocked / undecided (state + blocker).
 - PLAN: next-step plans; exclude user-disagreed or FUTURE.
