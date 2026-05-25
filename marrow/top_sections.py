@@ -215,7 +215,7 @@ def render_affect(conn: sqlite3.Connection) -> str:
         "ORDER BY created_at DESC, id DESC LIMIT 1"
     ).fetchone()
 
-    out = ["## Affect", "### Today"]
+    out = ["## Affect", "", "### Today"]
     if not latest:
         out.append("_none_")
         out.append("### This Week")
@@ -269,6 +269,7 @@ def render_affect(conn: sqlite3.Connection) -> str:
                 f"{_ep_phrase(ep_l, 'l')} [24h]"
             )
 
+    out.append("")
     out.append("### This Week")
     if week_rows:
         mv, ma = _wmean(week_rows, "valence"), _wmean(week_rows, "arousal")
@@ -311,6 +312,7 @@ def render_affect(conn: sqlite3.Connection) -> str:
     ).fetchall()
     # Pending sub-section hides entirely when empty (no heading, no body).
     if pending_rows:
+        out.append("")
         out.append("### Pending")
         for r in pending_rows:
             text = r["description"] or r["label"] or "(ep)"
