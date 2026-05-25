@@ -37,8 +37,8 @@
 
 ## Dashboard — single entry
 - Top: Alerts (bug + pipeline-fail only; pipeline-fail self-clears, bug hand-cleared) · Open Threads (daily / study / project).
-- Bottom: Monitor Zone — last N system writes, read-only. Single purpose: Lumi sees where each row landed.
-- No user scratch zone.
+- Bottom: Monitor Zone — last N system writes. Auto-rendered + hand-editable, same SoT contract as all md (see Content flow).
+- All sections hand-editable; auto-writer skips any block whose hash diverges from md_index baseline (= user has edited).
 
 ## Sub-pages (one table → one view, same render contract)
 > Order + visibility config-driven via `[subpages]` in `~/.config/marrow/config.toml`. Two groups: top (content) + bottom (utility), rendered with `---` divider.
@@ -59,15 +59,13 @@ Bottom (utility):
 
 Dashboard top renders a `## Content` section below Affect, listing the above with md links to each subpage file. Candidate rows in dashboard sections carry three anchor buttons: `✅` pin (jump to target subpage, milestone uses `scope` to land in Us or Me) · `❌` drop (delete + tombstone) · `✏️` edit (in-place edit; md uses placeholder semantics, HTML layer realises it).
 
-## Content flow — bidirectional
-- System → md: pipeline scans events, writes candidate rows, next render shows them. Idempotent on source_hash.
-- md → System: edit md (hook reconciles before next render), or `mw` CLI by id, or tell Claude in plain language.
-- Reconcile by view type:
-  - Structured — row-end short id. id+text change → update; id removed → delete; new no-id block → insert.
-  - Narrative (diary, goose-bites) — date heading = row boundary. Edit body → whole-row overwrite by id; delete block incl heading → delete day; clearing body alone is not a delete.
-- Anti-revive: deleted row's hash → tombstone, extractor skips.
-- Hand-edit policy → DECISIONS (Lumi input > render; silent overwrite; alert only on AI/bug/reconcile-failure).
-- Pending: anchor char format · per-view render template · per-table extraction trigger/confidence.
+## Content flow — md is SoT, DB is index
+- Markdown is authoritative. DB is an index/search/aggregation layer that follows md.
+- System → md: inserter mode. Per-block content_hash in md_index; hash match on user-modified block → auto-writer skips (preserves edit).
+- md → System: watcher (watchdog/FSEvents) monitors md roots. Edit → md_index hash diff → DB sync (insert/update/tombstone).
+- Block id `<!-- id:N date:YYYY-MM-DD -->` stable across renders; tombstone via md_index.tombstones.
+- All hand-edits preserved across files, regions, blocks.
+- Recovery: md is canon; backups and system versioning cover loss.
 
 ## Hooks (four)
 - SessionStart — inject open threads + alerts; Phase 2 adds emotion backdrop. No persona (static CLAUDE.md owns it).
@@ -105,4 +103,5 @@ Dashboard top renders a `## Content` section below Affect, listing the above wit
 - Phase 1 shipped — memory core: SQLite + FTS + vec, daemon (MCP recall), 4 hooks Phase-1 subset, dashboard top, migrate.py, `mw` CLI, 4 launchd jobs (daily-routine / catchup / db-backup / aging), jsonl retention → cc `cleanupPeriodDays`.
 - Phase 2 in progress — emotion (affect) + recall fusion + entity co-emit + sub-page render fills out.
 - Phase 2.5 in-flight reset — SessionEnd async LLM pipeline · diary demote to read-only 07:00 roll-up (was 04:00) · threads → tasks · candidates 0-audit · pinned no-decay · 6AM day boundary · all-sonnet tier.
+- Phase 3 (in-flight, locked 2026-05-25) — md-as-SoT reversal · md_index hash table + watchdog daemon + per-block inserter for handover/dashboard/subpage/projects · Handover prompt split (state + narrative) + sessionend silent-death root-cause fix in wt-handover · Waves: wt-handover ∥ wt-md-a → wt-md-b ∥ wt-md-cd → wt-md-e → wt-md-f
 - Pending (scope/order TBD): writer authority · cross-channel parity (WeChat deep rebuild) · addons + OSS (stellan_wallet first). Detail → FUTURE.
