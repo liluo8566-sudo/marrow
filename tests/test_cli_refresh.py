@@ -62,6 +62,76 @@ def test_refresh_all_prints_subpages_marker(db, capsys):
     assert "+ subpages" in capsys.readouterr().out
 
 
+# ── wt-md-f: scan-then-render semantic ──────────────────────────────────────
+
+def test_refresh_scans_handover_md_into_md_index(db, tmp_path):
+    """mw refresh ingests hand-added blocks in handover.md into md_index so a
+    later auto-write sees the baseline and preserves them."""
+    p, _, _ = db
+    handover = tmp_path / "handover.md"
+    handover.write_text(
+        "# notes\n"
+        "<!-- id:handover.manual.block -->\n"
+        "- hand-added line\n",
+        encoding="utf-8",
+    )
+    rc = cli.main(["refresh", "--db", p])
+    assert rc == 0
+
+    conn = storage.connect(p)
+    row = conn.execute(
+        "SELECT content_hash, tombstone_at FROM md_index"
+        " WHERE path=? AND block_id=?",
+        (str(handover), "handover.manual.block"),
+    ).fetchone()
+    conn.close()
+    assert row is not None, "scan did not record handover hand-edit baseline"
+    assert row["tombstone_at"] is None
+
+
+def test_refresh_records_dashboard_block_baselines(db):
+    """mw refresh scans dashboard.md so each canonical block has a baseline
+    row in md_index — subsequent sessionend writes can detect hand-edits."""
+    p, dash, _ = db
+    assert cli.main(["refresh", "--db", p]) == 0
+    conn = storage.connect(p)
+    rows = conn.execute(
+        "SELECT block_id FROM md_index WHERE path=?"
+        " AND tombstone_at IS NULL AND block_id LIKE 'dashboard.%'",
+        (str(dash),),
+    ).fetchall()
+    conn.close()
+    block_ids = {r["block_id"] for r in rows}
+    # Alerts + tasks are unconditional canonical blocks.
+    assert "dashboard.alerts" in block_ids
+    assert "dashboard.tasks" in block_ids
+
+
+def test_refresh_all_scans_subpage_md_into_md_index(db, tmp_path):
+    """With --all, refresh full_scans subpage md files and re-renders."""
+    p, _, sub_folder = db
+    # First --all to bootstrap subpage files.
+    assert cli.main(["refresh", "--all", "--db", p]) == 0
+    # Hand-edit one subpage by injecting a marker.
+    profile = Path(sub_folder) / "profile.md"
+    if not profile.exists():
+        pytest.skip("profile subpage not produced in this fixture")
+    body = profile.read_text(encoding="utf-8")
+    profile.write_text(
+        body + "\n<!-- id:profile.handadd -->\n- hand line\n",
+        encoding="utf-8",
+    )
+    rc = cli.main(["refresh", "--all", "--db", p])
+    assert rc == 0
+    conn = storage.connect(p)
+    row = conn.execute(
+        "SELECT 1 FROM md_index WHERE path=? AND block_id=?",
+        (str(profile), "profile.handadd"),
+    ).fetchone()
+    conn.close()
+    assert row is not None, "scan phase did not pick up subpage hand-edit"
+
+
 # ── mw handover --sid ───────────────────────────────────────────────────────
 
 def test_handover_cli_fires_async_popen(db, capsys, monkeypatch):

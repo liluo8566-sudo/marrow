@@ -600,8 +600,8 @@ def test_user_deleted_bullet_tombstoned_and_filtered_on_next_render(env):
         "Tombstone-filter regression: Lumi-deleted bullet revived by sonnet.")
 
 
-def test_tombstone_rows_persist_in_audit_log(env):
-    """Confirm AuditLogTombstoneStore (placeholder impl) writes through."""
+def test_tombstone_rows_persist_in_md_index(env):
+    """MdIndexTombstoneStore writes through to md_index, keyed on handover path."""
     db, _, _, rendered_path = env
 
     _write_full(env, "s1", done="- keep\n- drop me")
@@ -612,12 +612,14 @@ def test_tombstone_rows_persist_in_audit_log(env):
 
     conn = _conn(db)
     rows = conn.execute(
-        "SELECT target_id, summary FROM audit_log"
-        " WHERE action='handover_tombstone'"
+        "SELECT block_id, content_hash FROM md_index"
+        " WHERE path=? AND tombstone_at IS NOT NULL",
+        (str(rendered_path),),
     ).fetchall()
     conn.close()
     assert len(rows) >= 1
-    assert any("drop me" in (r["summary"] or "") for r in rows)
+    # content_hash carries the bullet summary (truncated to 200 chars).
+    assert any("drop me" in (r["content_hash"] or "") for r in rows)
 
 
 def test_empty_inputs_render_na_in_all_sections(env):
@@ -628,3 +630,82 @@ def test_empty_inputs_render_na_in_all_sections(env):
     for header in ("## Done", "## Open", "## Plan", "## Reference"):
         section = content.split(header)[1].split("##")[0]
         assert "- N/A" in section, f"{header} missing N/A placeholder"
+
+
+# ── wt-md-f: MdIndex-backed tombstone adapter ───────────────────────────────
+
+def test_new_store_is_md_index_backed(env):
+    """_new_store() returns an MdIndex-backed adapter; tombstones land in
+    md_index table, not audit_log."""
+    db, _, _, rendered_path = env
+    conn = _conn(db)
+    store = handover_render._new_store(conn)
+    h = "deadbeef" * 5
+    store.tombstone(h, summary="some bullet")
+    listed = store.list_tombstones()
+    # Ensure tombstone surfaces via the new store.
+    assert h in listed
+    # Confirm row landed in md_index, not audit_log.
+    rows = conn.execute(
+        "SELECT COUNT(*) FROM md_index WHERE path=? AND block_id=?"
+        " AND tombstone_at IS NOT NULL",
+        (str(rendered_path), h),
+    ).fetchone()
+    conn.close()
+    assert rows[0] == 1
+
+
+def test_new_store_clear_tombstone_via_md_index(env):
+    db, _, _, rendered_path = env
+    conn = _conn(db)
+    store = handover_render._new_store(conn)
+    h1, h2 = "aaa" * 10, "bbb" * 10
+    store.tombstone(h1, summary="a")
+    store.tombstone(h2, summary="b")
+    assert {h1, h2}.issubset(store.list_tombstones())
+    store.clear_tombstone(h1)
+    listed = store.list_tombstones()
+    conn.close()
+    assert h1 not in listed
+    assert h2 in listed
+
+
+def test_new_store_record_and_get_hash_use_md_index(env):
+    """record_block / get_hash flow through MdIndex; baseline survives."""
+    db, _, _, rendered_path = env
+    conn = _conn(db)
+    store = handover_render._new_store(conn)
+    bid = "blk-handover-1"
+    store.record_block(bid, "hash-v1")
+    assert store.get_hash(bid) == "hash-v1"
+    store.record_block(bid, "hash-v2")
+    assert store.get_hash(bid) == "hash-v2"
+    conn.close()
+
+
+def test_user_deleted_bullet_uses_md_index_table(env):
+    """End-to-end Lumi-edit survival flow: tombstone row lands in md_index,
+    bullet stays filtered on next auto-write."""
+    db, _, _, rendered_path = env
+
+    _write_full(env, "s1",
+                done="- decision X\n- decision Y",
+                plan="- pick up Z")
+    body_1 = rendered_path.read_text(encoding="utf-8")
+    edited = body_1.replace("\n- decision Y", "")
+    rendered_path.write_text(edited, encoding="utf-8")
+    _write_full(env, "s2",
+                done="- decision X\n- decision Y",
+                plan="- pick up Z")
+    body_2 = rendered_path.read_text(encoding="utf-8")
+    done_section = body_2.split("## Done")[1].split("## Open")[0]
+    assert "- decision Y" not in done_section
+
+    conn = _conn(db)
+    rows = conn.execute(
+        "SELECT block_id FROM md_index WHERE path=?"
+        " AND tombstone_at IS NOT NULL",
+        (str(rendered_path),),
+    ).fetchall()
+    conn.close()
+    assert rows, "tombstone row did not land in md_index for handover path"

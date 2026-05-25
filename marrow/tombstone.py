@@ -65,6 +65,37 @@ class AuditLogTombstoneStore:
         return {r["target_id"] for r in rows if r["target_id"]}
 
 
+class MdIndexTombstoneStore:
+    """Thin adapter: bullet-level TombstoneStore Protocol over MdIndex.
+
+    Binds a fixed md path (handover.md) so callers stay bullet-hash-keyed
+    while persistence shares the md_index table used by dashboard / subpages.
+    block_id == content_hash; content_hash arg == summary placeholder.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, path: str):
+        from .md_index import MdIndex
+        self._idx = MdIndex(conn)
+        self._path = path
+
+    def record_block(self, block_id: str, content_hash: str) -> None:
+        self._idx.record_block(self._path, block_id, content_hash)
+
+    def get_hash(self, block_id: str) -> str | None:
+        return self._idx.get_hash(self._path, block_id)
+
+    def tombstone(self, content_hash: str, *, summary: str = "") -> None:
+        # Record then tombstone so the row exists with the hash payload.
+        self._idx.record_block(self._path, content_hash, summary[:200])
+        self._idx.tombstone(self._path, content_hash)
+
+    def clear_tombstone(self, content_hash: str) -> None:
+        self._idx.clear_tombstone(self._path, content_hash)
+
+    def list_tombstones(self) -> set[str]:
+        return {bid for bid, _ts in self._idx.list_tombstones(self._path)}
+
+
 # ── tombstone-aware bullet helpers (used by handover_render) ────────────────
 
 def filter_tombstoned(bullets: Iterable[str], tombstones: set[str]) -> list[str]:

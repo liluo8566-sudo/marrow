@@ -21,7 +21,7 @@ from pathlib import Path
 from . import config
 from .dashboard import _atomic_write
 from .handover_norm import bullet_lines
-from .tombstone import (AuditLogTombstoneStore, TombstoneStore,
+from .tombstone import (MdIndexTombstoneStore, TombstoneStore,
                         filter_tombstoned, record_user_deletes)
 
 _TEMPLATE_PATH = Path(__file__).parent / "handover_template.md"
@@ -197,8 +197,8 @@ def render_full(conn: sqlite3.Connection, sid: str,
 
 
 def _new_store(conn: sqlite3.Connection) -> TombstoneStore:
-    """Bind the active TombstoneStore. wt-md-a flips this to md_index store."""
-    return AuditLogTombstoneStore(conn)
+    """MdIndex-backed bullet store, bound to handover.md absolute path."""
+    return MdIndexTombstoneStore(conn, str(_RENDERED_PATH))
 
 
 def write_handover_full(conn: sqlite3.Connection, sid: str,

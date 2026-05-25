@@ -182,10 +182,30 @@ def cmd_handover(args) -> int:
     return 0
 
 
+def _refresh_scan(conn, *, include_subpages: bool) -> None:
+    """Walk watched md files and sync each into md_index before re-render.
+
+    Always: dashboard.md + handover.md. With include_subpages: db-pages folder.
+    Lets hand-edits become the new baseline so the next inserter pass
+    preserves them.
+    """
+    from .md_index import MdIndex
+    idx = MdIndex(conn)
+    file_roots = [config.dashboard_path(),
+                  str(config.DATA_DIR / "handover.md")]
+    dir_roots = [config.sub_pages_path()] if include_subpages else []
+    for f in file_roots:
+        if Path(f).exists():
+            idx.sync_file(f)
+    if dir_roots:
+        idx.full_scan(dir_roots)
+
+
 def cmd_refresh(args) -> int:
     db = args.db or config.db_path()
     conn = storage.connect(db)
     try:
+        _refresh_scan(conn, include_subpages=args.all)
         dashboard.write_dashboard(
             config.dashboard_path(), conn,
             state_dir=str(config.DATA_DIR / "state"), db=db,
