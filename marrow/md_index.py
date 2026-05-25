@@ -168,6 +168,13 @@ class MdIndex:
     def sync_file(self, path: str, report: ReconcileReport | None = None) -> ReconcileReport:
         """Reconcile one md file with md_index. Read fs, diff, write.
 
+        FULL semantic — overwrites `content_hash` for blocks whose body
+        changed on disk. Used by `full_scan` + tests. **Watcher and
+        `mw refresh` must NOT call this**: overwriting the baseline
+        destroys the "last auto-write" signal the dashboard inserter
+        compares user-edited bodies against. They call
+        `sync_file_observe` instead.
+
         Insert: new block_id → record_block.
         Update: same block_id, hash changed → record_block (overwrites + clears tombstone).
         Tombstone: block_id in db but absent from fs → tombstone.
@@ -216,13 +223,80 @@ class MdIndex:
                 report.tombstoned += 1
         return report
 
-    def full_scan(self, roots: list[str]) -> ReconcileReport:
+    def sync_file_observe(self, path: str,
+                           report: ReconcileReport | None = None
+                           ) -> ReconcileReport:
+        """Observe-only sync — keep `content_hash` baseline frozen.
+
+        Used by the watcher debounce + `mw refresh` scan phase. Semantic:
+        - new block_id on fs → record_block (first-sight baseline).
+        - existing block_id, body changed on fs → leave `content_hash`
+          alone (this is the user-edit signal the dashboard inserter
+          reads against to decide "preserve user body").
+        - block_id in db, absent from fs → tombstone.
+        - tombstoned block reappears on fs → record_block (fresh baseline)
+          so the next inserter pass doesn't skip-as-tombstoned.
+
+        Counters: `updated` still increments on detected drift even though
+        no write happens — log lines benefit from the volume signal.
+        """
+        report = report or ReconcileReport()
+        p = Path(path)
+        if not p.exists():
+            for bid, _ in self._list_active(path):
+                self.tombstone(path, bid)
+                report.tombstoned += 1
+            return report
+        text = p.read_text(encoding="utf-8")
+        blocks, has_markers = parse_blocks(text)
+        report.scanned_files += 1
+        if not has_markers:
+            report.files_without_markers.append(path)
+            for bid, _ in self._list_active(path):
+                self.tombstone(path, bid)
+                report.tombstoned += 1
+            return report
+        seen_ids: set[str] = set()
+        for blk in blocks:
+            seen_ids.add(blk.block_id)
+            prev = self._raw_row(path, blk.block_id)
+            if prev is None:
+                self.record_block(path, blk.block_id, blk.content_hash)
+                report.inserted += 1
+            else:
+                prev_hash, prev_tomb = prev
+                if prev_tomb is not None:
+                    # Was tombstoned, now back — clear + record fresh baseline.
+                    self.record_block(path, blk.block_id, blk.content_hash)
+                    report.cleared += 1
+                    if prev_hash != blk.content_hash:
+                        report.updated += 1
+                elif prev_hash != blk.content_hash:
+                    # User edit detected. DO NOT overwrite baseline.
+                    report.updated += 1
+        for bid, _ in self._list_active(path):
+            if bid not in seen_ids:
+                self.tombstone(path, bid)
+                report.tombstoned += 1
+        return report
+
+    def full_scan(self, roots: list[str], *, observe: bool = False
+                  ) -> ReconcileReport:
+        """Walk roots and reconcile each md file.
+
+        observe=False (default): full sync — overwrites baseline hashes on
+        body change. Used by watcher boot + tests.
+        observe=True: observe-only — keep baseline frozen. Used by the
+        `mw refresh` scan phase so user edits survive the next inserter
+        pass.
+        """
         report = ReconcileReport()
         seen_paths: set[str] = set()
+        sync = self.sync_file_observe if observe else self.sync_file
         for root in roots:
             for md_path in _walk_md(root):
                 seen_paths.add(md_path)
-                self.sync_file(md_path, report)
+                sync(md_path, report)
         # Tombstone files known to md_index but no longer on disk under any root.
         # Only sweep paths whose prefix matches one of the roots — avoids nuking
         # historical rows from rotated/moved dirs.

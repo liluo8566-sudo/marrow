@@ -25,7 +25,8 @@ from pathlib import Path
 
 from . import repo, top_sections
 from .md_index import MdIndex
-from .reconcile import reconcile_milestone_candidates, reconcile_tasks
+from .reconcile import (reconcile_affect, reconcile_milestone_candidates,
+                        reconcile_tasks)
 
 M0 = "<!-- marrow:top:start -->"
 M1 = "<!-- marrow:top:end -->"
@@ -165,6 +166,14 @@ def write_dashboard(path: str, conn, *, state_dir: str,
             repo.add_alert(
                 "warn", "dashboard",
                 f"task reconcile failed: {e}; falling through to render",
+                source="dashboard.py", db=db,
+            )
+        try:
+            reconcile_affect(conn, Path(path))
+        except Exception as e:
+            repo.add_alert(
+                "warn", "dashboard",
+                f"affect reconcile failed: {e}; falling through to render",
                 source="dashboard.py", db=db,
             )
     Path(state_dir).mkdir(parents=True, exist_ok=True)

@@ -215,7 +215,7 @@ def test_render_affect_today_band_low(env):
 
 
 def test_render_affect_today_single_ep_dedup(env):
-    """One today-ep → ep_h == ep_l, dedup to one side, no '· eplN' tail."""
+    """One today-ep → ep_h == ep_l, only the eph sub-bullet, no epl line."""
     db, _, _, _ = env
     conn = _conn(db)
     today = datetime.now(timezone.utc).date().isoformat()
@@ -223,17 +223,16 @@ def test_render_affect_today_single_ep_dedup(env):
                    label="平静", description="散步")
     out = top_sections.render_affect(conn)
     conn.close()
-    today_line = [
-        ln for ln in out.splitlines()
-        if ln.startswith("- 【")
-    ][0]
-    assert "eph2" in today_line
-    assert "epl" not in today_line  # no second side
-    assert "平静 | 散步" in today_line
+    today_block = out.split("### Today")[1].split("###")[0]
+    assert "eph2 平静 | 散步" in today_block
+    # No second-side sub-bullet for dedup case.
+    assert "epl" not in today_block
+    # Anchor per ep — reconcile_affect relies on `<!-- id:affect.N -->`.
+    assert "<!-- id:affect." in today_block
 
 
 def test_render_affect_today_multi_ep_phrase_format(env):
-    """Multi-ep day → ephN <label> | <description> · eplN <label> | <description>."""
+    """Multi-ep day → eph sub-bullet then epl sub-bullet, each anchored."""
     db, _, _, _ = env
     conn = _conn(db)
     today = datetime.now(timezone.utc).date().isoformat()
@@ -243,11 +242,11 @@ def test_render_affect_today_multi_ep_phrase_format(env):
                    label="委屈", description="猪一样的队友")
     out = top_sections.render_affect(conn)
     conn.close()
-    today_line = [
-        ln for ln in out.splitlines() if ln.startswith("- 【")
-    ][0]
-    assert "eph4 雀跃 | 拿到 HD" in today_line
-    assert "epl3 委屈 | 猪一样的队友" in today_line
+    today_block = out.split("### Today")[1].split("###")[0]
+    assert "eph4 雀跃 | 拿到 HD" in today_block
+    assert "epl3 委屈 | 猪一样的队友" in today_block
+    # Both eps anchored so reconcile can absorb edits on either side.
+    assert today_block.count("<!-- id:affect.") >= 2
 
 
 def test_render_affect_week_variance_label(env):

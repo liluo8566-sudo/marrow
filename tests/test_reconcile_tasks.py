@@ -84,6 +84,69 @@ def test_untick_sets_active(conn, tmp_path):
     assert row["status"] == "active"
 
 
+# ── 2b. title text edit absorbed into DB ─────────────────────────────────────
+
+def _swap_title(text: str, tid: int, old: str, new: str) -> str:
+    """Find the rendered row by anchor and substitute only the title segment."""
+    out_lines = []
+    needle = f"<!-- id:{tid} -->"
+    for ln in text.splitlines():
+        if needle in ln and old in ln:
+            ln = ln.replace(old, new, 1)
+        out_lines.append(ln)
+    return "\n".join(out_lines)
+
+
+def test_title_edit_updates_db(conn, tmp_path):
+    tid = _insert_task(conn, "123")
+    dash = _render_dashboard(conn, tmp_path)
+    # Lumi rewrites the title — leave the anchor + check intact.
+    dash.write_text(_swap_title(dash.read_text(), tid, "] 123 [", "] 321 ["))
+
+    rpt = reconcile.reconcile_tasks(conn, dash)
+
+    assert rpt.updated == 1
+    row = conn.execute("SELECT title FROM tasks WHERE id=?", (tid,)).fetchone()
+    assert row["title"] == "321"
+
+
+def test_title_edit_then_render_preserves_edit(conn, tmp_path):
+    """End-to-end: hand-edit title in md, write_dashboard reconciles +
+    re-renders. Re-rendered body must show Lumi's edited title."""
+    tid = _insert_task(conn, "old title")
+    dash = _render_dashboard(conn, tmp_path)
+    dash.write_text(
+        _swap_title(dash.read_text(), tid, "] old title [", "] new title [")
+    )
+    dashboard.write_dashboard(str(dash), conn, state_dir=str(tmp_path / "s"))
+    result = dash.read_text()
+    db_title = conn.execute(
+        "SELECT title FROM tasks WHERE id=?", (tid,)
+    ).fetchone()["title"]
+    assert db_title == "new title"
+    assert "new title" in result
+    assert "old title" not in result
+
+
+def test_title_edit_with_next_step_suffix(conn, tmp_path):
+    """next_step suffix peeling: edit the title text but leave the suffix."""
+    tid = _insert_task(conn, "draft")
+    conn.execute("UPDATE tasks SET next_step=? WHERE id=?", ("write intro", tid))
+    conn.commit()
+    dash = _render_dashboard(conn, tmp_path)
+    # Rendered row body: `[Study] draft: write intro [<date>] <!-- id:N -->`
+    dash.write_text(_swap_title(dash.read_text(), tid,
+                                "] draft: write intro [",
+                                "] essay: write intro ["))
+    reconcile.reconcile_tasks(conn, dash)
+    row = conn.execute(
+        "SELECT title, next_step FROM tasks WHERE id=?", (tid,)
+    ).fetchone()
+    assert row["title"] == "essay"
+    # next_step left untouched.
+    assert row["next_step"] == "write intro"
+
+
 # ── 3. delete-by-trail: id in trail, missing from md -> archived ──────────────
 
 def test_delete_by_trail_archives(conn, tmp_path):

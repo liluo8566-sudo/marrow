@@ -206,6 +206,11 @@ def _ep_phrase(row: dict, side: str) -> str:
     return f"ep{side}{n} {label} | {desc}"
 
 
+def _affect_anchor(row: dict) -> str:
+    """Stable anchor for one affect record so reconcile_affect can match it."""
+    return f"<!-- id:affect.{row['id']} -->"
+
+
 def render_affect(conn: sqlite3.Connection) -> str:
     # Anchor everything to the latest sessionend batch's date — so after 6AM
     # rollover the prior day stays visible until the next sessionend writes.
@@ -238,7 +243,9 @@ def render_affect(conn: sqlite3.Connection) -> str:
         "date FROM affect WHERE superseded_by IS NULL AND date>=?",
         (week_floor,)).fetchall()]
 
-    # Line 1 — last sessionend batch (fine label tone, batch max/min, ago tag).
+    # Line 1 — last sessionend batch (tone header + one anchored ep sub-bullet).
+    # Anchoring per ep lets reconcile_affect absorb description/label edits
+    # back into the specific DB row Lumi edited.
     if last_batch:
         tone_row = max(last_batch, key=lambda r: (r["importance"], r["valence"]))
         last_tone = tone_row.get("label") or _tone(
@@ -247,13 +254,10 @@ def render_affect(conn: sqlite3.Connection) -> str:
         ep_h = max(last_batch, key=lambda r: r["valence"])
         ep_l = min(last_batch, key=lambda r: r["valence"])
         ago = _rel_time(last_ts)
-        if ep_h["id"] == ep_l["id"]:
-            out.append(f"- 【{last_tone}】 · {_ep_phrase(ep_h, 'h')} [{ago}]")
-        else:
-            out.append(
-                f"- 【{last_tone}】 · {_ep_phrase(ep_h, 'h')} · "
-                f"{_ep_phrase(ep_l, 'l')} [{ago}]"
-            )
+        out.append(f"- 【{last_tone}】 [{ago}]")
+        out.append(f"  - {_ep_phrase(ep_h, 'h')} {_affect_anchor(ep_h)}")
+        if ep_l["id"] != ep_h["id"]:
+            out.append(f"  - {_ep_phrase(ep_l, 'l')} {_affect_anchor(ep_l)}")
 
     # Line 2 — 24h (today, anchored to last_date).
     if today_rows:
@@ -261,13 +265,10 @@ def render_affect(conn: sqlite3.Connection) -> str:
         ep_h = max(today_rows, key=lambda r: (r["valence"], r["importance"]))
         ep_l = min(today_rows, key=lambda r: (r["valence"], -r["importance"]))
         tone = _tone(mv, ma)
-        if ep_h["id"] == ep_l["id"]:
-            out.append(f"- 【{tone}】 · {_ep_phrase(ep_h, 'h')} [24h]")
-        else:
-            out.append(
-                f"- 【{tone}】 · {_ep_phrase(ep_h, 'h')} · "
-                f"{_ep_phrase(ep_l, 'l')} [24h]"
-            )
+        out.append(f"- 【{tone}】 [24h]")
+        out.append(f"  - {_ep_phrase(ep_h, 'h')} {_affect_anchor(ep_h)}")
+        if ep_l["id"] != ep_h["id"]:
+            out.append(f"  - {_ep_phrase(ep_l, 'l')} {_affect_anchor(ep_l)}")
 
     out.append("")
     out.append("### This Week")
@@ -296,16 +297,15 @@ def render_affect(conn: sqlite3.Connection) -> str:
             week_rows,
             key=lambda r: (-abs(r["valence"] - simple_mean), -r["importance"]),
         )[:4]
-        parts = [
-            _ep_phrase(r, "h" if r["valence"] >= simple_mean else "l")
-            for r in outliers
-        ]
-        out.append(f"- 【{tone_label}】 · {' · '.join(parts)}")
+        out.append(f"- 【{tone_label}】")
+        for r in outliers:
+            side = "h" if r["valence"] >= simple_mean else "l"
+            out.append(f"  - {_ep_phrase(r, side)} {_affect_anchor(r)}")
     else:
         out.append("_none_")
 
     pending_rows = conn.execute(
-        "SELECT description, label, resolved_at FROM affect "
+        "SELECT id, description, label, resolved_at FROM affect "
         "WHERE superseded_by IS NULL AND unresolved=1 AND date>=? "
         "ORDER BY created_at, id",
         (week_floor,),
@@ -317,7 +317,7 @@ def render_affect(conn: sqlite3.Connection) -> str:
         for r in pending_rows:
             text = r["description"] or r["label"] or "(ep)"
             box = "x" if r["resolved_at"] else " "
-            out.append(f"- [{box}] {text}")
+            out.append(f"- [{box}] {text} {_affect_anchor(dict(r))}")
     return "\n".join(out)
 
 
@@ -394,6 +394,7 @@ DASHBOARD_BLOCK_IDS = (
 RECONCILED_BLOCK_IDS = frozenset({
     "dashboard.tasks",
     "dashboard.milestone_cand",
+    "dashboard.affect",
 })
 
 

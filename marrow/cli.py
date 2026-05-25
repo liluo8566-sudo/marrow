@@ -183,11 +183,14 @@ def cmd_handover(args) -> int:
 
 
 def _refresh_scan(conn, *, include_subpages: bool) -> None:
-    """Walk watched md files and sync each into md_index before re-render.
+    """Walk watched md files and OBSERVE each into md_index before re-render.
 
-    Always: dashboard.md + handover.md. With include_subpages: db-pages folder.
-    Lets hand-edits become the new baseline so the next inserter pass
-    preserves them.
+    Observe-only: brand-new block_ids get a first-sight baseline so the
+    inserter knows they exist; existing block_ids whose body changed
+    leave their content_hash baseline UNTOUCHED — that is the signal the
+    dashboard inserter uses to recognise a user edit and preserve it.
+
+    Always: dashboard.md + handover.md. With include_subpages: db-pages.
     """
     from .md_index import MdIndex
     idx = MdIndex(conn)
@@ -196,9 +199,9 @@ def _refresh_scan(conn, *, include_subpages: bool) -> None:
     dir_roots = [config.sub_pages_path()] if include_subpages else []
     for f in file_roots:
         if Path(f).exists():
-            idx.sync_file(f)
+            idx.sync_file_observe(f)
     if dir_roots:
-        idx.full_scan(dir_roots)
+        idx.full_scan(dir_roots, observe=True)
 
 
 def cmd_refresh(args) -> int:

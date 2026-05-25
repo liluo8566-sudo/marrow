@@ -469,8 +469,12 @@ def reconcile_milestone_candidates(conn: sqlite3.Connection,
 # ── task reconcile ────────────────────────────────────────────────────────────
 
 _TASK_ROW_RE = re.compile(
-    r"^- \[(?P<check>[ x])\] .*<!-- id:(?P<id>\d+) -->\s*$"
+    r"^- \[(?P<check>[ x])\] (?P<body>.*?)\s*<!-- id:(?P<id>\d+) -->\s*$"
 )
+# Allow any non-ws text in tag — render emits Title/None-fallback Others so it
+# may carry spaces in user-renamed categories. The first `]` ends the tag.
+_TAG_PREFIX_RE = re.compile(r"^\[(?P<tag>[^\]]+)\]\s+(?P<rest>.*)$")
+_TRAILING_DATE_RE = re.compile(r"^(?P<rest>.*?)\s+\[(?P<date>[^\]]+)\]\s*$")
 _TASK_TRAIL_RE = re.compile(
     r"<!-- cand:task:ids=\[(?P<ids>[^\]]*)\] -->"
 )
@@ -485,16 +489,46 @@ def _task_audit(conn, tid: int, action: str, summary: str) -> None:
     )
 
 
+def _parse_task_row_body(body: str, db_next_step: str | None) -> str:
+    """Recover the title text from a rendered task row body.
+
+    Render shape: `[<tag>] <title>{: <next_step>}{ [<date>]}`. We peel the
+    optional tag prefix, the optional trailing `[<date>]`, then the optional
+    trailing `: <next_step>` IF the suffix matches the DB's next_step verbatim.
+    Whatever remains is the (possibly edited) title.
+
+    Conservative: if shapes don't match, return the body as-is — caller diffs
+    that against the DB title; equal → no edit, differ → absorb.
+    """
+    text = body.strip()
+    m = _TAG_PREFIX_RE.match(text)
+    if m:
+        text = m.group("rest").strip()
+    dm = _TRAILING_DATE_RE.match(text)
+    if dm:
+        text = dm.group("rest").rstrip()
+    if db_next_step:
+        suffix = f": {db_next_step}"
+        if text.endswith(suffix):
+            text = text[: -len(suffix)].rstrip()
+    return text
+
+
 def reconcile_tasks(conn: sqlite3.Connection,
                     dashboard_path: str | Path) -> ReconcileReport:
-    """Apply tick/untick edits from the dashboard Tasks block back to DB.
+    """Apply md edits from the dashboard Tasks block back to DB.
 
-    Contract:
-    - Row with <!-- id:N -->: [x] + active in DB -> UPDATE status='done'.
-    - Row with <!-- id:N -->: [ ] + done in DB -> UPDATE status='active'.
-    - id in trail marker but absent from rendered rows this pass -> archived.
-    - No-op when trail marker is absent (legacy dashboard, no anchors yet).
-    - Anchored id not found in DB -> conflict (logged, not fatal).
+    Absorbed edits — each becomes a DB UPDATE before re-render so the
+    reconciled block can safely overwrite the body:
+    - Tick `[ ] -> [x]` → status='done'.
+    - Untick `[x] -> [ ]` → status='active'.
+    - Title text edit → tasks.title UPDATE (peels tag/date/next_step
+      suffixes; whatever remains between them is the title).
+    - id in trail but missing from rendered rows → status='archived'.
+
+    No-op when trail marker is absent (legacy dashboard).
+    Anchored id not found in DB → conflict (logged, not fatal).
+    Malformed row → conflict + skip; never crash refresh.
     """
     rpt = ReconcileReport()
     dashboard_path = Path(dashboard_path)
@@ -524,12 +558,12 @@ def reconcile_tasks(conn: sqlite3.Connection,
             if part.isdigit():
                 trail_ids.add(int(part))
 
-    # Parse rows with anchors.
-    anchored: dict[int, str] = {}  # id -> "x" or " "
+    # Parse rows with anchors. body retained for title diff.
+    anchored: dict[int, tuple[str, str]] = {}  # id -> (check, body)
     for line in block.splitlines():
         m = _TASK_ROW_RE.match(line)
         if m:
-            anchored[int(m.group("id"))] = m.group("check")
+            anchored[int(m.group("id"))] = (m.group("check"), m.group("body"))
 
     if not trail_ids and not anchored:
         return rpt
@@ -537,21 +571,24 @@ def reconcile_tasks(conn: sqlite3.Connection,
     # Load all tasks referenced by anchored ids in one query.
     all_ids = trail_ids | set(anchored.keys())
     placeholders = ",".join("?" for _ in all_ids)
-    db_rows: dict[int, str] = {}
+    db_rows: dict[int, dict] = {}
     if all_ids:
         for row in conn.execute(
-            f"SELECT id, status FROM tasks WHERE id IN ({placeholders})",
+            f"SELECT id, status, title, next_step FROM tasks "
+            f"WHERE id IN ({placeholders})",
             list(all_ids),
         ).fetchall():
-            db_rows[row["id"]] = row["status"]
+            db_rows[row["id"]] = dict(row)
 
     with conn:
-        # tick / untick anchored rows
-        for tid, check in anchored.items():
+        # tick / untick / title-edit anchored rows
+        for tid, (check, body) in anchored.items():
             if tid not in db_rows:
                 rpt.conflicts.append(f"anchored id {tid} not in db")
                 continue
-            current = db_rows[tid]
+            row = db_rows[tid]
+            current = row["status"]
+            status_changed = False
             if check == "x" and current == "active":
                 conn.execute(
                     "UPDATE tasks SET status='done', updated_at=? WHERE id=?",
@@ -559,6 +596,7 @@ def reconcile_tasks(conn: sqlite3.Connection,
                 )
                 _task_audit(conn, tid, "tick", "md-reconcile: ticked done")
                 rpt.updated += 1
+                status_changed = True
             elif check == " " and current == "done":
                 conn.execute(
                     "UPDATE tasks SET status='active', updated_at=? WHERE id=?",
@@ -566,16 +604,37 @@ def reconcile_tasks(conn: sqlite3.Connection,
                 )
                 _task_audit(conn, tid, "untick", "md-reconcile: unticked active")
                 rpt.updated += 1
-            else:
+                status_changed = True
+            # Title edit absorption — parse the title text out of the row body
+            # and UPDATE the DB if it differs. Done independently of tick/
+            # untick so both can land in one pass.
+            try:
+                md_title = _parse_task_row_body(body, row.get("next_step"))
+            except Exception as e:  # noqa: BLE001 — parse must never crash
+                rpt.conflicts.append(f"task row {tid} malformed: {e}")
+                if not status_changed:
+                    rpt.unchanged += 1
+                continue
+            db_title = row.get("title") or ""
+            if md_title and md_title != db_title:
+                conn.execute(
+                    "UPDATE tasks SET title=?, updated_at=? WHERE id=?",
+                    (md_title, _now(), tid),
+                )
+                _task_audit(conn, tid, "retitle",
+                            f"md-reconcile: title={md_title[:80]}")
+                rpt.updated += 1
+            elif not status_changed:
                 rpt.unchanged += 1
 
         # archive: ids in trail but not present as anchored rows in this block
         for tid in trail_ids:
             if tid in anchored:
                 continue  # still rendered
-            current = db_rows.get(tid)
-            if current is None:
+            row = db_rows.get(tid)
+            if row is None:
                 continue  # already gone
+            current = row["status"]
             if current in ("done", "archived"):
                 continue  # already terminal
             conn.execute(
@@ -586,4 +645,137 @@ def reconcile_tasks(conn: sqlite3.Connection,
                         "md-reconcile: removed from dashboard")
             rpt.deleted += 1
 
+    return rpt
+
+
+# ── affect reconcile ──────────────────────────────────────────────────────────
+
+# Affect rows in the dashboard carry `<!-- id:affect.<id> -->` anchors. Format
+# of each anchored line is one of:
+#   - 【tone】 [ago]       (no anchor — derived stats only)
+#     - ep{h|l}N <label> | <description> <!-- id:affect.N -->
+#   - [ ] <desc> <!-- id:affect.N -->     (pending sub-section)
+_AFFECT_ID_RE = re.compile(r"<!-- id:affect\.(?P<id>\d+) -->")
+_AFFECT_EP_RE = re.compile(
+    r"^\s*-\s+ep[hl]\d+\s+(?P<label>.+?)\s*\|\s*(?P<desc>.+?)\s*$"
+)
+_AFFECT_PENDING_RE = re.compile(
+    r"^\s*-\s+\[[ x]\]\s+(?P<text>.+?)\s*$"
+)
+_AFFECT_H2 = "## Affect"
+
+
+def _affect_audit(conn, aid: int, action: str, summary: str) -> None:
+    conn.execute(
+        "INSERT INTO audit_log (target_table, target_id, action, summary) "
+        "VALUES ('affect', ?, ?, ?)",
+        (str(aid), action, summary),
+    )
+
+
+def _parse_affect_line(line: str, db_label: str | None,
+                       db_desc: str | None) -> tuple[str | None, str | None]:
+    """Recover (label, description) from a rendered affect anchored line.
+
+    Strip the trailing `<!-- id:affect.N -->`. Try ep-phrase shape first
+    (`ep{h|l}N label | desc`); fall back to pending-shape (`[ ] text`).
+    Returns (None, None) when the line doesn't match either shape — caller
+    treats as unchanged.
+    """
+    body = _AFFECT_ID_RE.sub("", line).rstrip()
+    m = _AFFECT_EP_RE.match(body)
+    if m:
+        return m.group("label").strip(), m.group("desc").strip()
+    m = _AFFECT_PENDING_RE.match(body)
+    if m:
+        text = m.group("text").strip()
+        # pending render emits `description or label or (ep)`. Map md text
+        # back to whichever field the DB sourced it from.
+        if db_desc and text == db_desc:
+            return None, db_desc  # unchanged
+        if db_label and text == db_label and not db_desc:
+            return db_label, None  # unchanged label-only source
+        # Edit detected — assume the user wrote into description (richer field).
+        return None, text
+    return None, None
+
+
+def reconcile_affect(conn: sqlite3.Connection,
+                     dashboard_path: str | Path) -> ReconcileReport:
+    """Absorb dashboard `## Affect` description/label edits back into the
+    affect table. Each anchored line maps 1:1 to one DB row via the
+    `<!-- id:affect.N -->` marker. Aggregate stats lines (no anchor) and
+    sub-section headings (`### Today`, `### Pending`) are left alone.
+
+    No-op when the affect block has no anchored lines (cold-start / empty).
+    """
+    rpt = ReconcileReport()
+    dashboard_path = Path(dashboard_path)
+    if not dashboard_path.exists():
+        return rpt
+    text = dashboard_path.read_text(encoding="utf-8")
+    start = text.find(_AFFECT_H2)
+    if start == -1:
+        return rpt
+    after_h2 = text[start + len(_AFFECT_H2):]
+    next_h2 = re.search(r"\n##\s", after_h2)
+    block = after_h2[: next_h2.start()] if next_h2 else after_h2
+
+    # Collect anchored lines: id -> raw line.
+    anchored: dict[int, str] = {}
+    for raw in block.splitlines():
+        m = _AFFECT_ID_RE.search(raw)
+        if not m:
+            continue
+        try:
+            aid = int(m.group("id"))
+        except ValueError:
+            continue
+        anchored[aid] = raw
+
+    if not anchored:
+        return rpt
+
+    placeholders = ",".join("?" for _ in anchored)
+    db_rows: dict[int, dict] = {}
+    for row in conn.execute(
+        f"SELECT id, label, description FROM affect "
+        f"WHERE id IN ({placeholders})",
+        list(anchored.keys()),
+    ).fetchall():
+        db_rows[row["id"]] = dict(row)
+
+    with conn:
+        for aid, line in anchored.items():
+            row = db_rows.get(aid)
+            if row is None:
+                rpt.conflicts.append(f"anchored affect id {aid} not in db")
+                continue
+            try:
+                new_label, new_desc = _parse_affect_line(
+                    line, row.get("label"), row.get("description")
+                )
+            except Exception as e:  # noqa: BLE001 — parse must never crash
+                rpt.conflicts.append(f"affect line {aid} malformed: {e}")
+                continue
+            updates: list[tuple[str, str | None]] = []
+            db_label = row.get("label")
+            db_desc = row.get("description")
+            if new_label is not None and new_label != (db_label or ""):
+                updates.append(("label", new_label))
+            if new_desc is not None and new_desc != (db_desc or ""):
+                updates.append(("description", new_desc))
+            if not updates:
+                rpt.unchanged += 1
+                continue
+            set_clause = ", ".join(f"{c}=?" for c, _ in updates)
+            params = [v for _, v in updates] + [aid]
+            conn.execute(f"UPDATE affect SET {set_clause} WHERE id=?", params)
+            _affect_audit(
+                conn, aid, "retext",
+                f"md-reconcile: " + ", ".join(
+                    f"{c}={(v or '')[:40]}" for c, v in updates
+                ),
+            )
+            rpt.updated += 1
     return rpt

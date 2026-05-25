@@ -140,9 +140,10 @@ def test_iter_top_blocks_round_trip_through_dashboard_parser(db):
     assert list(parsed.keys()) == list(top_sections.DASHBOARD_BLOCK_IDS)
 
 
-def test_tasks_block_always_overwritten(db, tmp_path):
-    # Tasks is a reconciled block — reconcile_tasks absorbed any user edit
-    # into the DB before render, so the inserter always rewrites it.
+def test_tasks_title_edit_absorbed_into_db(db, tmp_path):
+    # Tasks block is RECONCILED: reconcile_tasks absorbs Lumi's title edit
+    # back into the DB before render, so the next render reproduces her
+    # edited title rather than clobbering it.
     dash = tmp_path / "dashboard.md"
     state = tmp_path / "state"
     conn = storage.connect(db)
@@ -153,12 +154,16 @@ def test_tasks_block_always_overwritten(db, tmp_path):
         dash.write_text(t)
         dashboard.write_dashboard(str(dash), conn, state_dir=str(state), db=db)
         result = dash.read_text()
+        db_title = conn.execute(
+            "SELECT title FROM tasks WHERE id=1"
+        ).fetchone()[0]
         alerts = [a["message"] for a in
                   __import__("marrow.repo", fromlist=["x"]).open_alerts(conn)]
     finally:
         conn.close()
-    assert "EDITED BY LUMI" not in result
-    assert "Essay 370" in result
+    assert "EDITED BY LUMI" in result, \
+        "title edit must survive re-render via DB absorption"
+    assert db_title == "Essay 370 EDITED BY LUMI"
     assert not any("dashboard" in m.lower() and "hand-edited" in m.lower()
                    for m in alerts)
     assert not list(Path(state).glob("dashboard*.bak"))

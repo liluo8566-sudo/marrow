@@ -185,7 +185,12 @@ class Watcher:
         self._stop = threading.Event()
 
     def _fire_sync(self, path: str) -> None:
-        report = self.store.sync_file(path)
+        # observe-only — keep auto-write baseline frozen so the dashboard
+        # inserter can detect user edits on the next render. Hand-edit
+        # debounce fires → block_id stays in md_index but content_hash
+        # baseline is NOT updated → dashboard._resolve_blocks sees stored
+        # != cur_hash → preserves user body.
+        report = self.store.sync_file_observe(path)
         if report.inserted or report.updated or report.tombstoned or report.cleared:
             self.log.info(
                 "sync %s inserted=%d updated=%d tombstoned=%d cleared=%d",
@@ -212,8 +217,11 @@ class Watcher:
         self.log.info("watching file %s", path)
 
     def _reconcile_boot(self) -> None:
+        # Boot scan = observe-only. Hand-edits made while the watcher was
+        # down must not collapse the auto-write baseline; the next inserter
+        # pass needs `stored != cur_hash` to recognise them as user edits.
         roots = self.file_roots + self.dir_roots
-        report = self.store.full_scan(roots)
+        report = self.store.full_scan(roots, observe=True)
         self.log.info(
             "boot full_scan scanned_files=%d inserted=%d updated=%d "
             "tombstoned=%d cleared=%d", report.scanned_files,
