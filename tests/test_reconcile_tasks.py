@@ -122,7 +122,7 @@ def test_noop_when_no_trail(conn, tmp_path):
 # ── 5. _seg_task_cand: done status UPDATEs active row, no INSERT ──────────────
 
 def test_seg_task_cand_done_updates_not_inserts(conn, tmp_path):
-    from marrow.sessionend_async import _seg_task_cand
+    from marrow.sessionend_writers import seg_task_cand as _seg_task_cand
 
     tid = _insert_task(conn, "Fix bug", status="active")
     before = conn.execute("SELECT COUNT(*) c FROM tasks WHERE title='Fix bug'").fetchone()["c"]
@@ -139,7 +139,7 @@ def test_seg_task_cand_done_updates_not_inserts(conn, tmp_path):
 # ── 6. _seg_task_cand: archived title skips insert ───────────────────────────
 
 def test_seg_task_cand_skips_archived(conn, tmp_path):
-    from marrow.sessionend_async import _seg_task_cand
+    from marrow.sessionend_writers import seg_task_cand as _seg_task_cand
 
     _insert_task(conn, "Old task", status="archived")
 

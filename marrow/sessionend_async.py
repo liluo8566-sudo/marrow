@@ -1,28 +1,31 @@
-"""SessionEnd async LLM extraction: 1 sonnet call → 4 block writers.
+"""SessionEnd async LLM extraction: 2 sonnet calls → 4 segment writers.
 
 CLI: python -m marrow.sessionend_async --sid <session_id>
 
-One combined SESSIONEND_PROMPT emits AFFECT / TASK_CAND / DIGEST /
-HANDOVER blocks. Each writer parses its own marker — one block failing
-to parse does not block the others. Audit row per block + final summary
-(ok / partial / fail).
+STATE call emits TASK_CAND + HANDOVER. NARRATIVE call emits AFFECT + DIGEST.
+Both prompts share a byte-identical transcript-fence prefix so the second
+call's cache_read > 0 (audit_log.llm_call_cost). One call failing does not
+block the other.
 
 Skip rule: sessions with ≤ skip_turn_threshold user turns extract nothing.
+Stale-skip recovery: if a prior skip:short_session row exists but the
+session has since grown past threshold (cc mid-flush partial archive),
+drop the skip and process.
 
-ENTITY/MILESTONE/MEMES candidate extraction lives in daily.py (day-
-aggregated input is cheaper and dedupes naturally).
+ENTITY/MILESTONE/MEMES candidate extraction lives in daily.py.
 """
 from __future__ import annotations
 
 import datetime as _dt
-import json
 import sys
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from . import candidates, config, handover_render, repo, storage
+from . import config, handover_render, repo, storage
 from .llm import LLMClient, LLMError
-from .sessionend_prompts import SESSIONEND_PROMPT, fence
+from .sessionend_prompts import NARRATIVE_PROMPT, STATE_PROMPT
+from .sessionend_writers import (seg_affect, seg_digest, seg_handover,
+                                 seg_task_cand)
 
 _LOGS_DIR = Path.home() / ".config" / "marrow" / "logs"
 _TZ = ZoneInfo("Australia/Melbourne")
@@ -35,25 +38,7 @@ _SUMMARY_START = "start"
 _SEGMENTS = ("affect", "task_cand", "digest", "handover")
 
 
-# ── parsing helpers ─────────────────────────────────────────────────────────
-
-def _extract_text_block(text: str, marker: str) -> str:
-    """Pull prose between ===<marker>=== and the next ===END==='."""
-    open_tag = f"==={marker}==="
-    i = text.find(open_tag)
-    if i == -1:
-        return ""
-    tail = text[i + len(open_tag):]
-    j = tail.find("===END===")
-    return tail[:j].strip() if j != -1 else tail.strip()
-
-
-def _clamp_importance(x) -> int:
-    try:
-        return max(1, min(5, int(x)))
-    except (TypeError, ValueError):
-        return 3
-
+# ── helpers ─────────────────────────────────────────────────────────────────
 
 def _to_local_date(utc_iso: str) -> str:
     """UTC ISO -> local diary day by 6AM cutoff."""
@@ -67,8 +52,6 @@ def _to_local_date(utc_iso: str) -> str:
     local = d.astimezone(_TZ) - _dt.timedelta(hours=_CUTOFF_H)
     return local.date().isoformat()
 
-
-# ── DB ops ──────────────────────────────────────────────────────────────────
 
 def _user_event_count(conn, sid: str) -> int:
     row = conn.execute(
@@ -117,7 +100,9 @@ def _drop_stale_skip(conn, sid: str, threshold: int) -> bool:
 
 
 def _session_events_text(conn, sid: str) -> tuple[str, str]:
-    """Return (fenced events string, session date). Empty session -> ('', today)."""
+    """Return (raw events block, session date). Empty session -> ('', today).
+    Transcript fence lives inside the prompt body (sessionend_prompts), so
+    we only emit the role-tagged content here."""
     rows = conn.execute(
         "SELECT timestamp, role, content FROM events"
         " WHERE session_id=? ORDER BY timestamp, id",
@@ -128,7 +113,7 @@ def _session_events_text(conn, sid: str) -> tuple[str, str]:
     label = {"user": "念念", "assistant": "屿忱"}
     lines = [f"[{label.get(r['role'], r['role'])}] {r['content']}" for r in rows]
     date = _to_local_date(rows[0]["timestamp"])
-    return fence("\n".join(lines)), date
+    return "\n".join(lines), date
 
 
 def _write_segment_audit(conn, sid: str, segment: str, summary: str) -> None:
@@ -141,10 +126,10 @@ def _write_segment_audit(conn, sid: str, segment: str, summary: str) -> None:
 
 
 def _write_final_audit(conn, sid: str, summary: str) -> None:
-    # Count prior effective failures BEFORE inserting this one. Effective =
-    # explicit fail/partial rows + silent deaths (start rows with no matching
-    # terminal). First failure stays silent — catchup retries once. Alert
-    # only when this insertion pushes effective failures ≥ 2.
+    """Insert final summary row + alert when effective failures cross 2.
+    Effective failures = fail/partial rows + silent deaths (start rows
+    without a matching terminal). Silent-death count excludes the current
+    attempt's own 'start' row."""
     prior_fails = 0
     if summary.startswith(("fail:", "partial:")):
         row = conn.execute(
@@ -160,7 +145,6 @@ def _write_final_audit(conn, sid: str, summary: str) -> None:
             fails = row["fails"] or 0
             done = row["done"] or 0
             starts = row["starts"] or 0
-            # Exclude the current attempt's own 'start' row from silent-death count.
             silent_deaths = max(0, starts - 1 - (done + fails))
             prior_fails = fails + silent_deaths
     with conn:
@@ -181,171 +165,11 @@ def _write_final_audit(conn, sid: str, summary: str) -> None:
             pass
 
 
-# ── segment writers ─────────────────────────────────────────────────────────
-
-def _seg_affect(conn, raw: str, sid: str, date: str) -> int:
-    """Insert affect rows with importance clamp + unresolved/reconcile linkage."""
-    items = candidates.extract_block(raw, "AFFECT")
-    if not items:
-        return 0
-    n = 0
-    for it in items:
-        if not isinstance(it, dict):
-            continue
-        ep = int(it.get("ep") or (n + 1))
-        valence = float(it.get("valence", 0.5))
-        arousal = float(it.get("arousal", 0.3))
-        importance = _clamp_importance(it.get("importance", 3))
-        label = it.get("label") or None
-        desc_raw = it.get("description")
-        description = desc_raw.strip() if isinstance(desc_raw, str) else None
-        if not description:
-            description = label
-            print(
-                f"[sessionend_async] warn: affect ep={ep} missing description,"
-                f" fallback to label={label!r}",
-                file=sys.stderr,
-            )
-        ents = it.get("entities")
-        entities = (json.dumps(ents, ensure_ascii=False)
-                    if isinstance(ents, list) and ents else None)
-        unresolved_raw = it.get("unresolved", 0)
-        try:
-            unresolved = 1 if int(unresolved_raw) else 0
-        except (TypeError, ValueError):
-            unresolved = 0
-        reconcile_prev = it.get("reconcile_prev")
-        if isinstance(reconcile_prev, str):
-            rp = reconcile_prev.strip()
-            reconcile_prev = None if not rp or rp.upper() == "N/A" else rp
-        else:
-            reconcile_prev = None
-
-        reconcile_ref = None
-        if reconcile_prev:
-            prior = conn.execute(
-                "SELECT id FROM affect_live"
-                " WHERE unresolved=1 AND resolved_at IS NULL"
-                " ORDER BY created_at DESC, id DESC LIMIT 1"
-            ).fetchone()
-            if prior:
-                reconcile_ref = prior["id"]
-
-        with conn:
-            conn.execute(
-                "INSERT INTO affect (date, ep, valence, arousal, importance,"
-                " label, description, entities, source, unresolved,"
-                " reconcile_ref, reconcile_prev_text)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (date, ep, valence, arousal, importance, label, description,
-                 entities, "sessionend_async", unresolved, reconcile_ref,
-                 reconcile_prev),
-            )
-            if reconcile_ref:
-                ts_now = _dt.datetime.now(_dt.timezone.utc).strftime(
-                    "%Y-%m-%dT%H:%M:%SZ")
-                conn.execute(
-                    "UPDATE affect SET resolved_at=? WHERE id=?",
-                    (ts_now, reconcile_ref),
-                )
-            n += 1
-    return n
-
-
-_TASK_CATEGORIES = (
-    "Appointment", "Assignment", "Study", "Project", "Daily", "Others",
-)
-
-
-def _normalise_category(raw: str | None) -> str:
-    if not raw:
-        return "Others"
-    cleaned = raw.strip().title()
-    return cleaned if cleaned in _TASK_CATEGORIES else "Others"
-
-
-def _seg_task_cand(conn, raw: str) -> int:
-    """tasks table: dedup on title across active/done/archived; category from LLM \
-(whitelist fallback Others)."""
-    items = candidates.extract_block(raw, "TASK_CAND")
-    if not items:
-        return 0
-    n = 0
-    _24h_ago = (_dt.datetime.now(_dt.timezone.utc)
-                - _dt.timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    for it in items:
-        if not isinstance(it, dict):
-            continue
-        title = (it.get("title") or "").strip()
-        if not title:
-            continue
-        status = it.get("status") or "active"
-        if status not in ("active", "done", "archived"):
-            status = "active"
-        category = _normalise_category(it.get("category"))
-        due = it.get("due") or None
-        note = (it.get("note") or "").strip() or None
-
-        # Skip insert: active exists, archived exists (don't revive), or
-        # done within last 24h exists (avoid duplicate near same task).
-        active_row = conn.execute(
-            "SELECT id FROM tasks WHERE title=? AND status='active' LIMIT 1",
-            (title,),
-        ).fetchone()
-        if active_row:
-            if status == "done":
-                # Flip the active row to done instead of inserting a parallel one.
-                with conn:
-                    conn.execute(
-                        "UPDATE tasks SET status='done', updated_at=? WHERE id=?",
-                        (_dt.datetime.now(_dt.timezone.utc)
-                         .strftime("%Y-%m-%dT%H:%M:%SZ"),
-                         active_row["id"]),
-                    )
-                n += 1
-            # status == "active": already active, skip
-            continue
-
-        # No active row — check archived / recent done to prevent re-creation.
-        blocking = conn.execute(
-            "SELECT 1 FROM tasks WHERE title=? AND ("
-            "  status='archived'"
-            "  OR (status='done' AND updated_at>=?)"
-            ") LIMIT 1",
-            (title, _24h_ago),
-        ).fetchone()
-        if blocking:
-            continue
-
-        with conn:
-            conn.execute(
-                "INSERT INTO tasks (category, title, due, status, next_step)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (category, title, due, status, note),
-            )
-        n += 1
-    return n
-
-
-def _seg_digest(conn, raw: str, sid: str, date: str) -> int:
-    """Persist DIGEST text into session_digests. INSERT OR REPLACE on sid."""
-    body = _extract_text_block(raw, "DIGEST")
-    if not body:
-        return 0
-    ts_now = _dt.datetime.now(_dt.timezone.utc).strftime(
-        "%Y-%m-%dT%H:%M:%SZ")
-    with conn:
-        conn.execute(
-            "INSERT OR REPLACE INTO session_digests (sid, date, text, ts)"
-            " VALUES (?, ?, ?, ?)",
-            (sid, date, body, ts_now),
-        )
-    return 1
-
+# ── sonnet input loaders ────────────────────────────────────────────────────
 
 def _load_active_tasks_for_sonnet(conn) -> str:
     """db active task snapshot for sonnet's tick decisions. Title is the
-    match key — sonnet must copy verbatim so _seg_task_cand flips by title."""
+    match key — sonnet must copy verbatim so seg_task_cand flips by title."""
     rows = conn.execute(
         "SELECT title, category FROM tasks WHERE status='active'"
         " ORDER BY id"
@@ -356,71 +180,18 @@ def _load_active_tasks_for_sonnet(conn) -> str:
 
 
 def _load_prior_handover_for_sonnet() -> str:
-    """Read prior handover.md and extract the narrative sections (Previous /
-    This / Next / Reference) for sonnet carry-over judgement. Alerts / Tasks /
-    Affect / Milestone candidate are code-owned and not included."""
+    """Read prior handover.md and extract the 4 state-axis sections (Done /
+    Open / Plan / Reference) for sonnet's audit step. Top-section (Alerts /
+    Tasks / Affect / Milestone candidate) is code-owned and not included."""
     try:
         text = handover_render._RENDERED_PATH.read_text(encoding="utf-8")
     except (FileNotFoundError, OSError):
         return "(no prior handover)"
     parts: list[str] = []
-    for header in ("Previous Sessions", "This Session",
-                   "Next Session", "Reference"):
+    for header in ("Done", "Open", "Plan", "Reference"):
         body = handover_render._split_section_body(text, header).strip()
         parts.append(f"## {header}\n{body or '- N/A'}")
     return "\n\n".join(parts)
-
-
-def _parse_handover_blocks(raw: str) -> tuple[str, str, str, str]:
-    """Pull THIS_SESSION, THIS_DONE, NEXT_NEW, REFERENCE bullet blocks out
-    of LLM output. Each defaults to empty if its marker is missing.
-
-    Legacy fallback: if LLM still emits the old `NEXT_SESSION` marker,
-    treat it as NEXT_NEW (no carry-over removal possible — best-effort
-    until the new prompt fully lands)."""
-    def _slice(open_tag: str, *close_tags: str) -> str:
-        i = raw.find(open_tag)
-        if i < 0:
-            return ""
-        start = i + len(open_tag)
-        end = len(raw)
-        for close in close_tags:
-            j = raw.find(close, start)
-            if 0 <= j < end:
-                end = j
-        return raw[start:end].strip()
-
-    this_s = _slice("===THIS_SESSION===",
-                    "===THIS_DONE===", "===NEXT_NEW===",
-                    "===NEXT_SESSION===", "===REFERENCE===", "===END===")
-    this_done = _slice("===THIS_DONE===",
-                       "===NEXT_NEW===", "===REFERENCE===", "===END===")
-    next_new = _slice("===NEXT_NEW===", "===REFERENCE===", "===END===")
-    if not next_new:
-        next_new = _slice("===NEXT_SESSION===",
-                          "===REFERENCE===", "===END===")
-    ref_s = _slice("===REFERENCE===", "===END===")
-    return this_s, this_done, next_new, ref_s
-
-
-def _seg_handover(conn, raw: str, sid: str) -> int:
-    """Build full handover.md (skeleton + LLM bullets + ready stamp) in ONE
-    atomic write — single-writer rule per Bug #1 fix. SessionStart hooks are
-    read-only and never invoke this path.
-
-    NEXT_NEW + THIS_DONE replace the old single NEXT_SESSION block:
-    handover_render filters prior Previous + This + Next sessions by
-    THIS_DONE prefix match (stale loops anywhere get cleared), then
-    unions NEXT_NEW on top. Stops sonnet's ghost carry-over and prevents
-    closed-loop events from sitting in the archive forever.
-    """
-    this_s, this_done, next_new, ref_s = _parse_handover_blocks(raw)
-    if not this_s and not this_done and not next_new and not ref_s:
-        return 0
-    handover_render.write_handover_full(
-        conn, sid, this_s, next_new, reference=ref_s,
-        this_done=this_done)
-    return 1
 
 
 # ── main loop ───────────────────────────────────────────────────────────────
@@ -448,15 +219,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if _already_done(conn, sid):
             return 0
-        # Silent-death root cause: cc fires session_end mid-flush while only
-        # a partial slice of events is on disk. The original skip:short_session
-        # row then blocked every later re-run. _drop_stale_skip clears the row
-        # only when event count grew past threshold since the skip was written.
+        # Silent-death root cause: cc fires session_end mid-flush. The first
+        # hook can write skip:short_session while only a partial slice of
+        # events is on disk. _drop_stale_skip clears that row when event
+        # count grew past threshold so the real run isn't blocked.
         _drop_stale_skip(conn, sid, threshold)
 
         # Stamp "start" the moment we own the work. Any silent death below
-        # (LLM hang killed, import crash mid-call, OS reap) leaves this row
-        # behind so catchup can count it as one failed attempt.
+        # leaves this row behind so catchup counts it as one failed attempt.
         try:
             with conn:
                 conn.execute(
@@ -477,51 +247,7 @@ def main(argv: list[str] | None = None) -> int:
             _write_final_audit(conn, sid, "fail:no_events")
             return 1
 
-        client = LLMClient(cfg=cfg)
-        # One sonnet call emits all 4 segment blocks.
-        try:
-            prior_handover = _load_prior_handover_for_sonnet()
-            active_tasks = _load_active_tasks_for_sonnet(conn)
-            raw = client.call(
-                role="sessionend",
-                body=SESSIONEND_PROMPT.format(
-                    sid=sid, events=events_text,
-                    prior_handover=prior_handover,
-                    active_tasks=active_tasks),
-                tier="mid",
-            )
-        except (LLMError, ValueError, RuntimeError) as e:
-            _write_final_audit(conn, sid, f"fail:{type(e).__name__}")
-            return 1
-
-        writers = (
-            ("affect", lambda r: _seg_affect(conn, r, sid, date)),
-            ("task_cand", lambda r: _seg_task_cand(conn, r)),
-            ("digest", lambda r: _seg_digest(conn, r, sid, date)),
-            ("handover", lambda r: _seg_handover(conn, r, sid)),
-        )
-        failures: list[str] = []
-        for name, writer in writers:
-            try:
-                writer(raw)
-                _write_segment_audit(conn, sid, name, "ok")
-            except (ValueError, RuntimeError, TypeError, KeyError) as e:
-                failures.append(name)
-                try:
-                    _write_segment_audit(
-                        conn, sid, name, f"fail:{type(e).__name__}")
-                except Exception:
-                    pass
-
-        if not failures:
-            _write_final_audit(conn, sid, _SUMMARY_OK)
-            return 0
-        if len(failures) == len(writers):
-            _write_final_audit(conn, sid, "fail:all")
-            return 1
-        _write_final_audit(conn, sid, f"partial:{','.join(failures)}")
-        return 0
-
+        return _run_extraction(conn, sid, date, events_text, cfg)
     except Exception as e:  # noqa: BLE001
         try:
             _write_final_audit(conn, sid, f"fail:{type(e).__name__}")
@@ -530,6 +256,88 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     finally:
         conn.close()
+
+
+def _run_extraction(conn, sid: str, date: str,
+                    events_text: str, cfg: dict) -> int:
+    """Two-call flow: STATE + NARRATIVE → 4 segment writers + final audit."""
+    client = LLMClient(cfg=cfg)
+    prior_handover = _load_prior_handover_for_sonnet()
+    active_tasks = _load_active_tasks_for_sonnet(conn)
+
+    state_raw, state_err = "", None
+    try:
+        state_raw = client.call(
+            role="sessionend_state",
+            body=STATE_PROMPT.format(
+                sid=sid, events=events_text,
+                prior_handover=prior_handover,
+                active_tasks=active_tasks),
+            tier="mid",
+        )
+    except (LLMError, ValueError, RuntimeError) as e:
+        state_err = type(e).__name__
+
+    narrative_raw, narrative_err = "", None
+    try:
+        narrative_raw = client.call(
+            role="sessionend_narrative",
+            body=NARRATIVE_PROMPT.format(sid=sid, events=events_text),
+            tier="mid",
+        )
+    except (LLMError, ValueError, RuntimeError) as e:
+        narrative_err = type(e).__name__
+
+    if state_err and narrative_err:
+        _write_final_audit(
+            conn, sid, f"fail:state={state_err},narrative={narrative_err}")
+        return 1
+    if state_err:
+        _write_segment_audit(conn, sid, "state_call", f"fail:{state_err}")
+    if narrative_err:
+        _write_segment_audit(conn, sid, "narrative_call",
+                             f"fail:{narrative_err}")
+
+    writers = (
+        ("affect",    "narrative", lambda: seg_affect(
+            conn, narrative_raw, sid, date)),
+        ("task_cand", "state",     lambda: seg_task_cand(conn, state_raw)),
+        ("digest",    "narrative", lambda: seg_digest(
+            conn, narrative_raw, sid, date)),
+        ("handover",  "state",     lambda: seg_handover(
+            conn, state_raw, sid)),
+    )
+    failures: list[str] = []
+    for name, src, writer in writers:
+        if src == "state" and state_err:
+            _write_segment_audit(
+                conn, sid, name, f"skip:state_failed_{state_err}")
+            failures.append(name)
+            continue
+        if src == "narrative" and narrative_err:
+            _write_segment_audit(
+                conn, sid, name, f"skip:narrative_failed_{narrative_err}")
+            failures.append(name)
+            continue
+        try:
+            writer()
+            _write_segment_audit(conn, sid, name, "ok")
+        except (ValueError, RuntimeError, TypeError, KeyError) as e:
+            failures.append(name)
+            try:
+                _write_segment_audit(
+                    conn, sid, name, f"fail:{type(e).__name__}")
+            except Exception:
+                pass
+
+    if not failures:
+        _write_final_audit(conn, sid, _SUMMARY_OK)
+        return 0
+    if len(failures) == len(writers):
+        _write_final_audit(conn, sid, "fail:all")
+        return 1
+    _write_final_audit(conn, sid, f"partial:{','.join(failures)}")
+    return 0
 
 
 if __name__ == "__main__":

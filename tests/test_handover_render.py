@@ -318,36 +318,45 @@ def test_render_affect_empty_tables(env):
     assert "_none_" in out
 
 
-# ── Unit: handover_render ─────────────────────────────────────────────────────
+# ── Unit: handover_render (Plan H — 4 state-axis sections) ──────────────────
+
+def _write_full(env, sid: str, *, done: str = "- N/A", open_: str = "- N/A",
+                plan: str = "- N/A", reference: str = "- N/A"):
+    db, _, _, _ = env
+    conn = _conn(db)
+    try:
+        return handover_render.write_handover_full(
+            conn, sid, done=done, open_=open_, plan=plan, reference=reference)
+    finally:
+        conn.close()
+
 
 def test_handover_write_full_atomic_and_ready_stamp(env):
-    """write_handover_full produces file at _RENDERED_PATH with ready stamp + body sections + bullets.
-    Top section (Alerts/Tasks/Milestone/Affect) is stripped — handover contains only the 4 body sections."""
+    """write_handover_full produces file at _RENDERED_PATH with ready stamp +
+    4 state-axis sections. Top-section block is stripped from handover."""
     db, _, _, rendered_path = env
-    conn = _conn(db)
-    result_path = handover_render.write_handover_full(
-        conn, "abc123", "- did X\n- did Y", "- pick up Z")
-    conn.close()
-
+    result_path = _write_full(env, "abc123",
+                              done="- did X\n- did Y",
+                              plan="- pick up Z")
     assert result_path == rendered_path
     assert rendered_path.exists()
     content = rendered_path.read_text(encoding="utf-8")
 
-    # Ready stamp present (not pending) — single-writer atomic flow
-    assert f"<!-- handover: ready sid:abc123 ts:" in content
+    assert "<!-- handover: ready sid:abc123 ts:" in content
     assert "pending sid:" not in content
-    # Top section markers and their content must NOT appear in handover
+    # Top section markers stripped
     assert "<!-- marrow:top:start -->" not in content
     assert "<!-- marrow:top:end -->" not in content
     assert "## Alerts (active)" not in content
-    assert "## Tasks" not in content
-    assert "## Milestone candidate" not in content
-    assert "## Affect" not in content
-    # The 4 body sections must be present
-    assert "## Previous Sessions" in content
-    assert "## This Session" in content
-    assert "## Next Session" in content
+    # 4 state-axis sections present
+    assert "## Done" in content
+    assert "## Open" in content
+    assert "## Plan" in content
     assert "## Reference" in content
+    # No legacy time-axis headers
+    assert "## Previous Sessions" not in content
+    assert "## This Session" not in content
+    assert "## Next Session" not in content
     # LLM bullets injected
     assert "- did X" in content
     assert "- pick up Z" in content
@@ -356,9 +365,7 @@ def test_handover_write_full_atomic_and_ready_stamp(env):
 def test_handover_write_full_strips_instruction_lines(env):
     """Lines starting with '> ' must not appear in the rendered output."""
     db, _, _, rendered_path = env
-    conn = _conn(db)
-    handover_render.write_handover_full(conn, "s1", "- a", "- b")
-    conn.close()
+    _write_full(env, "s1", done="- a", plan="- b")
     content = rendered_path.read_text(encoding="utf-8")
     for line in content.splitlines():
         assert not line.startswith("> "), f"Instruction line leaked: {line!r}"
@@ -375,9 +382,7 @@ def test_handover_write_full_atomic_via_replace(env, monkeypatch):
         real_replace(src, dst)
 
     monkeypatch.setattr(os, "replace", tracking_replace)
-    conn = _conn(db)
-    handover_render.write_handover_full(conn, "s-atomic", "- a", "- b")
-    conn.close()
+    _write_full(env, "s-atomic", done="- a", plan="- b")
 
     assert len(replace_calls) >= 1
     assert any(str(rendered_path) in str(dst) for _, dst in replace_calls)
@@ -386,45 +391,19 @@ def test_handover_write_full_atomic_via_replace(env, monkeypatch):
 def test_handover_timestamp_replaced(env):
     """{{YYYY-MM-DD HH:MM}} placeholder is replaced with current time."""
     db, _, _, rendered_path = env
-    conn = _conn(db)
-    handover_render.write_handover_full(conn, "s-ts", "- a", "- b")
-    conn.close()
+    _write_full(env, "s-ts", done="- a", plan="- b")
     content = rendered_path.read_text(encoding="utf-8")
     assert "{{YYYY-MM-DD HH:MM}}" not in content
     import re
     assert re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", content)
 
 
-def test_handover_full_single_write_populates_both_sections(env):
-    """Acceptance test for Bug #1: one atomic write contains skeleton + both
-    ThisSession + NextSession + ready stamp — no pending stamp ever appears.
-    """
-    db, _, _, rendered_path = env
-    conn = _conn(db)
-    handover_render.write_handover_full(
-        conn, "sid-acceptance",
-        this_session="- shipped Bug #1 fix",
-        next_session="- verify pytest + ship merge",
-    )
-    conn.close()
-    content = rendered_path.read_text(encoding="utf-8")
-    # Phase A: ThisSession now wraps each segment in `### [ts]` sub-heading.
-    this_section = content.split("## This Session")[1].split("## Next Session")[0]
-    assert "- shipped Bug #1 fix" in this_section
-    assert "### [" in this_section
-    assert "## Next Session\n- verify pytest + ship merge" in content
-    assert "<!-- handover: ready sid:sid-acceptance ts:" in content
-    assert "pending sid:" not in content
-
-
 def test_session_start_is_readonly_for_handover(env, monkeypatch, tmp_path):
     """SessionStart hook must NEVER mutate handover.md — file mtime unchanged."""
     import io, json as _json
     db, _, _, rendered_path = env
-    conn = _conn(db)
-    handover_render.write_handover_full(
-        conn, "pre-existing", "- prior session content", "- next plan")
-    conn.close()
+    _write_full(env, "pre-existing", done="- prior session content",
+                plan="- next plan")
     before_bytes = rendered_path.read_bytes()
     before_mtime = rendered_path.stat().st_mtime_ns
 
@@ -495,17 +474,16 @@ def test_session_end_does_not_write_handover(env, monkeypatch, tmp_path):
     assert rendered_path.read_bytes() == before
 
 
-# ── Reference section (sonnet-owned) ────────────────────────────────────────
+# ── render_full + Reference ─────────────────────────────────────────────────
 
 def test_render_full_injects_reference_body(env):
     db, _, _, _ = env
     conn = storage.connect(db)
     out = handover_render.render_full(
         conn, sid="s1",
-        this_session="- did X",
-        next_session="- pick up Y",
+        done="- did X", open_="- N/A", plan="- pick up Y",
         reference="- `marrow/foo.py:42` — entry point\n- skill: tdd",
-        prior_text="", now_epoch=1700000000,
+        now_epoch=1700000000,
     )
     assert "## Reference\n" in out
     assert "`marrow/foo.py:42` — entry point" in out
@@ -517,10 +495,9 @@ def test_render_full_reference_defaults_to_na(env):
     conn = storage.connect(db)
     out = handover_render.render_full(
         conn, sid="s2",
-        this_session="- did X",
-        next_session="- pick up Y",
+        done="- did X", open_="- N/A", plan="- pick up Y",
         reference="",
-        prior_text="", now_epoch=1700000000,
+        now_epoch=1700000000,
     )
     assert "## Reference\n- N/A" in out
 
@@ -531,203 +508,39 @@ def test_strip_instruction_preserves_trailing_newline():
     assert out.endswith("\n"), "trailing \\n must survive so regex inject sites still match"
 
 
-# ── Phase A: multi-session merge ─────────────────────────────────────────────
+# ── Plan H: tombstone + snapshot + flock + structural invariants ────────────
 
-def _write_via(env, sid: str, this_s: str, next_s: str, now_epoch: int,
-               *, this_done: str = ""):
-    db, _, _, rendered_path = env
-    import time as _time
-    real_time = _time.time
-    try:
-        _time.time = lambda: now_epoch  # type: ignore[assignment]
-        conn = _conn(db)
-        handover_render.write_handover_full(
-            conn, sid, this_s, next_s, this_done=this_done)
-        conn.close()
-    finally:
-        _time.time = real_time  # type: ignore[assignment]
-    return rendered_path.read_text(encoding="utf-8")
-
-
-def test_apply_this_done_drops_matching_prior_bullet():
-    from marrow.handover_render import _apply_this_done
-    old = ("- bug recall_cross_table_vec_gap (structural) — memes/entities "
-           "missing vec lane\n"
-           "- entity_card_recency_tiebreaker (low) — 19 rows null ts")
-    done = ("- bug recall_cross_table_vec_gap (structural) — memes/entities "
-            "missing vec lane")
-    out = _apply_this_done(old, done)
-    assert "recall_cross_table_vec_gap" not in out
-    assert "entity_card_recency_tiebreaker" in out
-
-
-def test_apply_this_done_ignores_short_or_na_lines():
-    from marrow.handover_render import _apply_this_done
-    old = "- real carry-over bullet that is long enough to match\n- short"
-    done_short = "- short"
-    done_na = "- N/A"
-    assert _apply_this_done(old, done_short) == old, "short stub must not delete"
-    assert _apply_this_done(old, done_na) == old, "N/A must not delete"
-
-
-def test_handover_ghost_carry_over_cleared_via_this_done(env):
-    """E2E: prior NEXT has X+Y, this_done verbatim-copies X, next_new empty
-    → final NEXT only Y. Stops sonnet's repetition loop."""
-    base = int(datetime(2026, 5, 24, 10, 0).timestamp())
-    ghost = ("- bug recall_cross_table_vec_gap (structural) — memes/entities "
-             "missing vec lane")
-    keep = "- entity_card_recency_tiebreaker (low) — 19 rows null ts"
-    _write_via(env, "s1", "- prior work", f"{ghost}\n{keep}", base)
-    content = _write_via(env, "s2", "- new work", "",
-                         base + 30 * 60, this_done=ghost)
-    next_section = content.split("## Next Session")[1].split("##")[0]
-    assert "recall_cross_table_vec_gap" not in next_section
-    assert "entity_card_recency_tiebreaker" in next_section
-
-
-def test_this_done_also_clears_prior_this_session(env):
-    """Stale event in prior This Session segment gets dropped when verbatim
-    THIS_DONE bullet matches. (Example: 出去玩 listed in This, this session
-    reports 回家了 + lists 出去玩 in done.)"""
-    base = int(datetime(2026, 5, 24, 10, 0).timestamp())
-    stale = "- 出去玩 with friends — leaving 2pm, back later tonight maybe"
-    _write_via(env, "s1", stale, "- 洗澡", base)
-    content = _write_via(env, "s2", "- 6pm 回家了 + 收衣服了", "",
-                         base + 30 * 60, this_done=stale)
-    this_section = content.split("## This Session")[1].split("## Next Session")[0]
-    assert "出去玩 with friends" not in this_section
-    assert "回家了" in this_section
-
-
-def test_this_done_drops_empty_timed_segment_entirely(env):
-    """If every bullet inside a prior This-Session timed segment matches
-    THIS_DONE, drop the whole `### [ts]` segment — no orphan headings."""
-    base = int(datetime(2026, 5, 24, 10, 0).timestamp())
-    only_bullet = "- single closed loop event long enough to be a real anchor"
-    _write_via(env, "s1", only_bullet, "- 洗澡", base)
-    content = _write_via(env, "s2", "- new unrelated work", "",
-                         base + 30 * 60, this_done=only_bullet)
-    this_section = content.split("## This Session")[1].split("## Next Session")[0]
-    assert "single closed loop event" not in this_section
-    assert "### [2026-05-24 10:00]" not in this_section
-    assert "new unrelated work" in this_section
-
-
-def test_this_done_clears_prior_previous_session(env):
-    """Stale bullet sitting in Previous Sessions also gets pruned by
-    THIS_DONE — the (晒衣服) Previous + (出去玩) This + (收衣服) now case."""
-    base = int(datetime(2026, 5, 24, 10, 0).timestamp())
-    # s1 writes (晒衣服) into This; s2 happens 4h later → s1's This rolls
-    # into Previous; s3 30min after s2 with THIS_DONE = 晒衣服.
-    stale = "- 下午2点晒衣服 out on the balcony before heading out"
-    _write_via(env, "s1", stale, "- 洗澡", base)
-    _write_via(env, "s2", "- 出去玩 (1h ago)", "", base + 4 * 3600)
-    content = _write_via(env, "s3", "- 6pm 回家 + 收衣服了", "",
-                         base + 4 * 3600 + 30 * 60, this_done=stale)
-    prev_section = content.split("## Previous Sessions")[1].split("## This Session")[0]
-    assert "下午2点晒衣服" not in prev_section
-    assert "收衣服了" in content
-
-
-def test_phase_a_two_sessions_within_window(env):
-    """Two sessions 30min apart → both segments live under ## This Session."""
-    base = int(datetime(2026, 5, 24, 10, 0).timestamp())
-    _write_via(env, "s1", "- did A", "- next A", base)
-    content = _write_via(env, "s2", "- did B", "- next B", base + 30 * 60)
-
-    this_section = content.split("## This Session")[1].split("## Next Session")[0]
-    prev_section = content.split("## Previous Sessions")[1].split("## This Session")[0]
-    # Newest on top
-    assert this_section.index("- did B") < this_section.index("- did A")
-    # Both have time sub-headings
-    assert "### [2026-05-24 10:30]" in this_section
-    assert "### [2026-05-24 10:00]" in this_section
-    # Previous Sessions still empty
-    assert "- None" in prev_section
-
-
-def test_phase_a_two_sessions_outside_window(env):
-    """Two sessions 4h apart → old ThisSession pushed to Previous Sessions."""
-    base = int(datetime(2026, 5, 24, 6, 0).timestamp())
-    _write_via(env, "s1", "- old work", "- old plan", base)
-    content = _write_via(env, "s2", "- new work", "- new plan", base + 4 * 3600)
-
-    this_section = content.split("## This Session")[1].split("## Next Session")[0]
-    prev_section = content.split("## Previous Sessions")[1].split("## This Session")[0]
-
-    assert "- new work" in this_section
-    assert "- old work" not in this_section
-    assert "- old work" in prev_section
-    assert "### [2026-05-24 06:00]" in prev_section
-    assert "### [2026-05-24 10:00]" in this_section
-
-
-def test_phase_a_three_sessions_mix(env):
-    """3 sessions: 4h ago, 30min ago, now → previous=[4h], this=[now, 30min]."""
-    base = int(datetime(2026, 5, 24, 6, 0).timestamp())
-    _write_via(env, "s1", "- four hr ago", "- np1", base)
-    _write_via(env, "s2", "- thirty min ago", "- np2", base + 3 * 3600 + 30 * 60)
-    content = _write_via(env, "s3", "- right now", "- np3", base + 4 * 3600)
-
-    this_section = content.split("## This Session")[1].split("## Next Session")[0]
-    prev_section = content.split("## Previous Sessions")[1].split("## This Session")[0]
-    next_section = content.split("## Next Session")[1].split("## Reference")[0]
-
-    assert "- four hr ago" in prev_section
-    assert "- thirty min ago" in this_section
-    assert "- right now" in this_section
-    assert this_section.index("- right now") < this_section.index("- thirty min ago")
-    # NextSession union — all three preserved
-    for marker in ("- np1", "- np2", "- np3"):
-        assert marker in next_section
-
-
-def test_phase_a_next_session_union_dedup(env):
-    base = int(datetime(2026, 5, 24, 10, 0).timestamp())
-    _write_via(env, "s1", "- a", "- shared\n- only-old", base)
-    content = _write_via(env, "s2", "- b", "- shared\n- only-new", base + 30 * 60)
-    next_section = content.split("## Next Session")[1].split("## Reference")[0]
-    # `- shared` appears exactly once
-    assert next_section.count("- shared") == 1
-    assert "- only-old" in next_section
-    assert "- only-new" in next_section
-    # New on top
-    assert next_section.index("- only-new") < next_section.index("- only-old")
-
-
-def test_phase_a_empty_inputs_render_none(env):
-    base = int(datetime(2026, 5, 24, 10, 0).timestamp())
-    content = _write_via(env, "s1", "", "N/A", base)
-    this_section = content.split("## This Session")[1].split("## Next Session")[0]
-    next_section = content.split("## Next Session")[1].split("## Reference")[0]
-    prev_section = content.split("## Previous Sessions")[1].split("## This Session")[0]
-    assert "- None" in this_section
-    assert "- None" in next_section
-    assert "- None" in prev_section
-
-
-def test_phase_a_snapshot_audit_row_written(env):
-    db, _, _, rendered_path = env
-    base = int(datetime(2026, 5, 24, 10, 0).timestamp())
-    _write_via(env, "s1", "- first body", "- next1", base)
-    _write_via(env, "s2", "- second body", "- next2", base + 30 * 60)
+def test_snapshot_audit_row_written_each_write(env):
+    """Each write captures the body it is about to atomic_write as a
+    handover_snapshot row — that becomes the diff baseline for the next write.
+    A second `handover_overwritten` row captures the pre-overwrite text."""
+    db, _, _, _ = env
+    _write_full(env, "s1", done="- first body", plan="- next1")
+    _write_full(env, "s2", done="- second body", plan="- next2")
 
     conn = _conn(db)
-    rows = conn.execute(
-        "SELECT target_id, summary FROM audit_log"
+    snapshots = conn.execute(
+        "SELECT summary FROM audit_log"
         " WHERE action='handover_snapshot' ORDER BY id"
     ).fetchall()
+    overwritten = conn.execute(
+        "SELECT summary FROM audit_log"
+        " WHERE action='handover_overwritten' ORDER BY id"
+    ).fetchall()
     conn.close()
-    # Second write should have captured the first write as snapshot.
-    assert len(rows) >= 1
-    assert any("- first body" in r["summary"] for r in rows)
-    assert any("sha256=" in r["summary"] for r in rows)
+    # Two snapshot rows — one per write.
+    assert len(snapshots) == 2
+    # Latest snapshot reflects the most recent write.
+    assert "- second body" in snapshots[-1]["summary"]
+    # Overwritten row captured the pre-overwrite body (from s1).
+    assert len(overwritten) == 1
+    assert "- first body" in overwritten[0]["summary"]
+    assert "sha256=" in snapshots[0]["summary"]
 
 
-def test_phase_a_flock_retry_then_partial(env, monkeypatch):
+def test_flock_retry_then_partial(env, monkeypatch):
     """flock contention → 3x retry then partial file + audit row, no crash."""
     db, _, _, rendered_path = env
-    # Pre-seed file so flock target exists.
     rendered_path.parent.mkdir(parents=True, exist_ok=True)
     rendered_path.write_text("seed", encoding="utf-8")
 
@@ -745,8 +558,8 @@ def test_phase_a_flock_retry_then_partial(env, monkeypatch):
 
     conn = _conn(db)
     result = handover_render.write_handover_full(
-        conn, "sid-lock", "- new", "- next")
-    # Audit row for lock failure exists.
+        conn, "sid-lock", done="- new", open_="- N/A", plan="- next",
+        reference="- N/A")
     rows = conn.execute(
         "SELECT summary FROM audit_log WHERE action='handover_lock_failed'"
     ).fetchall()
@@ -757,74 +570,61 @@ def test_phase_a_flock_retry_then_partial(env, monkeypatch):
     assert len(rows) == 1
 
 
-def test_phase_a_legacy_format_treated_as_single_segment(env):
-    """Old handover.md without ### sub-headings folds into one segment using footer ts."""
+def test_user_deleted_bullet_tombstoned_and_filtered_on_next_render(env):
+    """End-to-end Lumi-edit survival:
+    1. Auto-write places `- decision X` and `- decision Y` in Done.
+    2. Lumi edits handover.md and removes `- decision Y` by hand.
+    3. Next auto-write re-emits `- decision Y` in Done.
+    Tombstone records the diff and the next render drops it again."""
     db, _, _, rendered_path = env
-    base = int(datetime(2026, 5, 24, 10, 0).timestamp())
-    legacy = (
-        "# Marrow handover — 2026-05-24 09:00\n\n"
-        "## Previous Sessions\n- None\n\n"
-        "## This Session\n- legacy bullet without timestamp\n\n"
-        "## Next Session\n- legacy next\n\n"
-        "## Reference (last 3 commits)\n\n"
-        f"<!-- handover: ready sid:old ts:{base - 30 * 60} -->\n"
-    )
-    rendered_path.parent.mkdir(parents=True, exist_ok=True)
-    rendered_path.write_text(legacy, encoding="utf-8")
 
-    content = _write_via(env, "s-new", "- new bullet", "- new next", base)
-    this_section = content.split("## This Session")[1].split("## Next Session")[0]
-    # Both legacy + new live in ThisSession (legacy was 30min ago, within window).
-    assert "- new bullet" in this_section
-    assert "- legacy bullet without timestamp" in this_section
-    assert "### [2026-05-24 09:30]" in this_section  # footer ts label
-    assert "### [2026-05-24 10:00]" in this_section
+    # Step 1: initial auto-write.
+    _write_full(env, "s1",
+                done="- decision X\n- decision Y",
+                plan="- pick up Z")
+    body_1 = rendered_path.read_text(encoding="utf-8")
+    assert "- decision Y" in body_1
 
+    # Step 2: Lumi removes "- decision Y" from the rendered file directly.
+    edited = body_1.replace("\n- decision Y", "")
+    rendered_path.write_text(edited, encoding="utf-8")
 
-# ── Dedup: _merge_sections same-ts / same-body guard ─────────────────────────
-
-def test_merge_sections_dedup_same_ts_not_duplicated(env):
-    """7-duplicate scenario: same ts fired 7 times, only 1 segment in result."""
-    # Reproduce the 7x [2026-05-25 05:23] duplicate bug: 7 writes at the same
-    # epoch minute all within the 2h window.
-    base = int(datetime(2026, 5, 25, 5, 23).timestamp())
-    # Write 7 times with identical ts (same minute) and identical content.
-    for i in range(7):
-        _write_via(env, f"sid-{i}", "- schema v9 recap", "- next plan", base)
-
-    content = (env[3]).read_text(encoding="utf-8")
-    this_section = content.split("## This Session")[1].split("## Next Session")[0]
-    # Only one segment heading for this ts — not 7.
-    assert this_section.count("### [2026-05-25 05:23]") == 1
-    assert this_section.count("- schema v9 recap") == 1
+    # Step 3: sonnet re-emits both bullets — the next auto-write must filter Y.
+    _write_full(env, "s2",
+                done="- decision X\n- decision Y",
+                plan="- pick up Z")
+    body_2 = rendered_path.read_text(encoding="utf-8")
+    done_section = body_2.split("## Done")[1].split("## Open")[0]
+    assert "- decision X" in done_section
+    assert "- decision Y" not in done_section, (
+        "Tombstone-filter regression: Lumi-deleted bullet revived by sonnet.")
 
 
-def test_merge_sections_dedup_same_body_not_duplicated(env):
-    """Two writes with different labels but identical bodies: only 1 stored."""
-    base = int(datetime(2026, 5, 25, 5, 22).timestamp())
-    body = "- identical body bullet that should not duplicate"
-    _write_via(env, "sa", body, "- next", base)
-    # One minute later — different ts label but same body.
-    content = _write_via(env, "sb", body, "- next", base + 60)
-    this_section = content.split("## This Session")[1].split("## Next Session")[0]
-    assert this_section.count(body) == 1
-
-
-def test_handover_top_section_stripped_from_rendered(env):
-    """Rendered handover.md must not contain top-section markers or Alerts/Tasks headers."""
+def test_tombstone_rows_persist_in_audit_log(env):
+    """Confirm AuditLogTombstoneStore (placeholder impl) writes through."""
     db, _, _, rendered_path = env
+
+    _write_full(env, "s1", done="- keep\n- drop me")
+    body_1 = rendered_path.read_text(encoding="utf-8")
+    rendered_path.write_text(body_1.replace("\n- drop me", ""),
+                             encoding="utf-8")
+    _write_full(env, "s2", done="- keep\n- drop me")
+
     conn = _conn(db)
-    handover_render.write_handover_full(conn, "s-strip", "- x", "- y")
+    rows = conn.execute(
+        "SELECT target_id, summary FROM audit_log"
+        " WHERE action='handover_tombstone'"
+    ).fetchall()
     conn.close()
+    assert len(rows) >= 1
+    assert any("drop me" in (r["summary"] or "") for r in rows)
+
+
+def test_empty_inputs_render_na_in_all_sections(env):
+    """No content for any section → `- N/A` in all four blocks."""
+    db, _, _, rendered_path = env
+    _write_full(env, "s-empty")
     content = rendered_path.read_text(encoding="utf-8")
-    assert "<!-- marrow:top:start -->" not in content
-    assert "<!-- marrow:top:end -->" not in content
-    assert "## Alerts (active)" not in content
-    assert "## Tasks" not in content
-    assert "## Milestone candidate" not in content
-    assert "## Affect" not in content
-    # Body sections intact.
-    assert "## Previous Sessions" in content
-    assert "## This Session" in content
-    assert "## Next Session" in content
-    assert "## Reference" in content
+    for header in ("## Done", "## Open", "## Plan", "## Reference"):
+        section = content.split(header)[1].split("##")[0]
+        assert "- N/A" in section, f"{header} missing N/A placeholder"

@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 import pytest
 
-from marrow import config, storage
+from marrow import config, sessionend_writers, storage  # noqa: F401
 from marrow.popen_detach import popen_detach
 
 
@@ -254,7 +254,8 @@ def test_catchup_keeps_skipping_genuinely_short_sids(db_env, monkeypatch,
 
 
 def test_sessionend_async_writes_fail_audit_on_exception(db_env):
-    """Single sonnet call raises → final summary='fail:RuntimeError', rc=1."""
+    """Both sonnet calls raise → final summary='fail:state=...,narrative=...',
+    rc=1. Plan H: STATE + NARRATIVE both blown means full fail."""
     db, _ = db_env
     _insert_events(db, "test-fail", count=10, role="user")
 
@@ -265,7 +266,9 @@ def test_sessionend_async_writes_fail_audit_on_exception(db_env):
 
     assert rc == 1
     rows = _audit_rows(db, "test-fail")
-    assert [r["summary"] for r in rows] == ["start", "fail:RuntimeError"]
+    assert rows[0]["summary"] == "start"
+    assert rows[-1]["summary"] == (
+        "fail:state=RuntimeError,narrative=RuntimeError")
 
 
 # ── Unit 3: sessionstart_catchup ─────────────────────────────────────────────
@@ -454,7 +457,7 @@ def test_seg_digest_writes_session_digests_row(db_env):
     conn = storage.connect(db)
     try:
         raw = "===DIGEST===\n今天和念念聊了很久。\n===END===\n"
-        n = sessionend_async._seg_digest(conn, raw, "sid-d1", "2026-05-23")
+        n = sessionend_writers.seg_digest(conn, raw, "sid-d1", "2026-05-23")
         assert n == 1
         row = conn.execute(
             "SELECT sid, date, text FROM session_digests"
@@ -472,9 +475,9 @@ def test_seg_digest_replace_on_resave(db_env):
     from marrow import sessionend_async
     conn = storage.connect(db)
     try:
-        sessionend_async._seg_digest(
+        sessionend_writers.seg_digest(
             conn, "===DIGEST===\nfirst\n===END===", "sid-r1", "2026-05-23")
-        sessionend_async._seg_digest(
+        sessionend_writers.seg_digest(
             conn, "===DIGEST===\nsecond\n===END===", "sid-r1", "2026-05-23")
         rows = conn.execute("SELECT text FROM session_digests").fetchall()
         assert len(rows) == 1
@@ -489,7 +492,7 @@ def test_seg_digest_no_marker_returns_zero(db_env):
     from marrow import sessionend_async
     conn = storage.connect(db)
     try:
-        n = sessionend_async._seg_digest(conn, "no markers here", "sid-x",
+        n = sessionend_writers.seg_digest(conn, "no markers here", "sid-x",
                                          "2026-05-23")
         assert n == 0
         rows = conn.execute("SELECT * FROM session_digests").fetchall()
@@ -519,7 +522,7 @@ def test_seg_affect_persists_reconcile_prev_text(db_env):
             " \"reconcile_prev\": \"和好了\"}]\n"
             "===END===\n"
         )
-        n = sessionend_async._seg_affect(conn, raw, "sid-a1", "2026-05-23")
+        n = sessionend_writers.seg_affect(conn, raw, "sid-a1", "2026-05-23")
         assert n == 1
         row = conn.execute(
             "SELECT reconcile_prev_text, reconcile_ref FROM affect"
@@ -544,7 +547,7 @@ def test_seg_affect_na_reconcile_prev_text_is_null(db_env):
             " \"reconcile_prev\": \"N/A\"}]\n"
             "===END===\n"
         )
-        sessionend_async._seg_affect(conn, raw, "sid-a2", "2026-05-23")
+        sessionend_writers.seg_affect(conn, raw, "sid-a2", "2026-05-23")
         row = conn.execute(
             "SELECT reconcile_prev_text FROM affect WHERE date='2026-05-23'"
         ).fetchone()
@@ -568,7 +571,7 @@ def test_seg_affect_persists_description(db_env):
             " \"reconcile_prev\": \"N/A\"}]\n"
             "===END===\n"
         )
-        n = sessionend_async._seg_affect(conn, raw, "sid-d1", "2026-05-23")
+        n = sessionend_writers.seg_affect(conn, raw, "sid-d1", "2026-05-23")
         assert n == 1
         row = conn.execute(
             "SELECT description FROM affect WHERE date='2026-05-23'"
@@ -592,7 +595,7 @@ def test_seg_affect_description_falls_back_to_label(db_env):
             " \"reconcile_prev\": \"N/A\"}]\n"
             "===END===\n"
         )
-        sessionend_async._seg_affect(conn, raw, "sid-d2", "2026-05-23")
+        sessionend_writers.seg_affect(conn, raw, "sid-d2", "2026-05-23")
         row = conn.execute(
             "SELECT description FROM affect WHERE date='2026-05-23'"
         ).fetchone()
@@ -614,7 +617,7 @@ def test_seg_task_cand_writes_tasks_table(db_env):
             " \"due\": null, \"completed_at\": null, \"note\": \"\"}]\n"
             "===END===\n"
         )
-        n = sessionend_async._seg_task_cand(conn, raw)
+        n = sessionend_writers.seg_task_cand(conn, raw)
         assert n == 1
         row = conn.execute(
             "SELECT title, status, category FROM tasks WHERE title='Ship 2.5c'"
@@ -645,7 +648,7 @@ def test_seg_task_cand_category_whitelist(db_env):
             " \"note\": \"\"}]\n"
             "===END===\n"
         )
-        n = sessionend_async._seg_task_cand(conn, raw)
+        n = sessionend_writers.seg_task_cand(conn, raw)
         assert n == 3
         rows = {r["title"]: r["category"] for r in conn.execute(
             "SELECT title, category FROM tasks"
@@ -688,48 +691,49 @@ def test_pingpong_live_isolation_in_hook_context(db_env):
     assert rows and rows[-1]["summary"] == "ok"
 
 
-# ── handover segment ────────────────────────────────────────────────────────
+# ── handover segment (Plan H — STATE + NARRATIVE split) ─────────────────────
 
-def test_sessionend_single_call_routes_to_four_writers(db_env, tmp_path,
-                                                        monkeypatch):
-    """One sonnet response containing all 4 blocks fans out to each writer
-    and produces 4 per-segment audit rows + final 'ok'. Bug #1 fix: handover
-    writer composes full file (skeleton + bullets + ready stamp) atomically."""
+def test_sessionend_two_calls_routes_to_four_writers(db_env, tmp_path,
+                                                      monkeypatch):
+    """STATE + NARRATIVE → 4 segment writers + per-segment audit + final 'ok'.
+    Plan H: client.call invoked twice; handover lands DONE/OPEN/PLAN/REFERENCE."""
     db, _ = db_env
     _insert_events(db, "test-combined", count=10, role="user")
 
     h = tmp_path / "handover.md"
 
-    combined_raw = (
-        "===AFFECT===\n"
-        "[{\"ep\": 1, \"valence\": 0.8, \"arousal\": 0.5,"
-        " \"importance\": 3, \"label\": \"愉悦\", \"entities\": [],"
-        " \"event_hint\": \"\", \"unresolved\": 0,"
-        " \"reconcile_prev\": \"N/A\"}]\n"
-        "===END===\n"
+    state_raw = (
         "===TASK_CAND===\n"
         "[{\"title\": \"refactor sessionend\", \"status\": \"done\","
         " \"due\": null, \"completed_at\": null, \"note\": \"\"}]\n"
         "===END===\n"
-        "===DIGEST===\n"
-        "Refactored sessionend to 1 call.\n"
-        "===END===\n"
         "===HANDOVER===\n"
-        "===THIS_SESSION===\n- shipped 4→1 call refactor\n"
-        "===NEXT_NEW===\n- verify pytest + plist reload\n"
+        "===DONE===\n- shipped 2-call refactor\n"
+        "===OPEN===\n- N/A\n"
+        "===PLAN===\n- verify pytest + plist reload\n"
+        "===REFERENCE===\n- `marrow/sessionend_async.py:80` — main loop\n"
         "===END===\n"
+    )
+    narrative_raw = (
+        "===AFFECT===\n"
+        "[{\"ep\": 1, \"valence\": 0.8, \"arousal\": 0.5,"
+        " \"importance\": 3, \"label\": \"愉悦\","
+        " \"description\": \"refactor 通过\", \"entities\": [],"
+        " \"event_hint\": \"\", \"unresolved\": 0,"
+        " \"reconcile_prev\": \"N/A\"}]\n"
+        "===END===\n"
+        "===DIGEST===\nRefactored sessionend to 2 calls.\n===END===\n"
     )
 
     with patch("marrow.sessionend_async.LLMClient") as MockClient, \
          patch("marrow.handover_render._RENDERED_PATH", h):
-        MockClient.return_value.call.return_value = combined_raw
+        MockClient.return_value.call.side_effect = [state_raw, narrative_raw]
         from marrow import sessionend_async
         rc = sessionend_async.main(["--sid", "test-combined"])
 
     assert rc == 0
     conn = storage.connect(db)
     try:
-        # 1 affect row, 1 task row, 1 digest row.
         n_aff = conn.execute(
             "SELECT COUNT(*) c FROM affect WHERE source='sessionend_async'"
         ).fetchone()["c"]
@@ -740,52 +744,80 @@ def test_sessionend_single_call_routes_to_four_writers(db_env, tmp_path,
             "SELECT COUNT(*) c FROM session_digests WHERE sid='test-combined'"
         ).fetchone()["c"]
         assert n_aff == 1 and n_task == 1 and n_dig == 1
-        # 4 per-segment audit rows + 1 final summary row.
         seg_rows = conn.execute(
             "SELECT action, summary FROM audit_log"
             " WHERE target_id='test-combined' ORDER BY id"
         ).fetchall()
-        actions = [r["action"] for r in seg_rows]
         summaries = [r["summary"] for r in seg_rows]
-        assert actions == [
-            "sessionend_extract",  # start stamp
-            "sessionend_extract_affect",
-            "sessionend_extract_task_cand",
-            "sessionend_extract_digest",
-            "sessionend_extract_handover",
-            "sessionend_extract",  # final
-        ]
         assert summaries[0] == "start"
         assert summaries[-1] == "ok"
+        # All 4 segment audit rows logged 'ok'.
+        seg_oks = [r for r in seg_rows
+                   if r["action"].startswith("sessionend_extract_")
+                   and r["summary"] == "ok"]
+        assert len(seg_oks) == 4
     finally:
         conn.close()
-    # Handover file written fresh by sessionend_async — full skeleton + bullets.
     body = h.read_text(encoding="utf-8")
-    assert "shipped 4→1 call refactor" in body
-    assert "verify pytest + plist reload" in body
+    assert "- shipped 2-call refactor" in body
+    assert "- verify pytest + plist reload" in body
     assert "handover: ready sid:test-combined" in body
-    # Top section stripped; body sections present
-    assert "## Previous Sessions" in body
-    assert "## This Session" in body
+    assert "## Done" in body and "## Open" in body
+    assert "## Plan" in body and "## Reference" in body
 
 
-def test_load_prior_handover_extracts_four_sections(tmp_path, monkeypatch):
+def test_sessionend_state_fail_narrative_ok_partial(db_env, tmp_path,
+                                                      monkeypatch):
+    """STATE raises, NARRATIVE succeeds → narrative writers run, state ones
+    skipped → final summary='partial:...'. Plan H independence."""
+    db, _ = db_env
+    _insert_events(db, "test-partial", count=10, role="user")
+    h = tmp_path / "handover.md"
+
+    narrative_raw = (
+        "===AFFECT===\n"
+        "[{\"ep\": 1, \"valence\": 0.6, \"arousal\": 0.4,"
+        " \"importance\": 2, \"label\": \"平静\","
+        " \"description\": \"测试通过\", \"entities\": [],"
+        " \"event_hint\": \"\", \"unresolved\": 0,"
+        " \"reconcile_prev\": \"N/A\"}]\n"
+        "===END===\n"
+        "===DIGEST===\nshort digest\n===END===\n"
+    )
+    state_err = RuntimeError("state-blew-up")
+
+    with patch("marrow.sessionend_async.LLMClient") as MockClient, \
+         patch("marrow.handover_render._RENDERED_PATH", h):
+        MockClient.return_value.call.side_effect = [state_err, narrative_raw]
+        from marrow import sessionend_async
+        rc = sessionend_async.main(["--sid", "test-partial"])
+
+    assert rc == 0  # partial = recovered, not fatal
+    rows = _audit_rows(db, "test-partial")
+    final = rows[-1]["summary"]
+    assert final.startswith("partial:")
+    assert "task_cand" in final and "handover" in final
+
+
+def test_load_prior_handover_extracts_four_state_sections(tmp_path, monkeypatch):
+    """Plan H: prior handover loader pulls Done/Open/Plan/Reference now,
+    not the legacy Previous/This/Next/Reference."""
     from marrow import sessionend_async, handover_render
     h = tmp_path / "handover.md"
     h.write_text(
         "# title\n\n"
         "## Alerts (active)\n- warn x\n\n"
         "## Tasks\n- [ ] foo\n\n"
-        "## Previous Sessions\n- old A\n\n"
-        "## This Session\n- did B\n\n"
-        "## Next Session\n- pick C\n\n"
+        "## Done\n- did A\n\n"
+        "## Open\n- blocked on B\n\n"
+        "## Plan\n- pick C\n\n"
         "## Reference\n- `path/x.py:1` — y\n\n"
         "<!-- stamp -->\n", encoding="utf-8")
     monkeypatch.setattr(handover_render, "_RENDERED_PATH", h)
     out = sessionend_async._load_prior_handover_for_sonnet()
-    assert "## Previous Sessions\n- old A" in out
-    assert "## This Session\n- did B" in out
-    assert "## Next Session\n- pick C" in out
+    assert "## Done\n- did A" in out
+    assert "## Open\n- blocked on B" in out
+    assert "## Plan\n- pick C" in out
     assert "## Reference\n- `path/x.py:1` — y" in out
     assert "Alerts" not in out and "Tasks" not in out
 
@@ -796,64 +828,65 @@ def test_load_prior_handover_returns_placeholder_when_missing(tmp_path, monkeypa
     assert sessionend_async._load_prior_handover_for_sonnet() == "(no prior handover)"
 
 
-def test_handover_parses_four_blocks():
-    from marrow.sessionend_async import _parse_handover_blocks
-    raw = ("intro\n===THIS_SESSION===\n- did A\n- did B\n"
-           "===THIS_DONE===\n- carry-over X cleared\n"
-           "===NEXT_NEW===\n- pick up C\n"
-           "===REFERENCE===\n- `path/foo.py:10` — entry\n===END===\n")
-    this_s, this_done, next_new, ref_s = _parse_handover_blocks(raw)
-    assert this_s == "- did A\n- did B"
-    assert this_done == "- carry-over X cleared"
-    assert next_new == "- pick up C"
-    assert ref_s == "- `path/foo.py:10` — entry"
+def test_parse_handover_output_slices_four_state_blocks():
+    """parse_handover_output returns (done, open, plan, reference)."""
+    from marrow.sessionend_prompts import parse_handover_output
+    raw = ("intro\n"
+           "===DONE===\n- did A\n- did B\n"
+           "===OPEN===\n- waiting on review\n"
+           "===PLAN===\n- pick up C\n"
+           "===REFERENCE===\n- `path/foo.py:10` — entry\n"
+           "===END===\n")
+    done, open_, plan, reference = parse_handover_output(raw)
+    assert done == "- did A\n- did B"
+    assert open_ == "- waiting on review"
+    assert plan == "- pick up C"
+    assert reference == "- `path/foo.py:10` — entry"
 
 
-def test_handover_parses_legacy_next_session_marker():
-    """Old prompt in flight still falls into next_new with empty this_done."""
-    from marrow.sessionend_async import _parse_handover_blocks
-    raw = ("===THIS_SESSION===\n- did A\n"
-           "===NEXT_SESSION===\n- pick up B\n===END===\n")
-    this_s, this_done, next_new, ref_s = _parse_handover_blocks(raw)
-    assert this_s == "- did A"
-    assert this_done == ""
-    assert next_new == "- pick up B"
-    assert ref_s == ""
+def test_parse_handover_output_missing_markers_default_empty():
+    from marrow.sessionend_prompts import parse_handover_output
+    raw = "===DONE===\n- only one\n===END===\n"
+    done, open_, plan, reference = parse_handover_output(raw)
+    assert done == "- only one"
+    assert open_ == "" and plan == "" and reference == ""
 
 
 def test_seg_handover_composes_full_file(db_env, tmp_path, monkeypatch):
-    """_seg_handover writes complete handover.md in one atomic call."""
+    """seg_handover writes complete handover.md in one atomic call."""
     db, _ = db_env
     h = tmp_path / "handover.md"
     monkeypatch.setattr("marrow.handover_render._RENDERED_PATH", h)
-    raw = ("===THIS_SESSION===\n- shipped phase 2.5c\n"
-           "===NEXT_NEW===\n- launchctl + commit\n===END===\n")
+    raw = ("===DONE===\n- shipped phase 3 handover\n"
+           "===OPEN===\n- N/A\n"
+           "===PLAN===\n- launchctl + commit\n"
+           "===REFERENCE===\n- N/A\n"
+           "===END===\n")
     conn = storage.connect(db)
     try:
-        from marrow import sessionend_async
-        n = sessionend_async._seg_handover(conn, raw, "S1")
+        from marrow.sessionend_writers import seg_handover
+        n = seg_handover(conn, raw, "S1")
     finally:
         conn.close()
     assert n == 1
     body = h.read_text(encoding="utf-8")
-    assert "- shipped phase 2.5c" in body
+    assert "- shipped phase 3 handover" in body
     assert "- launchctl + commit" in body
     assert "handover: ready sid:S1" in body
     assert "handover: pending" not in body
-    # Top section stripped; body sections present
-    assert "## This Session" in body
+    assert "## Done" in body and "## Plan" in body
 
 
 def test_seg_handover_noop_on_empty_blocks(db_env, tmp_path, monkeypatch):
-    """If LLM returns no THIS_SESSION/NEXT_SESSION, leave file untouched."""
+    """If LLM returns no markers, leave file untouched."""
     db, _ = db_env
     h = tmp_path / "handover.md"
     h.write_text("PRE-EXISTING", encoding="utf-8")
     monkeypatch.setattr("marrow.handover_render._RENDERED_PATH", h)
     conn = storage.connect(db)
     try:
-        from marrow import sessionend_async
-        n = sessionend_async._seg_handover(conn, "no markers here", "S1")
+        from marrow.sessionend_writers import seg_handover
+        n = seg_handover(conn, "no markers here", "S1")
     finally:
         conn.close()
     assert n == 0
