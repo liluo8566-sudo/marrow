@@ -471,6 +471,15 @@ def reconcile_milestone_candidates(conn: sqlite3.Connection,
 _TASK_ROW_RE = re.compile(
     r"^- \[(?P<check>[ x])\] (?P<body>.*?)\s*<!-- id:(?P<id>\d+) -->\s*$"
 )
+# Same row shape minus the `<!-- id:N -->` anchor — used to detect rows Lumi
+# typed into the dashboard by hand. INSERTed by reconcile_tasks so the next
+# render replaces them with the canonical anchored body.
+_TASK_ROW_NOID_RE = re.compile(
+    r"^- \[(?P<check>[ x])\] (?P<body>.+?)\s*$"
+)
+# Category whitelist matches top_sections._TAG_ORDER — anything outside falls
+# back to `Project` (mirrors the renderer's None-fallback intent for typed rows).
+_TASK_CATEGORIES = ("Study", "Project", "Appointment", "Daily", "Others")
 # Allow any non-ws text in tag — render emits Title/None-fallback Others so it
 # may carry spaces in user-renamed categories. The first `]` ends the tag.
 _TAG_PREFIX_RE = re.compile(r"^\[(?P<tag>[^\]]+)\]\s+(?P<rest>.*)$")
@@ -512,6 +521,51 @@ def _parse_task_row_body(body: str, db_next_step: str | None) -> str:
         if text.endswith(suffix):
             text = text[: -len(suffix)].rstrip()
     return text
+
+
+def _parse_unanchored_task_body(body: str) -> dict | None:
+    """Pull (category, title, next_step, due) from a hand-typed row body.
+
+    Shape mirrors render_tasks output minus the anchor:
+        [<tag>] <title>{: <next_step>}{ [<date>]}
+
+    Returns None when the body lacks a non-empty title (malformed). The tag
+    prefix is optional; missing or unrecognised → 'Project'. The trailing
+    `[<date>]` and `: <next_step>` suffixes are optional and peel in that
+    order to avoid swallowing a colon inside the title.
+    """
+    text = body.strip()
+    if not text:
+        return None
+    cat = "Project"
+    m = _TAG_PREFIX_RE.match(text)
+    if m:
+        raw_tag = m.group("tag").strip()
+        cap = raw_tag.capitalize()
+        cat = cap if cap in _TASK_CATEGORIES else "Project"
+        text = m.group("rest").strip()
+    due: str | None = None
+    dm = _TRAILING_DATE_RE.match(text)
+    if dm:
+        due = dm.group("date").strip() or None
+        text = dm.group("rest").rstrip()
+    next_step: str | None = None
+    if ":" in text:
+        head, _, tail = text.rpartition(":")
+        head = head.rstrip()
+        tail = tail.strip()
+        if head and tail:
+            text = head
+            next_step = tail
+    title = text.strip()
+    if not title:
+        return None
+    return {
+        "category": cat,
+        "title": title,
+        "next_step": next_step,
+        "due": due,
+    }
 
 
 def reconcile_tasks(conn: sqlite3.Connection,
@@ -558,14 +612,20 @@ def reconcile_tasks(conn: sqlite3.Connection,
             if part.isdigit():
                 trail_ids.add(int(part))
 
-    # Parse rows with anchors. body retained for title diff.
+    # Parse rows with anchors. body retained for title diff. Unanchored
+    # task-shaped rows are collected separately — they're hand-typed inserts.
     anchored: dict[int, tuple[str, str]] = {}  # id -> (check, body)
+    unanchored: list[tuple[str, str]] = []  # (check, body)
     for line in block.splitlines():
         m = _TASK_ROW_RE.match(line)
         if m:
             anchored[int(m.group("id"))] = (m.group("check"), m.group("body"))
+            continue
+        m2 = _TASK_ROW_NOID_RE.match(line)
+        if m2:
+            unanchored.append((m2.group("check"), m2.group("body")))
 
-    if not trail_ids and not anchored:
+    if not trail_ids and not anchored and not unanchored:
         return rpt
 
     # Load all tasks referenced by anchored ids in one query.
@@ -645,7 +705,76 @@ def reconcile_tasks(conn: sqlite3.Connection,
                         "md-reconcile: removed from dashboard")
             rpt.deleted += 1
 
+        # insert: hand-typed unanchored rows → new tasks. Next render emits
+        # them with `<!-- id:N -->` anchors so subsequent passes treat them
+        # as ordinary anchored rows.
+        _insert_unanchored_tasks(conn, unanchored, rpt)
+
     return rpt
+
+
+def _insert_unanchored_tasks(conn: sqlite3.Connection,
+                              rows: list[tuple[str, str]],
+                              rpt: ReconcileReport) -> None:
+    """INSERT new tasks for each unanchored row in the Tasks block.
+
+    Status follows the checkbox (`[x]` → done, otherwise active). Dedup:
+    if an active task with the same `(category, title)` already exists,
+    skip the insert and log via add_alert(info) — see DECISIONS.md.
+    Malformed body (missing title) → warn alert, skip.
+    """
+    if not rows:
+        return
+    now = _now()
+    for check, body in rows:
+        try:
+            parsed = _parse_unanchored_task_body(body)
+        except Exception as e:  # noqa: BLE001 — never crash refresh on a typo
+            rpt.conflicts.append(f"unanchored task malformed: {e}")
+            continue
+        if parsed is None:
+            try:
+                from . import repo as _repo  # local import to dodge cycles
+                _repo.add_alert(
+                    "warn", "tasks",
+                    f"unanchored task row missing title: {body[:80]}",
+                    source="reconcile",
+                )
+            except Exception:
+                pass
+            continue
+        status = "done" if check == "x" else "active"
+        # Dedup: refuse to insert another active task with the same
+        # (category, title) — keeps repeated mw refresh idempotent if Lumi
+        # forgot to delete her hand-typed line.
+        dup = conn.execute(
+            "SELECT id FROM tasks "
+            "WHERE status='active' AND category=? AND title=? LIMIT 1",
+            (parsed["category"], parsed["title"]),
+        ).fetchone()
+        if dup is not None:
+            try:
+                from . import repo as _repo
+                _repo.add_alert(
+                    "info", "tasks",
+                    f"unanchored task dedup: title={parsed['title'][:60]} "
+                    f"matches active id={dup['id']}",
+                    source="reconcile",
+                )
+            except Exception:
+                pass
+            continue
+        cur = conn.execute(
+            "INSERT INTO tasks "
+            "(category, title, due, next_step, status, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (parsed["category"], parsed["title"], parsed["due"],
+             parsed["next_step"], status, now, now),
+        )
+        new_id = cur.lastrowid
+        _task_audit(conn, new_id, "insert",
+                     f"md-reconcile: typed row title={parsed['title'][:60]}")
+        rpt.inserted += 1
 
 
 # ── affect reconcile ──────────────────────────────────────────────────────────

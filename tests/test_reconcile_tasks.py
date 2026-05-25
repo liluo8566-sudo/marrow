@@ -213,7 +213,109 @@ def test_seg_task_cand_skips_archived(conn, tmp_path):
     assert count == 1  # still only one row
 
 
-# ── 7. Completed cutoff: 6AM local boundary ──────────────────────────────────
+# ── 8. unanchored hand-typed rows are absorbed as new tasks ─────────────────
+
+def _inject_into_tasks_block(text: str, new_line: str) -> str:
+    """Insert `new_line` just before the `<!-- cand:task:ids=[...] -->` trail."""
+    out = []
+    for ln in text.splitlines():
+        if ln.startswith("<!-- cand:task:ids="):
+            out.append(new_line)
+        out.append(ln)
+    return "\n".join(out)
+
+
+def test_unanchored_task_row_inserts_into_db(conn, tmp_path):
+    """User types a brand-new task line into the dashboard → reconcile INSERTs."""
+    # Start with at least one anchored row so the trail marker renders.
+    _insert_task(conn, "seed task")
+    dash = _render_dashboard(conn, tmp_path)
+    text = dash.read_text()
+    dash.write_text(_inject_into_tasks_block(
+        text, "- [ ] [Project] my new task [2026-06-01]"
+    ))
+
+    rpt = reconcile.reconcile_tasks(conn, dash)
+
+    assert rpt.inserted == 1
+    row = conn.execute(
+        "SELECT category, title, due, status FROM tasks "
+        "WHERE title='my new task'"
+    ).fetchone()
+    assert row is not None
+    assert row["category"] == "Project"
+    assert row["due"] == "2026-06-01"
+    assert row["status"] == "active"
+
+
+def test_unanchored_task_survives_full_refresh(conn, tmp_path):
+    """End-to-end: type a row, run write_dashboard → re-render shows the row
+    with an `<!-- id:N -->` anchor matching the newly inserted DB id."""
+    _insert_task(conn, "seed task")
+    dash = _render_dashboard(conn, tmp_path)
+    text = dash.read_text()
+    dash.write_text(_inject_into_tasks_block(
+        text, "- [ ] [Project] survives refresh [2026-06-02]"
+    ))
+
+    dashboard.write_dashboard(str(dash), conn, state_dir=str(tmp_path / "s"))
+    result = dash.read_text()
+    new_id = conn.execute(
+        "SELECT id FROM tasks WHERE title='survives refresh'"
+    ).fetchone()["id"]
+    assert f"<!-- id:{new_id} -->" in result
+    assert "survives refresh" in result
+
+
+def test_unanchored_done_row_inserts_as_done(conn, tmp_path):
+    """`- [x] [Project] already done` → row inserted with status='done'."""
+    _insert_task(conn, "seed task")
+    dash = _render_dashboard(conn, tmp_path)
+    dash.write_text(_inject_into_tasks_block(
+        dash.read_text(), "- [x] [Project] already done [2026-06-01]"
+    ))
+
+    reconcile.reconcile_tasks(conn, dash)
+    row = conn.execute(
+        "SELECT status FROM tasks WHERE title='already done'"
+    ).fetchone()
+    assert row is not None
+    assert row["status"] == "done"
+
+
+def test_unanchored_default_category_when_bracket_missing(conn, tmp_path):
+    """Missing [<tag>] prefix → category falls back to Project."""
+    _insert_task(conn, "seed task")
+    dash = _render_dashboard(conn, tmp_path)
+    dash.write_text(_inject_into_tasks_block(
+        dash.read_text(), "- [ ] no bracket here"
+    ))
+
+    reconcile.reconcile_tasks(conn, dash)
+    row = conn.execute(
+        "SELECT category FROM tasks WHERE title='no bracket here'"
+    ).fetchone()
+    assert row is not None
+    assert row["category"] == "Project"
+
+
+def test_unanchored_dedup_against_active_title(conn, tmp_path):
+    """Hand-typed line that matches an existing active task → skip insert."""
+    _insert_task(conn, "dup title", category="Project")
+    dash = _render_dashboard(conn, tmp_path)
+    dash.write_text(_inject_into_tasks_block(
+        dash.read_text(), "- [ ] [Project] dup title"
+    ))
+
+    rpt = reconcile.reconcile_tasks(conn, dash)
+    assert rpt.inserted == 0
+    count = conn.execute(
+        "SELECT COUNT(*) c FROM tasks WHERE title='dup title'"
+    ).fetchone()["c"]
+    assert count == 1
+
+
+# ── 9. Completed cutoff: 6AM local boundary ──────────────────────────────────
 
 def test_completed_cutoff_6am(conn, tmp_path):
     # Pre-6AM done timestamp hides; post-6AM shows.
