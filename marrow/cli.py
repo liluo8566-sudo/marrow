@@ -9,8 +9,11 @@ import argparse
 import datetime
 import hashlib
 import re
+import shutil
+import subprocess
 import sys
 from contextlib import contextmanager
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from . import config, dashboard, storage, subpages
@@ -188,6 +191,83 @@ def cmd_refresh(args) -> int:
         conn.close()
 
 
+_WATCHER_LABEL = "com.marrow.watcher"
+_WATCHER_PLIST_SRC = Path(__file__).resolve().parents[1] / "deploy" / "mw-watcher.plist"
+_LAUNCH_AGENTS = Path.home() / "Library" / "LaunchAgents"
+
+
+def _watcher_plist_target() -> Path:
+    return _LAUNCH_AGENTS / "com.marrow.watcher.plist"
+
+
+def _launchctl(*args: str) -> tuple[int, str]:
+    r = subprocess.run(["launchctl", *args], capture_output=True, text=True)
+    return r.returncode, (r.stdout + r.stderr).strip()
+
+
+def _watcher_bootstrap() -> str:
+    tgt = _watcher_plist_target()
+    _LAUNCH_AGENTS.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(_WATCHER_PLIST_SRC, tgt)
+    # Idempotent: bootout first, ignore not-loaded; then bootstrap.
+    uid = subprocess.run(["id", "-u"], capture_output=True, text=True).stdout.strip()
+    domain = f"gui/{uid}"
+    _launchctl("bootout", domain, str(tgt))  # tolerated failure
+    rc, msg = _launchctl("bootstrap", domain, str(tgt))
+    if rc != 0:
+        return f"bootstrap failed: {msg}"
+    return f"bootstrapped {domain}/{_WATCHER_LABEL}"
+
+
+def _watcher_kickstart() -> str:
+    uid = subprocess.run(["id", "-u"], capture_output=True, text=True).stdout.strip()
+    rc, msg = _launchctl("kickstart", "-k", f"gui/{uid}/{_WATCHER_LABEL}")
+    return msg if rc != 0 else f"kickstarted {_WATCHER_LABEL}"
+
+
+def _watcher_unload() -> str:
+    uid = subprocess.run(["id", "-u"], capture_output=True, text=True).stdout.strip()
+    rc, msg = _launchctl("bootout", f"gui/{uid}", str(_watcher_plist_target()))
+    return msg if rc != 0 else f"unloaded {_WATCHER_LABEL}"
+
+
+def _watcher_state() -> str:
+    rc, msg = _launchctl("print", f"gui/{subprocess.run(['id','-u'], capture_output=True, text=True).stdout.strip()}/{_WATCHER_LABEL}")
+    if rc != 0:
+        return "not loaded"
+    state = "unknown"
+    pid = "-"
+    for line in msg.splitlines():
+        s = line.strip()
+        if s.startswith("state ="):
+            state = s.split("=", 1)[1].strip()
+        elif s.startswith("pid ="):
+            pid = s.split("=", 1)[1].strip()
+    return f"state={state} pid={pid}"
+
+
+def cmd_watcher(args) -> int:
+    if args.action == "start":
+        print(_watcher_bootstrap())
+        print(_watcher_kickstart())
+        return 0
+    if args.action == "stop":
+        print(_watcher_unload())
+        return 0
+    if args.action == "status":
+        print(_watcher_state())
+        log_path = config.DATA_DIR / "logs" / "watcher.log"
+        if log_path.exists():
+            tail = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-5:]
+            print("--- last 5 log lines ---")
+            for line in tail:
+                print(line)
+        else:
+            print(f"(no log yet at {log_path})")
+        return 0
+    return _fail(f"unknown watcher action: {args.action}")
+
+
 def cmd_add(args) -> int:
     fn = _ADD_TABLES.get(args.table)
     if fn is None:
@@ -288,6 +368,10 @@ def build_parser() -> argparse.ArgumentParser:
     rf = sub.add_parser("refresh", parents=[common])
     rf.add_argument("--all", action="store_true")
     rf.set_defaults(fn=cmd_refresh)
+
+    wt = sub.add_parser("watcher", parents=[common])
+    wt.add_argument("action", choices=["start", "stop", "status"])
+    wt.set_defaults(fn=cmd_watcher)
 
     return p
 
