@@ -89,3 +89,22 @@ def write_dashboard(path: str, conn, *, state_dir: str,
         new = block + "\n"
 
     _atomic_write(path, new)
+
+
+def _main() -> int:
+    # CLI entry: `python -m marrow.dashboard` re-renders the dashboard.
+    # Used by mw-dashboard-tick.plist (06:01 daily) and ad-hoc refresh.
+    from . import config, storage
+    db = config.db_path()
+    conn = storage.connect(db)
+    try:
+        write_dashboard(config.dashboard_path(), conn,
+                        state_dir=str(config.DATA_DIR / "state"), db=db)
+    finally:
+        conn.close()
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(_main())

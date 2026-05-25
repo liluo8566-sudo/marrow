@@ -13,7 +13,7 @@ import sys
 from contextlib import contextmanager
 from zoneinfo import ZoneInfo
 
-from . import config, storage
+from . import config, dashboard, storage, subpages
 
 
 PROTECTED = {"id", "created_at", "updated_at", "source_hash", "occurred_at"}
@@ -164,6 +164,30 @@ def cmd_goose_bites(args) -> int:
     return 0
 
 
+def cmd_refresh(args) -> int:
+    db = args.db or config.db_path()
+    conn = storage.connect(db)
+    try:
+        dashboard.write_dashboard(
+            config.dashboard_path(), conn,
+            state_dir=str(config.DATA_DIR / "state"), db=db,
+        )
+        msg = "dashboard refreshed"
+        if args.all:
+            try:
+                subpages.write_all_subpages(
+                    conn, folder=config.sub_pages_path(),
+                    state_dir=config.sub_pages_state_path(), db=db,
+                )
+                msg += " + subpages"
+            except Exception as e:
+                print(f"mw: subpages refresh failed: {e}", file=sys.stderr)
+        print(msg)
+        return 0
+    finally:
+        conn.close()
+
+
 def cmd_add(args) -> int:
     fn = _ADD_TABLES.get(args.table)
     if fn is None:
@@ -260,6 +284,10 @@ def build_parser() -> argparse.ArgumentParser:
     gs = sub.add_parser("goose-bites", parents=[common])
     gs.add_argument("--date", default=None, metavar="YYYY-MM-DD")
     gs.set_defaults(fn=cmd_goose_bites)
+
+    rf = sub.add_parser("refresh", parents=[common])
+    rf.add_argument("--all", action="store_true")
+    rf.set_defaults(fn=cmd_refresh)
 
     return p
 
