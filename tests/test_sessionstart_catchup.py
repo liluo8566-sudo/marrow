@@ -221,26 +221,55 @@ def test_alert_idempotent(db_env):
     assert count == 1, f"expected 1 alert row, got {count}"
 
 
-def test_live_cc_ppids_started_at_mismatch(db_env, monkeypatch):
-    """If ps lstart doesn't match recorded started_at, ppid treated as dead."""
+def test_classify_legacy_ok_without_lifecycle_end_skips(db_env):
+    """Regression: a sid processed before the lifecycle plan deployment has
+    sessionend_extract:ok but NO session_lifecycle:end. _classify used to
+    skip the ok check entirely on the 'no end' path and fall through to
+    spawn -> historical sids piled into pending and crowded out new ones
+    past MAX_FIRE. Must read as skip (already done)."""
+    db, _ = db_env
+    sid = "legacy-ok-sid"
+    _insert_extract(db, sid, "ok")  # bare legacy ok
+    _insert_user_events(db, sid, count=7)
+    assert _classify(db, sid, set()) == "skip"
+
+
+def test_classify_new_ok_without_lifecycle_end_skips_when_covered(db_env):
+    """cc reaping the hook between archive_events and the end-marker write
+    leaves an `ok,user_count=N` row but no lifecycle:end. Still skip when
+    events have not grown beyond N."""
+    db, _ = db_env
+    sid = "ok-no-end-covered"
+    _insert_extract(db, sid, "ok,user_count=10")
+    _insert_user_events(db, sid, count=10)
+    assert _classify(db, sid, set()) == "skip"
+
+
+def test_classify_new_ok_without_lifecycle_end_spawns_when_grew(db_env):
+    """Same path but events grew past N -> spawn for incremental rerun."""
+    db, _ = db_env
+    sid = "ok-no-end-grew"
+    _insert_extract(db, sid, "ok,user_count=10")
+    _insert_user_events(db, sid, count=15)
+    assert _classify(db, sid, set()) == "spawn"
+
+
+def test_live_cc_ppids_trusts_os_kill_over_started_at(db_env, monkeypatch):
+    """os.kill is the primary liveness signal; started_at mismatch alone
+    does NOT exclude a ppid from live. This guards against the locale-bug
+    regression where audit_log markers stored fallback started_at values
+    that never match the real process start time -> live cc misjudged as
+    dead -> handover clobbered."""
     db, _ = db_env
     sid = "mismatch-sid"
-    # started_at=1000 (epoch 1970) but ps will return current time -> mismatch
+    # started_at=1000 (epoch 1970) but the live process started recently -> mismatch
     _insert_lifecycle(db, sid, "session_lifecycle:start",
                       "ppid=55555,source=cc,started_at=1000")
 
     def fake_kill(pid, sig):
-        # os.kill succeeds (process "alive")
-        pass
-
-    def fake_run(cmd, **kwargs):
-        class R:
-            stdout = "Mon May 25 21:00:00 2026\n"  # != epoch 1000
-            returncode = 0
-        return R()
+        pass  # process alive
 
     monkeypatch.setattr("marrow.sessionstart_catchup.os.kill", fake_kill)
-    monkeypatch.setattr("marrow.sessionstart_catchup.subprocess.run", fake_run)
 
     from marrow import sessionstart_catchup
     conn = storage.connect(db)
@@ -248,4 +277,25 @@ def test_live_cc_ppids_started_at_mismatch(db_env, monkeypatch):
         live = sessionstart_catchup._live_cc_ppids(conn)
     finally:
         conn.close()
-    assert 55555 not in live, "started_at mismatch should exclude ppid from live set"
+    assert 55555 in live, "os.kill success must mark ppid live even when started_at differs"
+
+
+def test_live_cc_ppids_excludes_dead_ppid(db_env, monkeypatch):
+    """os.kill failure means the process is gone -> excluded from live."""
+    db, _ = db_env
+    sid = "dead-sid"
+    _insert_lifecycle(db, sid, "session_lifecycle:start",
+                      "ppid=66666,source=cc,started_at=1779700000")
+
+    def fake_kill(pid, sig):
+        raise ProcessLookupError("no such process")
+
+    monkeypatch.setattr("marrow.sessionstart_catchup.os.kill", fake_kill)
+
+    from marrow import sessionstart_catchup
+    conn = storage.connect(db)
+    try:
+        live = sessionstart_catchup._live_cc_ppids(conn)
+    finally:
+        conn.close()
+    assert 66666 not in live

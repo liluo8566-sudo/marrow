@@ -59,11 +59,18 @@ def _parse_ppid_started_at(summary: str) -> tuple[int | None, int | None]:
 
 
 def _ps_started_at(ppid: int) -> int | None:
-    """Return process start epoch via `ps -o lstart= -p <ppid>`, or None."""
+    """Return process start epoch via `ps -o lstart= -p <ppid>`, or None.
+
+    LC_ALL=C forces POSIX time format ('Mon May 25 22:07:42 2026') so the
+    strptime mask works under any user locale (en_AU prints day-before-month
+    by default, which silently broke ppid liveness checks)."""
     try:
+        env = os.environ.copy()
+        env["LC_ALL"] = "C"
+        env["LC_TIME"] = "C"
         out = subprocess.run(
             ["ps", "-o", "lstart=", "-p", str(ppid)],
-            capture_output=True, text=True, check=False, timeout=2,
+            capture_output=True, text=True, check=False, timeout=2, env=env,
         ).stdout.strip()
         if out:
             return int(datetime.strptime(out, "%a %b %d %H:%M:%S %Y").timestamp())
@@ -73,7 +80,15 @@ def _ps_started_at(ppid: int) -> int | None:
 
 
 def _live_cc_ppids(conn) -> set[int]:
-    """Return set of ppids whose cc process is confirmed alive (os.kill + started_at match)."""
+    """Return set of ppids whose cc process is confirmed alive.
+
+    Primary signal = `os.kill(pid, 0)` — process exists. started_at is a soft
+    secondary signal: when present and the recorded value matches the live
+    process's actual start time within 60s tolerance, we have stronger
+    confidence the pid was not recycled. When markers were written with a
+    fallback started_at (legacy locale bug), the os.kill signal alone is
+    still authoritative; we'd rather over-attribute liveness than mark a
+    real active session dead and clobber its handover."""
     now = int(time.time())
     cutoff_ts = datetime.fromtimestamp(
         now - _WINDOW_HOURS * 3600, tz=timezone.utc
@@ -85,17 +100,13 @@ def _live_cc_ppids(conn) -> set[int]:
     ).fetchall()
     live: set[int] = set()
     for row in rows:
-        ppid, started_at = _parse_ppid_started_at(row["summary"] or "")
+        ppid, _started_at = _parse_ppid_started_at(row["summary"] or "")
         if ppid is None:
             continue
         try:
             os.kill(ppid, 0)
         except OSError:
             continue  # process dead
-        if started_at is not None:
-            actual = _ps_started_at(ppid)
-            if actual is None or abs(actual - started_at) >= 2:
-                continue  # ppid reused by another process
         live.add(ppid)
     return live
 
@@ -212,6 +223,22 @@ def _classify(conn, sid: str, live_ppids: set[int]) -> Literal["spawn", "skip"]:
             return "spawn"
 
     # No lifecycle:end.
+    # Legacy/cc-killed-hook path: ok row exists but no lifecycle:end. Could be
+    # (a) sid processed before lifecycle plan deployment, or (b) cc reaped the
+    # hook between archive_events and the end-marker write but sessionend_async
+    # still ran. Either way, the ok row is authoritative.
+    if ok_row:
+        ok_summary = ok_row["summary"]
+        if ok_summary == "ok":
+            return "skip"  # legacy bare ok, no incremental signal
+        try:
+            n = int(ok_summary.split("=", 1)[1])
+        except (ValueError, IndexError):
+            return "skip"
+        if user_count > n:
+            return "spawn"  # resumed and grew past last ok
+        return "skip"
+
     # State 6: start marker exists + ppid dead.
     if start_rows:
         ppid, _ = _parse_ppid_started_at(start_rows[0]["summary"] or "")

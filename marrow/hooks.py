@@ -29,11 +29,18 @@ SESSION_START_HARD_CAP = 6000
 
 def _started_at_for(ppid: int) -> int:
     """Return process start time as epoch for *ppid* via `ps -o lstart=`.
-    Falls back to current time on any failure."""
+    Falls back to current time on any failure.
+
+    LC_ALL=C forces POSIX time format so the strptime mask works under any
+    user locale (en_AU prints day-before-month by default, breaking parsing
+    and silently rotting catchup's ppid liveness check)."""
     try:
+        env = os.environ.copy()
+        env["LC_ALL"] = "C"
+        env["LC_TIME"] = "C"
         out = subprocess.run(
             ["ps", "-o", "lstart=", "-p", str(ppid)],
-            capture_output=True, text=True, check=False, timeout=2,
+            capture_output=True, text=True, check=False, timeout=2, env=env,
         ).stdout.strip()
         if out:
             return int(datetime.strptime(out, "%a %b %d %H:%M:%S %Y").timestamp())
