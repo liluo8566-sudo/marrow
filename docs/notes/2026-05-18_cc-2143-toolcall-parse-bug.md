@@ -1,5 +1,10 @@
 # CC 2.1.142 / 2.1.143 — two regressions, pin to 2.1.141
 
+## Status (2026-05-26)
+Unpinned to 2.1.150; `DISABLE_AUTOUPDATER` removed from `~/.claude/settings.json`.
+Bug A likely fixed in 2.1.144+.
+Bug C: no changelog entry, no recurrence observed since unpin.
+
 ## Bug A — toolcall parse-fail (2.1.143 only)
 GitHub #60033 / #59787. Pure 2.1.143 regression.
 
@@ -8,7 +13,7 @@ Symptom: thinking block → `stop_reason=end_turn` with no text/tool_use.
 Scan (2026-05-18, 600 jsonl / 8712 turns): 2.1.116–2.1.141: 0 cases; 2.1.142: 6, 2.1.143: 19 (~0.5%, model/context-independent).
 Recovery: reply any token (`.`/`继续`).
 
-## Pin to 2.1.141
+## Pin to 2.1.141 (historical)
 
 Native install: `~/.local/bin/claude` → `~/.local/share/claude/versions/<ver>`. Updater retops symlink to highest version on every start.
 
