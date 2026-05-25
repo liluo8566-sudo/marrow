@@ -3,13 +3,22 @@
 Each renderer returns a complete markdown block (including markers).
 Anchor formats:
 - Structured views: `<!-- id:{id} -->` at line end (DESIGN L118).
-- Narrative views (diary, goose-bites): `## YYYY-MM-DD` heading is the row
-  boundary (DESIGN L119); no inline anchor needed.
+- Narrative views (diary, goose-bites): `#### YYYY-MM-DD` heading (diary)
+  or `- [YYYY-MM-DD]` bullet (goose) is the row boundary; no inline anchor.
+  Both pages stack `## YYYY` / `### MonthName` above for navigation.
 """
 from __future__ import annotations
 
+import calendar
 import sqlite3
 from pathlib import Path
+
+
+def _year_month(date_str: str) -> tuple[str, str]:
+    """`'2026-05-20'` → `('2026', 'May')`. Empty/short strings get sentinels."""
+    if not date_str or len(date_str) < 7:
+        return ("?", "?")
+    return date_str[:4], calendar.month_name[int(date_str[5:7])]
 
 
 _MARKER_START = "<!-- marrow:{key}:start -->"
@@ -37,18 +46,23 @@ def render_diary(conn: sqlite3.Connection) -> str:
     ).fetchall()
     # No internal H1 — Obsidian shows the filename as the title; an in-file
     # H1 duplicates it. Same rule applies to every render fn below.
+    # Hierarchy: ## YYYY → ### MonthName → #### YYYY-MM-DD [mood] → body.
     out = [_m0(key), ""]
+    cur_year = None
     cur_month = None
     for r in rows:
-        month = r["date"][:7]
+        year, month = _year_month(r["date"])
+        if year != cur_year:
+            out.append(f"## {year}")
+            out.append("")
+            cur_year = year
+            cur_month = None
         if month != cur_month:
-            if cur_month is not None:
-                out.append("")
-            out.append(f"## {month}")
+            out.append(f"### {month}")
             out.append("")
             cur_month = month
         mood = f" [{r['mood']}]" if r["mood"] else ""
-        out.append(f"## {r['date']}{mood}")
+        out.append(f"#### {r['date']}{mood}")
         out.append("")
         out.append(r["content"].strip() if r["content"] else "")
         out.append("")
@@ -224,7 +238,20 @@ def render_goose(conn: sqlite3.Connection) -> str:
         out.append("_No goose-bites yet._")
         out.append("")
     else:
+        # Hierarchy: ## YYYY → ### MonthName → bullet rows.
+        cur_year = None
+        cur_month = None
         for r in rows:
+            year, month = _year_month(r["date"])
+            if year != cur_year:
+                out.append(f"## {year}")
+                out.append("")
+                cur_year = year
+                cur_month = None
+            if month != cur_month:
+                out.append(f"### {month}")
+                out.append("")
+                cur_month = month
             bites = (r["bites"] or "").strip()
             # Legacy multiline: take first non-empty line only.
             if "\n" in bites:

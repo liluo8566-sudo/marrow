@@ -57,9 +57,11 @@ def test_render_diary_contains_dates_and_content(db):
         block = subpages.render_diary(conn)
     finally:
         conn.close()
-    assert "## 2026-05-20" in block
+    assert "#### 2026-05-20" in block
     assert "Today was a good day." in block
-    assert "## 2026-04" in block  # month heading
+    assert "### April" in block  # month-name heading
+    assert "### May" in block
+    assert "## 2026" in block    # year heading
     assert "Spring entry." in block
     assert "<!-- marrow:diary:start -->" in block
     assert "<!-- marrow:diary:end -->" in block
@@ -81,11 +83,12 @@ def test_render_diary_month_grouped(db):
         block = subpages.render_diary(conn)
     finally:
         conn.close()
-    # Both months appear as headings
-    assert "## 2026-05" in block
-    assert "## 2026-04" in block
-    # ASC order: oldest first — 2026-04 entry appears before 2026-05
-    assert block.index("## 2026-04") < block.index("## 2026-05")
+    # Both months appear as H3 month-name headings under a shared year.
+    assert "## 2026" in block
+    assert "### April" in block
+    assert "### May" in block
+    # ASC order: oldest first — April appears before May.
+    assert block.index("### April") < block.index("### May")
 
 
 # ---------------------------------------------------------------------------
@@ -156,9 +159,10 @@ def test_render_goose_flat_list(db):
         conn.close()
     assert "- [2026-05-20]quack quack" in block
     assert "<!-- marrow:goose:start -->" in block
-    # No month grouping or per-day headers
+    # Year + month-name headings group the bullets; no per-day H2.
+    assert "## 2026" in block
+    assert "### May" in block
     assert "## 2026-05-20" not in block
-    assert "## 2026-05" not in block
 
 
 def test_render_goose_no_structured_anchor(db):
