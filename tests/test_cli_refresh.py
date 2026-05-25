@@ -60,3 +60,24 @@ def test_refresh_all_prints_subpages_marker(db, capsys):
     p, _, _ = db
     cli.main(["refresh", "--all", "--db", p])
     assert "+ subpages" in capsys.readouterr().out
+
+
+# ── mw handover --sid ───────────────────────────────────────────────────────
+
+def test_handover_cli_fires_async_popen(db, capsys, monkeypatch):
+    """mw handover --sid <sid> spawns sessionend_async detached + prints log path."""
+    p, _, _ = db
+    spawned: list[list[str]] = []
+
+    def fake_popen(args, log_path):  # noqa: ARG001
+        spawned.append(list(args))
+
+    monkeypatch.setattr("marrow.popen_detach.popen_detach", fake_popen)
+    rc = cli.main(["handover", "--db", p, "--sid", "test-sid-99"])
+    assert rc == 0
+    assert len(spawned) == 1
+    assert "sessionend_async" in " ".join(spawned[0])
+    assert "test-sid-99" in spawned[0]
+    out = capsys.readouterr().out
+    assert "test-sid-99" in out
+    assert "sessionend_async_test-sid-99.log" in out

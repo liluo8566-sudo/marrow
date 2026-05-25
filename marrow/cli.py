@@ -164,6 +164,21 @@ def cmd_goose_bites(args) -> int:
     return 0
 
 
+def cmd_handover(args) -> int:
+    """Manually fire sessionend_async for a sid — re-renders handover.md.
+    Fire-and-forget popen; logs land in DATA_DIR/logs/sessionend_async_<sid>.log."""
+    if not args.sid:
+        return _fail("mw handover requires --sid <session_id>")
+    from .popen_detach import popen_detach
+    log = config.DATA_DIR / "logs" / f"sessionend_async_{args.sid}.log"
+    popen_detach(
+        [sys.executable, "-m", "marrow.sessionend_async", "--sid", args.sid],
+        log_path=log,
+    )
+    print(f"handover async fired for sid={args.sid} (log: {log})")
+    return 0
+
+
 def cmd_refresh(args) -> int:
     db = args.db or config.db_path()
     conn = storage.connect(db)
@@ -288,6 +303,11 @@ def build_parser() -> argparse.ArgumentParser:
     rf = sub.add_parser("refresh", parents=[common])
     rf.add_argument("--all", action="store_true")
     rf.set_defaults(fn=cmd_refresh)
+
+    ho = sub.add_parser("handover", parents=[common])
+    ho.add_argument("--sid", required=True,
+                    help="session id to re-extract")
+    ho.set_defaults(fn=cmd_handover)
 
     return p
 

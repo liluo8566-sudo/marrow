@@ -29,7 +29,7 @@ _LOGS_DIR = Path.home() / ".config" / "marrow" / "logs"
 _CC_PROJECTS = Path.home() / ".claude" / "projects"
 
 WINDOW_HOURS = 24
-IDLE_SECONDS = 600  # jsonl untouched ≥10min → treat as closed; alive sessions still flushing skip this turn
+IDLE_SECONDS = 300  # jsonl untouched ≥5min → treat as closed; alive sessions still flushing skip this turn
 MAX_FIRE = 2
 RETRY_LIMIT = 2  # max fail/partial extractions before catchup gives up
 
