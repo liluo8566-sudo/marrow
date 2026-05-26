@@ -239,7 +239,7 @@ def render_affect(conn: sqlite3.Connection) -> str:
     day_cut = (now - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
     week_cut = (now - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    out: list[str] = ["## Affect", "", "### Today"]
+    out: list[str] = ["## Affect", "### Today"]
 
     last_batch: list[dict] = []
     last_ts: str | None = None
@@ -312,7 +312,6 @@ def render_affect(conn: sqlite3.Connection) -> str:
     elif not last_batch:
         out.append("_none_")
 
-    out.append("")
     out.append("### This Week")
     week_pool = [r for r in week_rows
                  if r["id"] not in line1_ids and r["id"] not in line2_ids]
