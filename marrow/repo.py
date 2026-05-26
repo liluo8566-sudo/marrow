@@ -69,8 +69,20 @@ def add_alert(severity: str, atype: str, message: str,
               source: str | None = None, *, db: str | None = None) -> int:
     # on_alert sink for LLMClient: self-contained connection so it works
     # from any context (pipeline, hook, daemon). Mirrors to audit_log.
+    # Idempotent: if an unresolved alert with the same (severity, type,
+    # message, source) already exists, return its id without inserting —
+    # stops legacy full-render etc. from breeding hundreds of dupes.
     conn = storage.connect(db)
     try:
+        existing = conn.execute(
+            "SELECT id FROM alerts"
+            " WHERE severity=? AND type=? AND message=?"
+            " AND COALESCE(source,'')=COALESCE(?,'') AND resolved=0"
+            " LIMIT 1",
+            (severity, atype, message, source),
+        ).fetchone()
+        if existing is not None:
+            return existing["id"]
         with conn:
             cur = conn.execute(
                 "INSERT INTO alerts (severity, type, message, source) "

@@ -30,13 +30,26 @@ def _redirect_marrow_data_dir(tmp_path_factory):
     Patches the module object directly so `from marrow import config;
     config.db_path()` returns the test path. Survives reimports because
     the attribute lives on the module singleton.
+
+    Also redirects dashboard_path / db_pages_path / sub_pages_path —
+    these fall back to `~/Desktop/NY/...` (NOT DATA_DIR), so a test that
+    forgets to patch them would write into the real Obsidian vault. This
+    autouse guard makes that leak impossible.
     """
     from marrow import config
 
     tmp = tmp_path_factory.mktemp("marrow-data")
+    vault = tmp / "vault"
+    (vault / "db-pages").mkdir(parents=True, exist_ok=True)
     mp = pytest.MonkeyPatch()
     mp.setattr(config, "DATA_DIR", tmp)
     mp.setattr(config, "CONFIG_PATH", tmp / "config.toml")
+    mp.setattr(config, "dashboard_path",
+               lambda: str(vault / "dashboard.md"))
+    mp.setattr(config, "db_pages_path",
+               lambda: str(vault / "db-pages"))
+    mp.setattr(config, "sub_pages_path",
+               lambda: str(vault / "db-pages"))
     yield tmp
     mp.undo()
 

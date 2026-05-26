@@ -3,7 +3,26 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from marrow import config
+
+
+@pytest.fixture(autouse=True)
+def _restore_path_accessors(monkeypatch):
+    """Undo conftest's autouse vault patches so we can test real fallback."""
+    monkeypatch.setattr(
+        config, "dashboard_path",
+        lambda: config.load()["paths"]["dashboard"],
+    )
+    monkeypatch.setattr(
+        config, "db_pages_path",
+        lambda: config.load()["paths"]["db_pages"],
+    )
+    monkeypatch.setattr(
+        config, "sub_pages_path",
+        lambda: config.load()["paths"]["db_pages"],
+    )
 
 
 def test_db_pages_path_defaults_under_ny(monkeypatch, tmp_path):
