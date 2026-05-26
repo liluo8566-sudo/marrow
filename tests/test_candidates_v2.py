@@ -28,6 +28,23 @@ def db(tmp_path):
     return conn
 
 
+@pytest.fixture(autouse=True)
+def _disable_cosine_layer(monkeypatch):
+    """Tests in this file target the string/alias dedup layer. The cosine
+    layer (added later for tasks/milestones/entities) is exercised in
+    tests/test_semantic_dedup.py with explicit stubs. Force it off here so
+    bge-m3 paraphrase scoring can't swallow rows that the string layer
+    intends to insert (e.g. '阿屿' vs '阿屿新' score 0.87).
+    """
+    from marrow import semantic_dedup
+    monkeypatch.setattr(
+        semantic_dedup, "cosine_max", lambda conn, q, t: 0.0,
+    )
+    monkeypatch.setattr(
+        semantic_dedup, "cosine_top_match", lambda conn, q, t: (-1, 0.0),
+    )
+
+
 # ── milestone dedup ─────────────────────────────────────────────────────────
 
 def test_milestone_dedup_same_key_noop(db):

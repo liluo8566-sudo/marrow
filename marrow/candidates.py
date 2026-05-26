@@ -163,6 +163,30 @@ def write_entity_cand(conn, raw: str, source: str = "daily") -> int:
         if hit_id is not None:
             _merge_aliases_into(conn, hit_id, name, aliases_list)
             continue
+        # Cosine dedup vs same-kind active entity names. Hit → merge new
+        # name + aliases into the matched row (auto-learn alias), not
+        # block: entity.aliases JSON exists exactly for this case.
+        from . import semantic_dedup
+        kind_rows = conn.execute(
+            "SELECT id, name FROM entities WHERE kind=?"
+            " AND superseded_by IS NULL", (kind,),
+        ).fetchall()
+        if kind_rows:
+            target_names = [r["name"] for r in kind_rows]
+            match = semantic_dedup.cosine_top_match(conn, name, target_names)
+            if match is None:
+                with conn:
+                    semantic_dedup.warn_embedder_missing(
+                        conn, "entities_dedup_no_embedder",
+                        "candidates.write_entity_cand",
+                    )
+            else:
+                idx, score = match
+                if (idx >= 0
+                        and score >= semantic_dedup.threshold_for("entities")):
+                    _merge_aliases_into(conn, kind_rows[idx]["id"],
+                                        name, aliases_list)
+                    continue
         fact = (it.get("note") or "").strip() or None
         aliases_json = (json.dumps(aliases_list, ensure_ascii=False)
                         if aliases_list else None)
@@ -218,6 +242,25 @@ def write_milestone_cand(conn, raw: str, date: str,
             (f"%{nh}%",),
         ).fetchone()
         if tomb:
+            continue
+        # Cosine dedup vs all milestones.title (all-in — table stays small,
+        # <1 row/month, cheap to scan; protects against re-creation under
+        # paraphrased wording).
+        from . import semantic_dedup
+        cos_targets = [
+            r["title"] for r in conn.execute(
+                "SELECT title FROM milestones WHERE title IS NOT NULL"
+                " AND title != ''"
+            ).fetchall()
+        ]
+        cos = semantic_dedup.cosine_max(conn, title, cos_targets)
+        if cos is None:
+            with conn:
+                semantic_dedup.warn_embedder_missing(
+                    conn, "milestones_dedup_no_embedder",
+                    "candidates.write_milestone_cand",
+                )
+        elif cos >= semantic_dedup.threshold_for("milestones"):
             continue
         with conn:
             conn.execute(

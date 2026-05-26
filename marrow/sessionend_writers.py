@@ -178,6 +178,26 @@ LLM (whitelist fallback Others)."""
         if blocking:
             continue
 
+        # Cosine dedup vs active titles + 24h-window done titles. Mirrors
+        # the string-layer scope: archived intentionally excluded so an
+        # old archived task can resurface under a new wording.
+        from . import semantic_dedup
+        cos_targets = [
+            r["title"] for r in conn.execute(
+                "SELECT title FROM tasks WHERE status='active' OR"
+                " (status='done' AND updated_at>=?)", (_24h_ago,),
+            ).fetchall()
+        ]
+        cos = semantic_dedup.cosine_max(conn, title, cos_targets)
+        if cos is None:
+            with conn:
+                semantic_dedup.warn_embedder_missing(
+                    conn, "tasks_dedup_no_embedder",
+                    "sessionend_writers.seg_task_cand",
+                )
+        elif cos >= semantic_dedup.threshold_for("tasks"):
+            continue
+
         with conn:
             conn.execute(
                 "INSERT INTO tasks (category, title, due, status, next_step)"

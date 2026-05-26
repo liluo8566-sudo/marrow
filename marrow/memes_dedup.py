@@ -115,10 +115,7 @@ def cosine_dup_score(conn: sqlite3.Connection, key: str) -> float | None:
 
     Embeds are L2-normalized → cosine = dot product.
     """
-    from . import recall  # lazy: heavy onnxruntime import
-    emb = recall._ensure_embedder()
-    if emb is None:
-        return None
+    from . import semantic_dedup
     targets: list[str] = []
     for r in conn.execute(
         "SELECT key FROM memes WHERE status='active' AND key IS NOT NULL"
@@ -133,25 +130,7 @@ def cosine_dup_score(conn: sqlite3.Connection, key: str) -> float | None:
         "SELECT name FROM entities_live WHERE name IS NOT NULL AND name != ''"
     ).fetchall():
         targets.append(r["name"])
-    if not targets:
-        return 0.0
-    # dedupe targets case-insensitively to cut inference cost
-    seen: set[str] = set()
-    uniq: list[str] = []
-    for t in targets:
-        lc = t.lower()
-        if lc in seen:
-            continue
-        seen.add(lc)
-        uniq.append(t)
-    vecs = emb.embed([key, *uniq])
-    q = vecs[0]
-    best = 0.0
-    for v in vecs[1:]:
-        s = float((q * v).sum())
-        if s > best:
-            best = s
-    return best
+    return semantic_dedup.cosine_max(conn, key, targets)
 
 
 def cosine_dup_threshold() -> float:

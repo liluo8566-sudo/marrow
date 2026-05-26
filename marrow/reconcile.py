@@ -811,6 +811,23 @@ def _insert_unanchored_tasks(conn: sqlite3.Connection,
         ).fetchone()
         if dup is not None:
             continue
+        # Cosine dedup across all active tasks (cross-category — Lumi may
+        # have hand-typed the category wrong, so don't trust it as a
+        # partitioning key here).
+        from . import semantic_dedup as _sd
+        cos_targets = [
+            r["title"] for r in conn.execute(
+                "SELECT title FROM tasks WHERE status='active'"
+            ).fetchall()
+        ]
+        cos = _sd.cosine_max(conn, parsed["title"], cos_targets)
+        if cos is None:
+            _sd.warn_embedder_missing(
+                conn, "tasks_dedup_no_embedder",
+                "reconcile._insert_unanchored_tasks",
+            )
+        elif cos >= _sd.threshold_for("tasks"):
+            continue
         cur = conn.execute(
             "INSERT INTO tasks "
             "(category, title, due, next_step, status, created_at, updated_at) "

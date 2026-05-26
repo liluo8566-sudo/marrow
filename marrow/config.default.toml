@@ -87,6 +87,21 @@ cosine_threshold = 0.85
 # repeat candidates.
 fast_skip_count = 3
 
+[tasks_dedup]
+# Cosine vs active tasks + 24h-window done tasks. Archived intentionally
+# excluded — old archived tasks may legitimately resurface under new
+# wording. Cross-category in both insert paths.
+cosine_threshold = 0.85
+
+[milestones_dedup]
+# Cosine vs all milestones.title (table stays small, <1 row/month).
+cosine_threshold = 0.85
+
+[entities_dedup]
+# Cosine vs same-kind active entities.name. Hit merges new name into
+# matched row's aliases JSON (auto-learn), does not block insert path.
+cosine_threshold = 0.85
+
 [subpages]
 # Sub-page render order + visibility (DESIGN L43-65). Known keys:
 #   profile · milestone · diary · memes · stickers · wallet · goose
