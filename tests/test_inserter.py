@@ -225,6 +225,93 @@ def test_rerun_idempotent_when_md_matches_db(store, tmp_path):
     assert store.get_hash(path, "1") == first_hash
 
 
+# ── layout: rows in same section run flush ─────────────────────────────────
+
+
+def test_bootstrap_rows_in_same_section_have_no_blank_between(store, tmp_path):
+    """Cold-start emits a flush list — adjacent rows are not separated by a
+    blank line."""
+    path = str(tmp_path / "p.md")
+    rows = [
+        {"id": 1, "tag": "A", "text": "alpha"},
+        {"id": 2, "tag": "A", "text": "beta"},
+        {"id": 3, "tag": "A", "text": "gamma"},
+    ]
+    spec = _spec(path, rows, group_by="tag",
+                 section_of=lambda r: r["tag"],
+                 section_order=lambda s: ["A"])
+    write_subpage_inserter(spec, store.conn, store)
+    text = Path(path).read_text()
+    # Adjacent rows: no blank line between them.
+    assert "- alpha <!-- id:1 -->\n- beta <!-- id:2 -->" in text
+    assert "- beta <!-- id:2 -->\n- gamma <!-- id:3 -->" in text
+
+
+def test_bootstrap_sections_separated_by_blank_line(store, tmp_path):
+    """Each section header sits between blank lines; last row of one
+    section + first row of the next are not adjacent."""
+    path = str(tmp_path / "p.md")
+    rows = [
+        {"id": 1, "tag": "A", "text": "alpha"},
+        {"id": 2, "tag": "B", "text": "beta"},
+    ]
+    spec = _spec(path, rows, group_by="tag",
+                 section_of=lambda r: r["tag"],
+                 section_order=lambda s: ["A", "B"])
+    write_subpage_inserter(spec, store.conn, store)
+    text = Path(path).read_text()
+    # Section header keeps a blank above + below.
+    assert "\n\n## B\n\n- beta" in text
+
+
+def test_bootstrap_with_subsection_emits_sub_header(store, tmp_path):
+    """When subsection_of is set, cold-start emits subsection headers and
+    rows under each subsection stay flush."""
+    path = str(tmp_path / "p.md")
+    rows = [
+        {"id": 1, "year": "2026", "month": "April", "text": "a"},
+        {"id": 2, "year": "2026", "month": "April", "text": "b"},
+        {"id": 3, "year": "2026", "month": "May", "text": "c"},
+    ]
+    spec = InserterSpec(
+        key="test",
+        path=path,
+        fetch=lambda _c: list(rows),
+        block_id_of=lambda r: str(r["id"]),
+        render_row=lambda r: f"- {r['text']} <!-- id:{r['id']} -->",
+        group_by="date",
+        section_of=lambda r: r["year"],
+        section_order=lambda s: sorted(set(s)),
+        subsection_of=lambda r: r["month"],
+        render_subsection_header=lambda m: f"### {m}",
+        empty_message="_(none)_",
+    )
+    write_subpage_inserter(spec, store.conn, store)
+    text = Path(path).read_text()
+    assert "## 2026" in text
+    assert "### April" in text
+    assert "### May" in text
+    # Adjacent rows inside the same sub-month run flush.
+    assert "- a <!-- id:1 -->\n- b <!-- id:2 -->" in text
+    # Sub header bordered by blank lines.
+    assert "\n\n### May\n\n- c <!-- id:3 -->" in text
+
+
+def test_append_keeps_flush_layout(store, tmp_path):
+    """New row appended into an existing section sits flush against the
+    previous row — no extra blank line."""
+    path = str(tmp_path / "p.md")
+    rows = [{"id": 1, "tag": "A", "text": "alpha"}]
+    spec = _spec(path, rows, group_by="tag",
+                 section_of=lambda r: r["tag"],
+                 section_order=lambda s: ["A"])
+    write_subpage_inserter(spec, store.conn, store)
+    rows.append({"id": 2, "tag": "A", "text": "beta"})
+    write_subpage_inserter(spec, store.conn, store)
+    text = Path(path).read_text()
+    assert "- alpha <!-- id:1 -->\n- beta <!-- id:2 -->" in text
+
+
 # ── recovery: file missing markers triggers bootstrap ──────────────────────
 
 def test_file_with_no_markers_rebootstraps(store, tmp_path):

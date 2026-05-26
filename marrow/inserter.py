@@ -61,6 +61,11 @@ class InserterSpec:
     section_of(row) returns the section label. section_order(labels) returns
     the canonical display order. Sections appear in the order returned by
     section_order; new sections append at the end of the canonical list.
+
+    subsection_of(row) is an optional second-level grouping inside each
+    section — e.g. month inside year for goose-bites. Empty string ('')
+    means no subsection header for that row. Subsection labels are emitted
+    in first-seen order from the bootstrap fetch.
     """
     key: str
     path: str
@@ -74,6 +79,10 @@ class InserterSpec:
     )
     render_section_header: Callable[[str], str] = field(
         default=lambda label: f"## {label}",
+    )
+    subsection_of: Callable[[dict], str] = field(default=lambda _r: "")
+    render_subsection_header: Callable[[str], str] = field(
+        default=lambda label: f"### {label}",
     )
     empty_message: str = "_(none yet)_"
 
@@ -156,7 +165,12 @@ def write_subpage_inserter(spec: InserterSpec, conn: sqlite3.Connection,
 
 
 def _bootstrap(spec: InserterSpec, rows: list[dict]) -> str:
-    """Render full file fresh. Sections in canonical order."""
+    """Render full file fresh. Sections in canonical order.
+
+    Layout — sections separated by a blank line; rows inside a section run
+    flush (no blank line between rows of the same subsection). Subsection
+    headers (e.g. month inside year) get one blank line above + below.
+    """
     out: list[str] = [spec.m0(), ""]
     if not rows:
         out.append(spec.empty_message)
@@ -172,9 +186,18 @@ def _bootstrap(spec: InserterSpec, rows: list[dict]) -> str:
         if label:
             out.append(spec.render_section_header(label))
             out.append("")
+        cur_sub: str | None = None
         for r in sections.get(label, []):
+            sub = spec.subsection_of(r)
+            if sub != cur_sub:
+                if cur_sub is not None:
+                    out.append("")
+                if sub:
+                    out.append(spec.render_subsection_header(sub))
+                    out.append("")
+                cur_sub = sub
             out.append(spec.render_row(r))
-            out.append("")
+        out.append("")
     out.append(spec.m1())
     out.append("")
     return "\n".join(out)
@@ -185,6 +208,16 @@ def _append_new_rows(spec: InserterSpec, text: str,
     """Insert new rows under their section header. If the section header
     is missing, append the header + rows just before the end marker.
 
+    Layout — new rows run flush against the previous row of the same section
+    (no blank line between rows). Section header insertion keeps one blank
+    line above + below the header.
+
+    Subsection-aware specs (goose-bites month-inside-year) emit subsection
+    headers on cold-start only; append-mode here glues new rows to the
+    section's last existing row without injecting a fresh `### Month`. If
+    that creates a visible header gap, deleting the md file triggers a
+    fresh bootstrap on the next pass.
+
     Behaviour is deliberately additive — never re-orders existing user content.
     """
     end_marker = spec.m1()
@@ -193,7 +226,7 @@ def _append_new_rows(spec: InserterSpec, text: str,
         # No end marker — treat the entire file as the block, append at EOF.
         end_idx = len(text)
     section_labels = spec.section_order(new_by_section.keys())
-    inserts: list[str] = []
+    pending: list[tuple[str, list[tuple[str, str]]]] = []
     for label in section_labels:
         items = new_by_section.get(label, [])
         if not items:
@@ -205,21 +238,29 @@ def _append_new_rows(spec: InserterSpec, text: str,
                 cursor = text.find("\n##", h_idx + len(header))
                 if cursor < 0 or cursor > end_idx:
                     cursor = end_idx
-                addition = "\n".join(
-                    body + "\n" for _bid, body in items
-                )
-                text = text[:cursor] + "\n" + addition + text[cursor:]
-                # end_idx may have shifted if cursor < end_idx.
+                # Glue new rows to the section's last content — strip
+                # trailing newlines so each new row sits flush.
+                trail_start = cursor
+                while trail_start > 0 and text[trail_start - 1] == "\n":
+                    trail_start -= 1
+                addition = "".join("\n" + body for _bid, body in items)
+                text = text[:trail_start] + addition + text[trail_start:]
                 end_idx = text.find(end_marker)
                 if end_idx < 0:
                     end_idx = len(text)
                 continue
-            inserts.append(header)
-            inserts.append("")
-        for _bid, body in items:
-            inserts.append(body)
-            inserts.append("")
-    if inserts:
-        prelude = "\n".join(inserts) + "\n"
-        text = text[:end_idx] + prelude + text[end_idx:]
+        pending.append((label, items))
+    if pending:
+        trail_start = end_idx
+        while trail_start > 0 and text[trail_start - 1] == "\n":
+            trail_start -= 1
+        chunks: list[str] = []
+        for label, items in pending:
+            if label:
+                chunks.append("\n\n" + spec.render_section_header(label))
+                chunks.append("\n")
+            for _bid, body in items:
+                chunks.append("\n" + body)
+        addition = "".join(chunks)
+        text = text[:trail_start] + addition + text[trail_start:]
     return text

@@ -14,6 +14,7 @@ read-only render path.
 """
 from __future__ import annotations
 
+import calendar
 import sqlite3
 from pathlib import Path
 
@@ -22,6 +23,16 @@ from .inserter import InserterSpec
 
 def _year(date_str: str) -> str:
     return date_str[:4] if date_str and len(date_str) >= 4 else "?"
+
+
+def _month_name(date_str: str) -> str:
+    """`'2026-05-20'` → `'May'`. Empty/short strings get sentinel."""
+    if not date_str or len(date_str) < 7:
+        return ""
+    try:
+        return calendar.month_name[int(date_str[5:7])]
+    except (ValueError, IndexError):
+        return ""
 
 
 def _anchor(row_id: int | str) -> str:
@@ -294,6 +305,8 @@ def build_goose_spec(folder: str) -> InserterSpec:
         section_of=lambda r: _year(r["date"]),
         section_order=lambda labels: sorted(set(labels)),
         render_section_header=lambda y: f"## {y}",
+        subsection_of=lambda r: _month_name(r["date"]),
+        render_subsection_header=lambda m: f"### {m}",
         empty_message="_No goose-bites yet._",
     )
 
