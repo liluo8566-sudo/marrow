@@ -232,28 +232,29 @@ def test_path_shaped_only(drift_env):
 # ---------------------------------------------------------------------------
 
 def test_dir_tree_refresh(drift_env):
+    """dir_tree is a dirs-only structural overview (files are omitted —
+    grep covers files). Verify rename of a directory updates the tree."""
     env = drift_env
     root = env.root_a
 
-    old_file = root / "old_module.py"
-    new_file = root / "new_module.py"
-    old_file.write_text('# old_module.py\n', encoding="utf-8")
+    old_dir = root / "old_module"
+    new_dir = root / "new_module"
+    old_dir.mkdir()
+    (old_dir / "x.py").write_text("x = 1\n", encoding="utf-8")
 
     from marrow.drift_sweep import refresh_dir_tree
 
-    # Refresh before rename — tree should have old_module
     refresh_dir_tree(roots=[env.root_a, env.root_b])
     tree_content = env.tree_md.read_text()
-    assert "old_module.py" in tree_content
+    assert "old_module/" in tree_content
+    assert "x.py" not in tree_content  # files intentionally omitted
 
-    # Rename: remove old, create new
-    old_file.unlink()
-    new_file.write_text('# new_module.py\n', encoding="utf-8")
+    old_dir.rename(new_dir)
 
     refresh_dir_tree(roots=[env.root_a, env.root_b])
     tree_content = env.tree_md.read_text()
-    assert "new_module.py" in tree_content, "new path missing from tree"
-    assert "old_module.py" not in tree_content, "old path still in tree"
+    assert "new_module/" in tree_content, "new dir missing from tree"
+    assert "old_module/" not in tree_content, "old dir still in tree"
 
 
 # ---------------------------------------------------------------------------

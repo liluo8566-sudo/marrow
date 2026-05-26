@@ -41,10 +41,31 @@ BINARY_EXTS = {
     ".gz", ".dmg", ".so", ".dylib", ".o",
 }
 
-EXCLUDE_DIRS = {
+# Files we skip during ref scan / apply: binaries + append-only history.
+# cc session jsonl + log files quote old paths from past sessions as
+# historical record; rewriting those would corrupt history without fixing
+# any real reference.
+SKIP_SCAN_EXTS = BINARY_EXTS | {".jsonl", ".log"}
+
+# Ref-scan exclude: drift_sweep skips these when looking for path references.
+# Keep narrow — only directories that genuinely cannot contain user-managed
+# references (build artifacts, VCS metadata, virtualenvs, prior backups).
+EXCLUDE_DIRS_SCAN = {
     ".git", "__pycache__", "node_modules", ".venv", "venv",
     ".DS_Store", "logs", "archives", "drift_backup",
 }
+
+# Dir-tree exclude: cosmetic — additionally hide cc / marrow runtime state
+# whose contents are high-cardinality session/UUID noise that adds nothing
+# to a structural overview. Ref scan still walks these (above set is narrower).
+EXCLUDE_DIRS_TREE = EXCLUDE_DIRS_SCAN | {
+    "file-history", "projects", "cache", "backups", "todos", "shell-snapshots",
+    "session-env", "image-cache", "paste-cache", "jobs", "ide", "downloads",
+    "tasks", "telemetry",
+}
+
+# Back-compat alias — older code paths may still reference EXCLUDE_DIRS.
+EXCLUDE_DIRS = EXCLUDE_DIRS_SCAN
 
 _BATCH_WINDOW_S = 30.0
 _PENDING_TTL_S = 1800  # 30 min
@@ -85,9 +106,9 @@ def _find_refs_rg(old_name: str, rg_bin: str, roots: list[Path]) -> list[dict] |
     """Run ripgrep search. Returns parsed refs list or None on failure."""
     args = [rg_bin, "--line-number", "--column", "--no-heading",
             "--color=never", "-e", old_name]
-    for d in EXCLUDE_DIRS:
+    for d in EXCLUDE_DIRS_SCAN:
         args += ["--glob", f"!{d}/**"]
-    for ext in BINARY_EXTS:
+    for ext in SKIP_SCAN_EXTS:
         args += ["--glob", f"!*{ext}"]
     args += [str(r) for r in roots if r.exists()]
 
@@ -117,10 +138,10 @@ def _find_refs_python(old_name: str, roots: list[Path]) -> list[dict]:
             continue
         for dirpath, dirnames, filenames in os.walk(root):
             # Prune excluded dirs in-place
-            dirnames[:] = [d for d in dirnames if d not in EXCLUDE_DIRS]
+            dirnames[:] = [d for d in dirnames if d not in EXCLUDE_DIRS_SCAN]
             for fname in filenames:
                 fpath = Path(dirpath) / fname
-                if fpath.suffix.lower() in BINARY_EXTS:
+                if fpath.suffix.lower() in SKIP_SCAN_EXTS:
                     continue
                 try:
                     if fpath.stat().st_size > 10 * 1024 * 1024:
@@ -257,7 +278,7 @@ def _emit_alert(message: str, source: str = "drift_sweep") -> None:
 # ---------------------------------------------------------------------------
 
 def refresh_dir_tree(roots: list[Path] | None = None) -> None:
-    """Regenerate ~/.config/marrow/dir_tree.md (max-depth=4, excludes applied)."""
+    """Regenerate ~/.config/marrow/dir_tree.md (dirs-only, max-depth=2)."""
     if roots is None:
         roots = AUTHORIZED_ROOTS
     lines: list[str] = ["# dir_tree", ""]
@@ -266,7 +287,7 @@ def refresh_dir_tree(roots: list[Path] | None = None) -> None:
         if not root.exists():
             continue
         lines.append(f"## {root}")
-        lines.extend(_tree_lines(root, "", depth=0, max_depth=4))
+        lines.extend(_tree_lines(root, "", depth=0, max_depth=2))
         lines.append("")
 
     out = Path(str(paths.dir_tree_md))
@@ -275,28 +296,29 @@ def refresh_dir_tree(roots: list[Path] | None = None) -> None:
 
 
 def _tree_lines(path: Path, prefix: str, depth: int, max_depth: int) -> list[str]:
+    """Dirs-only overview tree. Files are omitted; grep finds files, this is
+    a structural skeleton ("which kind of stuff lives where")."""
     if depth >= max_depth:
         return []
     try:
-        entries = sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name))
+        entries = sorted(p for p in path.iterdir() if p.is_dir())
     except PermissionError:
         return []
-    result: list[str] = []
     entries = [e for e in entries if _include_entry(e)]
+    result: list[str] = []
     for i, entry in enumerate(entries):
         connector = "└── " if i == len(entries) - 1 else "├── "
-        result.append(f"{prefix}{connector}{entry.name}")
-        if entry.is_dir():
-            ext_prefix = prefix + ("    " if i == len(entries) - 1 else "│   ")
-            result.extend(_tree_lines(entry, ext_prefix, depth + 1, max_depth))
+        result.append(f"{prefix}{connector}{entry.name}/")
+        ext_prefix = prefix + ("    " if i == len(entries) - 1 else "│   ")
+        result.extend(_tree_lines(entry, ext_prefix, depth + 1, max_depth))
     return result
 
 
 def _include_entry(p: Path) -> bool:
-    if p.name in EXCLUDE_DIRS:
+    if p.name in EXCLUDE_DIRS_TREE:
         return False
     if p.is_file():
-        if p.suffix.lower() in BINARY_EXTS:
+        if p.suffix.lower() in SKIP_SCAN_EXTS:
             return False
         try:
             if p.stat().st_size > 10 * 1024 * 1024:
@@ -488,7 +510,7 @@ class DriftWatcher:
 
     def on_moved(self, src: str, dest: str) -> None:
         """Trigger A: same-root rename/move."""
-        if Path(src).suffix.lower() in BINARY_EXTS:
+        if Path(src).suffix.lower() in SKIP_SCAN_EXTS:
             return
         with self._lock:
             self._cache[Path(dest).name] = self._stat(dest)
@@ -496,7 +518,7 @@ class DriftWatcher:
             self._queue_batch(src, dest)
 
     def on_deleted(self, path: str) -> None:
-        if Path(path).suffix.lower() in BINARY_EXTS:
+        if Path(path).suffix.lower() in SKIP_SCAN_EXTS:
             return
         st = self._stat_safe(path)
         with self._lock:
@@ -505,7 +527,7 @@ class DriftWatcher:
             }
 
     def on_created(self, path: str) -> None:
-        if Path(path).suffix.lower() in BINARY_EXTS:
+        if Path(path).suffix.lower() in SKIP_SCAN_EXTS:
             return
         p = Path(path)
         name = p.name
