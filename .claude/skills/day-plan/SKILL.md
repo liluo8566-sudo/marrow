@@ -67,7 +67,7 @@ Constraints
 Plan rejected if any Session lacks Dispatch line, or any Done lacks verifiable command.
 End with one declarative line — main session starts now.
 
-**Save plan to** `~/Desktop/NY/<slug>.md` — slug ≤4 words, no date prefix (e.g. `dashboard-rebuild.md`). Hard cap 150 lines, target ≤100.
+**Save plan to** `marrow/docs/plans/<slug>.md` — slug ≤4 words, no date prefix (e.g. `dashboard-rebuild.md`). Hard cap 150 lines, target ≤100.
 
 ## Evening mode (review window)
 

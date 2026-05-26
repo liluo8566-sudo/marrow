@@ -74,3 +74,11 @@ Delta only. Never restate DESIGN / SCHEMA.
 - Marrow 4 commits (1156aef day-plan, 8f4cd06 PROGRESS append, 0d22c82 day-plan refine wt/agent + ≤3 cap, 49a6eb0 comms+workflow+sessionend pass-through); ~/.claude 3 commits (741e3dd skill bundle rotation, db03375 drop fetcher/subagents, e81d6ba rules+handoff+marrow commands)
 - wt vs agent distinction settled: agent=single-run ephemeral (search/scan/review/small patch), wt=independent session with own SID (hours-long, multi-file, experimental); main session always opens wt, user never manually
 - Grill scope: grill-me for daily use, grill-with-doc reserved for phase kickoff; brainstorming skill for new module-level feature only; day-plan internal Brainstorm step covers addon-scale items
+
+[2026-05-26 sid:eb3555c3]
+- Three `reconcile.py` bugs fixed + committed (`a078ba6`), 611 tests pass:
+  1. `_parse_task_row_body` now matches prefix *or* suffix — title-with-colon no longer blocks next_step edits
+  2. Deleting a done-row from dashboard now archives it instead of resurrecting on next render
+  3. Rebound guard: `body == db_title` skips colon-split when `db_next_step` is NULL
+- Hook timing root cause confirmed: `sessionend_async` / `mw refresh` / launchd import **disk code** at call time — half-patched code runs live during edits; `mw refresh` safe as long as DB isn't corrupted by bad write
+- Lesson locked in: patches to `reconcile.py` / `dashboard` / `top_sections` must go through worktree to avoid live disk pollution
