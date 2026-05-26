@@ -18,11 +18,11 @@ from __future__ import annotations
 import hashlib
 import os
 import sqlite3
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
 
+from ._atomic import atomic_write as _atomic_write
 from .md_index import TombstoneStore, parse_blocks
 
 # Marker emitted around the auto-managed block. Same shape as legacy
@@ -33,19 +33,6 @@ _M1 = "<!-- marrow:{key}:end -->"
 
 def _hash(body: str) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
-
-
-def _atomic_write(path: str, data: str) -> None:
-    d = os.path.dirname(path) or "."
-    os.makedirs(d, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=d, prefix=".mrw.")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(data)
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
 
 
 @dataclass
@@ -271,7 +258,7 @@ def _append_new_rows(spec: InserterSpec, text: str,
             header = spec.render_section_header(label)
             h_idx = text.find(header, 0, end_idx)
             if h_idx >= 0:
-                cursor = text.find("\n##", h_idx + len(header))
+                cursor = text.find("\n## ", h_idx + len(header))
                 if cursor < 0 or cursor > end_idx:
                     cursor = end_idx
                 # Glue new rows to the section's last content — strip

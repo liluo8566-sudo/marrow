@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import os
 import sqlite3
-import tempfile
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,6 +21,7 @@ from typing import Callable
 from . import config as _config
 from . import repo
 from . import subpage_specs
+from ._atomic import atomic_write as _atomic_write
 from .inserter import InserterSpec, write_subpage_inserter
 from .md_index import MdIndex
 from .reconcile import reconcile_milestones
@@ -86,19 +86,6 @@ class SubPageConfig:
 # Write (atomic)
 # ---------------------------------------------------------------------------
 
-def _atomic_write(path: str, data: str) -> None:
-    d = os.path.dirname(path) or "."
-    os.makedirs(d, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=d, prefix=".mrw.")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(data)
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-
-
 def _split(text: str, key: str) -> tuple[str, str, str]:
     """(before, block_incl_markers, after); block '' if markers absent."""
     m0, m1 = _m0(key), _m1(key)
@@ -145,6 +132,12 @@ def write_subpage(cfg: SubPageConfig, conn: sqlite3.Connection,
                 source="subpages.py", db=db,
             )
     else:
+        if not cfg.read_only:
+            repo.add_alert(
+                "warn", "db_pages",
+                f"{key} missing inserter — legacy full-render path bypasses SoT",
+                source="subpages.py", db=db,
+            )
         block = cfg.render(conn)
         existing = (Path(path).read_text(encoding="utf-8")
                     if os.path.exists(path) else "")
