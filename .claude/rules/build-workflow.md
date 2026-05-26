@@ -1,9 +1,15 @@
 # Build workflow
 
+<reload-long-runners>
+- daemon / recall / storage / entity_recall edit → restart cc
+- After editing watcher-loaded modules: md_index / top_sections / reconcile / watcher / dashboard / repo / storage edit → `launchctl kickstart -k gui/501/com.marrow.watcher`
+</reload-long-runners>
+
 ## Commit
 - Auto commit per logical unit; push at session/phase end.
 - If you see something Lumi modified, commit it together.
-- Each session commits its own part.
+- Each session commits its own part, unless last session missed anything (inactive session).
+- Don't ask Lumi unless destructive or conflict - just do it and report!!!
 
 ## Build tools
 - `/goal <condition>`: when a sub-module's pass condition is fixed and machine-checkable; auto-runs each turn until met. Leave test output in the transcript — the evaluator reads only the conversation.
@@ -18,6 +24,7 @@
 2b. Code quality + logic bugs + safety nets (`code-quality-reviewer` agent): with DESIGN + goal + Marrow safety-net checklist.
 3. `/ultrareview` after major phases (only 3 free trials).
 4. Main session adjudicates: findings material, not verdict; never trust self-report — double-check stop-bleed/fix claims; fix → pytest + dashboard green → PROGRESS delta.
+5. 加一个产品评价员：不看design和goal盲审，评价这个项目的质量和价值。
 5. Simplify (optional) at project end.
 
 One-shot: `/rr <phase>` runs step 0 then steps 1 + 2a + 2b concurrently; main session adjudicates.
@@ -36,4 +43,5 @@ One-shot: `/rr <phase>` runs step 0 then steps 1 + 2a + 2b concurrently; main se
 - Sweep abandoned `/tmp/*.py`, `/tmp/*.db` scratch files created mid-session at session end.
 - Prune local-only branches that have no commits ahead of main.
 - Untracked `docs/notes/` scratch belongs to the author session
-- Each session clean it's own rubbish.
+- Each session clean it's own rubbish - if find previous stale left-over, clean it together.
+- Just do it - don't ask Lumi!

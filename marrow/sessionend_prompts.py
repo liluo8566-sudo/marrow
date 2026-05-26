@@ -127,6 +127,8 @@ Marker bodies:
 > Exclude ideas / plan user ignored or rejected during the session.
 > Exclude plan that sounds too broad / vague / far away.
 - DONE: decisions, findings, work useful for next session.
+  - It's fine to keep a few significant items from previous sessions but only \
+  if relevant to current or future items.
 - OPEN: unfinished / blocked / undecided (state + blocker).
 - PLAN: next-step plans; exclude user-disagreed or FUTURE.
 - REFERENCE: file:line — 4-6 word hint (path / doc URL / skill / commit).
