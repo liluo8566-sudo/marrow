@@ -1,8 +1,5 @@
 # Marrow handover — {{YYYY-MM-DD HH:MM}}
 
-<!-- marrow:top:start -->
-<!-- marrow:top:end -->
-
 ## Done
 > decisions, findings, work useful for next session.
 - N/A
