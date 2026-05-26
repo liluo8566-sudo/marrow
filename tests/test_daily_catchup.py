@@ -1,6 +1,7 @@
 """Tests for marrow/daily_catchup.py: 6AM boundary, pending scan, fcntl lock."""
 from __future__ import annotations
 
+import datetime as _dt
 import os
 
 import pytest
@@ -51,7 +52,16 @@ def test_pending_days_excludes_diary_done(conn, monkeypatch):
     assert daily_catchup.pending_days(conn) == []
 
 
-def test_day_events_filters_by_6am(conn):
+def test_day_events_filters_by_6am(conn, monkeypatch):
+    # Freeze wall clock — _scan_rows uses date.today() to set the SQL
+    # cutoff (today − 9d). With a hard-coded 2026-05-16 fixture date,
+    # once real today drifts past 2026-05-25 the cutoff filters our
+    # events out and this test starts returning an empty set.
+    class _D(_dt.date):
+        @classmethod
+        def today(cls):
+            return _dt.date(2026, 5, 17)
+    monkeypatch.setattr(daily_catchup._dt, "date", _D)
     _ev(conn, "s1", "2026-05-16T07:00:00Z", "user", "in")   # local 17:00, in
     _ev(conn, "s2", "2026-05-16T20:00:00Z", "user", "out")  # local 06:00 next, out
     conn.commit()
