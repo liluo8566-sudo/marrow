@@ -1122,3 +1122,115 @@ def test_append_progress_concurrent_writers_preserve_both(tmp_path):
     # Each section header appears exactly once (no torn writes).
     assert text.count("[2026-05-26 sid:aaaaaaaa]") == 1
     assert text.count("[2026-05-26 sid:bbbbbbbb]") == 1
+
+
+def test_sessionend_writer_operationalerror_partial_not_fail(db_env, tmp_path,
+                                                              monkeypatch):
+    """Outcome 2: a single writer raising sqlite3.OperationalError (or any
+    Exception outside the legacy ValueError/RuntimeError/TypeError/KeyError
+    tuple) must mark that writer as fail in its audit row and the session
+    overall as partial — other writers still run.
+
+    Today's regression would have let OperationalError escape _run_writer,
+    bubble to _run_extraction's outer try, and stamp the whole session as
+    fail:OperationalError, losing the work of every other writer.
+    """
+    import sqlite3 as _sqlite3
+    db, _ = db_env
+    sid = "test-op-error"
+    _insert_events(db, sid, count=10, role="user")
+    h = tmp_path / "handover.md"
+    pmd = tmp_path / "PROGRESS.md"
+    monkeypatch.setattr("marrow.sessionend_writers._PROGRESS_DEFAULT", pmd)
+
+    state_raw = (
+        "===TASK_CAND===\n"
+        "[{\"title\": \"unrelated task\", \"status\": \"done\","
+        " \"due\": null, \"completed_at\": null, \"note\": \"\"}]\n"
+        "===END===\n"
+        "===HANDOVER===\n"
+        "===DONE===\n- did stuff\n"
+        "===OPEN===\n- N/A\n"
+        "===PLAN===\n- next\n"
+        "===REFERENCE===\n- N/A\n"
+        "===END===\n"
+    )
+    narrative_raw = (
+        "===AFFECT===\n"
+        "[{\"ep\": 1, \"valence\": 0.5, \"arousal\": 0.4,"
+        " \"importance\": 2, \"label\": \"平静\","
+        " \"description\": \"测试\", \"entities\": [],"
+        " \"event_hint\": \"\", \"unresolved\": 0,"
+        " \"reconcile_prev\": \"N/A\"}]\n"
+        "===END===\n"
+        "===DIGEST===\nshort digest\n===END===\n"
+    )
+
+    # Make seg_handover raise OperationalError; leave the others alone.
+    from marrow import sessionend_async
+
+    def _boom(*_a, **_kw):
+        raise _sqlite3.OperationalError("simulated db lock")
+
+    with patch("marrow.sessionend_async.LLMClient") as MockClient, \
+         patch("marrow.handover_render._RENDERED_PATH", h), \
+         patch("marrow.sessionend_async.seg_handover", _boom):
+        MockClient.return_value.call.side_effect = [state_raw, narrative_raw]
+        rc = sessionend_async.main(["--sid", sid])
+
+    # rc == 0 because partial is recoverable, not fatal.
+    assert rc == 0
+    rows = _audit_rows(db, sid)
+    summaries = [r["summary"] for r in rows]
+
+    # Session-level final must be partial, not fail.
+    final = summaries[-1]
+    assert final.startswith("partial:"), (
+        f"expected partial:..., got {final!r}; full audit: {summaries!r}"
+    )
+    assert "handover" in final
+
+    # Per-segment rows live under sessionend_extract_<seg>; fetch separately.
+    conn = storage.connect(db)
+    try:
+        seg_rows = conn.execute(
+            "SELECT action, summary FROM audit_log"
+            " WHERE target_id=? AND action LIKE 'sessionend_extract_%'",
+            (sid,),
+        ).fetchall()
+    finally:
+        conn.close()
+    seg_map = {r["action"]: r["summary"] for r in seg_rows}
+
+    # The failing writer's segment row was logged with the writer name and a
+    # specific exception type, not the generic outer-catch placeholder.
+    h_summary = seg_map.get("sessionend_extract_handover", "")
+    assert h_summary.startswith("fail:"), (
+        f"expected fail: row for handover writer, got seg_map={seg_map!r}"
+    )
+    assert "OperationalError" in h_summary, (
+        f"expected OperationalError name in summary, got {h_summary!r}"
+    )
+    # Other writers in the same call ran to completion.
+    assert seg_map.get("sessionend_extract_task_cand") == "ok"
+    assert seg_map.get("sessionend_extract_progress") == "ok"
+    assert seg_map.get("sessionend_extract_affect") == "ok"
+    assert seg_map.get("sessionend_extract_digest") == "ok"
+
+    # And the persisted side-effects of the surviving writers landed.
+    conn = storage.connect(db)
+    try:
+        n_task = conn.execute(
+            "SELECT COUNT(*) c FROM tasks WHERE title='unrelated task'"
+        ).fetchone()["c"]
+        n_aff = conn.execute(
+            "SELECT COUNT(*) c FROM affect WHERE source='sessionend_async'"
+        ).fetchone()["c"]
+        n_dig = conn.execute(
+            "SELECT COUNT(*) c FROM session_digests WHERE sid=?", (sid,)
+        ).fetchone()["c"]
+    finally:
+        conn.close()
+    assert n_task == 1
+    assert n_aff == 1
+    assert n_dig == 1

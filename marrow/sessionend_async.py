@@ -286,12 +286,19 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _run_writer(conn, sid: str, name: str, writer) -> bool:
-    """Run one writer; log audit row. Returns True on success."""
+    """Run one writer; log audit row. Returns True on success.
+
+    Catches every Exception (including sqlite3.OperationalError and OSError)
+    so one writer failing never escapes to the outer session-level try and
+    flips the whole session to fail. The audit row carries the writer name
+    explicitly, so downstream final-audit sees this as a per-writer partial,
+    not a session-wide blowup.
+    """
     try:
         writer()
         _write_segment_audit(conn, sid, name, "ok")
         return True
-    except (ValueError, RuntimeError, TypeError, KeyError) as e:
+    except Exception as e:  # noqa: BLE001
         try:
             _write_segment_audit(conn, sid, name, f"fail:{type(e).__name__}")
         except Exception:  # noqa: BLE001
