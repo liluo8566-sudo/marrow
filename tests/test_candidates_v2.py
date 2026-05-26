@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 
 import pytest
 
@@ -438,3 +439,102 @@ def test_daily_material_includes_importance5_affect_ep(tmp_path):
     assert "工签签证被拒" in body
     # diary call also receives the same material
     assert "importance=5" in fake.bodies.get("daily", "")
+
+
+# ── entity alias-aware dedup ────────────────────────────────────────────────
+
+def _entity_raw(name, kind="person", aliases=None, conf=0.9, note=None):
+    import json as _j
+    obj = {"name": name, "kind": kind, "conf": conf}
+    if aliases is not None:
+        obj["aliases"] = aliases
+    if note is not None:
+        obj["note"] = note
+    return ("===ENTITY_CAND===\n" + _j.dumps([obj], ensure_ascii=False)
+            + "\n===END===\n")
+
+
+def test_entity_new_name_hits_existing_alias_skips_and_merges(db):
+    # Seed: row(name=阿屿, aliases=[屿忱, Stellan])
+    candidates.write_entity_cand(
+        db, _entity_raw("阿屿", aliases=["屿忱", "Stellan"]))
+    n = candidates.write_entity_cand(
+        db, _entity_raw("屿忱", aliases=["小屿"]))
+    assert n == 0  # no new insert
+    rows = db.execute(
+        "SELECT name, aliases FROM entities WHERE kind='person'"
+    ).fetchall()
+    assert len(rows) == 1
+    aliases = json.loads(rows[0]["aliases"])
+    # 小屿 merged; 屿忱 already in aliases (dedup); name 阿屿 unchanged
+    assert rows[0]["name"] == "阿屿"
+    assert "小屿" in aliases
+    assert aliases.count("屿忱") == 1
+
+
+def test_entity_new_aliases_contain_existing_name_skips_and_merges(db):
+    candidates.write_entity_cand(db, _entity_raw("阿屿"))
+    n = candidates.write_entity_cand(
+        db, _entity_raw("屿忱", aliases=["阿屿", "Stellan"]))
+    assert n == 0
+    rows = db.execute(
+        "SELECT name, aliases FROM entities WHERE kind='person'"
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["name"] == "阿屿"
+    aliases = json.loads(rows[0]["aliases"])
+    assert "屿忱" in aliases and "Stellan" in aliases
+    assert "阿屿" not in aliases  # canonical name not duplicated into aliases
+
+
+def test_entity_unrelated_name_inserts_new_row(db):
+    candidates.write_entity_cand(
+        db, _entity_raw("阿屿", aliases=["屿忱"]))
+    n = candidates.write_entity_cand(
+        db, _entity_raw("陈奶奶", aliases=["邻居陈"]))
+    assert n == 1
+    cnt = db.execute(
+        "SELECT COUNT(*) FROM entities WHERE kind='person'"
+    ).fetchone()[0]
+    assert cnt == 2
+
+
+def test_entity_dedup_case_insensitive(db):
+    candidates.write_entity_cand(
+        db, _entity_raw("Stellan", aliases=["屿忱"]))
+    n = candidates.write_entity_cand(
+        db, _entity_raw("stellan", aliases=["雪狼"]))
+    assert n == 0
+    rows = db.execute(
+        "SELECT name, aliases FROM entities WHERE kind='person'"
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["name"] == "Stellan"
+    aliases = json.loads(rows[0]["aliases"])
+    assert "雪狼" in aliases
+
+
+def test_entity_dedup_scoped_by_kind(db):
+    # Same name in different kinds is a legitimate distinct entity.
+    candidates.write_entity_cand(
+        db, _entity_raw("Bendigo", kind="place"))
+    n = candidates.write_entity_cand(
+        db, _entity_raw("Bendigo", kind="pref"))
+    assert n == 1
+    cnt = db.execute(
+        "SELECT COUNT(*) FROM entities WHERE name='Bendigo'"
+    ).fetchone()[0]
+    assert cnt == 2
+
+
+def test_entity_superseded_row_does_not_block_insert(db):
+    # Seed two rows: row1=阿屿(aliases=屿忱), row2=阿屿新; mark row1 superseded by row2.
+    candidates.write_entity_cand(db, _entity_raw("阿屿", aliases=["屿忱"]))
+    candidates.write_entity_cand(db, _entity_raw("阿屿新"))
+    ids = [r["id"] for r in db.execute(
+        "SELECT id FROM entities WHERE kind='person' ORDER BY id").fetchall()]
+    db.execute("UPDATE entities SET superseded_by=? WHERE id=?",
+               (ids[1], ids[0]))
+    db.commit()
+    n = candidates.write_entity_cand(db, _entity_raw("屿忱"))
+    assert n == 1  # superseded row should not gate fresh insert

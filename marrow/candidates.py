@@ -53,6 +53,85 @@ def extract_block(text: str, marker: str) -> list | None:
     return parsed if isinstance(parsed, list) else None
 
 
+def _alias_dedup_lookup(conn, kind: str, name: str,
+                        new_aliases: list[str]) -> int | None:
+    """Find an active entity row in `kind` whose name or aliases overlap
+    (case-insensitive) with the incoming `name` ∪ `new_aliases`. Returns
+    the row id on hit, None on miss. Synonym-aware sibling of the legacy
+    (kind, name) exact check — prevents alias entities re-inserting as
+    fresh rows.
+    """
+    needles = {name.strip().lower()}
+    for a in new_aliases:
+        s = a.strip().lower()
+        if s:
+            needles.add(s)
+    if not needles:
+        return None
+    rows = conn.execute(
+        "SELECT id, name, aliases FROM entities"
+        " WHERE kind=? AND superseded_by IS NULL", (kind,),
+    ).fetchall()
+    for r in rows:
+        if (r["name"] or "").strip().lower() in needles:
+            return r["id"]
+        raw = r["aliases"]
+        if not raw:
+            continue
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(parsed, list):
+            continue
+        for a in parsed:
+            if isinstance(a, str) and a.strip().lower() in needles:
+                return r["id"]
+    return None
+
+
+def _merge_aliases_into(conn, row_id: int, incoming_name: str,
+                        incoming_aliases: list[str]) -> None:
+    """Merge `incoming_name` (if distinct from row.name) and
+    `incoming_aliases` into row.aliases JSON. Case-insensitive dedup;
+    no-op when nothing new. Caller owns the transaction context.
+    """
+    row = conn.execute(
+        "SELECT name, aliases FROM entities WHERE id=?", (row_id,),
+    ).fetchone()
+    if row is None:
+        return
+    existing: list[str] = []
+    raw = row["aliases"]
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                existing = [str(a).strip() for a in parsed if str(a).strip()]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            existing = []
+    canonical_lc = (row["name"] or "").strip().lower()
+    seen_lc = {canonical_lc} | {a.lower() for a in existing}
+    additions: list[str] = []
+    candidates_in = [incoming_name, *incoming_aliases]
+    for cand in candidates_in:
+        s = cand.strip()
+        if not s:
+            continue
+        if s.lower() in seen_lc:
+            continue
+        seen_lc.add(s.lower())
+        additions.append(s)
+    if not additions:
+        return
+    merged = existing + additions
+    with conn:
+        conn.execute(
+            "UPDATE entities SET aliases=? WHERE id=?",
+            (json.dumps(merged, ensure_ascii=False), row_id),
+        )
+
+
 def write_entity_cand(conn, raw: str, source: str = "daily") -> int:
     items = extract_block(raw, "ENTITY_CAND")
     if not items:
@@ -76,19 +155,17 @@ def write_entity_cand(conn, raw: str, source: str = "daily") -> int:
         if key in seen:
             continue
         seen.add(key)
-        exists = conn.execute(
-            "SELECT 1 FROM entities WHERE kind=? AND name=?"
-            " AND superseded_by IS NULL LIMIT 1", (kind, name),
-        ).fetchone()
-        if exists:
+        raw_aliases = it.get("aliases")
+        aliases_list: list[str] = []
+        if isinstance(raw_aliases, list):
+            aliases_list = [str(a).strip() for a in raw_aliases if str(a).strip()]
+        hit_id = _alias_dedup_lookup(conn, kind, name, aliases_list)
+        if hit_id is not None:
+            _merge_aliases_into(conn, hit_id, name, aliases_list)
             continue
         fact = (it.get("note") or "").strip() or None
-        raw_aliases = it.get("aliases")
-        aliases_json = None
-        if isinstance(raw_aliases, list):
-            cleaned = [str(a).strip() for a in raw_aliases if str(a).strip()]
-            if cleaned:
-                aliases_json = json.dumps(cleaned, ensure_ascii=False)
+        aliases_json = (json.dumps(aliases_list, ensure_ascii=False)
+                        if aliases_list else None)
         with conn:
             conn.execute(
                 "INSERT INTO entities (kind, name, fact, aliases, source)"
