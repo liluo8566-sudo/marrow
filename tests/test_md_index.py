@@ -117,6 +117,20 @@ def test_sync_file_clear_tombstone_on_readd(store, tmp_path):
     assert store.get_hash(str(f), "1") is not None
 
 
+def test_sync_file_missing_file_is_coldstart_noop(store, tmp_path):
+    # Seed db with blocks for a path, delete the file, sync_file must NOT
+    # tombstone — treat missing file as cold start, leave md_index untouched.
+    f = tmp_path / "ghost.md"
+    store.record_block(str(f), "1", "h1")
+    store.record_block(str(f), "2", "h2")
+    assert not f.exists()
+    r = store.sync_file(str(f))
+    assert r.tombstoned == 0
+    assert store.list_tombstones(str(f)) == []
+    assert store.get_hash(str(f), "1") == "h1"
+    assert store.get_hash(str(f), "2") == "h2"
+
+
 def test_sync_file_warns_no_markers(store, tmp_path):
     f = tmp_path / "plain.md"
     f.write_text("nothing here\n")

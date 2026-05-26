@@ -172,14 +172,13 @@ class MdIndex:
         Update: same block_id, hash changed → record_block (overwrites + clears tombstone).
         Tombstone: block_id in db but absent from fs → tombstone.
         Clear-tombstone happens automatically inside record_block.
+        Missing file = cold-start no-op, NOT tombstone-all — next refresh rebuilds.
         """
         report = report or ReconcileReport()
         p = Path(path)
         if not p.exists():
-            # File deleted — tombstone every known block.
-            for bid, _ in self._list_active(path):
-                self.tombstone(path, bid)
-                report.tombstoned += 1
+            # Cold start — file missing, leave md_index untouched.
+            # Next refresh rebuilds from db state.
             return report
         text = p.read_text(encoding="utf-8")
         blocks, has_markers = parse_blocks(text)
