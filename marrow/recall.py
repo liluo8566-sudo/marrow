@@ -959,10 +959,8 @@ def recall_fusion(
             "category": category, "status": card["status"],
         })
 
-    if (not candidates and not milestone_cands and not memes_cands
-            and not entities_vec_cards and not diary_cands
-            and not tasks_cands):
-        return []
+    # No early-return: even when fusion lanes are empty, entity force-include
+    # (substring/LIKE) may still surface an entity card alone — gated below.
 
     # ── dormant revive + scoring ──────────────────────────────────────────────
     import datetime as _dt
