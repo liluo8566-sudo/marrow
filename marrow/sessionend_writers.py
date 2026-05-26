@@ -7,11 +7,22 @@ under 300 LOC.
 from __future__ import annotations
 
 import datetime as _dt
+import errno
+import fcntl
 import json
+import os
 import sys
+import tempfile
+import time
+from pathlib import Path
 
 from . import candidates, handover_render
 from .sessionend_prompts import parse_handover_output
+
+# Repo root PROGRESS.md (one level up from the package dir).
+_PROGRESS_DEFAULT = Path(__file__).resolve().parents[1] / "PROGRESS.md"
+_PROGRESS_LOCK_RETRIES = 3
+_PROGRESS_LOCK_BACKOFF = 0.05
 
 
 # ── shared helpers ──────────────────────────────────────────────────────────
@@ -206,4 +217,78 @@ def seg_handover(conn, raw: str, sid: str) -> int:
         return 0
     handover_render.write_handover_full(
         conn, sid, done=done, open_=open_, plan=plan, reference=reference)
+    return 1
+
+
+# ── PROGRESS.md append (per-session DONE block) ─────────────────────────────
+
+def _progress_is_empty(done_block: str) -> bool:
+    """Skip markers — empty, whitespace-only, `(none)`, or `- N/A`."""
+    body = (done_block or "").strip()
+    if not body:
+        return True
+    flat = " ".join(line.strip("- \t") for line in body.splitlines()).strip()
+    return flat.lower() in ("", "none", "(none)", "n/a")
+
+
+def _acquire_progress_lock(path: Path):
+    """LOCK_EX with 3x 50ms backoff — same pattern as handover_render."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        path.touch()
+    for attempt in range(_PROGRESS_LOCK_RETRIES):
+        fd = open(path, "r+", encoding="utf-8")
+        try:
+            fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fd
+        except (BlockingIOError, OSError) as e:
+            fd.close()
+            if isinstance(e, OSError) and not isinstance(e, BlockingIOError):
+                if e.errno not in (errno.EWOULDBLOCK, errno.EAGAIN):
+                    return None
+            if attempt == _PROGRESS_LOCK_RETRIES - 1:
+                return None
+            time.sleep(_PROGRESS_LOCK_BACKOFF)
+    return None
+
+
+def append_progress(done_block: str, sid: str, date: str, *,
+                    progress_path: Path | None = None) -> int:
+    """Append this session's raw DONE block to PROGRESS.md (atomic + flock).
+    Skip on empty / (none) / N/A. Degrade-open on failure (alert + raise)."""
+    if _progress_is_empty(done_block):
+        return 0
+    path = Path(progress_path) if progress_path else _PROGRESS_DEFAULT
+    short_sid = (sid or "")[:8] or "unknown"
+    block = f"\n[{date} sid:{short_sid}]\n{done_block.strip()}\n"
+    fd = _acquire_progress_lock(path)
+    if fd is None:
+        print(f"[sessionend_writers] alert: PROGRESS.md lock-failed sid={sid}",
+              file=sys.stderr)
+        raise RuntimeError(f"progress_lock_failed sid={sid}")
+    try:
+        try:
+            prior = path.read_text(encoding="utf-8")
+        except (FileNotFoundError, OSError):
+            prior = ""
+        new_text = prior + block if prior.endswith("\n") or not prior \
+            else prior + "\n" + block
+        d = str(path.parent) or "."
+        tfd, tmp = tempfile.mkstemp(dir=d, prefix=".progress.")
+        try:
+            with os.fdopen(tfd, "w", encoding="utf-8") as f:
+                f.write(new_text)
+            os.replace(tmp, str(path))
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+    except Exception as e:
+        print(f"[sessionend_writers] alert: PROGRESS.md write-failed sid={sid}"
+              f" err={type(e).__name__}", file=sys.stderr)
+        raise
+    finally:
+        try:
+            fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
+        finally:
+            fd.close()
     return 1

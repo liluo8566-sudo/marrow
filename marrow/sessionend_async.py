@@ -23,9 +23,10 @@ from zoneinfo import ZoneInfo
 
 from . import config, handover_render, repo, storage
 from .llm import LLMClient, LLMError
-from .sessionend_prompts import NARRATIVE_PROMPT, STATE_PROMPT
-from .sessionend_writers import (seg_affect, seg_digest, seg_handover,
-                                 seg_task_cand)
+from .sessionend_prompts import (NARRATIVE_PROMPT, STATE_PROMPT,
+                                 parse_handover_output)
+from .sessionend_writers import (append_progress, seg_affect, seg_digest,
+                                 seg_handover, seg_task_cand)
 
 _LOGS_DIR = Path.home() / ".config" / "marrow" / "logs"
 _TZ = ZoneInfo("Australia/Melbourne")
@@ -329,6 +330,9 @@ def _run_extraction(conn, sid: str, date: str,
         # State-based writers: handover.md surfaces ~30s after popen.
         _run_writer(conn, sid, "handover", lambda: seg_handover(conn, state_raw, sid))
         _run_writer(conn, sid, "task_cand", lambda: seg_task_cand(conn, state_raw))
+        done_block, _, _, _ = parse_handover_output(state_raw)
+        _run_writer(conn, sid, "progress",
+                    lambda: append_progress(done_block, sid, date))
 
     # ── call 2: NARRATIVE (~30s; cache_read on events_text fence) ─────────────
     narrative_raw, narrative_err = "", None

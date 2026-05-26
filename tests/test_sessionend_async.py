@@ -643,6 +643,8 @@ def test_sessionend_two_calls_routes_to_four_writers(db_env, tmp_path,
     _insert_events(db, "test-combined", count=10, role="user")
 
     h = tmp_path / "handover.md"
+    pmd = tmp_path / "PROGRESS.md"
+    monkeypatch.setattr("marrow.sessionend_writers._PROGRESS_DEFAULT", pmd)
 
     state_raw = (
         "===TASK_CAND===\n"
@@ -693,15 +695,20 @@ def test_sessionend_two_calls_routes_to_four_writers(db_env, tmp_path,
         summaries = [r["summary"] for r in seg_rows]
         assert summaries[0] == "start"
         assert summaries[-1].startswith("ok,user_count=")
-        # All 4 segment audit rows logged 'ok'.
+        # All 5 segment audit rows logged 'ok' (handover/task_cand/progress
+        # from STATE call + affect/digest from NARRATIVE call).
         seg_oks = [r for r in seg_rows
                    if r["action"].startswith("sessionend_extract_")
                    and r["summary"] == "ok"]
-        assert len(seg_oks) == 4
+        assert len(seg_oks) == 5
     finally:
         conn.close()
     body = h.read_text(encoding="utf-8")
     assert "- shipped 2-call refactor" in body
+    # PROGRESS.md append landed alongside handover.md.
+    pbody = pmd.read_text(encoding="utf-8")
+    assert "- shipped 2-call refactor" in pbody
+    assert "sid:test-com" in pbody
     assert "- verify pytest + plist reload" in body
     assert "handover: ready sid:test-combined" in body
     assert "## Done" in body and "## Open" in body
@@ -1057,3 +1064,61 @@ def test_session_end_hook_no_longer_calls_embed_pending(db_env, monkeypatch,
     assert rc == 0
     assert embed_calls == [], (
         f"session_end hook must not call embed_pending; got {len(embed_calls)} call(s)")
+
+
+# ── PROGRESS.md append ───────────────────────────────────────────────────────
+
+def test_append_progress_writes_section(tmp_path):
+    """Non-empty DONE block appends a sid-stamped section to PROGRESS.md."""
+    p = tmp_path / "PROGRESS.md"
+    p.write_text("# Marrow Build Ledger\n\nexisting line\n", encoding="utf-8")
+    done = "- did the thing\n- shipped the other thing"
+    n = sessionend_writers.append_progress(
+        done, "abcd1234ef", "2026-05-26", progress_path=p)
+    assert n == 1
+    body = p.read_text(encoding="utf-8")
+    assert "existing line" in body
+    assert "[2026-05-26 sid:abcd1234]" in body
+    assert "- did the thing" in body
+    assert "- shipped the other thing" in body
+
+
+def test_append_progress_skips_empty(tmp_path):
+    """Empty / (none) / N/A DONE blocks do not touch PROGRESS.md."""
+    p = tmp_path / "PROGRESS.md"
+    seed = "# Marrow Build Ledger\n\nbaseline\n"
+    p.write_text(seed, encoding="utf-8")
+    for done in ("", "   ", "(none)", "- N/A", "- (none)"):
+        n = sessionend_writers.append_progress(
+            done, "sid12345", "2026-05-26", progress_path=p)
+        assert n == 0
+    assert p.read_text(encoding="utf-8") == seed
+
+
+def test_append_progress_concurrent_writers_preserve_both(tmp_path):
+    """Two concurrent appends serialize via flock; both sections present."""
+    import threading
+    p = tmp_path / "PROGRESS.md"
+    p.write_text("# Marrow Build Ledger\n", encoding="utf-8")
+    errors: list = []
+
+    def go(sid: str, body: str):
+        try:
+            sessionend_writers.append_progress(
+                body, sid, "2026-05-26", progress_path=p)
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    t1 = threading.Thread(target=go, args=("aaaaaaaa11", "- a session done"))
+    t2 = threading.Thread(target=go, args=("bbbbbbbb22", "- b session done"))
+    t1.start(); t2.start()
+    t1.join(); t2.join()
+    assert errors == []
+    text = p.read_text(encoding="utf-8")
+    assert "[2026-05-26 sid:aaaaaaaa]" in text
+    assert "[2026-05-26 sid:bbbbbbbb]" in text
+    assert "- a session done" in text
+    assert "- b session done" in text
+    # Each section header appears exactly once (no torn writes).
+    assert text.count("[2026-05-26 sid:aaaaaaaa]") == 1
+    assert text.count("[2026-05-26 sid:bbbbbbbb]") == 1
