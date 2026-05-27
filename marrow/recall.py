@@ -467,135 +467,96 @@ def _is_dormant(importance: int | None, age_days: float) -> bool:
 _VEC_ONLY_FLOOR = 0.40
 
 
-def _memes_vec_hits(
-    conn: sqlite3.Connection, qblob: bytes, k: int
+def _vec_score_map(
+    conn: sqlite3.Connection, sql: str, qblob: bytes, k: int
 ) -> dict[int, float]:
-    """Return {id: vec_score} for active memes matched by qblob."""
+    """Execute sql(qblob, k), return {id: 1-distance} score map."""
     try:
-        rows = conn.execute(
-            "SELECT m.id AS id, v.distance AS distance "
-            "FROM memes_vec v JOIN memes m ON m.id = v.rowid "
-            "WHERE m.status='active' AND embedding MATCH ? AND k = ? "
-            "ORDER BY v.distance",
-            (qblob, k),
-        ).fetchall()
+        rows = conn.execute(sql, (qblob, k)).fetchall()
     except sqlite3.Error:
         return {}
     return {r["id"]: max(0.0, 1.0 - r["distance"]) for r in rows}
 
 
-def _milestones_vec_hits(
-    conn: sqlite3.Connection, qblob: bytes, k: int
-) -> dict[int, float]:
-    """Return {id: vec_score} for milestones matched by qblob."""
-    try:
-        rows = conn.execute(
-            "SELECT mi.id AS id, v.distance AS distance "
-            "FROM milestones_vec v JOIN milestones mi ON mi.id = v.rowid "
-            "WHERE embedding MATCH ? AND k = ? "
-            "ORDER BY v.distance",
-            (qblob, k),
-        ).fetchall()
-    except sqlite3.Error:
-        return {}
-    return {r["id"]: max(0.0, 1.0 - r["distance"]) for r in rows}
-
-
-def _diary_vec_hits(
-    conn: sqlite3.Connection, qblob: bytes, k: int
+def _vec_cards(
+    conn: sqlite3.Connection, sql: str, qblob: bytes, k: int,
+    defaults: dict | None = None,
 ) -> list[dict]:
-    """Return diary cards matched by qblob, including vec_score.
-
-    Diary is long-form prose dated per day. We return id (rowid), date and
-    raw content so the fusion loop can shape the row.
-    """
+    """Execute sql(qblob, k), return list of dicts with vec_score added."""
     try:
-        rows = conn.execute(
-            "SELECT d.rowid AS id, d.date, d.content, v.distance "
-            "FROM diary_vec v JOIN diary d ON d.rowid = v.rowid "
-            "WHERE embedding MATCH ? AND k = ? "
-            "ORDER BY v.distance",
-            (qblob, k),
-        ).fetchall()
+        rows = conn.execute(sql, (qblob, k)).fetchall()
     except sqlite3.Error:
         return []
+    defs = defaults or {}
     out: list[dict] = []
     for r in rows:
         vs = max(0.0, 1.0 - r["distance"])
-        out.append({
-            "id": r["id"],
-            "date": r["date"] or "",
-            "content": r["content"] or "",
-            "vec_score": vs,
-        })
+        card = {col: (r[col] if r[col] is not None else defs.get(col, "")) for col in r.keys() if col != "distance"}
+        card["vec_score"] = vs
+        out.append(card)
     return out
 
 
-def _tasks_vec_hits(
-    conn: sqlite3.Connection, qblob: bytes, k: int
-) -> list[dict]:
-    """Return task cards (live: active/done) matched by qblob, with vec_score.
-
-    Mirrors _diary_vec_hits: vec-only lane (no kw scan). Status filter keeps
-    archived rows out — aging.py archives stale work, and surfacing it would
-    crowd the cap.
-    """
-    try:
-        rows = conn.execute(
-            "SELECT t.id, t.category, t.title, t.next_step, t.status, "
-            "       t.created_at, v.distance "
-            "FROM tasks_vec v JOIN tasks t ON t.id = v.rowid "
-            "WHERE t.status IN ('active','done') "
-            "  AND embedding MATCH ? AND k = ? "
-            "ORDER BY v.distance",
-            (qblob, k),
-        ).fetchall()
-    except sqlite3.Error:
-        return []
-    out: list[dict] = []
-    for r in rows:
-        vs = max(0.0, 1.0 - r["distance"])
-        out.append({
-            "id": r["id"],
-            "category": r["category"] or "",
-            "title": r["title"] or "",
-            "next_step": r["next_step"] or "",
-            "status": r["status"] or "",
-            "created_at": r["created_at"] or "",
-            "vec_score": vs,
-        })
-    return out
+def _memes_vec_hits(conn: sqlite3.Connection, qblob: bytes, k: int) -> dict[int, float]:
+    return _vec_score_map(
+        conn,
+        "SELECT m.id AS id, v.distance AS distance "
+        "FROM memes_vec v JOIN memes m ON m.id = v.rowid "
+        "WHERE m.status='active' AND embedding MATCH ? AND k = ? "
+        "ORDER BY v.distance",
+        qblob, k,
+    )
 
 
-def _entities_vec_hits(
-    conn: sqlite3.Connection, qblob: bytes, k: int
-) -> list[dict]:
-    """Return entity cards (live only) matched by qblob, including vec_score."""
-    try:
-        rows = conn.execute(
-            "SELECT e.id, e.kind, e.name, e.fact, e.mention_count, "
-            "       e.created_at, v.distance "
-            "FROM entities_vec v JOIN entities e ON e.id = v.rowid "
-            "WHERE e.superseded_by IS NULL "
-            "  AND embedding MATCH ? AND k = ? "
-            "ORDER BY v.distance",
-            (qblob, k),
-        ).fetchall()
-    except sqlite3.Error:
-        return []
-    out: list[dict] = []
-    for r in rows:
-        vs = max(0.0, 1.0 - r["distance"])
-        out.append({
-            "id": r["id"],
-            "kind": r["kind"] or "",
-            "name": r["name"] or "",
-            "fact": r["fact"] or "",
-            "mention_count": r["mention_count"] or 0,
-            "created_at": r["created_at"] or "",
-            "vec_score": vs,
-        })
-    return out
+def _milestones_vec_hits(conn: sqlite3.Connection, qblob: bytes, k: int) -> dict[int, float]:
+    return _vec_score_map(
+        conn,
+        "SELECT mi.id AS id, v.distance AS distance "
+        "FROM milestones_vec v JOIN milestones mi ON mi.id = v.rowid "
+        "WHERE embedding MATCH ? AND k = ? "
+        "ORDER BY v.distance",
+        qblob, k,
+    )
+
+
+def _diary_vec_hits(conn: sqlite3.Connection, qblob: bytes, k: int) -> list[dict]:
+    return _vec_cards(
+        conn,
+        "SELECT d.rowid AS id, d.date, d.content, v.distance "
+        "FROM diary_vec v JOIN diary d ON d.rowid = v.rowid "
+        "WHERE embedding MATCH ? AND k = ? "
+        "ORDER BY v.distance",
+        qblob, k,
+        {"date": "", "content": ""},
+    )
+
+
+def _tasks_vec_hits(conn: sqlite3.Connection, qblob: bytes, k: int) -> list[dict]:
+    return _vec_cards(
+        conn,
+        "SELECT t.id, t.category, t.title, t.next_step, t.status, "
+        "       t.created_at, v.distance "
+        "FROM tasks_vec v JOIN tasks t ON t.id = v.rowid "
+        "WHERE t.status IN ('active','done') "
+        "  AND embedding MATCH ? AND k = ? "
+        "ORDER BY v.distance",
+        qblob, k,
+        {"category": "", "title": "", "next_step": "", "status": "", "created_at": ""},
+    )
+
+
+def _entities_vec_hits(conn: sqlite3.Connection, qblob: bytes, k: int) -> list[dict]:
+    return _vec_cards(
+        conn,
+        "SELECT e.id, e.kind, e.name, e.fact, e.mention_count, "
+        "       e.created_at, v.distance "
+        "FROM entities_vec v JOIN entities e ON e.id = v.rowid "
+        "WHERE e.superseded_by IS NULL "
+        "  AND embedding MATCH ? AND k = ? "
+        "ORDER BY v.distance",
+        qblob, k,
+        {"kind": "", "name": "", "fact": "", "mention_count": 0, "created_at": ""},
+    )
 
 
 # ── milestone keyword scan ────────────────────────────────────────────────────
