@@ -68,10 +68,10 @@ def _audit_rows(db: str, sid: str, action: str = "manual_skip") -> list[dict]:
 # ── Test 1: mm- writes skip flag ──────────────────────────────────────────────
 
 def test_mm_minus_writes_skip_flag(env, monkeypatch):
-    """mm- prompt -> audit_log has manual_skip/skip row for current sid."""
+    """mm- prompt (no arg) -> audit_log has manual_skip/skip row for current sid."""
     db, _ = env
     sid = "test-mm-minus-sid"
-    _stdin(monkeypatch, {"prompt": "mm- skip this session", "session_id": sid})
+    _stdin(monkeypatch, {"prompt": "mm-", "session_id": sid})
     rc = hooks.main(["user_prompt_submit"])
     assert rc == 0
     rows = _audit_rows(db, sid, action="manual_skip")
@@ -117,9 +117,9 @@ def test_skip_blocks_sessionend_llm(env, monkeypatch):
 # ── Test 3: mm+ reruns sid ────────────────────────────────────────────────────
 
 def test_mm_plus_reruns_sid(env, monkeypatch, tmp_path):
-    """mm+ -> force-clears done marker, sessionend_async runs end-to-end (LLM called + write)."""
+    """mm+ <uuid> -> force-clears done marker, sessionend_async runs end-to-end (LLM called + write)."""
     db, data_tmp = env
-    sid = "test-mm-plus-sid"
+    sid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
     _insert_events(db, sid, count=10)
 
     # Pre-seed an ok row to simulate already-done state.
@@ -138,9 +138,7 @@ def test_mm_plus_reruns_sid(env, monkeypatch, tmp_path):
         spawned.append(list(args))
 
     _stdin(monkeypatch, {"prompt": f"mm+ {sid}", "session_id": "current-sid"})
-    # mm+ uses a local `from .popen_detach import popen_detach as _popen` inside
-    # _handle_mm_prefix, so we patch the source module function directly.
-    with patch("marrow.popen_detach.popen_detach", side_effect=fake_popen):
+    with patch("marrow.hooks.popen_detach", side_effect=fake_popen):
         rc = hooks.main(["user_prompt_submit"])
     assert rc == 0
 

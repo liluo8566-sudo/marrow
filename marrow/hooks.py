@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import re as _re
 import sqlite3
 import subprocess
 import sys
@@ -333,11 +334,44 @@ def session_end() -> int:
     return 0
 
 
+_SID_RE = _re.compile(
+    r"^[0-9a-f]{8}(-[0-9a-f]{4}){0,3}(-[0-9a-f]{4,12})?$",
+    _re.IGNORECASE,
+)
+
+
+def _looks_like_sid(arg: str) -> bool:
+    """Return True if arg matches a full UUID or a short hex-prefix Lumi might type."""
+    return bool(_SID_RE.match(arg.strip())) if arg and " " not in arg else False
+
+
+def _inject_locate_request(prefix: str, clue: str) -> None:
+    """Write a UserPromptSubmit additionalContext asking the LLM to locate the sid."""
+    action = "mm+ <full-sid>" if prefix == "mm+" else "mm- <full-sid>"
+    ctx = (
+        f"## {prefix} 定位请求\n"
+        f"念念发了 `{prefix} <clue>`，clue 不是有效 sid 格式。请帮她定位目标 session：\n"
+        f"- clue 原文: {clue}\n"
+        f"- 建议查询: events / audit_log 表中匹配 timestamp / content / role 的 sid\n"
+        f"- 找到后用 `{action}` 重新触发，或调用 `mw sessionend rerun <sid>`"
+    )
+    json.dump(
+        {"hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": ctx,
+        }},
+        sys.stdout,
+    )
+
+
 def _handle_mm_prefix(inp: dict) -> bool:
     """Handle mm- / mm+ prefixes. Returns True if handled (skip further processing).
 
-    mm-: writes manual_skip audit row for current sid.
-    mm+: fires sessionend_async rerun for current sid (or mm+ <sid>).
+    mm-: writes manual_skip audit row for current (or named) sid.
+    mm+ / mm-: three-branch on arg after prefix:
+      - empty          → current sid (existing behaviour)
+      - UUID-like      → named sid
+      - natural-lang   → inject additionalContext to help LLM locate sid; no spawn
     Fail-soft: any error is swallowed — hook must never block the user turn.
     """
     prompt = (inp.get("prompt") or "").strip()
@@ -346,18 +380,24 @@ def _handle_mm_prefix(inp: dict) -> bool:
 
     sid = (inp.get("session_id") or "").strip()
     prefix = prompt[:3]
+    rest = prompt[3:].strip()
+
+    # Natural-language branch — hand off to main LLM, no DB writes, no spawn.
+    if rest and not _looks_like_sid(rest):
+        _inject_locate_request(prefix, rest)
+        return True
+
+    # Empty or UUID-like arg: empty → current sid, UUID-like → that sid.
+    target_sid = rest if rest else sid
 
     try:
         db = config.db_path()
         conn = storage.connect(db)
         try:
             if prefix == "mm-":
-                if sid:
-                    _write_manual_skip_flag(conn, sid, _STATUS_SKIP)
+                if target_sid:
+                    _write_manual_skip_flag(conn, target_sid, _STATUS_SKIP)
             else:  # mm+
-                # Optional explicit sid after prefix + optional space.
-                rest = prompt[3:].strip()
-                target_sid = rest if rest else sid
                 if target_sid:
                     # Force-clear any done marker so sessionend_async reruns.
                     with conn:
@@ -370,8 +410,7 @@ def _handle_mm_prefix(inp: dict) -> bool:
                     conn.close()
                     conn = None
                     log = config.DATA_DIR / "logs" / f"sessionend_async_{target_sid}.log"
-                    from .popen_detach import popen_detach as _popen
-                    _popen(
+                    popen_detach(
                         [sys.executable, "-m", "marrow.sessionend_async",
                          "--sid", target_sid],
                         log_path=log,
