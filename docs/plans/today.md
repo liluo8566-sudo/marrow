@@ -85,3 +85,51 @@ Dispatch:
 - Hold: cheatsheet / housekeeping / placement_rules.toml (cheatsheet recall lane design parked in FUTURE.md, ships after P4)
 - Pit recall lane (vec + force_include) deferred — Lumi pending decision; today's Session 1 still retires the `pit` table, so the future lane will use a fresh `pit_entries` table without conflict
 - mm+ feedback already in (Lumi screenshot), no further wait
+
+---
+
+## Handover — 2026-05-28 03:00–04:10 atlas round 2
+
+### Done (4 commits on main)
+- `9247de9` feat(atlas): root section `## [name/](file://)` now carries marker + `note/write/naming/depth` fields, so depth on the root collapses/expands the whole subtree. `AUTHORIZED_ROOTS` `.config/marrow` → `.config`; new `CONFIG_BLACKLIST = {wechat-claude-bridge}` skips credential / chat-dump siblings in both atlas walk and drift_sweep rg + python ref scans. `atlas_sweep_fs` purges rows for blacklisted paths so stale rows from older sweeps self-clean. `reconcile_atlas` always triggers sweep. `subpage_specs.build_atlas_spec` caches root rows for `render_section_header` + forces canonical roots into `section_order`.
+- `6c8208b` fix(atlas): sweep retract now walks every atlas row as candidate (not just `depth>0` seeds), so root depth 1→0 actually retracts stub-only children. `manual_fields` (note/write/naming non-empty) + `depth>0` survive.
+- `2967a86` fix(sync): `_atomic.atomic_write` content-equality guard (skip `os.replace` when bytes match) + `sync_loop._process` db→md branch drops the 1s epsilon. Breaks the deadlock where every prior render pushed `md_mtime` within 1s of `db_mtime` → next tick "within epsilon — skip" → md frozen for minutes.
+- `84f2ba3` fix(atlas): drop `protected=md_paths` shield in sweep. md-listed stub-only rows were being saved from retract, leaving a fixed-point (md stub → reconcile upsert → sweep skip → render no-op). Now only `has_manual` survives.
+
+### Live verified
+- `cc-lab depth=1 → 0` collapses the whole cc-lab subtree within ~5s (db drops from 23 rows → 1; atlas.md re-renders with cc-lab section header only)
+- atlas.md mtime advances on every real db change instead of freezing for minutes
+- pytest 760/762 pass (2 fail = unrelated `test_hooks_mm_prefix.py` mm- behaviour, Lumi changed `hooks.py` test never updated)
+
+### Open bugs (NOT fixed)
+
+**1. root depth=0 does not cascade through nested `depth>0` rows**
+- Repro: set `.config` root `depth: 0`. Expected: whole `.config` subtree collapses. Actual: `.config/marrow` row has `depth: 1`, sweep retract skips it because `p_depth > 0`, then its layer-1 stubs (db-pages / state / scratch / ...) are spared because they're "covered" by `.config/marrow|1`.
+- Live db state: `~/.config/marrow|1` still in atlas table after reconcile, with one layer of children.
+- Design tension: user setting `.config depth=0` means "fold the whole branch" — root depth should dominate over descendant depth. But descendant depth was user-set too, can't be silently overridden either.
+- Fix sketch: retract logic walks the ancestor chain; if ANY root ancestor (path in `AUTHORIZED_ROOTS`) has `depth=0`, retract every stub-only descendant regardless of intermediate `depth>0` (manual-field rows still survive). Mid-chain non-root rows keep their depth signal; only root-level zero is the global kill switch.
+- Touch points: `marrow/atlas.py::atlas_sweep_fs` retract loop (around line 510-555).
+
+**2. orphan path `/Users/Gabrielle/Library/Application Support/iTerm2` lives in atlas db**
+- Path is outside every `AUTHORIZED_ROOT`. `_root_of()` returns None → `section_of()` falls back to path itself → it renders as its own section at the bottom of atlas.md with no canonical parent.
+- Source unknown — sweep can't have written it (walk is bounded by AUTHORIZED_ROOTS). Likely historical hand-insert or a now-removed AUTHORIZED_ROOTS entry that was never cleaned up.
+- Fix: one-time cleanup `DELETE FROM atlas WHERE path NOT LIKE '<each authorized root>%'`. Optionally: reconcile/sweep adds a guard that drops any row whose path is not under an AUTHORIZED_ROOT (defensive — paths can't appear there otherwise).
+
+**3. dir-rename drift not alerted (`grill → grillme` case)**
+- Lumi renamed `~/.claude/skills/grill/` → `~/.claude/skills/grillme/` deliberately to test drift_sweep. No alert fired; `mw drift apply` has nothing pending for it.
+- Root cause: `DriftWatcher` exists at `drift_sweep.py:493` but `watcher.py` only wires file-level rename events to it. Dir-rename → watchdog `on_moved(is_directory=True)` is not subscribed. handover notes already had this flagged as "DriftWatcher 没接 watcher.py — watchdog rename 接入是真欠账".
+- Fix: extend `watcher.py` DriftHandler (or equivalent) to handle dir `on_moved` — for each affected child path under `src`, queue a rename event so `drift_sweep.handle_move` can scan refs. Watch out for noisy events from worktree creation / `.pytest_cache` churn — apply existing `EXCLUDE_DIRS_*` filtering.
+
+### Open alerts
+- #117 / #123: `drift ready: SKILL.md → SKILL.md` — Lumi to `ls ~/.config/marrow/drift_pending/` and decide `mw drift apply <pid>` or reject. Both look like same-name modifies misfired as moves.
+- #116: `subpage 'atlas' build failed: no such table: atlas` — historical (atlas table exists now); manual `UPDATE alerts SET resolved=1 WHERE id=116`.
+
+### Python 3.14 SIGBUS
+- Still unresolved per Marrow handover. Lumi to `brew reinstall python@3.14` or rebuild venv on 3.13 to stop the recurring watcher crashes. launchd keepalive masks the issue but each crash is a real fault.
+
+### Reference
+- `marrow/atlas.py` — render `_section_header(row=...)` + `_walk_collect` blacklist + retract walking all rows
+- `marrow/subpage_specs.py:417,448` — root row cache + canonical section emission
+- `marrow/drift_sweep.py:30,51,149,194` — AUTHORIZED_ROOTS / CONFIG_BLACKLIST / rg + python fallback
+- `marrow/sync_loop.py:200-217` — epsilon removed (db→md strict `>`); md→db keeps 1s jitter guard
+- `marrow/_atomic.py:6-27` — content-equality guard
