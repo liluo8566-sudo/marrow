@@ -14,6 +14,8 @@ weight — milestones are evergreen identity anchors.
 """
 from __future__ import annotations
 
+import datetime
+import json
 import math
 import re
 import sqlite3
@@ -418,28 +420,14 @@ def embed_pending(
 
 def _recency_score(timestamp_iso: str) -> float:
     """exp(-days/30), using event timestamp."""
-    import datetime as _dt
     try:
-        ts = _dt.datetime.fromisoformat(timestamp_iso.replace("Z", "+00:00"))
-        now = _dt.datetime.now(_dt.timezone.utc)
+        ts = datetime.datetime.fromisoformat(timestamp_iso.replace("Z", "+00:00"))
+        now = datetime.datetime.now(datetime.timezone.utc)
         days = max(0.0, (now - ts).total_seconds() / 86400.0)
     except Exception:
         days = 0.0
     return math.exp(-days / 30.0)
 
-
-def _affect_bonus(conn: sqlite3.Connection, event_id: int | None) -> float:
-    """Affect bonus from affect_live for the linked event, capped 0.10."""
-    if event_id is None:
-        return 0.0
-    row = conn.execute(
-        "SELECT importance FROM affect_live WHERE event_id=?",
-        (event_id,),
-    ).fetchone()
-    if not row:
-        return 0.0
-    imp = row["importance"] or 0
-    return min(0.10, imp / 100.0)
 
 
 def _decay_floor(importance: int | None, source: str | None, age_days: float) -> float:
@@ -924,23 +912,25 @@ def recall_fusion(
     # (substring/LIKE) may still surface an entity card alone — gated below.
 
     # ── dormant revive + scoring ──────────────────────────────────────────────
-    import datetime as _dt
-    now = _dt.datetime.now(_dt.timezone.utc)
+    now = datetime.datetime.now(datetime.timezone.utc)
 
     scored: list[tuple[float, dict]] = []
     for eid, c in candidates.items():
         ts = c["timestamp"]
         try:
-            t = _dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            t = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
             age_days = max(0.0, (now - t).total_seconds() / 86400.0)
         except Exception:
             age_days = 0.0
 
-        # Dormant check: look up affect importance for this event
+        # Single affect_live fetch covers importance, entities, source.
         af_row = conn.execute(
-            "SELECT importance FROM affect_live WHERE event_id=?", (eid,)
+            "SELECT importance, entities, source FROM affect_live WHERE event_id=?",
+            (eid,),
         ).fetchone()
         importance = af_row["importance"] if af_row else None
+        af_entities_raw = af_row["entities"] if af_row else None
+        source = af_row["source"] if af_row else None
 
         if _is_dormant(importance, age_days):
             if c["fts_hit"]:
@@ -956,7 +946,8 @@ def recall_fusion(
                 continue  # exclude dormant without FTS hit
 
         recency = _recency_score(ts)
-        affect_b = _affect_bonus(conn, eid)
+        imp = importance or 0
+        affect_b = min(0.10, imp / 100.0)
 
         raw = (
             w_vec * c["vec"]
@@ -965,14 +956,10 @@ def recall_fusion(
             + w_affect * affect_b
         )
 
-        # Fix C: mention_count booster via affect.entities JSON column.
-        af_ent_row = conn.execute(
-            "SELECT entities FROM affect_live WHERE event_id=?", (eid,)
-        ).fetchone()
-        if af_ent_row and af_ent_row["entities"]:
+        # mention_count booster via affect.entities JSON column.
+        if af_entities_raw:
             try:
-                import json as _json
-                ent_list = _json.loads(af_ent_row["entities"])
+                ent_list = json.loads(af_entities_raw)
                 if isinstance(ent_list, list) and ent_list:
                     # Prod format = ["name", ...]; legacy/dict = [{"name": ...}].
                     names = []
@@ -993,13 +980,6 @@ def recall_fusion(
                             raw += min(0.1, 0.02 * math.log1p(sum_mc))
             except Exception:
                 pass  # malformed JSON or missing column: skip booster
-
-        source = None
-        af_src = conn.execute(
-            "SELECT source FROM affect_live WHERE event_id=?", (eid,)
-        ).fetchone()
-        if af_src:
-            source = af_src["source"]
 
         floor = _decay_floor(importance, source, age_days)
         final = max(raw, floor) if floor > 0 else raw
