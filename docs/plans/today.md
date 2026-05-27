@@ -34,71 +34,17 @@ Dispatch:
 - Explore agent: `build_projects_index_spec` structure + current `pit` row count + watcher path filtering state
 - worktree-implementer agent: TDD red lines + patches above; main session reviews diff and merges
 
-## Session 2 (main) — atlas subpage + drift_sweep .claude scope
-**Goal**: atlas subpage replaces dir_tree; drift_sweep watches rule-class only; rename auto-propagates
+## Session 2 (planning only — no implementation this window)
+Design locked. Detail moves to DECISIONS / DESIGN / FUTURE.
 
-Decisions locked (this session):
-- dir_tree → retired, replaced by `atlas` subpage (path map, depth-aware, manually editable)
-- cheatsheet stays parallel subpage (skill triggers / mcp / cli) — separate from atlas
-- naming rules: keep `~/.claude/rules/files.md` as interim; sink into atlas `naming` field next phase
-- write-location lookup: read-on-demand from `atlas.md`, rule line in `rules/files.md`; no UserPromptSubmit injection
+Implementation split, dispatched in new sessions:
+- S2a — drift_sweep `.claude` white/blacklist + `DriftWatcher` attach to `watcher.py`
+- S2b — sync loop (10s tick, md↔db bidirectional, all subpages)
+- S2c — atlas subpage (schema + render + reconcile + depth-aware fs walk)
 
-Atlas schema (table `atlas`):
-- `path TEXT PRIMARY KEY` — absolute, expanded
-- `note TEXT` — what this dir is
-- `write_hint TEXT` — what belongs here / what doesn't
-- `naming_hint TEXT` — naming convention for this dir
-- `depth INTEGER DEFAULT 0` — sweep expand depth per row (0=this only, 1=one sub-level, etc.)
-- `stale INTEGER DEFAULT 0` — 1 if fs walk no longer finds this path
-- `updated_at TEXT` — iso timestamp
+Order: S2a → S2b → S2c (atlas depends on sync loop).
 
-Atlas render shape (markdown heading tree, `##` per monitored root → `###`/`####`/... per dir depth, max `######`):
-```
-## ~/cc-lab/
-### marrow/
-- note: SQLite-backed memory system
-- write: docs/plans/, docs/notes/
-- naming: mw- prefix outside repo, snake_case in repo
-- depth: 1
-```
-Empty fields omitted. `(stale)` suffix on path heading when stale=1.
-
-drift_sweep `~/.claude` subtree filter:
-- Whitelist (sweep + watch): `CLAUDE.md`, `rules/`, `commands/`, `skills/`, `agents/`, `output-styles/`, `hooks/`, `keybindings.json`, `settings.json`
-- Blacklist (skip): `projects/`, `image-cache/`, `statsig/`, `shell-snapshots/`, `paste-cache/`, `file-history/`, `sessions/`, `daemon/`, `session-env/`, `*.jsonl`, `*.log`
-
-Watchdog wiring:
-- `DriftWatcher` (drift_sweep.py:493) currently standalone — attach to `marrow/watcher.py` observer
-- `on_moved` event for `.claude` whitelist + atlas-monitored roots → trigger 30s batch sweep (existing) → reconcile atlas path keys (note/write/naming follow the path)
-
-Atlas sweep loop (depth-aware fs walk):
-- For each row: walk `path` to depth `depth`, upsert child rows (note empty) if missing, mark vanished children as `stale=1` (preserves manual fields)
-- Triggers: `mw refresh` (existing CLI), watcher md edit, FSEvents rename
-
-Done:
-- `marrow/atlas.py` (or split into storage migration + subpage_specs entry) + `_REGISTRY` registration
-- `tests/test_atlas.py` covers: render heading layout, depth controls sub-expansion, reconcile preserves manual fields under fs rename, stale flag on missing dir
-- `drift_sweep.py` `.claude` subtree filter live + `DriftWatcher` attached to watcher
-- `~/.config/marrow/db-pages/atlas.md` produced by `mw refresh`, ≥5 root sections (cc-lab, .claude, Study, NY, Toolkit)
-- `pytest -q` exits 0
-- `docs/plans/today.md` (this file) reflects above
-- `rules/files.md` adds one-line: write new file → `read atlas.md first`
-
-Goal (machine-checkable):
-- pytest -q exit 0
-- `grep -F "atlas" marrow/subpages.py marrow/subpage_specs.py` hits both
-- `grep -F "DriftWatcher" marrow/watcher.py` hits (observer attachment)
-- `ls ~/.config/marrow/db-pages/atlas.md` exists, contains `## ~/cc-lab/` and `## ~/.claude/`
-- `git log --oneline -10` shows ≥3 atomic commits this session
-
-Dispatch:
-- WT1 (worktree-implementer Sonnet): drift_sweep `.claude` subtree filter + `DriftWatcher` attach to `watcher.py` observer + tests
-- WT2 (worktree-implementer Sonnet): atlas storage migration + subpage_specs + reconcile + depth-aware sweep + tests
-- Main: serialize storage migration first (schema), then WT1 + WT2 in parallel; merge in report order
-
-Pending-confirm (Lumi must point before move):
-- `cc-lab/external/` 重排 — physically `mv claude-buddy image-gen-mcp weclaude` into `external/`, update workspace
-- Shared `.claude` symlink scheme (cc-lab/.claude as single source, project .claude/rules symlinks back)
+Pending-confirm: `~/cc-lab/external/` 重排 + shared `.claude` symlink scheme.
 
 ## Session 3 (main + brainstorming) — NY memm retire sync
 **Goal**: memm fully offline + code transfer paths decided
