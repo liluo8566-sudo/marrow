@@ -56,11 +56,12 @@ def _insert_row(conn, path, note=None, write_hint=None, naming_hint=None,
 def _marker_md(path: str, note="", write="", naming="", depth=0) -> str:
     """Build a single marker-format atlas block for one path."""
     return (
-        f"- **{Path(path).name}/** <!-- id:{path} --> [open](file://{path})\n"
-        f"    - note: {note}\n"
-        f"    - write: {write}\n"
-        f"    - naming: {naming}\n"
-        f"    - depth: {depth}\n"
+        f"### [{Path(path).name}/](file://{path})\n"
+        f"<!-- id:{path} -->\n"
+        f"- note: {note}\n"
+        f"- write: {write}\n"
+        f"- naming: {naming}\n"
+        f"- depth: {depth}\n"
     )
 
 
@@ -261,10 +262,10 @@ def test_render_row_empty_fields_show_placeholders(tmp_path):
     }
     rendered = _render_atlas_row(r, [root.resolve()])
     # All four lines always emitted even when values are empty
-    assert "    - note: " in rendered
-    assert "    - write: " in rendered
-    assert "    - naming: " in rendered
-    assert "    - depth: 0" in rendered
+    assert "- note: " in rendered
+    assert "- write: " in rendered
+    assert "- naming: " in rendered
+    assert "- depth: 0" in rendered
 
 
 def test_render_row_stale_suffix(tmp_path):
@@ -293,8 +294,8 @@ def test_render_section_header():
     assert header == "## ~/cc-lab/"
 
 
-def test_render_row_has_open_link(tmp_path):
-    """Rendered row must include a file:// open link."""
+def test_render_row_name_is_open_link(tmp_path):
+    """Dir name itself must be the file:// link (no separate 'open' tag)."""
     root = tmp_path / "root"
     root.mkdir()
     child = root / "mydir"
@@ -302,11 +303,12 @@ def test_render_row_has_open_link(tmp_path):
     r = {"path": str(child.resolve()), "note": None, "write_hint": None,
          "naming_hint": None, "depth": 0, "stale": 0}
     rendered = _render_atlas_row(r, [root.resolve()])
-    assert "[open](file://" in rendered
+    assert f"[mydir/](file://{child.resolve()})" in rendered
+    assert "[open](" not in rendered
 
 
-def test_render_row_no_heading_emitted(tmp_path):
-    """_render_atlas_row must not emit any ## heading — only list bullet."""
+def test_render_row_emits_h3_heading(tmp_path):
+    """_render_atlas_row must emit an H3 heading so the dir shows in outline."""
     root = tmp_path / "root"
     root.mkdir()
     child = root / "mydir"
@@ -314,8 +316,8 @@ def test_render_row_no_heading_emitted(tmp_path):
     r = {"path": str(child.resolve()), "note": None, "write_hint": None,
          "naming_hint": None, "depth": 0, "stale": 0}
     rendered = _render_atlas_row(r, [root.resolve()])
-    for line in rendered.splitlines():
-        assert not line.startswith("#"), f"unexpected heading: {line!r}"
+    first_line = rendered.splitlines()[0]
+    assert first_line.startswith("### ")
 
 
 def test_build_atlas_spec_bootstrap_writes_sections(conn, tmp_path, monkeypatch):
@@ -341,7 +343,8 @@ def test_build_atlas_spec_bootstrap_writes_sections(conn, tmp_path, monkeypatch)
     except ValueError:
         shorthand = str(root.resolve()) + "/"
     assert f"## {shorthand}" in md
-    # New list layout: bullet with marker, not ### heading
+    # H3-heading layout: dir name is an open link, marker on next line
+    assert f"### [mydir/](file://{child.resolve()})" in md
     assert f"<!-- id:{str(child.resolve())} -->" in md
     assert "- note: hello" in md
     assert "- depth: 0" in md

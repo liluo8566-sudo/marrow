@@ -97,33 +97,37 @@ def _root_of(path: str | Path, roots: list[Path]) -> Path | None:
 
 
 def _render_atlas_row(r: dict, roots: list[Path]) -> str:
-    """List-based block for one atlas row, with inline id marker.
+    """H3 heading block for one atlas row; dir name itself is the open link.
 
     Layout:
-      - **dirname/** <!-- id:/abs/path --> [open](file:///abs/path)
-          - note: <value or empty>
-          - write: <value or empty>
-          - naming: <value or empty>
-          - depth: <int>
+      ### [dirname/](file:///abs/path)
+      <!-- id:/abs/path -->
+      - note: <value or empty>
+      - write: <value or empty>
+      - naming: <value or empty>
+      - depth: <int>
 
-    Appends ` (stale)` when stale=1. Always emits all four sub-bullets.
+    H3 keeps each dir visible in the Obsidian/VSCode outline without the
+    deep-stack-heading ugliness. Appends ` (stale)` to the visible name.
+    Always emits all four field bullets so blanks are obvious editing targets.
     """
     path = r["path"]
     name = Path(path).name + "/"
     stale_sfx = " (stale)" if r.get("stale") else ""
     encoded = urllib.parse.quote(path, safe="/")
+    heading = f"### [{name}](file://{encoded}){stale_sfx}"
     marker = f"<!-- id:{path} -->"
-    header = f"- **{name}**{stale_sfx} {marker} [open](file://{encoded})"
     note = r.get("note") or ""
     write = r.get("write_hint") or ""
     naming = r.get("naming_hint") or ""
     depth = r.get("depth") or 0
     lines = [
-        header,
-        f"    - note: {note}",
-        f"    - write: {write}",
-        f"    - naming: {naming}",
-        f"    - depth: {depth}",
+        heading,
+        marker,
+        f"- note: {note}",
+        f"- write: {write}",
+        f"- naming: {naming}",
+        f"- depth: {depth}",
     ]
     return "\n".join(lines)
 

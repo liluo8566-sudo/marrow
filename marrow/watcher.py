@@ -226,11 +226,36 @@ class _DriftHandler(FileSystemEventHandler):
             self._log.exception("drift on_created failed: %s", event.src_path)
 
 
+def _warmup_imports() -> None:
+    """Force-load every stdlib + marrow module the worker threads may touch.
+
+    Mitigates a macOS 26 / Python 3.14 SIGBUS (FS pagein error 22) seen when
+    multiple daemon threads concurrently trigger dyld page-in of a stdlib .so.
+    Pre-importing on the main thread means worker threads only hit
+    `sys.modules` lookups — no concurrent dlopen.
+    """
+    import grp  # noqa: F401
+    import pwd  # noqa: F401
+    import tempfile  # noqa: F401
+    import shutil  # noqa: F401
+    import subprocess  # noqa: F401
+    import urllib.parse  # noqa: F401
+    import hashlib  # noqa: F401
+    import sqlite3  # noqa: F401
+
+    from . import (  # noqa: F401
+        atlas, candidates, config, dashboard, drift_sweep, entity_recall,
+        inserter, md_index, recall, reconcile, repo, storage, subpage_specs,
+        subpages, subpages_render, top_sections,
+    )
+
+
 class Watcher:
     """Lifecycle wrapper. Build, start, join, stop."""
 
     def __init__(self) -> None:
         self.log = _setup_logger()
+        _warmup_imports()
         self.file_roots, self.dir_roots = _resolve_roots()
         # Schema first (default conn, main thread). Then reopen with
         # check_same_thread=False for the debouncer worker threads.
