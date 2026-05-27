@@ -371,8 +371,10 @@ def reconcile_atlas(conn: sqlite3.Connection, md_path: Path) -> int:
     # Always kick a sweep — handles both directions: depth bump (new stubs)
     # and depth shrink (retract deep orphans). Without this, a shrink would
     # have to wait for the 60s AtlasSweepLoop cycle to take effect.
+    # Protect md-listed paths: a row the user just wrote into md shouldn't
+    # be retracted as out-of-range in the same tick.
     try:
-        atlas_sweep_fs(conn)
+        atlas_sweep_fs(conn, protected=md_paths)
     except Exception:  # noqa: BLE001
         pass
 
@@ -388,7 +390,10 @@ def _is_claude_allowed(entry: Path) -> bool:
     return entry.name in CLAUDE_WHITELIST
 
 
-def atlas_sweep_fs(conn: sqlite3.Connection) -> dict[str, int]:
+def atlas_sweep_fs(
+    conn: sqlite3.Connection,
+    protected: set[str] | frozenset[str] | None = None,
+) -> dict[str, int]:
     """Depth-aware fs walk: stub new dirs, mark vanished dirs stale.
 
     For each atlas row with depth > 0:
@@ -398,8 +403,11 @@ def atlas_sweep_fs(conn: sqlite3.Connection) -> dict[str, int]:
     For each atlas row under a walked root:
     - Not found in walk results → set stale=1 (NEVER delete).
 
+    `protected` = paths to spare from retract (e.g. md_paths passed in by
+    reconcile so user-listed rows aren't retracted in the same tick).
+
     Respects EXCLUDE_DIRS_TREE and ~/.claude whitelist.
-    Returns {"stubbed": N, "unstaled": N, "staled": N}.
+    Returns {"stubbed": N, "unstaled": N, "staled": N, "purged": N, "retracted": N}.
     """
     from . import drift_sweep
     roots = [r.expanduser().resolve() for r in drift_sweep.AUTHORIZED_ROOTS]
@@ -503,42 +511,47 @@ def atlas_sweep_fs(conn: sqlite3.Connection) -> dict[str, int]:
                 )
                 counts["staled"] += 1
 
-        # Retract: when a seed's depth shrinks, stub-only descendants whose
-        # distance from their nearest-ancestor seed exceeds that seed's depth
-        # should disappear. User-edited rows (any manual field) survive — the
-        # user invested in them, so they live on even out-of-range.
-        # `counts["retracted"]` counts deleted rows for visibility.
+        # Retract out-of-range stubs. In-range = some depth>0 atlas row S
+        # covers it (path under S, rel_depth ≤ S.depth). When a root flips
+        # 1→0 its former children lose coverage and retract.
+        # Spare: AUTHORIZED_ROOTS, depth>0, manual fields, `protected`
+        # (md_paths from reconcile this tick), or rows with no atlas
+        # ancestor at all (unattached — not tied to any parent collapse).
         counts["retracted"] = 0
-        seed_paths_sorted = sorted(seed_path_strs, key=len, reverse=True)
-        manual_rows = {
-            r[0]: (r[1], r[2], r[3])
-            for r in conn.execute(
-                "SELECT path, note, write_hint, naming_hint FROM atlas"
-            ).fetchall()
-        }
-        seed_depth_map = {row["path"]: row["depth"] for row in seed_rows}
-        for p_str in children_to_check:
-            nearest = None
-            for sp in seed_paths_sorted:
-                if p_str.startswith(sp + os.sep):
-                    nearest = sp
-                    break
-            if nearest is None:
+        protected_set = set(protected) if protected else set()
+        root_strs = {str(r) for r in roots}
+        all_rows_full = conn.execute(
+            "SELECT path, depth, note, write_hint, naming_hint FROM atlas"
+        ).fetchall()
+        all_paths_depth = {r[0]: r[1] for r in all_rows_full}
+        manual_fields = {r[0]: (r[2], r[3], r[4]) for r in all_rows_full}
+        seed_pool = [(p, d) for p, d in all_paths_depth.items() if d > 0]
+        atlas_paths_sorted = sorted(all_paths_depth, key=len, reverse=True)
+        for p_str, p_depth in all_paths_depth.items():
+            if (p_str in root_strs or p_depth > 0 or p_str in protected_set):
                 continue
-            try:
-                rel = Path(p_str).relative_to(Path(nearest))
-                rel_depth = len(rel.parts)
-            except ValueError:
-                continue
-            seed_max = seed_depth_map.get(nearest, 0)
-            if rel_depth <= seed_max:
-                continue
-            note, write_hint, naming_hint = manual_rows.get(
+            note, write_hint, naming_hint = manual_fields.get(
                 p_str, (None, None, None))
-            has_manual = any(
-                v not in (None, "") for v in (note, write_hint, naming_hint)
+            if any(v not in (None, "") for v in (note, write_hint, naming_hint)):
+                continue
+            covered = False
+            for sp, sd in seed_pool:
+                if not p_str.startswith(sp + os.sep):
+                    continue
+                try:
+                    rel = Path(p_str).relative_to(Path(sp))
+                    if len(rel.parts) <= sd:
+                        covered = True
+                        break
+                except ValueError:
+                    continue
+            if covered:
+                continue
+            has_ancestor = any(
+                ap != p_str and p_str.startswith(ap + os.sep)
+                for ap in atlas_paths_sorted
             )
-            if has_manual:
+            if not has_ancestor:
                 continue
             conn.execute("DELETE FROM atlas WHERE path=?", (p_str,))
             counts["retracted"] += 1
