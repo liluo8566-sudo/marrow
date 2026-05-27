@@ -1100,22 +1100,19 @@ def recall_fusion(
         diary_cap = 1 if limit > 5 else 0
         # Tasks = study + project surface. Same reservation rule as diary.
         tasks_cap = 1 if limit > 5 else 0
-    ms_scored = [(s, r) for s, r in scored if r.get("kind") == "milestone"]
-    memes_scored = [(s, r) for s, r in scored if r.get("kind") == "memes"]
-    diary_scored = [(s, r) for s, r in scored if r.get("kind") == "diary"]
-    tasks_scored = [(s, r) for s, r in scored if r.get("kind") == "task"]
-    ev_scored = [
-        (s, r) for s, r in scored
-        if r.get("kind") not in ("milestone", "memes", "diary", "task")
-    ]
-    ms_picks = ms_scored[:ms_cap]
-    memes_picks = memes_scored[:memes_cap]
-    diary_picks = diary_scored[:diary_cap]
-    tasks_picks = tasks_scored[:tasks_cap]
-    reserved = (
-        len(ms_picks) + len(memes_picks) + len(diary_picks) + len(tasks_picks)
-    )
-    ev_picks = ev_scored[: max(0, limit - reserved)]
+    by_kind: dict[str, list] = {}
+    for s, r in scored:
+        by_kind.setdefault(r.get("kind", ""), []).append((s, r))
+    ms_picks = by_kind.get("milestone", [])[:ms_cap]
+    memes_picks = by_kind.get("memes", [])[:memes_cap]
+    diary_picks = by_kind.get("diary", [])[:diary_cap]
+    tasks_picks = by_kind.get("task", [])[:tasks_cap]
+    reserved = len(ms_picks) + len(memes_picks) + len(diary_picks) + len(tasks_picks)
+    ev_picks = [
+        item for k, items in by_kind.items()
+        if k not in ("milestone", "memes", "diary", "task")
+        for item in items
+    ][: max(0, limit - reserved)]
     picks = sorted(
         ms_picks + memes_picks + diary_picks + tasks_picks + ev_picks,
         key=lambda x: x[0], reverse=True,
