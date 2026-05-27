@@ -371,10 +371,11 @@ def reconcile_atlas(conn: sqlite3.Connection, md_path: Path) -> int:
     # Always kick a sweep — handles both directions: depth bump (new stubs)
     # and depth shrink (retract deep orphans). Without this, a shrink would
     # have to wait for the 60s AtlasSweepLoop cycle to take effect.
-    # Protect md-listed paths: a row the user just wrote into md shouldn't
-    # be retracted as out-of-range in the same tick.
+    # User-written content (manual fields) is preserved by the sweep's
+    # has_manual check; stub-only md_paths must NOT be protected, or a
+    # depth shrink could never collapse leftover stub blocks.
     try:
-        atlas_sweep_fs(conn, protected=md_paths)
+        atlas_sweep_fs(conn)
     except Exception:  # noqa: BLE001
         pass
 
@@ -390,10 +391,7 @@ def _is_claude_allowed(entry: Path) -> bool:
     return entry.name in CLAUDE_WHITELIST
 
 
-def atlas_sweep_fs(
-    conn: sqlite3.Connection,
-    protected: set[str] | frozenset[str] | None = None,
-) -> dict[str, int]:
+def atlas_sweep_fs(conn: sqlite3.Connection) -> dict[str, int]:
     """Depth-aware fs walk: stub new dirs, mark vanished dirs stale.
 
     For each atlas row with depth > 0:
@@ -403,8 +401,8 @@ def atlas_sweep_fs(
     For each atlas row under a walked root:
     - Not found in walk results → set stale=1 (NEVER delete).
 
-    `protected` = paths to spare from retract (e.g. md_paths passed in by
-    reconcile so user-listed rows aren't retracted in the same tick).
+    Stub-only rows out of range get retracted (deleted). Rows with manual
+    fields (note/write_hint/naming_hint) are always spared.
 
     Respects EXCLUDE_DIRS_TREE and ~/.claude whitelist.
     Returns {"stubbed": N, "unstaled": N, "staled": N, "purged": N, "retracted": N}.
@@ -514,11 +512,14 @@ def atlas_sweep_fs(
         # Retract out-of-range stubs. In-range = some depth>0 atlas row S
         # covers it (path under S, rel_depth ≤ S.depth). When a root flips
         # 1→0 its former children lose coverage and retract.
-        # Spare: AUTHORIZED_ROOTS, depth>0, manual fields, `protected`
-        # (md_paths from reconcile this tick), or rows with no atlas
-        # ancestor at all (unattached — not tied to any parent collapse).
+        # Spare only: AUTHORIZED_ROOTS, depth>0, manual fields, or rows
+        # with no atlas ancestor at all (unattached). md_paths is NOT a
+        # protection signal — a stub-only row still listed in md is just
+        # a leftover render from before the depth shrink; retract is the
+        # whole point. Otherwise reconcile→sweep would never collapse,
+        # since stale stub blocks re-insert themselves each tick before
+        # the sweep can act.
         counts["retracted"] = 0
-        protected_set = set(protected) if protected else set()
         root_strs = {str(r) for r in roots}
         all_rows_full = conn.execute(
             "SELECT path, depth, note, write_hint, naming_hint FROM atlas"
@@ -528,7 +529,7 @@ def atlas_sweep_fs(
         seed_pool = [(p, d) for p, d in all_paths_depth.items() if d > 0]
         atlas_paths_sorted = sorted(all_paths_depth, key=len, reverse=True)
         for p_str, p_depth in all_paths_depth.items():
-            if (p_str in root_strs or p_depth > 0 or p_str in protected_set):
+            if p_str in root_strs or p_depth > 0:
                 continue
             note, write_hint, naming_hint = manual_fields.get(
                 p_str, (None, None, None))
