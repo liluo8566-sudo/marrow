@@ -97,25 +97,26 @@ def _root_of(path: str | Path, roots: list[Path]) -> Path | None:
 
 
 def _render_atlas_row(r: dict, roots: list[Path]) -> str:
-    """H3 heading block for one atlas row; dir name itself is the open link.
+    """H5 heading block for one atlas row; dir name itself is the open link.
 
     Layout:
-      ### [dirname/](file:///abs/path)
+      ##### [dirname/](file:///abs/path)
       <!-- id:/abs/path -->
       - note: <value or empty>
       - write: <value or empty>
       - naming: <value or empty>
       - depth: <int>
 
-    H3 keeps each dir visible in the Obsidian/VSCode outline without the
-    deep-stack-heading ugliness. Appends ` (stale)` to the visible name.
-    Always emits all four field bullets so blanks are obvious editing targets.
+    H5 keeps each dir visible in the Obsidian/VSCode outline without
+    visually competing with the H2 section header. Appends ` (stale)`
+    to the visible name. Always emits all four field bullets so blanks
+    are obvious editing targets.
     """
     path = r["path"]
     name = Path(path).name + "/"
     stale_sfx = " (stale)" if r.get("stale") else ""
     encoded = urllib.parse.quote(path, safe="/")
-    heading = f"### [{name}](file://{encoded}){stale_sfx}"
+    heading = f"##### [{name}](file://{encoded}){stale_sfx}"
     marker = f"<!-- id:{path} -->"
     note = r.get("note") or ""
     write = r.get("write_hint") or ""
@@ -140,7 +141,7 @@ def _section_header(root_path: str) -> str:
 # Parser — marker-based, reads inline <!-- id:path --> anchors
 # ---------------------------------------------------------------------------
 
-_ID_RE = re.compile(r"<!--\s*id:(?P<path>[^\s>]+)\s*-->")
+_ID_RE = re.compile(r"<!--\s*id:(?P<path>[^>]+?)\s*-->")
 _BULLET_RE = re.compile(
     r"^\s*-\s+(note|write|naming|depth)\s*:\s*(.*)$"
 )
@@ -303,6 +304,15 @@ def reconcile_atlas(conn: sqlite3.Connection, md_path: Path) -> int:
                 continue
             conn.execute("DELETE FROM atlas WHERE path=?", (path,))
             changed += 1
+
+    # When the user just bumped any row's depth above 0, kick a fs walk
+    # immediately so new subdir stubs appear in the next render tick.
+    # Otherwise they'd have to wait for the 60s AtlasSweepLoop cadence.
+    if any((r.get("depth") or 0) > 0 for r in md_rows):
+        try:
+            atlas_sweep_fs(conn)
+        except Exception:  # noqa: BLE001
+            pass
 
     return changed
 

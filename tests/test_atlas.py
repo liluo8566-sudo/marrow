@@ -56,7 +56,7 @@ def _insert_row(conn, path, note=None, write_hint=None, naming_hint=None,
 def _marker_md(path: str, note="", write="", naming="", depth=0) -> str:
     """Build a single marker-format atlas block for one path."""
     return (
-        f"### [{Path(path).name}/](file://{path})\n"
+        f"##### [{Path(path).name}/](file://{path})\n"
         f"<!-- id:{path} -->\n"
         f"- note: {note}\n"
         f"- write: {write}\n"
@@ -307,8 +307,9 @@ def test_render_row_name_is_open_link(tmp_path):
     assert "[open](" not in rendered
 
 
-def test_render_row_emits_h3_heading(tmp_path):
-    """_render_atlas_row must emit an H3 heading so the dir shows in outline."""
+def test_render_row_emits_h5_heading(tmp_path):
+    """_render_atlas_row must emit an H5 heading so the dir shows in outline
+    without visually competing with the H2 section header."""
     root = tmp_path / "root"
     root.mkdir()
     child = root / "mydir"
@@ -317,7 +318,7 @@ def test_render_row_emits_h3_heading(tmp_path):
          "naming_hint": None, "depth": 0, "stale": 0}
     rendered = _render_atlas_row(r, [root.resolve()])
     first_line = rendered.splitlines()[0]
-    assert first_line.startswith("### ")
+    assert first_line.startswith("##### ")
 
 
 def test_build_atlas_spec_bootstrap_writes_sections(conn, tmp_path, monkeypatch):
@@ -343,8 +344,8 @@ def test_build_atlas_spec_bootstrap_writes_sections(conn, tmp_path, monkeypatch)
     except ValueError:
         shorthand = str(root.resolve()) + "/"
     assert f"## {shorthand}" in md
-    # H3-heading layout: dir name is an open link, marker on next line
-    assert f"### [mydir/](file://{child.resolve()})" in md
+    # H5-heading layout: dir name is an open link, marker on next line
+    assert f"##### [mydir/](file://{child.resolve()})" in md
     assert f"<!-- id:{str(child.resolve())} -->" in md
     assert "- note: hello" in md
     assert "- depth: 0" in md
