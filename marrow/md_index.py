@@ -16,7 +16,9 @@ from typing import Iterable, Iterator, Protocol
 
 # Block id marker. Date is optional — existing memes/tasks shipped `<!-- id:N -->`
 # without date; Phase 3 plan adds an optional date attr but stays back-compatible.
-_ID_RE = re.compile(r"<!--\s*id:([A-Za-z0-9_:.-]+)(?:\s+date:(\d{4}-\d{2}-\d{2}))?\s*-->")
+# Character class is non-whitespace, non-`>` so atlas block_ids (absolute paths
+# containing `/` and other path chars) are accepted alongside legacy integer ids.
+_ID_RE = re.compile(r"<!--\s*id:([^\s>]+?)(?:\s+date:(\d{4}-\d{2}-\d{2}))?\s*-->")
 
 
 def _now_iso() -> str:
