@@ -21,6 +21,28 @@ This is a pure planning/brainstorming session.
 
 **Save plan to** `marrow/docs/plans/<slug>.md` — slug ≤4 words, no date prefix (e.g. `dashboard-rebuild.md`). 
 
+
+## 把/goal融入整个planning机制 - 目标以后每天2-5个/goal，一个session完成一个goal【待完善这个section需要稍作修改template】
+https://code.claude.com/docs/en/goal.md
+- /goal <pass condition> — 一发立刻进入循环模式，我每轮做完事不等你回话，自动接下一轮。
+- /goal 空发 — 看当前 goal、跑了几轮、烧了多少 token。
+- /goal clear — 中途停掉。
+
+评估机制
+
+- 每轮我做完，Haiku 评估器读 transcript（不是文件系统、不是 git，只看对话），判断你写的 condition 是否满足。
+- 没满足 → 我自己再开一轮，无需你触发。
+- 满足 → 循环结束。
+- ⚠️ 推论：测试结果、build 输出、grep 命中数这些都得我显式跑出来贴在对话里，评估器才看得见；我默写一句 "done" 它认不出来。
+
+condition 怎么写
+
+- 单一可验证的终态，不要复合目标。
+- 例子：pytest tests/test_hooks.py exits 0 and no new files outside marrow/hooks.py
+- 上限 4000 字符。
+- 越具体越好——评估器和我都靠它对齐。
+---
+
 ## Morning mode
 
 ### 1. Scan (silent, auto)
@@ -52,12 +74,15 @@ Invoke `grill` skill **only if** Synthesize hit: decision deadlock, dependency c
 ### 5. Plan output
 
 ```
+## Principle
+- Keep going until the goal is truly achieved.
+- If user-like verification is possible, run it before reporting.
+- The only standard of goal verification is whether it works in practice. Tests and dry runs are just safeguards.
 
 ## Dispatch Policy (read first)
 - Strictly follow agent-dispatch.md
 - You are the orchestrator — dispatch tasks to agent or wt and keep context clean. 
 - You can ask questions if not sure but no need to ask if you know the optimal answer.
-- You should not stop until the goal achieved and outcome tested.
 - You decide agent count and agent type (follow agent-dispatch.md and less Opus)
 
 ## Today

@@ -159,3 +159,17 @@ Delta only. Never restate DESIGN / SCHEMA.
 - `paths.toml` + `marrow/paths.py`: 10-key central loader, env override, fallback defaults; `config.py` updated to use it
 - push done: 4fb6d45..5f17c3c (12 commits) + d3aa65c to origin/main
 - test vault isolation (conftest autouse fixture, `ca668b2`) still in effect — 668 tests clean
+
+[2026-05-27 sid:7545d090]
+- Phase 3 session 1 complete (4 commits): `_has_mm_plus_reset` uses latest non-start row; `build_study_index_spec` wired to study index; pit retired from SUBPAGE_BUILDERS; study/projects children `read_only=True`; watcher detail-page denylist; 674 tests green
+- Pit 23 rows exported to `~/.config/marrow/db-pages/projects/pit.md`; file is now manual inbox, refresh no longer overwrites
+- Alerts #114 #115 resolved; #53 (leak-test probe) resolved; refresh runs two rounds clean
+- mm+/mm- arg parsing three-branch fix (commit `b2627fd`): empty→current sid; UUID→explicit sid; natural language→`additionalContext` injection to main session; mm- named-sid support added; 687 green
+- Natural language branch live-verified: `mm+ 测一下看看` correctly routed to additionalContext, no fake-sid audit row written
+- mm+ active-session archive fix (agent, 690 tests green): before spawn, calls `transcript.clean()` + `repo.archive_events()` on current cc jsonl; `_locate_jsonl` glob fallback covers missing `transcript_path` in payload — **pending live verify**
+
+[2026-05-27 sid:7545d090]
+- mm+ active-session archive fix live-verified: `transcript.clean()` + `repo.archive_events()` called before spawn; events 0→61 rows, full audit chain `reset:mm_plus → start → writers ok → ok,user_count=14`; handover.md rewritten; commit `f3c40d1` pushed
+- Phase 3 session 1 all done (4 commits): `_has_mm_plus_reset` latest-non-start semantics; `build_study_index_spec` wired to study index; pit retired from SUBPAGE_BUILDERS; study/projects children `read_only=True`; watcher detail-page denylist; pit 23 rows exported to `pit.md` (manual inbox, refresh-safe); alerts #114 #115 #53 resolved; 674→690 tests green
+- mm+/mm- three-branch arg parsing shipped (`b2627fd`): empty→current sid+spawn; UUID→explicit sid+spawn; natural language→`additionalContext` injection to main session; mm- named-sid support added; both branches live-verified
+- Verification discipline locked in session: pytest green = "no regression", not "goal done"; done requires live observable artifact (events row count, audit ok row, dashboard mtime, file diff)

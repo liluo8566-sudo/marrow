@@ -1,7 +1,15 @@
 # Today — 2026-05-27 Wed evening
 
+## Principle
+- Keep going until the goal is truly achieved.
+- If user-like verification is possible, run it before reporting.
+- The only standard of goal verification is whether it works in practice. Tests and dry runs are just safeguards.
+
 ## Dispatch Policy (read first)
-You are the executor opening this plan. Orchestrator only — dispatch every implementation / scan / fetch / review to agent or wt. No inline coding when an agent fits. See `.claude/rules/agent-dispatch.md` + `build-workflow.md`.
+- Strictly follow agent-dispatch.md
+- You are the orchestrator — dispatch tasks to agent or wt and keep context clean. 
+- You can ask questions if not sure but no need to ask if you know the optimal answer.
+- You decide agent count and agent type (follow agent-dispatch.md and less Opus)
 
 ## Session 1 (main) — Phase 3 bug cleanup
 **Goal**: clear alerts + mm+ both modes work + study/pit two-way landed
@@ -26,22 +34,71 @@ Dispatch:
 - Explore agent: `build_projects_index_spec` structure + current `pit` row count + watcher path filtering state
 - worktree-implementer agent: TDD red lines + patches above; main session reviews diff and merges
 
-## Session 2 (main) — dir_tree + drift_sweep .claude scope
-**Goal**: drift_sweep watches only rule-class input + dir_tree shape decided
+## Session 2 (main) — atlas subpage + drift_sweep .claude scope
+**Goal**: atlas subpage replaces dir_tree; drift_sweep watches rule-class only; rename auto-propagates
 
-Steps:
-- Decide: drop dir_tree or keep (if keep: max_depth=1 + one-line summary per folder, for LLM use)
-- `drift_sweep.py` adds `~/.claude` subtree allowlist: `rules/ commands/ skills/ agents/ output-styles/ CLAUDE.md`
-- Exclude: `projects/ image-cache/ statsig/ shell-snapshots/ settings.json *.jsonl`
-- watchdog rename event triggers sweep (fixes dayplan→grillme not auto-propagating)
+Decisions locked (this session):
+- dir_tree → retired, replaced by `atlas` subpage (path map, depth-aware, manually editable)
+- cheatsheet stays parallel subpage (skill triggers / mcp / cli) — separate from atlas
+- naming rules: keep `~/.claude/rules/files.md` as interim; sink into atlas `naming` field next phase
+- write-location lookup: read-on-demand from `atlas.md`, rule line in `rules/files.md`; no UserPromptSubmit injection
+
+Atlas schema (table `atlas`):
+- `path TEXT PRIMARY KEY` — absolute, expanded
+- `note TEXT` — what this dir is
+- `write_hint TEXT` — what belongs here / what doesn't
+- `naming_hint TEXT` — naming convention for this dir
+- `depth INTEGER DEFAULT 0` — sweep expand depth per row (0=this only, 1=one sub-level, etc.)
+- `stale INTEGER DEFAULT 0` — 1 if fs walk no longer finds this path
+- `updated_at TEXT` — iso timestamp
+
+Atlas render shape (markdown heading tree, `##` per monitored root → `###`/`####`/... per dir depth, max `######`):
+```
+## ~/cc-lab/
+### marrow/
+- note: SQLite-backed memory system
+- write: docs/plans/, docs/notes/
+- naming: mw- prefix outside repo, snake_case in repo
+- depth: 1
+```
+Empty fields omitted. `(stale)` suffix on path heading when stale=1.
+
+drift_sweep `~/.claude` subtree filter:
+- Whitelist (sweep + watch): `CLAUDE.md`, `rules/`, `commands/`, `skills/`, `agents/`, `output-styles/`, `hooks/`, `keybindings.json`, `settings.json`
+- Blacklist (skip): `projects/`, `image-cache/`, `statsig/`, `shell-snapshots/`, `paste-cache/`, `file-history/`, `sessions/`, `daemon/`, `session-env/`, `*.jsonl`, `*.log`
+
+Watchdog wiring:
+- `DriftWatcher` (drift_sweep.py:493) currently standalone — attach to `marrow/watcher.py` observer
+- `on_moved` event for `.claude` whitelist + atlas-monitored roots → trigger 30s batch sweep (existing) → reconcile atlas path keys (note/write/naming follow the path)
+
+Atlas sweep loop (depth-aware fs walk):
+- For each row: walk `path` to depth `depth`, upsert child rows (note empty) if missing, mark vanished children as `stale=1` (preserves manual fields)
+- Triggers: `mw refresh` (existing CLI), watcher md edit, FSEvents rename
 
 Done:
-- `drift_sweep.py` subtree filter live + pytest green
-- DECISIONS gains a dir_tree shape decision line
+- `marrow/atlas.py` (or split into storage migration + subpage_specs entry) + `_REGISTRY` registration
+- `tests/test_atlas.py` covers: render heading layout, depth controls sub-expansion, reconcile preserves manual fields under fs rename, stale flag on missing dir
+- `drift_sweep.py` `.claude` subtree filter live + `DriftWatcher` attached to watcher
+- `~/.config/marrow/db-pages/atlas.md` produced by `mw refresh`, ≥5 root sections (cc-lab, .claude, Study, NY, Toolkit)
+- `pytest -q` exits 0
+- `docs/plans/today.md` (this file) reflects above
+- `rules/files.md` adds one-line: write new file → `read atlas.md first`
+
+Goal (machine-checkable):
+- pytest -q exit 0
+- `grep -F "atlas" marrow/subpages.py marrow/subpage_specs.py` hits both
+- `grep -F "DriftWatcher" marrow/watcher.py` hits (observer attachment)
+- `ls ~/.config/marrow/db-pages/atlas.md` exists, contains `## ~/cc-lab/` and `## ~/.claude/`
+- `git log --oneline -10` shows ≥3 atomic commits this session
 
 Dispatch:
-- Explore agent: `.claude` subdirectory inventory + current `drift_sweep.authorized_roots`
-- worktree-implementer agent: allowlist + watchdog rename wiring
+- WT1 (worktree-implementer Sonnet): drift_sweep `.claude` subtree filter + `DriftWatcher` attach to `watcher.py` observer + tests
+- WT2 (worktree-implementer Sonnet): atlas storage migration + subpage_specs + reconcile + depth-aware sweep + tests
+- Main: serialize storage migration first (schema), then WT1 + WT2 in parallel; merge in report order
+
+Pending-confirm (Lumi must point before move):
+- `cc-lab/external/` 重排 — physically `mv claude-buddy image-gen-mcp weclaude` into `external/`, update workspace
+- Shared `.claude` symlink scheme (cc-lab/.claude as single source, project .claude/rules symlinks back)
 
 ## Session 3 (main + brainstorming) — NY memm retire sync
 **Goal**: memm fully offline + code transfer paths decided
