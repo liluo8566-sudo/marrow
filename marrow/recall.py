@@ -1158,6 +1158,11 @@ def recall_with_config(
     """
     from . import config as _config
     rcfg = _config.load().get("recall", {})
+    _weight_keys = {
+        "w_vec", "w_bm25", "w_recency", "w_affect",
+        "w_memes_vec", "w_entities_vec", "w_milestones_vec",
+        "w_diary_vec", "w_tasks_vec", "min_score",
+    }
     return recall_fusion(
         conn, query,
         limit=int(limit if limit is not None else rcfg.get("limit", 15)),
@@ -1165,14 +1170,5 @@ def recall_with_config(
             budget_chars if budget_chars is not None
             else rcfg.get("budget_chars", 4000)
         ),
-        w_vec=float(rcfg.get("w_vec", 0.55)),
-        w_bm25=float(rcfg.get("w_bm25", 0.30)),
-        w_recency=float(rcfg.get("w_recency", 0.15)),
-        w_affect=float(rcfg.get("w_affect", 0.10)),
-        w_memes_vec=float(rcfg.get("w_memes_vec", 0.55)),
-        w_entities_vec=float(rcfg.get("w_entities_vec", 0.55)),
-        w_milestones_vec=float(rcfg.get("w_milestones_vec", 0.55)),
-        w_diary_vec=float(rcfg.get("w_diary_vec", 0.55)),
-        w_tasks_vec=float(rcfg.get("w_tasks_vec", 0.55)),
-        min_score=float(rcfg.get("min_score", 0.35)),
+        **{k: float(rcfg[k]) for k in _weight_keys if k in rcfg},
     )
