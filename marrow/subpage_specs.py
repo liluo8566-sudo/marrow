@@ -468,6 +468,12 @@ def build_atlas_spec(folder: str) -> InserterSpec:
         # inside known field bullets which are re-rendered anyway, so a
         # rebootstrap is loss-free in practice.
         force_sort_consistency=True,
+        # Atlas db is fs-driven: when sweep stubs a new sub-dir whose path
+        # was tombstoned in a prior pass (e.g. user lowered depth then
+        # raised it again), the row must re-appear in md instead of being
+        # blocked by the tombstone. Default tombstone respect prevents
+        # auto-resurrection across other subpages; atlas opts out.
+        respect_tombstones=False,
     )
 
 

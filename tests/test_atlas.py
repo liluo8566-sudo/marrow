@@ -291,7 +291,9 @@ def test_render_section_header():
     home = Path.home()
     root = str(home / "cc-lab")
     header = _section_header(root)
-    assert header == "## ~/cc-lab/"
+    # Short basename label + clickable open link
+    assert header.startswith("## [cc-lab/](file://")
+    assert header.endswith("/cc-lab)")
 
 
 def test_render_row_name_is_open_link(tmp_path):
@@ -338,12 +340,8 @@ def test_build_atlas_spec_bootstrap_writes_sections(conn, tmp_path, monkeypatch)
     write_subpage_inserter(spec, conn, store)
 
     md = Path(spec.path).read_text(encoding="utf-8")
-    try:
-        rel = root.resolve().relative_to(Path.home())
-        shorthand = f"~/{rel}/"
-    except ValueError:
-        shorthand = str(root.resolve()) + "/"
-    assert f"## {shorthand}" in md
+    # Section header now emits basename + open link instead of long shorthand
+    assert f"## [{root.name}/](file://{root.resolve()})" in md
     # H5-heading layout: dir name is an open link, marker on next line
     assert f"##### [mydir/](file://{child.resolve()})" in md
     assert f"<!-- id:{str(child.resolve())} -->" in md

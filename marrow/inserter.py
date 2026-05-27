@@ -78,6 +78,11 @@ class InserterSpec:
     # Side effect — non-anchored hand-edits inside the marker block are
     # wiped on rebootstrap. Tombstoned rows stay tombstoned.
     force_sort_consistency: bool = False
+    # When False, the inserter ignores the tombstone set when deciding which
+    # rows to write. Use for fs-truth-driven views (atlas) where the db is
+    # the canonical source and a row reappearing in db must always re-emit
+    # to md, even if a prior delete tombstoned its block_id.
+    respect_tombstones: bool = True
 
     def m0(self) -> str:
         return _M0.format(key=self.key)
@@ -129,7 +134,10 @@ def write_subpage_inserter(spec: InserterSpec, conn: sqlite3.Connection,
             counts["bootstrapped"] += 1
         return counts
 
-    tombstoned = {tid for tid, _ts in store.list_tombstones(path)}
+    tombstoned = (
+        {tid for tid, _ts in store.list_tombstones(path)}
+        if spec.respect_tombstones else set()
+    )
 
     # Sort-consistency check — diary / goose / milestone want canonical
     # chronological order. If catchup-style inserts have left md blocks

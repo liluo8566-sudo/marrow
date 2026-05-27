@@ -162,7 +162,17 @@ def _render_atlas_row(r: dict, roots: list[Path]) -> str:
 
 
 def _section_header(root_path: str) -> str:
-    return f"## {_root_shorthand(root_path)}"
+    """## [basename/](file:///abs/path) — short label + open link.
+
+    Older renders showed the full shorthand (`## ~/Library/Mobile Documents/
+    com~apple~CloudDocs/Study/`) which was unreadable and unclickable.
+    The basename is enough to identify the root in context; the link lets
+    the user jump to the folder. Encoded path handles spaces / `&` / CJK.
+    """
+    p = Path(root_path).expanduser().resolve()
+    name = p.name + "/"
+    encoded = urllib.parse.quote(str(p), safe="/")
+    return f"## [{name}](file://{encoded})"
 
 
 # ---------------------------------------------------------------------------
