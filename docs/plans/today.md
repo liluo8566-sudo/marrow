@@ -115,7 +115,13 @@ Dispatch:
 - Source unknown — sweep can't have written it (walk is bounded by AUTHORIZED_ROOTS). Likely historical hand-insert or a now-removed AUTHORIZED_ROOTS entry that was never cleaned up.
 - Fix: one-time cleanup `DELETE FROM atlas WHERE path NOT LIKE '<each authorized root>%'`. Optionally: reconcile/sweep adds a guard that drops any row whose path is not under an AUTHORIZED_ROOT (defensive — paths can't appear there otherwise).
 
-**3. dir-rename drift not alerted (`grill → grillme` case)**
+**3. atlas root section order = Lumi's preference, not AUTHORIZED_ROOTS file order**
+- Current: section_order in `build_atlas_spec` follows `AUTHORIZED_ROOTS` list order (`drift_sweep.py:29-36`) → cc-lab / .config / .claude / Toolkit / NY / Study.
+- Lumi wants Study + NY at the top (study-first habit), backend dirs at the bottom.
+- Simplest fix: reorder `AUTHORIZED_ROOTS` itself — list is ordered, no other code cares about order (drift_sweep iterates, doesn't index). Confirm preferred order with Lumi, then move the entries.
+- More flexible: separate `ATLAS_ROOT_ORDER: list[str]` constant in `atlas.py` (or read from a small config file) so atlas display order is decoupled from sweep order. Use if Lumi wants to change atlas-only order later without touching sweep semantics.
+
+**4. dir-rename drift not alerted (`grill → grillme` case)**
 - Lumi renamed `~/.claude/skills/grill/` → `~/.claude/skills/grillme/` deliberately to test drift_sweep. No alert fired; `mw drift apply` has nothing pending for it.
 - Root cause: `DriftWatcher` exists at `drift_sweep.py:493` but `watcher.py` only wires file-level rename events to it. Dir-rename → watchdog `on_moved(is_directory=True)` is not subscribed. handover notes already had this flagged as "DriftWatcher 没接 watcher.py — watchdog rename 接入是真欠账".
 - Fix: extend `watcher.py` DriftHandler (or equivalent) to handle dir `on_moved` — for each affected child path under `src`, queue a rename event so `drift_sweep.handle_move` can scan refs. Watch out for noisy events from worktree creation / `.pytest_cache` churn — apply existing `EXCLUDE_DIRS_*` filtering.
