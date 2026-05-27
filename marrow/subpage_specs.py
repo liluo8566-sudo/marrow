@@ -414,6 +414,9 @@ def build_atlas_spec(folder: str) -> InserterSpec:
     roots = [r.expanduser().resolve() for r in drift_sweep.AUTHORIZED_ROOTS]
 
     root_strs = {str(r) for r in roots}
+    # Per-render cache: fetch() pulls root rows aside so render_section_header
+    # can read note/write/naming/depth back without a second db hit.
+    root_rows_cache: dict[str, dict] = {}
 
     def fetch(conn: sqlite3.Connection) -> list[dict]:
         try:
@@ -423,7 +426,14 @@ def build_atlas_spec(folder: str) -> InserterSpec:
             ).fetchall()
         except sqlite3.Error:
             return []
-        result = [dict(r) for r in rows if r["path"] not in root_strs]
+        root_rows_cache.clear()
+        result: list[dict] = []
+        for r in rows:
+            d = dict(r)
+            if d["path"] in root_strs:
+                root_rows_cache[d["path"]] = d
+            else:
+                result.append(d)
         # stable sort by (section, path)
         result.sort(key=lambda r: (
             str(_atlas_mod._root_of(r["path"], roots) or r["path"]),
@@ -436,16 +446,20 @@ def build_atlas_spec(folder: str) -> InserterSpec:
         return str(root) if root else r["path"]
 
     def section_order(labels: list[str]) -> list[str]:
+        # Always emit a section per canonical root — root header now carries
+        # the depth field, so it must render even when the user collapsed
+        # the subtree (depth=0, no child rows in this fetch).
         canonical = [str(r) for r in roots]
-        seen = set(labels)
-        out = [lab for lab in canonical if lab in seen]
+        out = list(canonical)
         for lab in labels:
             if lab not in out:
                 out.append(lab)
         return out
 
     def render_section_header(root_path: str) -> str:
-        return _atlas_mod._section_header(root_path)
+        return _atlas_mod._section_header(
+            root_path, root_rows_cache.get(root_path)
+        )
 
     def render_row(r: dict) -> str:
         return _atlas_mod._render_atlas_row(r, roots)

@@ -43,7 +43,13 @@ except ImportError:
         ".git", "__pycache__", "node_modules", ".venv", "venv",
     }
 
+try:
+    from .drift_sweep import CONFIG_BLACKLIST
+except ImportError:
+    CONFIG_BLACKLIST: frozenset[str] = frozenset({"wechat-claude-bridge"})
+
 _CLAUDE_ROOT = Path.home() / ".claude"
+_CONFIG_ROOT = Path.home() / ".config"
 
 _NOW = lambda: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())  # noqa: E731
 
@@ -161,18 +167,37 @@ def _render_atlas_row(r: dict, roots: list[Path]) -> str:
     ])
 
 
-def _section_header(root_path: str) -> str:
-    """## [basename/](file:///abs/path) — short label + open link.
+def _section_header(root_path: str, row: dict | None = None) -> str:
+    """## [basename/](file:///abs/path) + marker + 4 fields when row is given.
 
     Older renders showed the full shorthand (`## ~/Library/Mobile Documents/
     com~apple~CloudDocs/Study/`) which was unreadable and unclickable.
     The basename is enough to identify the root in context; the link lets
     the user jump to the folder. Encoded path handles spaces / `&` / CJK.
+
+    Pass `row` (atlas row for the root path) to emit the marker + note /
+    write / naming / depth fields under the heading; setting depth=0 on
+    the root collapses the entire subtree on next reconcile.
     """
     p = Path(root_path).expanduser().resolve()
     name = p.name + "/"
     encoded = urllib.parse.quote(str(p), safe="/")
-    return f"## [{name}](file://{encoded})"
+    header = f"## [{name}](file://{encoded})"
+    if row is None:
+        return header
+    marker = f"<!-- id:{root_path} -->"
+    note = row.get("note") or ""
+    write = row.get("write_hint") or ""
+    naming = row.get("naming_hint") or ""
+    depth = row.get("depth") or 0
+    return "\n".join([
+        header,
+        marker,
+        f"- note: {note}",
+        f"- write: {write}",
+        f"- naming: {naming}",
+        f"- depth: {depth}",
+    ])
 
 
 # ---------------------------------------------------------------------------
@@ -343,14 +368,13 @@ def reconcile_atlas(conn: sqlite3.Connection, md_path: Path) -> int:
             conn.execute("DELETE FROM atlas WHERE path=?", (path,))
             changed += 1
 
-    # When the user just bumped any row's depth above 0, kick a fs walk
-    # immediately so new subdir stubs appear in the next render tick.
-    # Otherwise they'd have to wait for the 60s AtlasSweepLoop cadence.
-    if any((r.get("depth") or 0) > 0 for r in md_rows):
-        try:
-            atlas_sweep_fs(conn)
-        except Exception:  # noqa: BLE001
-            pass
+    # Always kick a sweep — handles both directions: depth bump (new stubs)
+    # and depth shrink (retract deep orphans). Without this, a shrink would
+    # have to wait for the 60s AtlasSweepLoop cycle to take effect.
+    try:
+        atlas_sweep_fs(conn)
+    except Exception:  # noqa: BLE001
+        pass
 
     return changed
 
@@ -426,6 +450,32 @@ def atlas_sweep_fs(conn: sqlite3.Connection) -> dict[str, int]:
                 continue
 
     with conn:
+        # Purge rows for paths the user has explicitly blacklisted (CLAUDE
+        # whitelist non-matches, or CONFIG_BLACKLIST hits). These slip in
+        # from older sweep passes before the blacklist was applied; without
+        # this, they'd live forever as stale rows.
+        counts["purged"] = 0
+        for p_str in list(all_rows):
+            p = Path(p_str)
+            try:
+                rel_claude = p.resolve().relative_to(_CLAUDE_ROOT.resolve())
+                if rel_claude.parts and rel_claude.parts[0] not in CLAUDE_WHITELIST:
+                    conn.execute("DELETE FROM atlas WHERE path=?", (p_str,))
+                    counts["purged"] += 1
+                    all_rows.pop(p_str, None)
+                    continue
+            except ValueError:
+                pass
+            try:
+                rel_cfg = p.resolve().relative_to(_CONFIG_ROOT.resolve())
+                if rel_cfg.parts and rel_cfg.parts[0] in CONFIG_BLACKLIST:
+                    conn.execute("DELETE FROM atlas WHERE path=?", (p_str,))
+                    counts["purged"] += 1
+                    all_rows.pop(p_str, None)
+                    continue
+            except ValueError:
+                pass
+
         # Stub new dirs
         for p_str in found_paths:
             if p_str not in all_rows:
@@ -511,6 +561,7 @@ def _walk_collect(root: Path, max_depth: int, found: set[str],
         return
 
     is_claude = root.resolve() == _CLAUDE_ROOT.resolve()
+    is_config = root.resolve() == _CONFIG_ROOT.resolve()
 
     for entry in entries:
         if not entry.is_dir():
@@ -518,6 +569,8 @@ def _walk_collect(root: Path, max_depth: int, found: set[str],
         if entry.name in EXCLUDE_DIRS_TREE:
             continue
         if is_claude and not _is_claude_allowed(entry):
+            continue
+        if is_config and entry.name in CONFIG_BLACKLIST:
             continue
         found.add(str(entry.resolve()))
         _walk_collect(entry, max_depth, found, _current_depth + 1)

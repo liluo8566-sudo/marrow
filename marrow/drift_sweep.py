@@ -28,7 +28,7 @@ from marrow.paths import paths
 
 AUTHORIZED_ROOTS: list[Path] = [
     Path.home() / "cc-lab",
-    Path.home() / ".config" / "marrow",
+    Path.home() / ".config",
     Path.home() / ".claude",
     Path.home() / "Toolkit",
     Path.home() / "Desktop" / "NY",
@@ -48,7 +48,12 @@ CLAUDE_WHITELIST: set[str] = {
     "output-styles", "hooks", "keybindings.json", "settings.json",
 }
 
+# Under ~/.config most subdirs are user-managed config worth indexing;
+# only blacklist ones with credentials or high-cardinality chat dumps.
+CONFIG_BLACKLIST: set[str] = {"wechat-claude-bridge"}
+
 _CLAUDE_ROOT = Path.home() / ".claude"
+_CONFIG_ROOT = Path.home() / ".config"
 
 
 def _claude_scope_ok(path: Path) -> bool:
@@ -137,7 +142,8 @@ def _find_refs_rg(old_name: str, rg_bin: str, roots: list[Path]) -> list[dict] |
     for ext in SKIP_SCAN_EXTS:
         args += ["--glob", f"!*{ext}"]
     # For ~/.claude, only pass whitelisted sub-dirs as individual roots so
-    # rg never descends into blacklisted siblings.
+    # rg never descends into blacklisted siblings. For ~/.config, expand
+    # to all sub-entries minus CONFIG_BLACKLIST (credentials, chat dumps).
     expanded: list[Path] = []
     for r in roots:
         if not r.exists():
@@ -147,6 +153,14 @@ def _find_refs_rg(old_name: str, rg_bin: str, roots: list[Path]) -> list[dict] |
                 child = r / name
                 if child.exists():
                     expanded.append(child)
+        elif r == _CONFIG_ROOT:
+            try:
+                for child in r.iterdir():
+                    if child.name in CONFIG_BLACKLIST:
+                        continue
+                    expanded.append(child)
+            except OSError:
+                continue
         else:
             expanded.append(r)
     args += [str(r) for r in expanded]
@@ -180,6 +194,12 @@ def _find_refs_python(old_name: str, roots: list[Path]) -> list[dict]:
             # Under ~/.claude: prune blacklisted top-level dirs immediately
             if cur == _CLAUDE_ROOT:
                 dirnames[:] = [d for d in dirnames if d in CLAUDE_WHITELIST
+                               and d not in EXCLUDE_DIRS_SCAN]
+                continue
+            # Under ~/.config: prune top-level credentials / chat dumps
+            if cur == _CONFIG_ROOT:
+                dirnames[:] = [d for d in dirnames
+                               if d not in CONFIG_BLACKLIST
                                and d not in EXCLUDE_DIRS_SCAN]
                 continue
             # Prune excluded dirs in-place; also gate individual files below
