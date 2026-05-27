@@ -77,3 +77,8 @@
 - [verified] doc system: DESIGN = goal+structure+hard-constraints+sub-pages (no still-changing decisions); DECISIONS = single current-truth entry, overwrite-in-place, read first; FUTURE = unbuilt plans by phase; PROGRESS = append-only action log; handover = next-session only, overwrite; docs/notes = hard-problem memo / research scratch, NOT a truth source; docs/adr deleted (conclusions folded into DECISIONS); CONTEXT = glossary maintained by grill-with-doc skill, outside this system but its conflicts get fixed each round · goal7 · this round C
 - [verified] decision vs process: DECISIONS = current conclusions (overwrite-in-place, reflect only current truth); PROGRESS = historical actions (append-only, "happened" stays true even if later overturned) · goal7
 - [verified] convergence discipline: overturn = overwrite in place, never stack; each phase-end a fresh no-context subagent scans DESIGN+DECISIONS consistency, Lumi adjudicates; trace a past decision via events (SessionEnd-cleaned transcript), never raw jsonl · goal7
+
+## Phase 3 (S2)
+- [verified] atlas subpage replaces dir_tree; depth-aware sweep, manual fields preserved, root + stub-only rows protected from reconcile DELETE · 2026-05-27
+- [verified] sync_loop 5s tick md↔db for every subpage + dashboard.md; dashboard db_mtime = max(affect, tasks, milestones, alerts).updated_at · 2026-05-27
+- [verified] drift_sweep .claude whitelist = {CLAUDE.md, rules, commands, skills, agents, output-styles, hooks, keybindings.json, settings.json}; rest blacklisted · 2026-05-27

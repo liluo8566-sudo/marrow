@@ -19,7 +19,7 @@
 - **placement_rules_toml** — Machine-readable `~/.config/marrow/placement_rules.toml`: content-type → canonical home + naming pattern (extracted from `~/.claude/rules/files.md` prose). cc reads on Write of new file. Pairs with drift_sweep registry. No PreToolUse hard-block (Lumi vetoed). **效果**: cc 写新文件前先查表，不再靠散文规则脑补。
 - **cheatsheet_index** *(hold — wait until tool stack settles)* — Single dashboard cheatsheet. Not fully decided, draft direction only:
   - **Source**: auto-scan + hand-edit preserved. Scan covers but is not limited to — `~/Toolkit/scripts`, `~/Library/LaunchAgents/*.plist`, `~/.claude/{skills,commands,agents,output-styles}/**`, `.mcp.json` (global + project), `~/.zshrc` alias, `brew list`, self-installed CLIs.
-  - **Layout**: one md, two sections — top = dir_tree (max-depth=4, auto, swept on file move); bottom = cheatsheet body (auto-scan + hand-edit, reverse md→db ingest). Standalone `~/.config/marrow/dir_tree.md` deprecated on ship.
+  - **Layout**: cheatsheet body (auto-scan + hand-edit, reverse md→db ingest). Dir map now lives in standalone `atlas` subpage (depth-aware heading tree); cheatsheet stays single-section.
   - **Recall lane**: own table + bge-m3 vec, separate from events fusion. User prompt keyword hit → force_include (仿 entity_force_include). Use case: 问 (怎么 restore) → 自动喂 `/rewind` 那行，不用手翻 help page.
   - **效果**: 工具一眼可查 + 不知道的 shortcut LLM 主动推；装删不会失同步。
 - **cloud_migration_runbook** — daemon→VPS / wechat-bridge→local mac / bridge→cloud via HTTPS one-way (cyberboss-verified topology). **效果**: 决定上云那天照着 runbook 走。
@@ -55,7 +55,6 @@
 
 ## Dashboard & Subpages
 
-- **dashboard_idle_refresh** — Auto-refresh dashboard.md on idle (no input N min). **效果**: 不用手敲 mw refresh。
 - **dashboard_wishlist** — Wishlist/promise/agreement subpage (location TBD): 你说请奶茶/我想买耳钉/约定 xxxclaude. **效果**: 承诺约定不会丢，能翻账。
 - **monitor_zone_audit_surface** — Dashboard bottom audit-log surface: entity/memes/tables ingest counts, recent activity, silent-failure indicators. **效果**: 哪些表在动、哪些静默一眼看到。
 - **pit_auto_candidate** — Pit candidate form + auto-extraction pipeline (similar to milestone/entity cand). **效果**: 项目想法自动入 pit，不用手敲。

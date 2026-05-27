@@ -56,6 +56,7 @@ Bottom (utility):
 - Study — one page per unit (progress / due / submitted). Notion stays primary, this is the CC-visible mirror.
 - Projects — index of active + done + pit (deferred backlog not in Open Threads), one page per project. Pit = disk-SoT (hand-written FUTURE-style inbox, not in DB, not in recall). Per-project detail pages render-only (hand-maintained maintenance notes, not in DB but readable). A project's own sub-pages do not appear on the dashboard.
 - Cheatsheet — scripts / hooks / skills / MCP / aliases / brew + directory map, rendered from disk + hand-edits (Trigger / notes / Anthropic new commands), hand-edits preserved. Entries indexed in separate `cheatsheet_entries` table for keyword-triggered force-include recall (own lane, not in events fusion).
+- Atlas — dir map (path / note / write_hint / naming_hint / depth / stale). Depth-aware fs sweep stubs new dirs; reconcile preserves manual fields; stale=1 marks vanished dirs (never deleted).
 
 Dashboard top renders a `## Content` section below Affect, listing the above with md links to each subpage file. Candidate rows in dashboard sections carry three anchor buttons: `✅` pin (jump to target subpage, milestone uses `scope` to land in Us or Me) · `❌` drop (delete + tombstone) · `✏️` edit (in-place edit; md uses placeholder semantics, HTML layer realises it).
 
