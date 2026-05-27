@@ -97,40 +97,68 @@ def _root_of(path: str | Path, roots: list[Path]) -> Path | None:
 
 
 def _render_atlas_row(r: dict, roots: list[Path]) -> str:
-    """H5 heading block for one atlas row; dir name itself is the open link.
+    """Layer-aware block for one atlas row; dir name itself is the open link.
 
-    Layout:
-      ##### [dirname/](file:///abs/path)
-      <!-- id:/abs/path -->
-      - note: <value or empty>
-      - write: <value or empty>
-      - naming: <value or empty>
-      - depth: <int>
+    Layout depends on the row's depth relative to its owning root:
+      layer 1 (direct child of root) -> H5 heading
+        ##### [dirname/](file:///abs)
+        <!-- id:/abs -->
+        - note: ...
+        - write: ...
+        - naming: ...
+        - depth: N
+      layer 2+ (deeper) -> indented list item, 2 spaces per extra layer
+          - [dirname/](file:///abs)
+            <!-- id:/abs -->
+            - note: ...
+            - write: ...
+            - naming: ...
+            - depth: N
 
-    H5 keeps each dir visible in the Obsidian/VSCode outline without
-    visually competing with the H2 section header. Appends ` (stale)`
-    to the visible name. Always emits all four field bullets so blanks
-    are obvious editing targets.
+    Section header (## ~/root/) is emitted separately by the spec.
+    Outline panel surfaces section + first-layer dirs; deeper levels
+    flow as nested list items so the tree shape stays readable without
+    hammering H6 / heading clutter.
     """
     path = r["path"]
     name = Path(path).name + "/"
     stale_sfx = " (stale)" if r.get("stale") else ""
     encoded = urllib.parse.quote(path, safe="/")
-    heading = f"##### [{name}](file://{encoded}){stale_sfx}"
     marker = f"<!-- id:{path} -->"
     note = r.get("note") or ""
     write = r.get("write_hint") or ""
     naming = r.get("naming_hint") or ""
     depth = r.get("depth") or 0
-    lines = [
-        heading,
-        marker,
-        f"- note: {note}",
-        f"- write: {write}",
-        f"- naming: {naming}",
-        f"- depth: {depth}",
-    ]
-    return "\n".join(lines)
+
+    root = _root_of(path, roots)
+    if root is not None:
+        try:
+            rel_parts = Path(path).resolve().relative_to(root.resolve()).parts
+            layer = len(rel_parts)
+        except ValueError:
+            layer = 1
+    else:
+        layer = 1
+
+    if layer <= 1:
+        return "\n".join([
+            f"##### [{name}](file://{encoded}){stale_sfx}",
+            marker,
+            f"- note: {note}",
+            f"- write: {write}",
+            f"- naming: {naming}",
+            f"- depth: {depth}",
+        ])
+    ind = "  " * (layer - 1)
+    body = "  " * (layer - 1) + "  "  # 2 extra spaces so bullets sit under the list item
+    return "\n".join([
+        f"{ind}- [{name}](file://{encoded}){stale_sfx}",
+        f"{body}{marker}",
+        f"{body}- note: {note}",
+        f"{body}- write: {write}",
+        f"{body}- naming: {naming}",
+        f"{body}- depth: {depth}",
+    ])
 
 
 def _section_header(root_path: str) -> str:
@@ -414,6 +442,46 @@ def atlas_sweep_fs(conn: sqlite3.Connection) -> dict[str, int]:
                     (now, p_str),
                 )
                 counts["staled"] += 1
+
+        # Retract: when a seed's depth shrinks, stub-only descendants whose
+        # distance from their nearest-ancestor seed exceeds that seed's depth
+        # should disappear. User-edited rows (any manual field) survive — the
+        # user invested in them, so they live on even out-of-range.
+        # `counts["retracted"]` counts deleted rows for visibility.
+        counts["retracted"] = 0
+        seed_paths_sorted = sorted(seed_path_strs, key=len, reverse=True)
+        manual_rows = {
+            r[0]: (r[1], r[2], r[3])
+            for r in conn.execute(
+                "SELECT path, note, write_hint, naming_hint FROM atlas"
+            ).fetchall()
+        }
+        seed_depth_map = {row["path"]: row["depth"] for row in seed_rows}
+        for p_str in children_to_check:
+            nearest = None
+            for sp in seed_paths_sorted:
+                if p_str.startswith(sp + os.sep):
+                    nearest = sp
+                    break
+            if nearest is None:
+                continue
+            try:
+                rel = Path(p_str).relative_to(Path(nearest))
+                rel_depth = len(rel.parts)
+            except ValueError:
+                continue
+            seed_max = seed_depth_map.get(nearest, 0)
+            if rel_depth <= seed_max:
+                continue
+            note, write_hint, naming_hint = manual_rows.get(
+                p_str, (None, None, None))
+            has_manual = any(
+                v not in (None, "") for v in (note, write_hint, naming_hint)
+            )
+            if has_manual:
+                continue
+            conn.execute("DELETE FROM atlas WHERE path=?", (p_str,))
+            counts["retracted"] += 1
 
     return counts
 

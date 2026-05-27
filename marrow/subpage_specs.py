@@ -461,6 +461,13 @@ def build_atlas_spec(folder: str) -> InserterSpec:
         section_order=section_order,
         render_section_header=render_section_header,
         empty_message="_No atlas entries yet. Run `mw refresh atlas` to seed._",
+        # Atlas db is the SoT; when sweep retracts deep stubs after a depth
+        # shrink, the md must drop them too. Without this flag the inserter
+        # would preserve the orphan blocks forever (its default policy is
+        # "never delete user content"). Atlas user-managed content lives
+        # inside known field bullets which are re-rendered anyway, so a
+        # rebootstrap is loss-free in practice.
+        force_sort_consistency=True,
     )
 
 
