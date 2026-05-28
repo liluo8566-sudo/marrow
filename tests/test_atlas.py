@@ -895,9 +895,9 @@ def test_atlas_root_order_constant_defined():
     """ATLAS_ROOT_ORDER must exist and contain the 6 canonical roots in order."""
     from marrow.atlas import ATLAS_ROOT_ORDER
     expected = [
+        Path.home() / "Desktop" / "NY",
         Path.home() / "Library" / "Mobile Documents" /
         "com~apple~CloudDocs" / "Study",
-        Path.home() / "Desktop" / "NY",
         Path.home() / "CC-Lab",
         Path.home() / ".claude",
         Path.home() / ".config",
@@ -914,7 +914,7 @@ def test_section_order_uses_atlas_root_order(tmp_path, monkeypatch):
 
     # Build fake roots matching ATLAS_ROOT_ORDER under tmp so we can assert.
     fake_roots = [tmp_path / name for name in
-                  ("Study", "NY", "CC-Lab", ".claude", ".config", "Toolkit")]
+                  ("NY", "Study", "CC-Lab", ".claude", ".config", "Toolkit")]
     for r in fake_roots:
         r.mkdir()
 
