@@ -3,9 +3,12 @@
 Trigger A: watchdog on_moved (same root) — src+dest captured directly.
 Trigger B: cross-root mv inferred from deleted+created with same basename+size.
 Trigger C: dangling delete — refs>0 write report, refs=0 silent drop.
-Trigger D: CLI `mw drift <old> <new>` manual one-shot.
+Trigger D: CLI `mw drift scan <old> <new>` manual one-shot.
 
-Batch debounce: 30s window, multiple ops merged into one pending + one alert.
+Per-op pending: each (src,dest) emits its own pending + alert (no merged batch).
+30s window only dedups identical (src,dest) repeats. Safe refs (text exts,
+path-shaped tokens, outside backup/venv) auto-apply with info alert; unsafe
+refs stay pending with warn alert plus `mw drift apply <pid>` / `reject <pid>`.
 """
 from __future__ import annotations
 
@@ -72,19 +75,43 @@ def _claude_scope_ok(path: Path) -> bool:
         return True  # ~/.claude itself — allowed
     return parts[0] in CLAUDE_WHITELIST
 
-# Files we skip during ref scan / apply: binaries + append-only history.
-# cc session jsonl + log files quote old paths from past sessions as
-# historical record; rewriting those would corrupt history without fixing
-# any real reference.
-SKIP_SCAN_EXTS = BINARY_EXTS | {".jsonl", ".log"}
+# Files we skip during ref scan / apply: binaries + append-only history +
+# transient tool/editor lock/tmp/swap artefacts. cc session jsonl + log files
+# quote old paths from past sessions as historical record; rewriting those
+# would corrupt history without fixing any real reference.
+SKIP_SCAN_EXTS = BINARY_EXTS | {
+    ".jsonl", ".log", ".lock", ".swp", ".swo", ".tmp",
+}
 
 # Ref-scan exclude: drift_sweep skips these when looking for path references.
 # Keep narrow — only directories that genuinely cannot contain user-managed
 # references (build artifacts, VCS metadata, virtualenvs, prior backups).
 EXCLUDE_DIRS_SCAN = {
     ".git", "__pycache__", "node_modules", ".venv", "venv",
-    ".DS_Store", "logs", "archives", "drift_backup",
+    ".DS_Store", "logs", "archives", "archive", "drift_backup",
+    "drift_pending",
 }
+
+# Watcher pre-enqueue noise filter (path-segment match). Any event whose
+# src/dest contains one of these parts is dropped before reaching
+# DriftWatcher. Catches editor/git/test/venv churn that floods the queue.
+NOISE_DIRS: set[str] = {
+    ".git", "__pycache__", ".venv", "venv", "node_modules",
+    "drift_pending", "drift_backup", "logs", "archives", "archive",
+}
+
+# Atomic-write artefact patterns. Different tools use different schemes:
+#   pytest: foo.py.tmp.13018.c7a3adecaf9d
+#   marrow: .mrw.oap8rcgu  (hidden prefix)
+#   python: atlas.cpython-313.pyc.4446290304   (numeric tail after real ext)
+_ATOMIC_TMP_RE = re.compile(r"\.tmp\.\d+\.[0-9a-fA-F]+$")
+_MRW_PREFIX_RE = re.compile(r"^\.mrw\.")
+_NUMERIC_TAIL_RE = re.compile(r"\.\d+$")
+
+# Suffix-substring exclusions for the ref-scan filename gate (in addition
+# to exact-suffix SKIP_SCAN_EXTS). Catches `.bak-20260518-220058` and
+# `.venv*.bak/...` artefacts that exact-suffix matching misses.
+SKIP_SCAN_SUFFIX_PARTS: tuple[str, ...] = (".bak",)
 
 # Dir-tree exclude: cosmetic — additionally hide cc / marrow runtime state
 # whose contents are high-cardinality session/UUID noise that adds nothing
@@ -95,11 +122,90 @@ EXCLUDE_DIRS_TREE = EXCLUDE_DIRS_SCAN | {
     "tasks", "telemetry",
 }
 
-# Back-compat alias — older code paths may still reference EXCLUDE_DIRS.
-EXCLUDE_DIRS = EXCLUDE_DIRS_SCAN
-
 _BATCH_WINDOW_S = 30.0
 _PENDING_TTL_S = 1800  # 30 min
+
+# Safe-classify: which file extensions can be auto-applied without binary risk.
+SAFE_AUTOAPPLY_EXTS: set[str] = {
+    ".md", ".py", ".json", ".sh", ".toml", ".plist", ".yaml", ".yml", ".txt",
+}
+
+# Path-segment denylist for safe-classify: if the ref's file path includes
+# any of these parts (or matches a glob prefix), it is NOT safe to auto-apply.
+UNSAFE_PATH_PARTS: set[str] = {
+    ".git", "__pycache__", "drift_pending", "drift_backup",
+}
+UNSAFE_PATH_PREFIX_PARTS: tuple[str, ...] = (".bak", ".venv")
+
+
+def _path_excluded(p: str | Path) -> bool:
+    """True if `p` lives under a NOISE_DIRS segment OR looks like an atomic-write
+    artefact. Applied at the watcher edge before DriftWatcher sees the event."""
+    try:
+        parts = Path(p).parts
+    except Exception:
+        return False
+    for part in parts:
+        if part in NOISE_DIRS:
+            return True
+        # Glob-style: `.venv.py314.bak`, `.bak-20260518-220058` etc.
+        if part.startswith(".venv") and part.endswith(".bak"):
+            return True
+    name = Path(p).name
+    return _is_atomic_write_artifact(name)
+
+
+def _is_atomic_write_artifact(name: str) -> bool:
+    """True if `name` matches a known editor/test/runtime atomic-write scheme.
+
+    Catches:
+      - pytest:  foo.py.tmp.13018.c7a3adecaf9d
+      - marrow:  .mrw.oap8rcgu  (hidden prefix)
+      - python:  atlas.cpython-313.pyc.4446290304  (numeric tail after real ext)
+    """
+    if _MRW_PREFIX_RE.match(name):
+        return True
+    if _ATOMIC_TMP_RE.search(name):
+        return True
+    # Numeric tail after a real-looking extension: foo.pyc.4446290304
+    m = _NUMERIC_TAIL_RE.search(name)
+    if m:
+        stripped = name[: m.start()]
+        # Stripped form must have a recognisable ext (e.g. `.pyc`, `.so`).
+        ext = Path(stripped).suffix.lower()
+        if ext and ext in (BINARY_EXTS | {".jsonl", ".log", ".lock"}):
+            return True
+    return False
+
+
+def _classify_refs(refs: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Partition refs into (safe_to_auto_apply, unsafe_needs_review).
+
+    A ref is safe iff ALL of:
+      - file ext is in SAFE_AUTOAPPLY_EXTS
+      - file path has NO UNSAFE_PATH_PARTS segment
+      - no path segment starts with UNSAFE_PATH_PREFIX_PARTS (.bak, .venv)
+      - matched text contains '/' (path-shaped slash token, not bare word)
+    """
+    safe: list[dict] = []
+    unsafe: list[dict] = []
+    for r in refs:
+        fpath = Path(r.get("file", ""))
+        text = r.get("text", "") or ""
+        if fpath.suffix.lower() not in SAFE_AUTOAPPLY_EXTS:
+            unsafe.append(r); continue
+        bad_part = False
+        for part in fpath.parts:
+            if part in UNSAFE_PATH_PARTS:
+                bad_part = True; break
+            if part.startswith(UNSAFE_PATH_PREFIX_PARTS):
+                bad_part = True; break
+        if bad_part:
+            unsafe.append(r); continue
+        if "/" not in text:
+            unsafe.append(r); continue
+        safe.append(r)
+    return safe, unsafe
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +245,10 @@ def _find_refs_rg(old_name: str, rg_bin: str, roots: list[Path]) -> list[dict] |
             "--color=never", "-e", old_name]
     for d in EXCLUDE_DIRS_SCAN:
         args += ["--glob", f"!{d}/**"]
+    # Exclude any path segment that *contains* `.bak` (catches
+    # `.bak-20260518-220058`, `.venv.py314.bak/`, `foo.db.bak` etc.).
+    for part in SKIP_SCAN_SUFFIX_PARTS:
+        args += ["--glob", f"!**/*{part}*/**", "--glob", f"!**/*{part}*"]
     for ext in SKIP_SCAN_EXTS:
         args += ["--glob", f"!*{ext}"]
     # For ~/.claude, only pass whitelisted sub-dirs as individual roots so
@@ -202,13 +312,23 @@ def _find_refs_python(old_name: str, roots: list[Path]) -> list[dict]:
                                if d not in CONFIG_BLACKLIST
                                and d not in EXCLUDE_DIRS_SCAN]
                 continue
-            # Prune excluded dirs in-place; also gate individual files below
-            dirnames[:] = [d for d in dirnames if d not in EXCLUDE_DIRS_SCAN]
+            # Prune excluded dirs in-place; also drop any dir whose name
+            # contains `.bak` (e.g. `.venv.py314.bak`, `.bak-2025…`).
+            dirnames[:] = [
+                d for d in dirnames
+                if d not in EXCLUDE_DIRS_SCAN
+                and not any(p in d for p in SKIP_SCAN_SUFFIX_PARTS)
+            ]
             for fname in filenames:
                 fpath = Path(dirpath) / fname
                 if not _claude_scope_ok(fpath):
                     continue
                 if fpath.suffix.lower() in SKIP_SCAN_EXTS:
+                    continue
+                # Substring-style suffix skip (.bak-<ts>, .bak.NN etc.).
+                if any(p in fname for p in SKIP_SCAN_SUFFIX_PARTS):
+                    continue
+                if _is_atomic_write_artifact(fname):
                     continue
                 try:
                     if fpath.stat().st_size > 10 * 1024 * 1024:
@@ -295,26 +415,6 @@ def write_pending(src: str, dest: str, refs: list[dict]) -> str:
     return pid
 
 
-def write_batch_pending(ops: list[tuple[str, str]], all_refs: list[dict]) -> str:
-    """Write a single pending for a batch of ops."""
-    if not ops:
-        return ""
-    src, dest = ops[0]
-    pid = _make_id(f"batch_{len(ops)}", f"{src}:{dest}")
-    payload = {
-        "id": pid,
-        "batch": [{"src": s, "dest": d} for s, d in ops],
-        "src": src,
-        "dest": dest,
-        "refs": all_refs,
-        "diff_preview": [r["text"][:120] for r in all_refs[:5]],
-        "created_at": time.time(),
-    }
-    pending_path = _pending_dir() / f"{pid}.json"
-    pending_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    return pid
-
-
 def load_pending(pid: str) -> dict | None:
     p = _pending_dir() / f"{pid}.json"
     if not p.exists():
@@ -331,11 +431,12 @@ def delete_pending(pid: str) -> None:
 # Alert emission
 # ---------------------------------------------------------------------------
 
-def _emit_alert(message: str, source: str = "drift_sweep") -> None:
+def _emit_alert(message: str, source: str = "drift_sweep",
+                severity: str = "warn") -> None:
     """Write to alerts table via repo.add_alert. Tolerate missing DB."""
     try:
         from marrow import repo
-        repo.add_alert("warn", "drift_sweep", message, source)
+        repo.add_alert(severity, "drift_sweep", message, source)
     except Exception:
         pass  # standalone / test context without DB — silently skip
 
@@ -464,40 +565,30 @@ def apply_confirm(pid: str, roots: list[Path] | None = None) -> dict[str, Any]:
     if data is None:
         return {"ok": False, "error": f"no pending: {pid}"}
 
-    # Support single-op and batch
-    if "batch" in data:
-        ops = [(op["src"], op["dest"]) for op in data["batch"]]
-    else:
-        ops = [(data["src"], data["dest"])]
-
+    src, dest = data["src"], data["dest"]
     refs = data.get("refs", [])
     backup_base = _backup_dir() / pid
     changed_files: list[str] = []
     errors: list[str] = []
 
-    for src, dest in ops:
-        old_name = Path(src).name
-        new_name = Path(dest).name
-        # Group refs by file
-        files_with_refs = list({r["file"] for r in refs})
-        for fstr in files_with_refs:
-            fpath = Path(fstr)
-            if not fpath.exists():
-                continue
-            if _is_in_git_repo(fpath):
-                subprocess.run(["git", "add", str(fpath)], capture_output=True)
-            else:
-                # Backup non-git file
-                try:
-                    rel = fpath.name
-                    backup_target = backup_base / rel
-                    backup_target.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(fpath, backup_target)
-                except OSError as e:
-                    errors.append(f"backup {fpath}: {e}")
-            changed = _atomic_replace(fpath, old_name, new_name)
-            if changed:
-                changed_files.append(str(fpath))
+    old_name = Path(src).name
+    new_name = Path(dest).name
+    files_with_refs = list({r["file"] for r in refs})
+    for fstr in files_with_refs:
+        fpath = Path(fstr)
+        if not fpath.exists():
+            continue
+        if _is_in_git_repo(fpath):
+            subprocess.run(["git", "add", str(fpath)], capture_output=True)
+        else:
+            try:
+                backup_target = backup_base / fpath.name
+                backup_target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(fpath, backup_target)
+            except OSError as e:
+                errors.append(f"backup {fpath}: {e}")
+        if _atomic_replace(fpath, old_name, new_name):
+            changed_files.append(str(fpath))
 
     delete_pending(pid)
     refresh_dir_tree(roots)
@@ -517,8 +608,21 @@ def apply_reject(pid: str) -> dict[str, Any]:
 # Scan and queue (core trigger logic)
 # ---------------------------------------------------------------------------
 
+def _fmt_files(files: list[str], cap: int = 5) -> str:
+    """Render a short comma-joined preview of basenames for alert messages."""
+    names = [Path(f).name for f in files]
+    head = names[:cap]
+    extra = len(names) - cap
+    out = ", ".join(head)
+    if extra > 0:
+        out += f", ...+{extra}"
+    return out
+
+
 def _scan_and_queue(src: str, dest: str, roots: list[Path] | None = None) -> str | None:
-    """Ripgrep for old basename, write pending, emit alert. Returns pid or None."""
+    """Ripgrep for old basename. If all refs are safe → auto-apply + info alert.
+    If any unsafe → keep pending + warn alert with reviewer hint. Returns pid
+    (or None if no refs)."""
     old_name = Path(src).name
     new_name = Path(dest).name
     if not old_name:
@@ -526,12 +630,31 @@ def _scan_and_queue(src: str, dest: str, roots: list[Path] | None = None) -> str
     refs = find_refs(old_name, roots)
     if not refs:
         return None  # no refs → silent drop
+    safe, unsafe = _classify_refs(refs)
+
+    if unsafe:
+        # Keep all refs in pending so the user can review the whole picture.
+        pid = write_pending(src, dest, refs)
+        unsafe_files = sorted({r["file"] for r in unsafe})
+        _emit_alert(
+            f"drift review: {old_name} → {new_name} · "
+            f"{len(safe)} safe · {len(unsafe)} unsafe "
+            f"({_fmt_files(unsafe_files)}) · "
+            f"mw drift apply {pid} | reject {pid}",
+            severity="warn",
+        )
+        refresh_dir_tree(roots)
+        return pid
+
+    # All refs safe → write pending then apply immediately.
     pid = write_pending(src, dest, refs)
-    n_files = len({r["file"] for r in refs})
+    safe_files = sorted({r["file"] for r in safe})
+    apply_confirm(pid, roots=roots)
     _emit_alert(
-        f"drift ready: {old_name} → {new_name} [{len(refs)} refs in {n_files} files]",
+        f"drift applied: {old_name} → {new_name} in "
+        f"{len(safe_files)} files ({_fmt_files(safe_files)})",
+        severity="info",
     )
-    refresh_dir_tree(roots)
     return pid
 
 
@@ -550,7 +673,9 @@ def handle_dangling_delete(src: str, roots: list[Path] | None = None) -> str | N
     pid = write_pending(src, "", refs)
     n_files = len({r["file"] for r in refs})
     _emit_alert(
-        f"drift dangling: {old_name} deleted [{len(refs)} refs in {n_files} files] — manual review needed",
+        f"drift dangling: {old_name} deleted "
+        f"[{len(refs)} refs in {n_files} files] — manual review needed",
+        severity="warn",
     )
     return pid
 
@@ -579,7 +704,10 @@ class DriftWatcher:
 
     def on_moved(self, src: str, dest: str) -> None:
         """Trigger A: same-root rename/move."""
-        if Path(src).suffix.lower() in SKIP_SCAN_EXTS:
+        if (Path(src).suffix.lower() in SKIP_SCAN_EXTS
+                or Path(dest).suffix.lower() in SKIP_SCAN_EXTS):
+            return
+        if _path_excluded(src) or _path_excluded(dest):
             return
         with self._lock:
             self._cache[Path(dest).name] = self._stat(dest)
@@ -589,6 +717,8 @@ class DriftWatcher:
     def on_deleted(self, path: str) -> None:
         if Path(path).suffix.lower() in SKIP_SCAN_EXTS:
             return
+        if _path_excluded(path):
+            return
         st = self._stat_safe(path)
         with self._lock:
             self._deleted[Path(path).name] = {
@@ -597,6 +727,8 @@ class DriftWatcher:
 
     def on_created(self, path: str) -> None:
         if Path(path).suffix.lower() in SKIP_SCAN_EXTS:
+            return
+        if _path_excluded(path):
             return
         p = Path(path)
         name = p.name
@@ -627,28 +759,24 @@ class DriftWatcher:
         t.start()
 
     def _flush_batch(self) -> None:
+        """Emit one pending + one alert per distinct (src, dest) — no merging.
+
+        The 30s window only dedups identical repeats; different ops each get
+        their own alert so the user sees "what renamed to what" per line.
+        """
         with self._lock:
             ops = list(self._batch)
             self._batch.clear()
             self._batch_timer = None
         if not ops:
             return
-        if len(ops) == 1:
-            src, dest = ops[0]
+        seen: set[tuple[str, str]] = set()
+        for src, dest in ops:
+            key = (src, dest)
+            if key in seen:
+                continue
+            seen.add(key)
             handle_move(src, dest, self._roots)
-        else:
-            # Gather refs for all ops, write one batch pending
-            all_refs: list[dict] = []
-            for src, dest in ops:
-                all_refs.extend(find_refs(Path(src).name, self._roots))
-            if not all_refs:
-                return
-            pid = write_batch_pending(ops, all_refs)
-            n_files = len({r["file"] for r in all_refs})
-            _emit_alert(
-                f"drift batch: {len(ops)} ops [{len(all_refs)} refs in {n_files} files]",
-            )
-            refresh_dir_tree(self._roots)
 
     def flush_dangling(self) -> None:
         """Process TTL-expired deleted entries as dangling deletes."""

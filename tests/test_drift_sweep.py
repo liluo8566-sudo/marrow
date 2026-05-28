@@ -317,3 +317,392 @@ def test_drift_watcher_cross_root_mv(drift_env, monkeypatch):
         "shared.py" in src and "shared.py" in dest
         for src, dest in captured
     ), f"cross-root mv not captured: {captured}"
+
+
+# ---------------------------------------------------------------------------
+# B. Atomic-write + .bak suffix exclusion (drift_sweep-level)
+# ---------------------------------------------------------------------------
+
+def test_is_atomic_write_artifact_pytest():
+    """pytest atomic-write tmp pattern is detected."""
+    from marrow.drift_sweep import _is_atomic_write_artifact
+    assert _is_atomic_write_artifact("test_atlas.py.tmp.13018.c7a3adecaf9d")
+    assert _is_atomic_write_artifact("foo.json.tmp.7.deadbeef")
+
+
+def test_is_atomic_write_artifact_marrow():
+    """Marrow's `.mrw.<token>` hidden atomic-write prefix is detected."""
+    from marrow.drift_sweep import _is_atomic_write_artifact
+    assert _is_atomic_write_artifact(".mrw.oap8rcgu")
+    assert _is_atomic_write_artifact(".mrw.deadbeef.tmp")
+
+
+def test_is_atomic_write_artifact_pyc_numeric():
+    """`*.pyc.<digits>` (python compile artefact) is detected."""
+    from marrow.drift_sweep import _is_atomic_write_artifact
+    assert _is_atomic_write_artifact("atlas.cpython-313.pyc.4446290304")
+
+
+def test_is_atomic_write_artifact_negative():
+    """Normal filenames are NOT flagged."""
+    from marrow.drift_sweep import _is_atomic_write_artifact
+    assert not _is_atomic_write_artifact("widget.py")
+    assert not _is_atomic_write_artifact("README.md")
+    assert not _is_atomic_write_artifact("alpha.py")
+
+
+def test_path_excluded_bak_dir():
+    """`.venv*.bak` style dirs are excluded by the watcher-edge filter."""
+    from marrow.drift_sweep import _path_excluded
+    assert _path_excluded("/Users/me/repo/.venv.py314.bak/bin/python")
+    assert _path_excluded("/Users/me/repo/.git/index.lock")
+    assert _path_excluded("/Users/me/repo/__pycache__/foo.pyc")
+    assert _path_excluded("/x/drift_pending/abc.json")
+
+
+def test_path_excluded_negative():
+    from marrow.drift_sweep import _path_excluded
+    assert not _path_excluded("/Users/me/repo/marrow/cli.py")
+    assert not _path_excluded("/Users/me/repo/docs/plans/today.md")
+
+
+def test_find_refs_skips_bak_suffix_dirs(drift_env):
+    """A `.bak-<timestamp>` dir under root must NOT appear in find_refs results."""
+    env = drift_env
+    backup_dir = env.root_a / "data.db.bak-20260518-220058"
+    backup_dir.mkdir()
+    (backup_dir / "stale.md").write_text("see widget.py here\n", encoding="utf-8")
+
+    live = env.root_a / "live.md"
+    live.write_text("see widget.py here\n", encoding="utf-8")
+
+    from marrow.drift_sweep import find_refs
+    refs = find_refs("widget.py", roots=[env.root_a, env.root_b])
+    files = {r["file"] for r in refs}
+    assert str(live) in files, "live ref should be found"
+    assert not any(".bak-" in f for f in files), \
+        f".bak- dir refs leaked: {files}"
+
+
+def test_find_refs_skips_drift_pending_dir(drift_env):
+    """drift_pending/ json must not be re-grepped."""
+    env = drift_env
+    pending_inside_root = env.root_a / "drift_pending"
+    pending_inside_root.mkdir()
+    (pending_inside_root / "abc.json").write_text(
+        '{"src":"widget.py","dest":"gadget.py"}', encoding="utf-8")
+    live = env.root_a / "live.md"
+    live.write_text("see widget.py here\n", encoding="utf-8")
+
+    from marrow.drift_sweep import find_refs
+    refs = find_refs("widget.py", roots=[env.root_a, env.root_b])
+    files = {r["file"] for r in refs}
+    assert str(live) in files
+    assert not any("drift_pending" in f for f in files), \
+        f"drift_pending leaked: {files}"
+
+
+# ---------------------------------------------------------------------------
+# A. Watcher-edge noise filter (via _DriftHandler in watcher.py)
+# ---------------------------------------------------------------------------
+
+def test_drift_handler_skips_git_lock(drift_env):
+    """`.git/index.lock` events never reach DriftWatcher."""
+    env = drift_env
+    from marrow.drift_sweep import DriftWatcher
+    from marrow.watcher import _DriftHandler
+    from unittest.mock import MagicMock
+
+    dw = DriftWatcher(roots=[env.root_a], batch_window=10)
+    handler = _DriftHandler(dw, MagicMock())
+
+    class Ev:
+        is_directory = False
+        src_path = str(env.root_a / ".git" / "index.lock")
+        dest_path = str(env.root_a / ".git" / "index")
+
+    handler.on_moved(Ev())
+    with dw._lock:
+        assert dw._batch == []
+
+
+def test_drift_handler_skips_pytest_tmp(drift_env):
+    """pytest atomic-write `.tmp.<n>.<hex>` events are filtered."""
+    env = drift_env
+    from marrow.drift_sweep import DriftWatcher
+    from marrow.watcher import _DriftHandler
+    from unittest.mock import MagicMock
+
+    dw = DriftWatcher(roots=[env.root_a], batch_window=10)
+    handler = _DriftHandler(dw, MagicMock())
+
+    class EvCreate:
+        is_directory = False
+        src_path = str(env.root_a / "test_atlas.py.tmp.13018.c7a3adecaf9d")
+
+    class EvMove:
+        is_directory = False
+        src_path = str(env.root_a / "test_atlas.py.tmp.13018.c7a3adecaf9d")
+        dest_path = str(env.root_a / "test_atlas.py")
+
+    handler.on_created(EvCreate())
+    handler.on_moved(EvMove())
+    with dw._lock:
+        assert dw._batch == []
+        assert "test_atlas.py.tmp.13018.c7a3adecaf9d" not in dw._deleted
+
+
+def test_drift_handler_skips_venv_bak(drift_env):
+    """`.venv.py314.bak/bin/python` events are filtered."""
+    env = drift_env
+    from marrow.drift_sweep import DriftWatcher
+    from marrow.watcher import _DriftHandler
+    from unittest.mock import MagicMock
+
+    dw = DriftWatcher(roots=[env.root_a], batch_window=10)
+    handler = _DriftHandler(dw, MagicMock())
+
+    class Ev:
+        is_directory = False
+        src_path = str(env.root_a / ".venv.py314.bak" / "bin" / "python")
+
+    handler.on_deleted(Ev())
+    with dw._lock:
+        assert dw._deleted == {}
+
+
+# ---------------------------------------------------------------------------
+# C. One pending per op — no batch merging
+# ---------------------------------------------------------------------------
+
+def test_three_distinct_ops_produce_three_pendings(drift_env, monkeypatch):
+    """3 different (src,dest) ops within one flush window → 3 handle_move calls."""
+    env = drift_env
+    from marrow.drift_sweep import DriftWatcher
+
+    captured: list[tuple] = []
+    monkeypatch.setattr(
+        "marrow.drift_sweep.handle_move",
+        lambda src, dest, roots=None: captured.append((src, dest)) or "pid",
+    )
+
+    dw = DriftWatcher(roots=[env.root_a], batch_window=0.05)
+    dw.on_moved(str(env.root_a / "a.md"), str(env.root_a / "A.md"))
+    dw.on_moved(str(env.root_a / "b.md"), str(env.root_a / "B.md"))
+    dw.on_moved(str(env.root_a / "c.md"), str(env.root_a / "C.md"))
+
+    import time
+    time.sleep(0.2)
+
+    assert len(captured) == 3, f"expected 3 separate handle_move calls, got {captured}"
+
+
+def test_duplicate_ops_deduped_in_window(drift_env, monkeypatch):
+    """Same (src,dest) emitted 3× in one window → only 1 handle_move call."""
+    env = drift_env
+    from marrow.drift_sweep import DriftWatcher
+
+    captured: list[tuple] = []
+    monkeypatch.setattr(
+        "marrow.drift_sweep.handle_move",
+        lambda src, dest, roots=None: captured.append((src, dest)) or "pid",
+    )
+
+    dw = DriftWatcher(roots=[env.root_a], batch_window=0.05)
+    src = str(env.root_a / "x.md")
+    dest = str(env.root_a / "y.md")
+    dw.on_moved(src, dest)
+    dw.on_moved(src, dest)
+    dw.on_moved(src, dest)
+
+    import time
+    time.sleep(0.2)
+    assert len(captured) == 1, f"expected 1 deduped call, got {captured}"
+
+
+# ---------------------------------------------------------------------------
+# D. Safe-classify + auto-apply
+# ---------------------------------------------------------------------------
+
+def test_classify_refs_safe_md_with_slash():
+    """`.md` ref containing a slash-prefixed token → safe."""
+    from marrow.drift_sweep import _classify_refs
+    refs = [{"file": "/Users/me/cc-lab/marrow/docs/x.md",
+             "line": 1, "col": 1, "text": 'see marrow/widget.py here'}]
+    safe, unsafe = _classify_refs(refs)
+    assert len(safe) == 1 and not unsafe
+
+
+def test_classify_refs_unsafe_db_bak():
+    """`.db.bak` file ref → unsafe (wrong ext + .bak prefix part)."""
+    from marrow.drift_sweep import _classify_refs
+    refs = [{"file": "/Users/me/.config/marrow/marrow.db.bak-20260518",
+             "line": 1, "col": 1, "text": 'path = marrow/widget.py'}]
+    safe, unsafe = _classify_refs(refs)
+    assert not safe and len(unsafe) == 1
+
+
+def test_classify_refs_unsafe_bare_word():
+    """Text with no `/` → unsafe (bare-word risk)."""
+    from marrow.drift_sweep import _classify_refs
+    refs = [{"file": "/x/notes.md",
+             "line": 1, "col": 1, "text": "the grill skill is great"}]
+    safe, unsafe = _classify_refs(refs)
+    assert not safe and len(unsafe) == 1
+
+
+def test_classify_refs_unsafe_venv_path():
+    """Ref in `.venv*/` → unsafe."""
+    from marrow.drift_sweep import _classify_refs
+    refs = [{"file": "/Users/me/repo/.venv/lib/python3.13/site-packages/x.py",
+             "line": 1, "col": 1, "text": "import marrow/widget.py"}]
+    safe, unsafe = _classify_refs(refs)
+    assert not safe and len(unsafe) == 1
+
+
+def test_handle_move_safe_auto_applies(drift_env, monkeypatch):
+    """All-safe refs → auto-applied, info alert, pending deleted."""
+    env = drift_env
+    root = env.root_a
+
+    ref1 = root / "doc1.md"
+    ref2 = root / "doc2.md"
+    ref3 = root / "doc3.md"
+    ref1.write_text("see marrow/widget.py here\n", encoding="utf-8")
+    ref2.write_text("path = marrow/widget.py\n", encoding="utf-8")
+    ref3.write_text('load "marrow/widget.py" now\n', encoding="utf-8")
+
+    alerts: list[tuple] = []
+    monkeypatch.setattr(
+        "marrow.drift_sweep._emit_alert",
+        lambda message, source="drift_sweep", severity="warn":
+            alerts.append((severity, message)),
+    )
+
+    from marrow.drift_sweep import handle_move
+    pid = handle_move(str(root / "widget.py"), str(root / "gadget.py"),
+                      roots=[env.root_a, env.root_b])
+    assert pid is not None
+    # Pending file deleted by auto-apply
+    assert not (env.pending_dir / f"{pid}.json").exists(), \
+        "auto-applied pending must be removed"
+    # Files actually rewritten
+    assert "gadget.py" in ref1.read_text()
+    assert "gadget.py" in ref2.read_text()
+    assert "gadget.py" in ref3.read_text()
+    # Info alert with file preview
+    assert alerts, "expected at least one alert"
+    sev, msg = alerts[-1]
+    assert sev == "info", f"expected info severity, got {sev}: {msg}"
+    assert "drift applied" in msg
+    assert "doc1.md" in msg or "doc2.md" in msg or "doc3.md" in msg
+
+
+def test_handle_move_unsafe_keeps_pending(drift_env, monkeypatch):
+    """Any unsafe ref → keep pending, warn alert with apply/reject hint."""
+    env = drift_env
+    root = env.root_a
+
+    # bare-word ref (no slash) → unsafe
+    bare = root / "prose.md"
+    bare.write_text("the widget.py thing\n", encoding="utf-8")
+
+    alerts: list[tuple] = []
+    monkeypatch.setattr(
+        "marrow.drift_sweep._emit_alert",
+        lambda message, source="drift_sweep", severity="warn":
+            alerts.append((severity, message)),
+    )
+
+    from marrow.drift_sweep import handle_move
+    pid = handle_move(str(root / "widget.py"), str(root / "gadget.py"),
+                      roots=[env.root_a, env.root_b])
+    assert pid is not None
+    assert (env.pending_dir / f"{pid}.json").exists(), \
+        "unsafe pending must be kept for manual review"
+    # Files untouched
+    assert "widget.py" in bare.read_text()
+    # Warn alert with apply/reject hint
+    sev, msg = alerts[-1]
+    assert sev == "warn"
+    assert "drift review" in msg
+    assert f"apply {pid}" in msg
+    assert f"reject {pid}" in msg
+
+
+def test_handle_move_no_refs_silent(drift_env, monkeypatch):
+    """0 refs → silent drop (no pending, no alert)."""
+    env = drift_env
+    alerts: list[tuple] = []
+    monkeypatch.setattr(
+        "marrow.drift_sweep._emit_alert",
+        lambda message, source="drift_sweep", severity="warn":
+            alerts.append((severity, message)),
+    )
+    from marrow.drift_sweep import handle_move
+    pid = handle_move(str(env.root_a / "nonexistent.py"),
+                      str(env.root_a / "other.py"),
+                      roots=[env.root_a, env.root_b])
+    assert pid is None
+    assert alerts == []
+
+
+# ---------------------------------------------------------------------------
+# E. CLI subcommands
+# ---------------------------------------------------------------------------
+
+def test_cli_drift_scan(drift_env, capsys, monkeypatch):
+    """`mw drift scan <old> <new>` exits 0 and prints queued pid."""
+    env = drift_env
+    root = env.root_a
+    (root / "widget.py").write_text("# widget.py\n", encoding="utf-8")
+    (root / "notes.md").write_text(
+        "see marrow/widget.py here\n", encoding="utf-8")
+
+    from marrow import cli
+    # Force auto-apply to not blow up looking for repo:
+    rc = cli.main(["drift", "scan",
+                   str(root / "widget.py"), str(root / "gadget.py")])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "drift queued" in out or "no refs" in out
+
+
+def test_cli_drift_apply(drift_env, capsys):
+    """`mw drift apply <pid>` applies a kept pending."""
+    env = drift_env
+    root = env.root_a
+    bare = root / "prose.md"
+    bare.write_text("the widget.py thing\n", encoding="utf-8")
+
+    from marrow.drift_sweep import handle_move
+    pid = handle_move(str(root / "widget.py"), str(root / "gadget.py"),
+                      roots=[env.root_a, env.root_b])
+    assert pid is not None
+    assert (env.pending_dir / f"{pid}.json").exists()
+
+    from marrow import cli
+    rc = cli.main(["drift", "apply", pid])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "drift apply" in out
+    # Pending gone
+    assert not (env.pending_dir / f"{pid}.json").exists()
+
+
+def test_cli_drift_reject(drift_env, capsys):
+    """`mw drift reject <pid>` discards pending."""
+    env = drift_env
+    root = env.root_a
+    bare = root / "prose.md"
+    bare.write_text("the widget.py thing\n", encoding="utf-8")
+
+    from marrow.drift_sweep import handle_move
+    pid = handle_move(str(root / "widget.py"), str(root / "gadget.py"),
+                      roots=[env.root_a, env.root_b])
+    assert pid is not None
+
+    from marrow import cli
+    rc = cli.main(["drift", "reject", pid])
+    assert rc == 0
+    assert not (env.pending_dir / f"{pid}.json").exists()

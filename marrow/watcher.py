@@ -184,7 +184,15 @@ class _MdHandler(FileSystemEventHandler):
 
 
 class _DriftHandler(FileSystemEventHandler):
-    """Watchdog bridge → DriftWatcher event methods."""
+    """Watchdog bridge → DriftWatcher event methods.
+
+    First gate: pre-enqueue noise filter (drift_sweep._path_excluded) drops
+    `.git/`, `__pycache__/`, `.venv*`, `node_modules/`, `drift_pending/`,
+    `drift_backup/`, `logs/`, `archives/` events and atomic-write artefacts
+    (`*.tmp.<N>.<hex>`, `.mrw.<token>`, `*.pyc.<N>`) BEFORE they reach
+    DriftWatcher. Otherwise every git commit / pytest run / venv touch
+    floods the batch and drowns real renames.
+    """
 
     def __init__(self, drift: DriftWatcher, log: logging.Logger) -> None:
         self._drift = drift
@@ -218,6 +226,9 @@ class _DriftHandler(FileSystemEventHandler):
                     event.src_path, event.dest_path,
                 )
             return
+        from .drift_sweep import _path_excluded
+        if _path_excluded(event.src_path) or _path_excluded(event.dest_path):
+            return
         try:
             self._drift.on_moved(event.src_path, event.dest_path)
         except Exception:
@@ -227,6 +238,9 @@ class _DriftHandler(FileSystemEventHandler):
     def on_deleted(self, event) -> None:
         if event.is_directory:
             return
+        from .drift_sweep import _path_excluded
+        if _path_excluded(event.src_path):
+            return
         try:
             self._drift.on_deleted(event.src_path)
         except Exception:
@@ -234,6 +248,9 @@ class _DriftHandler(FileSystemEventHandler):
 
     def on_created(self, event) -> None:
         if event.is_directory:
+            return
+        from .drift_sweep import _path_excluded
+        if _path_excluded(event.src_path):
             return
         try:
             self._drift.on_created(event.src_path)

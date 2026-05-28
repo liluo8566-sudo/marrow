@@ -224,14 +224,10 @@ def cmd_export_pit(args) -> int:
     return 0
 
 
-def cmd_drift(args) -> int:
-    """mw drift <old> <new> — manual one-shot trigger."""
+def cmd_drift_scan(args) -> int:
+    """mw drift scan <old> <new> — manual one-shot trigger."""
     from .drift_sweep import handle_move
-    old = getattr(args, "old", None)
-    new = getattr(args, "new_path", None)
-    if not old or not new:
-        return _fail("usage: mw drift <old_path> <new_path>")
-    pid = handle_move(old, new)
+    pid = handle_move(args.old, args.new_path)
     if pid:
         print(f"drift queued: {pid}")
     else:
@@ -239,13 +235,13 @@ def cmd_drift(args) -> int:
     return 0
 
 
-def cmd_drift_confirm(args) -> int:
+def cmd_drift_apply(args) -> int:
     from .drift_sweep import apply_confirm
     result = apply_confirm(args.id)
     if not result["ok"]:
-        return _fail(result.get("error", "confirm failed"))
+        return _fail(result.get("error", "apply failed"))
     changed = result.get("changed", [])
-    print(f"drift confirm {args.id}: {len(changed)} files updated")
+    print(f"drift apply {args.id}: {len(changed)} files updated")
     for f in changed:
         print(f"  {f}")
     return 0
@@ -509,20 +505,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     dr = sub.add_parser("drift", parents=[common],
                         help="drift_sweep: queue or apply file-move ref updates")
-    dr_sub = dr.add_subparsers(dest="drift_action", required=False)
+    dr_sub = dr.add_subparsers(dest="drift_action", required=True)
 
-    # mw drift <old> <new>  — manual one-shot
-    dr.add_argument("old", nargs="?", default=None, help="old file path")
-    dr.add_argument("new_path", nargs="?", default=None, help="new file path")
-    dr.set_defaults(fn=cmd_drift)
+    # mw drift scan <old> <new>  — manual one-shot
+    dr_scan = dr_sub.add_parser("scan", parents=[common],
+                                help="scan refs for an old→new rename")
+    dr_scan.add_argument("old", help="old file path")
+    dr_scan.add_argument("new_path", help="new file path")
+    dr_scan.set_defaults(fn=cmd_drift_scan)
 
-    # mw drift confirm <id>
-    dr_confirm = dr_sub.add_parser("confirm")
-    dr_confirm.add_argument("id")
-    dr_confirm.set_defaults(fn=cmd_drift_confirm)
+    # mw drift apply <id>
+    dr_apply = dr_sub.add_parser("apply", parents=[common],
+                                 help="apply a queued drift pending by id")
+    dr_apply.add_argument("id")
+    dr_apply.set_defaults(fn=cmd_drift_apply)
 
     # mw drift reject <id>
-    dr_reject = dr_sub.add_parser("reject")
+    dr_reject = dr_sub.add_parser("reject", parents=[common],
+                                  help="reject (discard) a queued drift pending")
     dr_reject.add_argument("id")
     dr_reject.set_defaults(fn=cmd_drift_reject)
 
