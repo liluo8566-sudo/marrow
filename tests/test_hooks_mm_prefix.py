@@ -196,7 +196,9 @@ def test_mm_minus_empty_skips_current_sid(env, monkeypatch, capsys):
     _stdin(monkeypatch, {"prompt": "mm-", "session_id": "skip-me-001"})
     rc = hooks.main(["user_prompt_submit"])
     assert rc == 0
-    assert capsys.readouterr().out == ""
+    # hook emits silent_ack additionalContext telling LLM mm- is a control
+    # signal (committed _inject_silent_ack behaviour, not chatter)
+    assert "mm- control signal" in capsys.readouterr().out
     conn = storage.connect(db)
     try:
         row = conn.execute(
@@ -218,7 +220,8 @@ def test_mm_minus_uuid_skips_named_sid(env, monkeypatch, capsys):
     _stdin(monkeypatch, {"prompt": f"mm- {named_sid}", "session_id": "other-sid"})
     rc = hooks.main(["user_prompt_submit"])
     assert rc == 0
-    assert capsys.readouterr().out == ""
+    # hook emits silent_ack additionalContext (committed _inject_silent_ack)
+    assert "mm- control signal" in capsys.readouterr().out
     conn = storage.connect(db)
     try:
         row = conn.execute(
