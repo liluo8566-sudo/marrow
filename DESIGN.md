@@ -91,7 +91,7 @@ Dashboard top renders a `## Content` section below Affect, listing the above wit
 - LLM via `claude` CLI subprocess (OAuth). No cloud embedding.
 - Three tiers: cheap/local for tagging-routing (bulk), mid for narrative, top for user-facing only.
 - Atomic write every rendered md (temp + replace). Every scheduled job: try/except + alert row on fail.
-- Data under `~/.config/marrow/`, code under `~/cc-lab/marrow/`. Hook scripts ≤100 lines.
+- Data under `~/.config/marrow/`, code under `~/CC-Lab/marrow/`. Hook scripts ≤100 lines.
 - Stub policy: each phase builds only what it uses. Placeholder tables OK (commented); stub classes banned.
 - Prompt/subagent template change: notify Lumi to confirm wording.
 

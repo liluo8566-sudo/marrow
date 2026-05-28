@@ -54,13 +54,11 @@ _CONFIG_ROOT = Path.home() / ".config"
 # Canonical render order for atlas section headers. Decoupled from
 # drift_sweep.AUTHORIZED_ROOTS iteration order so atlas.md stays stable
 # even if AUTHORIZED_ROOTS is reshuffled for unrelated reasons.
-# Order: Study → NY → cc-lab → .claude → .config → Toolkit.
-# (drift_sweep will auto-rewrite the literal "cc-lab" if the root is
-# renamed on disk.)
+# Order: Study → NY → CC-Lab → .claude → .config → Toolkit.
 ATLAS_ROOT_ORDER: list[Path] = [
     Path.home() / "Library" / "Mobile Documents" / "com~apple~CloudDocs" / "Study",
     Path.home() / "Desktop" / "NY",
-    Path.home() / "cc-lab",
+    Path.home() / "CC-Lab",
     Path.home() / ".claude",
     Path.home() / ".config",
     Path.home() / "Toolkit",

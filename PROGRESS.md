@@ -123,7 +123,7 @@ Delta only. Never restate DESIGN / SCHEMA.
 - `docs/plans/drift-sweep.md` created: full spec for three parallel wt tasks (wt-drift L1, wt-paths L2, wt-ssarchive mm+/mm-)
 - DESIGN.md patched: cheatsheet promoted from read-only to md-as-SoT (Phase 3 contract); was an open conflict with Phase 3 reversal
 - FUTURE.md patched: `paths_registry_early` absorbed into drift_sweep L2; cheatsheet expanded (scan sources + md-as-SoT); drift_sweep L1/L2/L3 layers clarified
-- Authorized roots locked: `~/cc-lab/` · `~/.config/marrow/` · `~/.claude/` · `~/Toolkit/` · `~/Desktop/NY/` · iCloud Study
+- Authorized roots locked: `~/CC-Lab/` · `~/.config/marrow/` · `~/.claude/` · `~/Toolkit/` · `~/Desktop/NY/` · iCloud Study
 - Trigger strategy locked: FSEvents watcher (real-time) for same-root mv; content-hash + 30-min TTL queue for cross-root mv; CLI `mw drift <old> <new>` for manual/batch; always dry-run → `mw drift confirm/reject <id>`; batch mv within 30s merged to one alert
 - Delete policy: refs=0 → silent; refs>0 →悬挂引用 report in Alert, nothing auto-deleted
 - Same-name overwrite (`on_modified`) → drift_sweep ignores; md-as-SoT watcher handles content change
@@ -180,7 +180,7 @@ Delta only. Never restate DESIGN / SCHEMA.
 - Sync_loop design: 5s tick bidirectional (md_mtime > db_mtime → reconcile, db_mtime > md_mtime → render); covers all subpages + dashboard; hash-guard兜底 race; `_reconcile_boot` already exists
 - DriftWatcher attach decision: exists at `drift_sweep.py:493`, needs wiring into `watcher.py` main observer — 50 LOC est.
 - S2a/S2b/S2c dispatch brief created with live-verify probes and /goal block; today.md condensed to 8 lines
-- cc-lab structure decided: `~/cc-lab/external/` for OSS forks, shared `.claude` via symlink, workspace root = `~/cc-lab/`; pending 念念 confirm before mv
+- cc-lab structure decided: `~/CC-Lab/external/` for OSS forks, shared `.claude` via symlink, workspace root = `~/CC-Lab/`; pending 念念 confirm before mv
 - Cheatsheet redesigned as independent subpage parallel to atlas (not merged); prior "upper=dir_tree / lower=cheatsheet" layout abandoned
 - Verification discipline: pytest green ≠ done; /goal evaluator requires raw shell output in transcript for live probes
 
@@ -279,3 +279,24 @@ Delta only. Never restate DESIGN / SCHEMA.
 - **Two agent false positives cleared**: `_blob_to_vec` + 5 `embed_*` wrappers kept (tests directly monkeypatch them); `affect`/`affect_live` write confirmed correct (`affect_live` is a view of base `affect` table)
 - **pytest baseline**: worktree + main both 762 pass / 1 skip — recall refactor clean
 - **Provider plug-and-play + WeChat recall bridge + atlas commits** holding from prior sessions
+
+[2026-05-27 sid:ab5395dd]
+- **Subpage inserter audit confirmed**: diary/memes/milestone/stickers/goose/wallet/projects-index all double-entry; study (#114) + pit (#115) missing inserters; cheatsheet intentionally legacy
+- **Pit architecture decided**: disk-SoT pass-through — no DB, no reconcile, no recall; pure hand-write md; `render_pit` reads disk and passes through unchanged
+- **Cheatsheet recall lane decided**: separate `cheatsheet_entries` table + bge-m3 vec; keyword-hit force_include (not events fusion); auto-scan sources (plist/skill/command/MCP/alias/brew) + hand-edit preserved; implementation held for cheatsheet phase
+- **mm+ bug root cause identified**: two failure modes need coverage — (1) active sid, events=0, never closed → must check `reset:mm_plus` before short_session early exit at `:286`; (2) closed-failed retry → existing `_already_done` override path already works
+- **day-plan skill template fixed**: plan output now starts with `## Dispatch Policy (read first)` block speaking to the executing session; today.md rewritten in English with this header
+- **today.md + DECISIONS.md + FUTURE.md + DESIGN.md all updated** this session (pit disk-SoT, cheatsheet recall lane, 4-session plan)
+- **4 recall commits unpushed**, pytest 762 pass / 1 skip baseline holding from prior session
+
+[2026-05-28 sid:c9a7aa13]
+- **mm+ two-mode bug fixed** (user confirmed: "mm+已经解决")
+- **Alert #114 (study inserter) + #115 (pit)** resolved (user confirmed: "alert已经解决", "pit已经做完换成md")
+- **Pit recall A vs B**: resolved as A (disk-SoT pass-through, no separate recall lane needed)
+- **4 recall commits confirmed pushed** to origin; only `Lumi` 1 commit ahead + PROGRESS.md modified remain
+- **Python 3.14 SIGBUS fixed**: S1 complete, 30-min monitor running ~15:28:30; root cause in crash reports at `~/Library/Logs/DiagnosticReports/Python-2026-05-28-*.ips`
+- **NY memm retire scope inventoried**: 5 dead plists (rm), 7 scripts+ny_lib+skip-now (archive), 2 hooks+3 bak (rm), `~/.config/ny/` 419 markers (rm), 4 logs (rm), rules/files.md "legacy ny-memm" ref (rm), skip-memm skill (rm) — archive path `~/CC-Lab/archive/ny-memm/`
+- **Atlas inject method decided**: PreToolUse hook (rejected @import — attention tax; rejected recall — low hit rate + db pollution); hook injects path-prefix slice of atlas.md on Write/Bash-mv/Grep/Glob; user designing full spec in separate window
+- **Atlas section order decided**: Study → NY → CC-Lab → .claude → .config → Toolkit
+- **NY folder stays permanent base**: atlas.md + dashboard.md remain at `~/Desktop/NY/db-pages/` (not migrated)
+- **Project layout decided**: own projects in `~/CC-Lab/`; external/forked repos → `~/CC-Lab/external/`; cc-lab → CC-Lab rename to go with S2

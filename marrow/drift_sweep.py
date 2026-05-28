@@ -27,7 +27,7 @@ from marrow.paths import paths
 # ---------------------------------------------------------------------------
 
 AUTHORIZED_ROOTS: list[Path] = [
-    Path.home() / "cc-lab",
+    Path.home() / "CC-Lab",
     Path.home() / ".config",
     Path.home() / ".claude",
     Path.home() / "Toolkit",

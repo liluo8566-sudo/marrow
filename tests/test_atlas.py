@@ -216,9 +216,9 @@ def test_render_heading_level_capped_h6():
 
 def test_root_shorthand():
     home = Path.home()
-    root = home / "cc-lab"
+    root = home / "CC-Lab"
     sh = _root_shorthand(str(root))
-    assert sh == "~/cc-lab/"
+    assert sh == "~/CC-Lab/"
 
 
 def test_render_row_bullets(tmp_path):
@@ -289,11 +289,11 @@ def test_render_row_stale_suffix(tmp_path):
 def test_render_section_header():
     from marrow.atlas import _section_header
     home = Path.home()
-    root = str(home / "cc-lab")
+    root = str(home / "CC-Lab")
     header = _section_header(root)
     # Short basename label + clickable open link
-    assert header.startswith("## [cc-lab/](file://")
-    assert header.endswith("/cc-lab)")
+    assert header.startswith("## [CC-Lab/](file://")
+    assert header.endswith("/CC-Lab)")
 
 
 def test_render_row_name_is_open_link(tmp_path):
@@ -898,7 +898,7 @@ def test_atlas_root_order_constant_defined():
         Path.home() / "Library" / "Mobile Documents" /
         "com~apple~CloudDocs" / "Study",
         Path.home() / "Desktop" / "NY",
-        Path.home() / "cc-lab",
+        Path.home() / "CC-Lab",
         Path.home() / ".claude",
         Path.home() / ".config",
         Path.home() / "Toolkit",
@@ -914,7 +914,7 @@ def test_section_order_uses_atlas_root_order(tmp_path, monkeypatch):
 
     # Build fake roots matching ATLAS_ROOT_ORDER under tmp so we can assert.
     fake_roots = [tmp_path / name for name in
-                  ("Study", "NY", "cc-lab", ".claude", ".config", "Toolkit")]
+                  ("Study", "NY", "CC-Lab", ".claude", ".config", "Toolkit")]
     for r in fake_roots:
         r.mkdir()
 

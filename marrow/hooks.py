@@ -10,7 +10,7 @@ SessionStart additionalContext, side effects for SessionEnd).
   user_prompt_submit -> mm-/mm+ skip control + recall fallback
 
 PreToolUse is the global prompt-guard.py (scope already covers
-~/cc-lab/marrow/), not duplicated here.
+~/CC-Lab/marrow/), not duplicated here.
 
 mm- prefix: writes audit_log manual_skip row; sessionend_async skips LLM pipeline.
 mm+ prefix: immediately reruns sessionend_async for current (or named) sid.
