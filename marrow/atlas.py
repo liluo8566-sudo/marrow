@@ -97,6 +97,21 @@ def _root_of(path: str | Path, roots: list[Path]) -> Path | None:
     return None
 
 
+def _under_any_root(path: str | Path, roots: list[Path]) -> bool:
+    """Return True if path is the same as or under any of the given roots."""
+    p = Path(path).expanduser().resolve()
+    for root in roots:
+        r = root.expanduser().resolve()
+        if p == r:
+            return True
+        try:
+            p.relative_to(r)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Render helpers (used by build_atlas_spec)
 # ---------------------------------------------------------------------------
@@ -326,6 +341,10 @@ def reconcile_atlas(conn: sqlite3.Connection, md_path: Path) -> int:
     changed = 0
 
     with conn:
+        # Bug 2 guard: skip md rows whose path is not under any
+        # AUTHORIZED_ROOT — they're noise (stale imports, manual mistakes)
+        # and must not get inserted/upserted into atlas.
+        md_rows = [r for r in md_rows if _under_any_root(r["path"], roots)]
         md_paths = {r["path"] for r in md_rows}
 
         # Upsert rows present in md
@@ -409,8 +428,21 @@ def atlas_sweep_fs(conn: sqlite3.Connection) -> dict[str, int]:
     """
     from . import drift_sweep
     roots = [r.expanduser().resolve() for r in drift_sweep.AUTHORIZED_ROOTS]
-    counts = {"stubbed": 0, "unstaled": 0, "staled": 0}
+    counts = {"stubbed": 0, "unstaled": 0, "staled": 0, "out_of_root": 0}
     now = _NOW()
+
+    # Bug 2 guard: purge any atlas row whose path is not under any
+    # AUTHORIZED_ROOT. These leak in from old code paths, manual edits,
+    # or imports. One-time + ongoing — runs every sweep so the table
+    # self-heals if new strays appear.
+    with conn:
+        existing = [r[0] for r in conn.execute(
+            "SELECT path FROM atlas"
+        ).fetchall()]
+        for p_str in existing:
+            if not _under_any_root(p_str, roots):
+                conn.execute("DELETE FROM atlas WHERE path=?", (p_str,))
+                counts["out_of_root"] += 1
 
     # Load all rows with depth > 0 — these are the "expand" seeds.
     seed_rows = [

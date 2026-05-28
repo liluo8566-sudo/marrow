@@ -396,7 +396,7 @@ def test_sweep_depth0_no_stub(conn, tmp_path):
 # 6. depth=1 stubs first-level only
 # ---------------------------------------------------------------------------
 
-def test_sweep_depth1_stubs_first_level_only(conn, tmp_path):
+def test_sweep_depth1_stubs_first_level_only(conn, tmp_path, monkeypatch):
     root = tmp_path / "root"
     root.mkdir()
     child = root / "expand_me"
@@ -407,6 +407,9 @@ def test_sweep_depth1_stubs_first_level_only(conn, tmp_path):
     sub2.mkdir()
     # deeper level — should NOT be stubbed at depth=1
     (sub1 / "level2").mkdir()
+
+    from marrow import drift_sweep
+    monkeypatch.setattr(drift_sweep, "AUTHORIZED_ROOTS", [root])
 
     _insert_row(conn, str(child.resolve()), depth=1)
     atlas_sweep_fs(conn)
@@ -421,7 +424,7 @@ def test_sweep_depth1_stubs_first_level_only(conn, tmp_path):
 # 7. depth=2 stubs two levels
 # ---------------------------------------------------------------------------
 
-def test_sweep_depth2_stubs_two_levels(conn, tmp_path):
+def test_sweep_depth2_stubs_two_levels(conn, tmp_path, monkeypatch):
     root = tmp_path / "root"
     root.mkdir()
     seed = root / "seed"
@@ -432,6 +435,9 @@ def test_sweep_depth2_stubs_two_levels(conn, tmp_path):
     l2.mkdir()
     l3 = l2 / "level3_too_deep"
     l3.mkdir()
+
+    from marrow import drift_sweep
+    monkeypatch.setattr(drift_sweep, "AUTHORIZED_ROOTS", [root])
 
     _insert_row(conn, str(seed.resolve()), depth=2)
     atlas_sweep_fs(conn)
@@ -446,13 +452,16 @@ def test_sweep_depth2_stubs_two_levels(conn, tmp_path):
 # 8. Vanished dir → stale=1, render shows (stale)
 # ---------------------------------------------------------------------------
 
-def test_sweep_marks_vanished_dir_stale(conn, tmp_path):
+def test_sweep_marks_vanished_dir_stale(conn, tmp_path, monkeypatch):
     root = tmp_path / "root"
     root.mkdir()
     seed = root / "seed_for_stale"
     seed.mkdir()
     child = seed / "soon_gone"
     child.mkdir()
+
+    from marrow import drift_sweep
+    monkeypatch.setattr(drift_sweep, "AUTHORIZED_ROOTS", [root])
 
     _insert_row(conn, str(seed.resolve()), depth=1)
     atlas_sweep_fs(conn)  # stubs child
@@ -485,13 +494,16 @@ def test_render_stale_row_shows_stale_suffix(tmp_path):
 # 9. Stale row returning → stale cleared
 # ---------------------------------------------------------------------------
 
-def test_sweep_clears_stale_when_dir_returns(conn, tmp_path):
+def test_sweep_clears_stale_when_dir_returns(conn, tmp_path, monkeypatch):
     root = tmp_path / "root"
     root.mkdir()
     seed = root / "seed_return"
     seed.mkdir()
     child = seed / "comes_back"
     child.mkdir()
+
+    from marrow import drift_sweep
+    monkeypatch.setattr(drift_sweep, "AUTHORIZED_ROOTS", [root])
 
     _insert_row(conn, str(seed.resolve()), depth=1)
     atlas_sweep_fs(conn)  # stubs child
@@ -564,8 +576,9 @@ def test_reconcile_preserves_fields_on_path_rekey(conn, tmp_path, monkeypatch):
 # 11. EXCLUDE_DIRS_TREE honored
 # ---------------------------------------------------------------------------
 
-def test_sweep_excludes_excluded_dirs(conn, tmp_path):
+def test_sweep_excludes_excluded_dirs(conn, tmp_path, monkeypatch):
     from marrow.drift_sweep import EXCLUDE_DIRS_TREE
+    from marrow import drift_sweep
 
     root = tmp_path / "root"
     root.mkdir()
@@ -576,6 +589,8 @@ def test_sweep_excludes_excluded_dirs(conn, tmp_path):
     excluded_name = next(iter(EXCLUDE_DIRS_TREE))
     (seed / excluded_name).mkdir()
     (seed / "normal_dir").mkdir()
+
+    monkeypatch.setattr(drift_sweep, "AUTHORIZED_ROOTS", [root])
 
     _insert_row(conn, str(seed.resolve()), depth=1)
     atlas_sweep_fs(conn)
@@ -592,6 +607,7 @@ def test_sweep_excludes_excluded_dirs(conn, tmp_path):
 def test_sweep_claude_whitelist_honored(conn, tmp_path, monkeypatch):
     """Dirs under ~/.claude not in CLAUDE_WHITELIST are not recursed into."""
     from marrow import atlas as _atlas_module
+    from marrow import drift_sweep
 
     fake_claude = tmp_path / "fake_claude"
     fake_claude.mkdir()
@@ -603,6 +619,7 @@ def test_sweep_claude_whitelist_honored(conn, tmp_path, monkeypatch):
     # Monkeypatch CLAUDE_WHITELIST and _CLAUDE_ROOT
     monkeypatch.setattr(_atlas_module, "CLAUDE_WHITELIST", frozenset({"rules"}))
     monkeypatch.setattr(_atlas_module, "_CLAUDE_ROOT", fake_claude.resolve())
+    monkeypatch.setattr(drift_sweep, "AUTHORIZED_ROOTS", [fake_claude])
 
     _insert_row(conn, str(fake_claude.resolve()), depth=1)
     atlas_sweep_fs(conn)
