@@ -337,16 +337,21 @@ def render_affect(conn: sqlite3.Connection) -> str:
             tone_label = f"{ht(srt[:mid] or srt)} → {ht(srt[mid:] or srt)}"
         else:
             tone_label = _tone(mv, ma)
-        if len(week_pool) == 1:
-            only = week_pool[0]
-            outliers = [only]
+        srt = sorted(week_pool, key=lambda r: r["valence"], reverse=True)
+        n = len(srt)
+        if n == 1:
+            picked = [(srt[0], _ep_side(srt[0], simple_mean))]
+        elif n == 2:
+            picked = [(srt[0], 'h'), (srt[1], 'l')]
+        elif n == 3:
+            picked = [(srt[0], 'h'),
+                      (srt[1], _ep_side(srt[1], simple_mean)),
+                      (srt[2], 'l')]
         else:
-            outliers = sorted(
-                week_pool,
-                key=lambda r: (-abs(r["valence"] - simple_mean), -r["importance"]),
-            )[:4]
-        segs = [_ep_phrase(r, _ep_side(r, simple_mean)) for r in outliers]
-        ids = [r["id"] for r in outliers]
+            picked = [(srt[0], 'h'), (srt[1], 'h'),
+                      (srt[-2], 'l'), (srt[-1], 'l')]
+        segs = [_ep_phrase(r, side) for r, side in picked]
+        ids = [r["id"] for r, _ in picked]
         out.append(
             f"- 【{tone_label}】 · " + " · ".join(segs) + " [7d] "
             f"{_affect_anchor_inline(ids)}"
