@@ -23,12 +23,19 @@ each thread is mid-doing and how to continue.
 - **Never touch production data files.** Do NOT read/write/seed/symlink anything under
   `~/.config/marrow/` (that is the live runtime: real db, real handover.md). Tests already
   redirect `config.DATA_DIR` to a tmp dir (see `tests/conftest.py`), so all dry-runs are safe.
-- **No path migration, no symlinks.** `_RENDERED_PATH` stays `config.DATA_DIR / "handover.md"`.
-  The global `@~/.config/marrow/handover.md` import already points here. Do not change it.
-- **No hook→async cwd wiring / no git_log plumbing.** `_load_git_log` is a stub that returns
-  `""` this round (see Module 2). Leave the `{git_log}` placeholder in the prompt.
-- **Lumi's Note is hands-off.** Code never appends/rewrites/deletes Note lines. Render it as
-  verbatim passthrough. (Auto-removal of done lines is explicitly deferred.)
+- **Path not migrated; symlinks are the main session's job.** `_RENDERED_PATH` stays
+  `config.DATA_DIR / "handover.md"` — the `@~/.config/marrow/handover.md` import already points
+  here. 3 symlinks (Desktop/NY, iCloud Study, CC-Lab/marrow) → the real file are a deploy step
+  the MAIN session does after merge — NOT in your scope. They touch production paths AND must
+  first clear stale real files (NY + marrow already hold old handover.md; marrow's is git-tracked
+  + gitignored and needs `git rm --cached`). Do not create or touch them.
+- **git_log IS built this round (M2/M4).** `_load_git_log(cwd, since_ts)` shells
+  `git -C <cwd> log` and degrades to `""` off-repo (study/daily sessions have no commits → fall
+  back to sonnet reading the transcript). cwd flows hook→async via a new `--cwd` arg.
+- **Lumi's Note: remove-done ONLY.** Code NEVER appends/rewrites/reorders Note. The ONE allowed
+  edit: delete a Note line that sonnet flags as clearly completed (a commit, or an explicit
+  completion in the transcript). No evidence → leave the line. Everything else is verbatim
+  passthrough. This is NOT hands-off — done lines must get cleared so they don't pile up.
 - **Do not touch task render/sort.** `seg_task_cand` only ticks/inserts; dashboard render +
   category-priority sort are already built and correct. Don't reorder/format the task list.
 - Commit per module on your branch. No push, no merge to main. The main session merges.
@@ -62,7 +69,7 @@ each thread is mid-doing and how to continue.
 - N/A
 
 ## Lumi's Note
-> Freeform, yours. Auto-write never edits here.
+> Freeform, yours. Auto-write only removes lines you've clearly completed — never adds/rewrites.
 - N/A
 ```
 - `N.` is a DISPLAY ordinal — code re-numbers 1,2,3… on every render. The stable identity is
@@ -110,7 +117,10 @@ its id so sonnet can reference it:
 4. `## Done` 24h roll-off: drop entries with `done:EPOCH` older than `now-24h`. Run on every
    write (and it's idempotent on sessionstart-time reads — but you do NOT need a sessionstart
    hook for this round; write-time cleanup is enough).
-5. Note: passthrough verbatim. Never modified.
+5. Note: verbatim passthrough EXCEPT delete the lines sonnet listed in `NOTE_DONE` (see M1).
+   Match each `NOTE_DONE` line against current Note lines via `handover_norm.hash_bullet`
+   (tolerant of rephrase/punctuation); drop matches, keep the rest byte-for-byte. Empty
+   `NOTE_DONE` → Note untouched. Code never adds or rewrites a Note line.
 6. Concurrency: `CLOSE` is idempotent by id; `UPDATE/KEEP` of an already-closed/deleted id is
    a no-op. flock serializes concurrent sessionend writers. Reuse `_acquire_flock` /
    `_release_flock` / `_atomic_write` and the snapshot-audit pattern from `handover_render.py`.
@@ -123,7 +133,14 @@ inside `handover_render.py` if it stays under the soft cap; a new module is clea
 ### M1 — prompt + parsers (`marrow/sessionend_prompts.py`)
 - Replace the ENTIRE `STATE_PROMPT` body with the v2 spec in `~/Desktop/handover-prompt-draft.md`
   (one judgement → SEGMENT A TASK json + SEGMENT B DOING_DIFF). Keep `{sid} {events}` and add
-  format fields `{active_tasks} {doing} {git_log}`. Keep 念念's examples verbatim.
+  format fields `{active_tasks} {doing} {git_log} {note}`. Keep 念念's examples verbatim.
+- **Note section in the prompt — override the draft's "HANDS OFF" wording.** Feed the current
+  Note via a `{note}` input block (`===NOTE===`/`===END===`). Sonnet emits a `===NOTE_DONE===`
+  segment: one VERBATIM Note line per row that it judges clearly completed this session
+  (evidence = a commit in `{git_log}` or an explicit completion in the transcript). No evidence
+  / any doubt → omit it. Sonnet may ONLY list lines to delete — never add, rewrite, or reorder.
+  Empty → `N/A`. Make this rule explicit and tight in the prompt so误删 needs hard proof.
+- `git_log` is real input now (see M2). The prompt already uses it as CLOSE evidence; keep that.
 - `NARRATIVE_PROMPT` is UNCHANGED.
 - New parsers:
   - `parse_task_rows(raw) -> list[dict]` — JSON list between `===TASK===`/`===END===`.
@@ -132,37 +149,52 @@ inside `handover_render.py` if it stays under the soft cap; a new module is clea
     `CLOSE:`/`KEEP:`/`UPDATE:`/`ADD:` sub-blocks into
     `{"close": [int], "keep": [int], "update": [{"id": int, "block": str}], "add": [str]}`.
     Be tolerant: missing sub-block → empty. Bad id token → skip it, don't crash.
+  - `parse_note_done(raw) -> list[str]` — lines between `===NOTE_DONE===`/`===END===`; drop
+    `N/A` / empty. These are the Note lines to remove.
   - DELETE `parse_handover_output` (4-section) and its `_slice` 4-section callers, OR keep
     `_slice` if still used; remove the 4-section semantics.
 
-### M2 — sonnet loaders (`marrow/sessionend_async.py`)
+### M2 — sonnet loaders + cwd arg (`marrow/sessionend_async.py`)
 - `_load_active_tasks_for_sonnet:226` → line form `- [#{id}] {title} ({category})` (add id).
 - `_load_prior_handover_for_sonnet:238` → read the single file's `## Doing`, parse thread blocks
   WITH their `<!-- id:N -->`, return the `[#id] …` form above. Replace the 4-section reader.
-- NEW `_load_git_log(since_ts=None) -> str` → return `""` (stub this round; documented boundary).
+- NEW `_load_note() -> str` → return the `## Lumi's Note` body verbatim (for the `{note}`
+  prompt input). Empty/missing → `N/A`.
+- NEW `_load_git_log(cwd, since_ts) -> str` — REAL impl this round:
+  - `if not cwd: return ""`.
+  - `git -C <cwd> log --since=@<since_ts> --format=%s` via `subprocess.run(..., timeout=5,
+    capture_output=True, text=True)`. Non-zero return (off-repo) or any exception → `""`.
+  - `since_ts` = the `ts:` epoch in the current handover.md `<!-- handover: ready ... ts:N -->`
+    stamp (last HO write). No stamp → default to `now - 24h`. Double-counting is harmless
+    (CLOSE is idempotent by id).
+- `main()` → parse a new optional `--cwd <path>` arg alongside `--sid`. Thread it into
+  `_run_extraction` → `_load_git_log`.
 - `_session_events_text:169` → prefix each line with local `[HH:MM]` derived from the row
-  timestamp (Australia/Melbourne). Keep it a single transform on `events_text`.
-- `_run_extraction`: pass `doing=`, `git_log=""` into `STATE_PROMPT.format(...)`. Drop the
-  `append_progress` writer call + its `parse_handover_output` done_block extraction. Remove
-  `"progress"` from the writer/failure bookkeeping. PROGRESS.md is FROZEN (file + function
-  stay; just no longer invoked).
+  timestamp (Australia/Melbourne). One transform on `events_text` (both calls inherit it).
+- `_run_extraction`: pass `doing=`, `note=`, and `git_log=_load_git_log(cwd, since_ts)` into
+  `STATE_PROMPT.format(...)`. Drop the `append_progress` writer call + its `parse_handover_output`
+  done_block extraction. Remove `"progress"` from the writer/failure bookkeeping. PROGRESS.md is
+  FROZEN (file + function stay; just no longer invoked).
 
 ### M3 — writers + diff-apply (`marrow/sessionend_writers.py` + new diff module)
 - `seg_task_cand:131` → id branch FIRST:
   - row has `"id"` and `status == "done"` → `UPDATE tasks SET status='done', updated_at=? WHERE id=?`.
   - row has a `title`, no id → existing INSERT + cosine-dedup path (unchanged).
   - Keep `_normalise_category`, dedup, 24h-window logic for new adds.
-- `seg_handover` → parse the DOING_DIFF and call `apply_diff(conn, sid, diff)`. Drop the
-  4-section `write_handover_full` path.
+- `seg_handover` → parse DOING_DIFF + NOTE_DONE, call `apply_diff(conn, sid, diff, note_done)`.
+  Drop the 4-section `write_handover_full` path.
 - Implement `apply_diff` per the design above. Port the snapshot/flock/atomic-write plumbing
   from `handover_render.py:295` (`write_handover_full`) and the snapshot-audit helpers.
 - `append_progress` stays defined (frozen), just not called.
 
-### M4 — sessionstart Note reminder (`marrow/hooks.py`)
-- In `_handoff_text` (or the `session_start` payload assembly at ~line 244), append ONE line:
-  a reminder that `## Lumi's Note` in the handover is the new window's to-do and must not be
-  ignored. English, one line. This is the only hooks.py change. Do not touch the task/alert/
-  affect blocks or the 6000-char cap.
+### M4 — hooks.py: cwd→async + Note reminder (`marrow/hooks.py`)
+- `session_end`, popen at line 319: add `"--cwd", inp.get("cwd") or ""` to the
+  `sessionend_async` argv so git_log can locate the repo. cc's hook input carries `cwd`; if
+  absent, the empty string makes `_load_git_log` return `""` — safe. (Quick first-check: confirm
+  the field by logging `inp` once; fall back to `""` regardless.)
+- `session_start` payload (~line 244, `_handoff_text` or assembly): append ONE English line
+  reminding that `## Lumi's Note` is the new window's to-do, don't ignore it. Don't touch the
+  task/alert/affect blocks or the 6000-char cap.
 
 ## Tests (TDD — write/adjust before or alongside each module)
 - Rewrite 4-section assumptions in `tests/test_handover_render.py` + `tests/test_sessionend_async.py`
@@ -175,7 +207,10 @@ inside `handover_render.py` if it stays under the soft cap; a new module is clea
     one stays.
   - **hand-edit survival**: hand-delete a Doing block (id gone) → not revived; hand-add a no-id
     block → gets an id and survives the next write.
-  - **Note hands-off**: Note body is byte-identical before/after an auto-write.
+  - **Note remove-done**: a line in NOTE_DONE is removed; lines NOT listed stay byte-identical;
+    empty NOTE_DONE leaves Note untouched; code never adds/rewrites a Note line.
+  - **git_log loader**: off-repo cwd → ""; in-repo → commit subjects since the ts stamp;
+    bad/missing cwd → "" (no crash).
   - **doing diff parser**: malformed/missing sub-blocks degrade gracefully.
 - Final gate: `.venv/bin/python -m pytest -q` green, count ≥ 811. Fix every failure before
   reporting — do not report a red suite as done.
@@ -190,5 +225,9 @@ inside `handover_render.py` if it stays under the soft cap; a new module is clea
 - Per module: done / partial / blocked, with the commit sha.
 - Test delta: baseline 811 → final N (passed/skipped), and which tests you rewrote vs added.
 - Any decision you made under "When stuck".
-- Explicitly confirm you touched NONE of: `~/.config/marrow/*`, symlinks, git_log cwd wiring,
-  Note auto-delete, task render/sort.
+- Confirm you BUILT: id-based task tick, DOING diff-apply (CLOSE/UPDATE/KEEP/ADD), Done 24h
+  roll-off, hand-edit survival, git_log loader + `--cwd` arg, Note remove-done, sessionstart
+  Note reminder, frozen PROGRESS.
+- Confirm you did NOT touch: `~/.config/marrow/*` production files, the 3 symlinks, task
+  render/sort — those are the MAIN session's post-merge deploy step. All dry-runs used the
+  conftest tmp dirs.
