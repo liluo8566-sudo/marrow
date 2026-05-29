@@ -1,8 +1,8 @@
 """Shared candidate-block parser + writers.
 
 Used by daily.py (ENTITY/MILESTONE/MEMES candidate extraction on day-
-aggregated digests) and sessionend_async.py (AFFECT/TASK_CAND block
-parser via extract_block). Writers are idempotent on their natural key.
+aggregated digests) and sessionend_writers.py (AFFECT block parser via
+extract_block). Writers are idempotent on their natural key.
 """
 from __future__ import annotations
 

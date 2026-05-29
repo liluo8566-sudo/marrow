@@ -1,11 +1,12 @@
 """SessionEnd async LLM extraction: 2 sonnet calls → 4 segment writers.
 
-CLI: python -m marrow.sessionend_async --sid <session_id>
+CLI: python -m marrow.sessionend_async --sid <session_id> [--cwd <path>]
 
-STATE call emits TASK_CAND + HANDOVER. NARRATIVE call emits AFFECT + DIGEST.
-Both prompts share a byte-identical transcript-fence prefix so the second
-call's cache_read > 0 (audit_log.llm_call_cost). One call failing does not
-block the other.
+STATE call emits TASK board + DOING diff + NOTE_DONE. NARRATIVE call emits
+AFFECT + DIGEST. Both prompts share a byte-identical transcript-fence prefix
+so the second call's cache_read > 0 (audit_log.llm_call_cost). One call
+failing does not block the other. `--cwd` lets _load_git_log locate the repo
+for CLOSE evidence; absent → "" (study / ny chats have no commits).
 
 Skip rule: sessions with ≤ skip_turn_threshold user turns extract nothing.
 Stale-skip recovery: if a prior skip:short_session row exists but the
@@ -17,18 +18,18 @@ ENTITY/MILESTONE/MEMES candidate extraction lives in daily.py.
 from __future__ import annotations
 
 import datetime as _dt
+import re as _re
+import subprocess as _sp
 import sys
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from . import config, handover_render, repo, storage
+from . import config, handover_diff, handover_render, repo, storage
 from .hooks import _is_manual_skip
 from .llm import LLMClient, LLMError
 from .paths import paths
-from .sessionend_prompts import (NARRATIVE_PROMPT, STATE_PROMPT,
-                                 parse_handover_output)
-from .sessionend_writers import (append_progress, seg_affect, seg_digest,
-                                 seg_handover, seg_task_cand)
+from .sessionend_prompts import NARRATIVE_PROMPT, STATE_PROMPT
+from .sessionend_writers import (seg_affect, seg_digest, seg_handover,
+                                 seg_task_cand)
 
 _LOGS_DIR = paths.logs_dir
 _TZ = ZoneInfo("Australia/Melbourne")
@@ -166,9 +167,26 @@ def _session_events_text(conn, sid: str) -> tuple[str, str]:
     if not rows:
         return "", _dt.date.today().isoformat()
     label = {"user": "念念", "assistant": "屿忱"}
-    lines = [f"[{label.get(r['role'], r['role'])}] {r['content']}" for r in rows]
+    lines = [
+        f"[{_local_hhmm(r['timestamp'])}] [{label.get(r['role'], r['role'])}]"
+        f" {r['content']}"
+        for r in rows
+    ]
     date = _to_local_date(rows[0]["timestamp"])
     return "\n".join(lines), date
+
+
+def _local_hhmm(utc_iso: str) -> str:
+    """UTC ISO timestamp -> local Australia/Melbourne HH:MM. '??:??' on parse
+    error so a malformed row never breaks the transcript."""
+    s = (utc_iso or "").strip().replace("Z", "+00:00")
+    try:
+        d = _dt.datetime.fromisoformat(s)
+    except ValueError:
+        return "??:??"
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=_dt.timezone.utc)
+    return d.astimezone(_TZ).strftime("%H:%M")
 
 
 def _write_segment_audit(conn, sid: str, segment: str, summary: str) -> None:
@@ -224,30 +242,89 @@ def _write_final_audit(conn, sid: str, summary: str) -> None:
 # ── sonnet input loaders ────────────────────────────────────────────────────
 
 def _load_active_tasks_for_sonnet(conn) -> str:
-    """db active task snapshot for sonnet's tick decisions. Title is the
-    match key — sonnet must copy verbatim so seg_task_cand flips by title."""
+    """db active task snapshot WITH id for sonnet's tick-by-id decisions.
+    Sonnet emits {"id": N, "status": "done"}; code flips WHERE id=?."""
     rows = conn.execute(
-        "SELECT title, category FROM tasks WHERE status='active'"
+        "SELECT id, title, category FROM tasks WHERE status='active'"
         " ORDER BY id"
     ).fetchall()
     if not rows:
         return "_none_"
-    return "\n".join(f"- {r['title']} ({r['category']})" for r in rows)
+    return "\n".join(
+        f"- [#{r['id']}] {r['title']} ({r['category']})" for r in rows)
 
 
-def _load_prior_handover_for_sonnet() -> str:
-    """Read prior handover.md and extract the 4 state-axis sections (Done /
-    Open / Plan / Reference) for sonnet's audit step. Top-section (Alerts /
-    Tasks / Affect / Milestone candidate) is code-owned and not included."""
+def _read_handover_text() -> str:
     try:
-        text = handover_render._RENDERED_PATH.read_text(encoding="utf-8")
+        return handover_render._RENDERED_PATH.read_text(encoding="utf-8")
     except (FileNotFoundError, OSError):
+        return ""
+
+
+def _load_doing_for_sonnet() -> str:
+    """Current `## Doing` threads, each prefixed `[#id]`, for the DOING_DIFF
+    audit. Empty/missing → placeholder."""
+    text = _read_handover_text()
+    if not text:
         return "(no prior handover)"
+    body = handover_diff._section_body(text, handover_diff._DOING_HEADER)
+    doing, _ = handover_diff.parse_doing(body)
+    if not doing:
+        return "(no open threads)"
     parts: list[str] = []
-    for header in ("Done", "Open", "Plan", "Reference"):
-        body = handover_render._split_section_body(text, header).strip()
-        parts.append(f"## {header}\n{body or '- N/A'}")
-    return "\n\n".join(parts)
+    for ident in sorted(doing):
+        block = doing[ident]
+        lines = block.splitlines()
+        head = f"[#{ident}] {lines[0]}" if lines else f"[#{ident}]"
+        parts.append("\n".join([head] + lines[1:]))
+    return "\n".join(parts)
+
+
+def _load_note() -> str:
+    """Current `## Lumi's Note` body verbatim, for the {note} prompt input.
+    Empty/missing → 'N/A'."""
+    text = _read_handover_text()
+    if not text:
+        return "N/A"
+    if not handover_diff._section_present(text, handover_diff._NOTE_HEADER):
+        return "N/A"
+    body = handover_diff._section_body(text, handover_diff._NOTE_HEADER).strip()
+    return body or "N/A"
+
+
+_READY_TS_RE = _re.compile(r"<!--\s*handover:\s*ready[^>]*ts:(\d+)")
+
+
+def _since_ts_from_handover() -> int:
+    """Epoch of the last HO write (ts: in the ready stamp). No stamp → 24h ago.
+    git_log uses this as `--since`; double-counting is harmless (CLOSE is
+    idempotent by id)."""
+    text = _read_handover_text()
+    m = _READY_TS_RE.search(text) if text else None
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            pass
+    return int(_dt.datetime.now(_dt.timezone.utc).timestamp()) - 24 * 3600
+
+
+def _load_git_log(cwd: str | None, since_ts: int) -> str:
+    """Commit subjects since `since_ts` from the repo at cwd. Off-repo / any
+    error / no cwd → '' (study & ny chats have no commits → sonnet falls back
+    to the transcript)."""
+    if not cwd:
+        return ""
+    try:
+        proc = _sp.run(
+            ["git", "-C", cwd, "log", f"--since=@{since_ts}", "--format=%s"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception:  # noqa: BLE001 — never let git crash extraction
+        return ""
+    if proc.returncode != 0:
+        return ""
+    return proc.stdout.strip()
 
 
 # ── main loop ───────────────────────────────────────────────────────────────
@@ -255,17 +332,21 @@ def _load_prior_handover_for_sonnet() -> str:
 def main(argv: list[str] | None = None) -> int:
     args = argv if argv is not None else sys.argv[1:]
     sid: str | None = None
+    cwd: str = ""
     i = 0
     while i < len(args):
         if args[i] == "--sid" and i + 1 < len(args):
             sid = args[i + 1]
             i += 2
+        elif args[i] == "--cwd" and i + 1 < len(args):
+            cwd = args[i + 1]
+            i += 2
         else:
             i += 1
 
     if not sid:
-        print("usage: python -m marrow.sessionend_async --sid <session_id>",
-              file=sys.stderr)
+        print("usage: python -m marrow.sessionend_async --sid <session_id>"
+              " [--cwd <path>]", file=sys.stderr)
         return 2
 
     cfg = config.load()
@@ -307,7 +388,7 @@ def main(argv: list[str] | None = None) -> int:
             _write_final_audit(conn, sid, "fail:no_events")
             return 1
 
-        return _run_extraction(conn, sid, date, events_text, cfg, count)
+        return _run_extraction(conn, sid, date, events_text, cfg, count, cwd)
     except Exception as e:  # noqa: BLE001
         try:
             _write_final_audit(conn, sid, f"fail:{type(e).__name__}")
@@ -340,15 +421,18 @@ def _run_writer(conn, sid: str, name: str, writer) -> bool:
 
 
 def _run_extraction(conn, sid: str, date: str,
-                    events_text: str, cfg: dict, count: int) -> int:
+                    events_text: str, cfg: dict, count: int,
+                    cwd: str = "") -> int:
     """Two-call flow: STATE writers run after call1; NARRATIVE writers after
     call2; dashboard + embed_pending run at tail (fail-soft)."""
     from . import dashboard as _dash_mod
     from . import recall as _recall_mod
 
     client = LLMClient(cfg=cfg)
-    prior_handover = _load_prior_handover_for_sonnet()
+    doing = _load_doing_for_sonnet()
     active_tasks = _load_active_tasks_for_sonnet(conn)
+    note = _load_note()
+    git_log = _load_git_log(cwd, _since_ts_from_handover())
 
     # ── call 1: STATE (~30s) ──────────────────────────────────────────────────
     state_raw, state_err = "", None
@@ -357,8 +441,8 @@ def _run_extraction(conn, sid: str, date: str,
             role="sessionend_state",
             body=STATE_PROMPT.format(
                 sid=sid, events=events_text,
-                prior_handover=prior_handover,
-                active_tasks=active_tasks),
+                active_tasks=active_tasks, doing=doing,
+                git_log=git_log, note=note),
             tier="mid",
         )
     except (LLMError, ValueError, RuntimeError) as e:
@@ -370,9 +454,6 @@ def _run_extraction(conn, sid: str, date: str,
         # State-based writers: handover.md surfaces ~30s after popen.
         _run_writer(conn, sid, "handover", lambda: seg_handover(conn, state_raw, sid))
         _run_writer(conn, sid, "task_cand", lambda: seg_task_cand(conn, state_raw))
-        done_block, _, _, _ = parse_handover_output(state_raw)
-        _run_writer(conn, sid, "progress",
-                    lambda: append_progress(done_block, sid, date))
 
     # ── call 2: NARRATIVE (~30s; cache_read on events_text fence) ─────────────
     narrative_raw, narrative_err = "", None
