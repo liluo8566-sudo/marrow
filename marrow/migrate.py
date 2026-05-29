@@ -292,7 +292,7 @@ _SRC_FILES = {
     "events_2026": "memory/2026.md",
     "timeline": "memory/timeline.md",
     "cipher": "memory/reference.md",
-    "pit": "code/_pit.md",
+    "pit": "code/pit.md",
 }
 _GOOSE_GLOB = "铁锅/语录/*.md"
 
