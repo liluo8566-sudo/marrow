@@ -365,7 +365,8 @@ def test_sessionend_hook_fires_async_popen(db_env, monkeypatch, tmp_path):
         spawned.append(list(args))
 
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(
-        {"session_id": "sid-hook-test", "transcript_path": str(jl)})))
+        {"session_id": "sid-hook-test", "transcript_path": str(jl),
+         "cwd": "/repo/path"})))
     monkeypatch.setattr(config, "dashboard_path",
                         lambda: str(tmp_path / "dashboard.md"))
     monkeypatch.setattr(config, "db_pages_path",
@@ -388,6 +389,10 @@ def test_sessionend_hook_fires_async_popen(db_env, monkeypatch, tmp_path):
     assert "--sid" in async_calls[0]
     idx = async_calls[0].index("--sid") + 1
     assert async_calls[0][idx] == "sid-hook-test"
+    # cwd from hook input threads through to sessionend_async for git_log.
+    assert "--cwd" in async_calls[0]
+    cidx = async_calls[0].index("--cwd") + 1
+    assert async_calls[0][cidx] == "/repo/path"
 
 
 # ── Segment writers: schema-v2 persistence ────────────────────────────────────
@@ -547,16 +552,15 @@ def test_seg_affect_description_falls_back_to_label(db_env):
 
 
 def test_seg_task_cand_writes_tasks_table(db_env):
-    """TASK_CAND segment writes to renamed `tasks` table."""
+    """New-task row (no id) writes to `tasks` table."""
     db, _ = db_env
-    from marrow import sessionend_async
     conn = storage.connect(db)
     try:
         raw = (
-            "===TASK_CAND===\n"
+            "===TASK===\n"
             "[{\"title\": \"Ship 2.5c\", \"category\": \"Project\","
             " \"status\": \"active\","
-            " \"due\": null, \"completed_at\": null, \"note\": \"\"}]\n"
+            " \"due\": null, \"note\": \"\"}]\n"
             "===END===\n"
         )
         n = sessionend_writers.seg_task_cand(conn, raw)
@@ -574,20 +578,16 @@ def test_seg_task_cand_writes_tasks_table(db_env):
 def test_seg_task_cand_category_whitelist(db_env):
     """Unknown / missing / lowercase categories fall back to Others or canonical."""
     db, _ = db_env
-    from marrow import sessionend_async
     conn = storage.connect(db)
     try:
         raw = (
-            "===TASK_CAND===\n"
+            "===TASK===\n"
             "[{\"title\": \"flu vac\", \"category\": \"daily\","
-            " \"status\": \"active\", \"due\": null, \"completed_at\": null,"
-            " \"note\": \"\"},"
+            " \"status\": \"active\", \"due\": null, \"note\": \"\"},"
             " {\"title\": \"random thing\", \"category\": \"banana\","
-            " \"status\": \"active\", \"due\": null, \"completed_at\": null,"
-            " \"note\": \"\"},"
+            " \"status\": \"active\", \"due\": null, \"note\": \"\"},"
             " {\"title\": \"no cat field\","
-            " \"status\": \"active\", \"due\": null, \"completed_at\": null,"
-            " \"note\": \"\"}]\n"
+            " \"status\": \"active\", \"due\": null, \"note\": \"\"}]\n"
             "===END===\n"
         )
         n = sessionend_writers.seg_task_cand(conn, raw)
@@ -599,6 +599,40 @@ def test_seg_task_cand_category_whitelist(db_env):
         assert rows["flu vac"] == "Daily"
         assert rows["random thing"] == "Others"
         assert rows["no cat field"] == "Others"
+    finally:
+        conn.close()
+
+
+def test_seg_task_cand_tick_by_id(db_env):
+    """v2 id-tick: a reworded active task still ticks via {id,status:done}."""
+    db, _ = db_env
+    conn = storage.connect(db)
+    try:
+        with conn:
+            cur = conn.execute(
+                "INSERT INTO tasks (category, title, status)"
+                " VALUES ('Study', 'Uni-370 essay draft', 'active')")
+            tid = cur.lastrowid
+        # Sonnet refers to the id, never the (reworded) title.
+        raw = (f"===TASK===\n[{{\"id\": {tid}, \"status\": \"done\"}}]\n"
+               "===END===\n")
+        n = sessionend_writers.seg_task_cand(conn, raw)
+        assert n == 1
+        row = conn.execute(
+            "SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()
+        assert row["status"] == "done"
+    finally:
+        conn.close()
+
+
+def test_seg_task_cand_tick_unknown_id_noop(db_env):
+    """Tick row for an absent / already-done id is a safe no-op."""
+    db, _ = db_env
+    conn = storage.connect(db)
+    try:
+        raw = "===TASK===\n[{\"id\": 9999, \"status\": \"done\"}]\n===END===\n"
+        n = sessionend_writers.seg_task_cand(conn, raw)
+        assert n == 0
     finally:
         conn.close()
 
@@ -638,25 +672,29 @@ def test_pingpong_live_isolation_in_hook_context(db_env):
 def test_sessionend_two_calls_routes_to_four_writers(db_env, tmp_path,
                                                       monkeypatch):
     """STATE + NARRATIVE → 4 segment writers + per-segment audit + final 'ok'.
-    Plan H: client.call invoked twice; handover lands DONE/OPEN/PLAN/REFERENCE."""
+    v2: client.call invoked twice; handover applies the DOING_DIFF; PROGRESS is
+    frozen (not appended)."""
     db, _ = db_env
     _insert_events(db, "test-combined", count=10, role="user")
 
     h = tmp_path / "handover.md"
     pmd = tmp_path / "PROGRESS.md"
+    pmd.write_text("# ledger\n", encoding="utf-8")
     monkeypatch.setattr("marrow.sessionend_writers._PROGRESS_DEFAULT", pmd)
 
     state_raw = (
-        "===TASK_CAND===\n"
-        "[{\"title\": \"refactor sessionend\", \"status\": \"done\","
-        " \"due\": null, \"completed_at\": null, \"note\": \"\"}]\n"
+        "===TASK===\n"
+        "[{\"title\": \"refactor sessionend\", \"category\": \"Project\","
+        " \"status\": \"active\", \"due\": null, \"note\": \"\"}]\n"
         "===END===\n"
-        "===HANDOVER===\n"
-        "===DONE===\n- shipped 2-call refactor\n"
-        "===OPEN===\n- N/A\n"
-        "===PLAN===\n- verify pytest + plist reload\n"
-        "===REFERENCE===\n- `marrow/sessionend_async.py:80` — main loop\n"
+        "===DOING_DIFF===\n"
+        "ADD:\n"
+        "[Marrow] - shipped 2-call refactor\n"
+        "  - Current: 2-call flow live\n"
+        "  - Next: verify pytest + plist reload\n"
+        "  - Reference: marrow/sessionend_async.py:80\n"
         "===END===\n"
+        "===NOTE_DONE===\nN/A\n===END===\n"
     )
     narrative_raw = (
         "===AFFECT===\n"
@@ -695,24 +733,23 @@ def test_sessionend_two_calls_routes_to_four_writers(db_env, tmp_path,
         summaries = [r["summary"] for r in seg_rows]
         assert summaries[0] == "start"
         assert summaries[-1].startswith("ok,user_count=")
-        # All 5 segment audit rows logged 'ok' (handover/task_cand/progress
-        # from STATE call + affect/digest from NARRATIVE call).
+        # 4 segment audit rows logged 'ok' (handover/task_cand from STATE,
+        # affect/digest from NARRATIVE). No 'progress' writer (frozen).
         seg_oks = [r for r in seg_rows
                    if r["action"].startswith("sessionend_extract_")
                    and r["summary"] == "ok"]
-        assert len(seg_oks) == 5
+        assert len(seg_oks) == 4
+        assert not any(r["action"].endswith("_progress") for r in seg_rows)
     finally:
         conn.close()
     body = h.read_text(encoding="utf-8")
-    assert "- shipped 2-call refactor" in body
-    # PROGRESS.md append landed alongside handover.md.
-    pbody = pmd.read_text(encoding="utf-8")
-    assert "- shipped 2-call refactor" in pbody
-    assert "sid:test-com" in pbody
-    assert "- verify pytest + plist reload" in body
+    assert "shipped 2-call refactor" in body
+    # PROGRESS.md is frozen — not appended this round.
+    assert pmd.read_text(encoding="utf-8") == "# ledger\n"
+    assert "verify pytest + plist reload" in body
     assert "handover: ready sid:test-combined" in body
-    assert "## Done" in body and "## Open" in body
-    assert "## Plan" in body and "## Reference" in body
+    assert "## Done" in body and "## Doing" in body
+    assert "## Lumi's Note" in body
 
 
 def test_sessionend_state_fail_narrative_ok_partial(db_env, tmp_path,
@@ -748,69 +785,159 @@ def test_sessionend_state_fail_narrative_ok_partial(db_env, tmp_path,
     assert "task_cand" in final and "handover" in final
 
 
-def test_load_prior_handover_extracts_four_state_sections(tmp_path, monkeypatch):
-    """Plan H: prior handover loader pulls Done/Open/Plan/Reference now,
-    not the legacy Previous/This/Next/Reference."""
+def test_session_events_text_prefixes_local_hhmm(db_env):
+    """v2: each transcript line is prefixed with a local [HH:MM] stamp."""
+    db, _ = db_env
+    conn = storage.connect(db)
+    with conn:
+        conn.execute(
+            "INSERT INTO events (session_id, timestamp, role, content)"
+            " VALUES ('s-hhmm', '2026-05-23T00:30:00Z', 'user', 'hi')")
+    from marrow import sessionend_async
+    text, _date = sessionend_async._session_events_text(conn, "s-hhmm")
+    conn.close()
+    import re
+    # 00:30 UTC → Melbourne (UTC+10) = 10:30; assert the [HH:MM] [念念] shape.
+    assert re.match(r"\[\d{2}:\d{2}\] \[念念\] hi", text), text
+
+
+def test_load_doing_for_sonnet_extracts_threads_with_ids(tmp_path, monkeypatch):
+    """v2: doing loader pulls `## Doing` threads prefixed with [#id]."""
     from marrow import sessionend_async, handover_render
     h = tmp_path / "handover.md"
     h.write_text(
         "# title\n\n"
-        "## Alerts (active)\n- warn x\n\n"
-        "## Tasks\n- [ ] foo\n\n"
-        "## Done\n- did A\n\n"
-        "## Open\n- blocked on B\n\n"
-        "## Plan\n- pick C\n\n"
-        "## Reference\n- `path/x.py:1` — y\n\n"
-        "<!-- stamp -->\n", encoding="utf-8")
+        "## Done\n- old <!-- done:1700000000 -->\n\n"
+        "## Doing\n"
+        "1. [Marrow] - thread A\n"
+        "  - Current: a-state\n"
+        "  - Next: a-next\n"
+        "  - Reference: N/A\n"
+        "<!-- id:3 -->\n\n"
+        "## Lumi's Note\n- buy hand cream\n\n"
+        "<!-- handover: ready sid:x ts:1700000000 -->\n", encoding="utf-8")
     monkeypatch.setattr(handover_render, "_RENDERED_PATH", h)
-    out = sessionend_async._load_prior_handover_for_sonnet()
-    assert "## Done\n- did A" in out
-    assert "## Open\n- blocked on B" in out
-    assert "## Plan\n- pick C" in out
-    assert "## Reference\n- `path/x.py:1` — y" in out
-    assert "Alerts" not in out and "Tasks" not in out
+    out = sessionend_async._load_doing_for_sonnet()
+    assert "[#3] [Marrow] - thread A" in out
+    assert "Current: a-state" in out
+    # Note / Done content not in the doing block.
+    assert "buy hand cream" not in out
 
 
-def test_load_prior_handover_returns_placeholder_when_missing(tmp_path, monkeypatch):
+def test_load_doing_returns_placeholder_when_missing(tmp_path, monkeypatch):
     from marrow import sessionend_async, handover_render
     monkeypatch.setattr(handover_render, "_RENDERED_PATH", tmp_path / "nope.md")
-    assert sessionend_async._load_prior_handover_for_sonnet() == "(no prior handover)"
+    assert sessionend_async._load_doing_for_sonnet() == "(no prior handover)"
 
 
-def test_parse_handover_output_slices_four_state_blocks():
-    """parse_handover_output returns (done, open, plan, reference)."""
-    from marrow.sessionend_prompts import parse_handover_output
-    raw = ("intro\n"
-           "===DONE===\n- did A\n- did B\n"
-           "===OPEN===\n- waiting on review\n"
-           "===PLAN===\n- pick up C\n"
-           "===REFERENCE===\n- `path/foo.py:10` — entry\n"
-           "===END===\n")
-    done, open_, plan, reference = parse_handover_output(raw)
-    assert done == "- did A\n- did B"
-    assert open_ == "- waiting on review"
-    assert plan == "- pick up C"
-    assert reference == "- `path/foo.py:10` — entry"
+def test_load_note_returns_verbatim_body(tmp_path, monkeypatch):
+    from marrow import sessionend_async, handover_render
+    h = tmp_path / "handover.md"
+    h.write_text(
+        "## Doing\n- N/A\n\n"
+        "## Lumi's Note\n- buy hand cream\n- recharge SIM\n\n",
+        encoding="utf-8")
+    monkeypatch.setattr(handover_render, "_RENDERED_PATH", h)
+    out = sessionend_async._load_note()
+    assert "buy hand cream" in out and "recharge SIM" in out
 
 
-def test_parse_handover_output_missing_markers_default_empty():
-    from marrow.sessionend_prompts import parse_handover_output
-    raw = "===DONE===\n- only one\n===END===\n"
-    done, open_, plan, reference = parse_handover_output(raw)
-    assert done == "- only one"
-    assert open_ == "" and plan == "" and reference == ""
+def test_load_note_na_when_missing(tmp_path, monkeypatch):
+    from marrow import sessionend_async, handover_render
+    monkeypatch.setattr(handover_render, "_RENDERED_PATH", tmp_path / "nope.md")
+    assert sessionend_async._load_note() == "N/A"
 
 
-def test_seg_handover_composes_full_file(db_env, tmp_path, monkeypatch):
-    """seg_handover writes complete handover.md in one atomic call."""
+def test_load_active_tasks_includes_id(db_env):
+    """v2: active task lines carry `[#id]` for id-based tick."""
+    db, _ = db_env
+    conn = storage.connect(db)
+    with conn:
+        conn.execute(
+            "INSERT INTO tasks (category, title, status) VALUES"
+            " ('Study', 'Uni-370 essay', 'active')")
+    from marrow import sessionend_async
+    out = sessionend_async._load_active_tasks_for_sonnet(conn)
+    conn.close()
+    import re
+    assert re.search(r"- \[#\d+\] Uni-370 essay \(Study\)", out)
+
+
+def test_parse_task_rows_tick_and_new():
+    from marrow.sessionend_prompts import parse_task_rows
+    raw = ('prefix\n===TASK===\n'
+           '[{"id": 12, "status": "done"},'
+           ' {"title": "Uni-370 AT3", "category": "Assignment",'
+           ' "status": "active"}]\n===END===\n')
+    rows = parse_task_rows(raw)
+    assert rows[0] == {"id": 12, "status": "done"}
+    assert rows[1]["title"] == "Uni-370 AT3"
+
+
+def test_parse_task_rows_empty_on_garbage():
+    from marrow.sessionend_prompts import parse_task_rows
+    assert parse_task_rows("no marker") == []
+    assert parse_task_rows("===TASK===\nnot json\n===END===\n") == []
+
+
+def test_parse_doing_diff_all_verbs():
+    from marrow.sessionend_prompts import parse_doing_diff
+    raw = (
+        "===DOING_DIFF===\n"
+        "CLOSE: 1, 2\n"
+        "KEEP: 3\n"
+        "UPDATE:\n"
+        "#4 [Marrow] - thread D\n"
+        "  - Current: new\n"
+        "  - Next: x\n"
+        "  - Reference: N/A\n"
+        "ADD:\n"
+        "[Study] - thread E\n"
+        "  - Current: e\n"
+        "  - Next: y\n"
+        "  - Reference: N/A\n"
+        "===END===\n")
+    d = parse_doing_diff(raw)
+    assert d["close"] == [1, 2]
+    assert d["keep"] == [3]
+    assert len(d["update"]) == 1 and d["update"][0]["id"] == 4
+    assert "thread D" in d["update"][0]["block"]
+    assert len(d["add"]) == 1 and "thread E" in d["add"][0]
+
+
+def test_parse_doing_diff_missing_subblocks_degrade():
+    from marrow.sessionend_prompts import parse_doing_diff
+    # No marker at all.
+    assert parse_doing_diff("nothing") == {
+        "close": [], "keep": [], "update": [], "add": []}
+    # Only CLOSE present; bad id token skipped, not crashing.
+    d = parse_doing_diff("===DOING_DIFF===\nCLOSE: 1, foo, 3\n===END===\n")
+    assert d["close"] == [1, 3]
+    assert d["keep"] == [] and d["update"] == [] and d["add"] == []
+
+
+def test_parse_note_done_drops_na():
+    from marrow.sessionend_prompts import parse_note_done
+    assert parse_note_done("===NOTE_DONE===\nN/A\n===END===\n") == []
+    out = parse_note_done(
+        "===NOTE_DONE===\n- buy hand cream\n- recharge SIM\n===END===\n")
+    assert out == ["- buy hand cream", "- recharge SIM"]
+
+
+def test_seg_handover_applies_diff(db_env, tmp_path, monkeypatch):
+    """seg_handover applies the DOING_DIFF (ADD) to the single file."""
     db, _ = db_env
     h = tmp_path / "handover.md"
     monkeypatch.setattr("marrow.handover_render._RENDERED_PATH", h)
-    raw = ("===DONE===\n- shipped phase 3 handover\n"
-           "===OPEN===\n- N/A\n"
-           "===PLAN===\n- launchctl + commit\n"
-           "===REFERENCE===\n- N/A\n"
-           "===END===\n")
+    raw = (
+        "===DOING_DIFF===\n"
+        "ADD:\n"
+        "[Marrow] - shipped phase 3 handover\n"
+        "  - Current: diff-apply done\n"
+        "  - Next: launchctl + commit\n"
+        "  - Reference: N/A\n"
+        "===END===\n"
+        "===NOTE_DONE===\nN/A\n===END===\n")
     conn = storage.connect(db)
     try:
         from marrow.sessionend_writers import seg_handover
@@ -819,15 +946,15 @@ def test_seg_handover_composes_full_file(db_env, tmp_path, monkeypatch):
         conn.close()
     assert n == 1
     body = h.read_text(encoding="utf-8")
-    assert "- shipped phase 3 handover" in body
-    assert "- launchctl + commit" in body
+    assert "shipped phase 3 handover" in body
+    assert "diff-apply done" in body
     assert "handover: ready sid:S1" in body
-    assert "handover: pending" not in body
-    assert "## Done" in body and "## Plan" in body
+    assert "<!-- id:1 -->" in body
+    assert "## Done" in body and "## Doing" in body
 
 
-def test_seg_handover_noop_on_empty_blocks(db_env, tmp_path, monkeypatch):
-    """If LLM returns no markers, leave file untouched."""
+def test_seg_handover_noop_on_no_diff_marker(db_env, tmp_path, monkeypatch):
+    """No DOING_DIFF marker → leave file untouched."""
     db, _ = db_env
     h = tmp_path / "handover.md"
     h.write_text("PRE-EXISTING", encoding="utf-8")
@@ -1144,16 +1271,18 @@ def test_sessionend_writer_operationalerror_partial_not_fail(db_env, tmp_path,
     monkeypatch.setattr("marrow.sessionend_writers._PROGRESS_DEFAULT", pmd)
 
     state_raw = (
-        "===TASK_CAND===\n"
-        "[{\"title\": \"unrelated task\", \"status\": \"done\","
-        " \"due\": null, \"completed_at\": null, \"note\": \"\"}]\n"
+        "===TASK===\n"
+        "[{\"title\": \"unrelated task\", \"category\": \"Daily\","
+        " \"status\": \"active\", \"due\": null, \"note\": \"\"}]\n"
         "===END===\n"
-        "===HANDOVER===\n"
-        "===DONE===\n- did stuff\n"
-        "===OPEN===\n- N/A\n"
-        "===PLAN===\n- next\n"
-        "===REFERENCE===\n- N/A\n"
+        "===DOING_DIFF===\n"
+        "ADD:\n"
+        "[Marrow] - did stuff\n"
+        "  - Current: stuff done\n"
+        "  - Next: next\n"
+        "  - Reference: N/A\n"
         "===END===\n"
+        "===NOTE_DONE===\nN/A\n===END===\n"
     )
     narrative_raw = (
         "===AFFECT===\n"
@@ -1213,7 +1342,6 @@ def test_sessionend_writer_operationalerror_partial_not_fail(db_env, tmp_path,
     )
     # Other writers in the same call ran to completion.
     assert seg_map.get("sessionend_extract_task_cand") == "ok"
-    assert seg_map.get("sessionend_extract_progress") == "ok"
     assert seg_map.get("sessionend_extract_affect") == "ok"
     assert seg_map.get("sessionend_extract_digest") == "ok"
 

@@ -71,7 +71,7 @@ def test_cosine_top_match_picks_highest(db, monkeypatch):
 # ── tasks: sessionend_writers.seg_task_cand cosine layer ────────────────────
 
 _TASK_RAW = (
-    "===TASK_CAND===\n"
+    "===TASK===\n"
     "[{{\"title\":\"{title}\",\"category\":\"Study\",\"status\":\"active\"}}]\n"
     "===END===\n"
 )

@@ -347,61 +347,82 @@ def test_render_affect_empty_tables(env):
     assert "_none_" in out
 
 
-# ── Unit: handover_render (Plan H — 4 state-axis sections) ──────────────────
+# ── render_skeleton / template helpers (3-section handover) ──────────────────
 
-def _write_full(env, sid: str, *, done: str = "- N/A", open_: str = "- N/A",
-                plan: str = "- N/A", reference: str = "- N/A"):
+def test_render_skeleton_has_three_sections_and_no_instruction_lines(env):
+    db, _, _, _ = env
+    conn = _conn(db)
+    out = handover_render.render_skeleton(conn)
+    conn.close()
+    assert "## Done" in out
+    assert "## Doing" in out
+    assert "## Lumi's Note" in out
+    # No legacy 4-section headers.
+    assert "## Open" not in out
+    assert "## Plan" not in out
+    assert "## Reference" not in out
+    # `> ` instruction lines stripped.
+    for line in out.splitlines():
+        assert not line.startswith("> "), f"instruction line leaked: {line!r}"
+
+
+def test_render_skeleton_timestamp_replaced(env):
+    db, _, _, _ = env
+    conn = _conn(db)
+    out = handover_render.render_skeleton(conn)
+    conn.close()
+    assert "{{YYYY-MM-DD HH:MM}}" not in out
+    import re
+    assert re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", out)
+
+
+def test_strip_instruction_preserves_trailing_newline():
+    src = "## A\n> hide\n> hide2\n"
+    out = handover_render._strip_instruction_lines(src)
+    assert out.endswith("\n"), (
+        "trailing \\n must survive so regex inject sites still match")
+
+
+# ── seg_handover atomic write via apply_diff ────────────────────────────────
+
+def _apply(env, sid: str, raw: str):
+    """Run seg_handover (diff-apply) against the env's redirected file."""
+    from marrow.sessionend_writers import seg_handover
     db, _, _, _ = env
     conn = _conn(db)
     try:
-        return handover_render.write_handover_full(
-            conn, sid, done=done, open_=open_, plan=plan, reference=reference)
+        return seg_handover(conn, raw, sid)
     finally:
         conn.close()
 
 
-def test_handover_write_full_atomic_and_ready_stamp(env):
-    """write_handover_full produces file at _RENDERED_PATH with ready stamp +
-    4 state-axis sections. Top-section block is stripped from handover."""
+def _add_raw(scope: str, title: str, current: str = "s", nxt: str = "n"):
+    return (
+        "===DOING_DIFF===\nADD:\n"
+        f"[{scope}] - {title}\n"
+        f"  - Current: {current}\n"
+        f"  - Next: {nxt}\n"
+        "  - Reference: N/A\n"
+        "===END===\n"
+        "===NOTE_DONE===\nN/A\n===END===\n")
+
+
+def test_apply_diff_atomic_and_ready_stamp(env):
+    """First diff-apply seeds the file with ready stamp + 3 sections."""
     db, _, _, rendered_path = env
-    result_path = _write_full(env, "abc123",
-                              done="- did X\n- did Y",
-                              plan="- pick up Z")
-    assert result_path == rendered_path
+    _apply(env, "abc123", _add_raw("Marrow", "did X"))
     assert rendered_path.exists()
     content = rendered_path.read_text(encoding="utf-8")
-
     assert "<!-- handover: ready sid:abc123 ts:" in content
     assert "pending sid:" not in content
-    # Top section markers stripped
-    assert "<!-- marrow:top:start -->" not in content
-    assert "<!-- marrow:top:end -->" not in content
-    assert "## Alerts" not in content
-    # 4 state-axis sections present
-    assert "## Done" in content
-    assert "## Open" in content
-    assert "## Plan" in content
-    assert "## Reference" in content
-    # No legacy time-axis headers
-    assert "## Previous Sessions" not in content
-    assert "## This Session" not in content
-    assert "## Next Session" not in content
-    # LLM bullets injected
-    assert "- did X" in content
-    assert "- pick up Z" in content
+    assert "## Done" in content and "## Doing" in content
+    assert "## Lumi's Note" in content
+    assert "did X" in content
+    assert "<!-- id:1 -->" in content
 
 
-def test_handover_write_full_strips_instruction_lines(env):
-    """Lines starting with '> ' must not appear in the rendered output."""
-    db, _, _, rendered_path = env
-    _write_full(env, "s1", done="- a", plan="- b")
-    content = rendered_path.read_text(encoding="utf-8")
-    for line in content.splitlines():
-        assert not line.startswith("> "), f"Instruction line leaked: {line!r}"
-
-
-def test_handover_write_full_atomic_via_replace(env, monkeypatch):
-    """Atomic write uses os.replace (rename). Verify via monkeypatch."""
+def test_apply_diff_uses_os_replace(env, monkeypatch):
+    """Atomic write goes through os.replace (rename)."""
     db, _, _, rendered_path = env
     replace_calls = []
     real_replace = os.replace
@@ -411,42 +432,70 @@ def test_handover_write_full_atomic_via_replace(env, monkeypatch):
         real_replace(src, dst)
 
     monkeypatch.setattr(os, "replace", tracking_replace)
-    _write_full(env, "s-atomic", done="- a", plan="- b")
-
+    _apply(env, "s-atomic", _add_raw("Marrow", "thing"))
     assert len(replace_calls) >= 1
     assert any(str(rendered_path) in str(dst) for _, dst in replace_calls)
 
 
-def test_handover_timestamp_replaced(env):
-    """{{YYYY-MM-DD HH:MM}} placeholder is replaced with current time."""
+def test_snapshot_audit_row_written_each_apply(env):
+    """Each diff-apply writes a handover_snapshot row (next-write diff baseline)
+    plus a handover_overwritten row when the body changed."""
+    db, _, _, _ = env
+    _apply(env, "s1", _add_raw("Marrow", "first body"))
+    _apply(env, "s2", _add_raw("Study", "second body"))
+    conn = _conn(db)
+    snapshots = conn.execute(
+        "SELECT summary FROM audit_log WHERE action='handover_snapshot'"
+        " ORDER BY id").fetchall()
+    overwritten = conn.execute(
+        "SELECT summary FROM audit_log WHERE action='handover_overwritten'"
+        " ORDER BY id").fetchall()
+    conn.close()
+    assert len(snapshots) == 2
+    assert "second body" in snapshots[-1]["summary"]
+    assert "sha256=" in snapshots[0]["summary"]
+    # The second apply overwrote the first body.
+    assert len(overwritten) >= 1
+    assert any("first body" in o["summary"] for o in overwritten)
+
+
+def test_apply_diff_flock_retry_then_partial(env, monkeypatch):
+    """flock contention → retry then partial file + audit row, no crash."""
     db, _, _, rendered_path = env
-    _write_full(env, "s-ts", done="- a", plan="- b")
-    content = rendered_path.read_text(encoding="utf-8")
-    assert "{{YYYY-MM-DD HH:MM}}" not in content
-    import re
-    assert re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", content)
+    rendered_path.parent.mkdir(parents=True, exist_ok=True)
+    rendered_path.write_text("## Done\n- N/A\n\n## Doing\n- N/A\n\n"
+                             "## Lumi's Note\n- N/A\n", encoding="utf-8")
+
+    calls = {"n": 0}
+    real_flock = handover_render.fcntl.flock
+
+    def flaky_flock(fd, op):
+        if op & handover_render.fcntl.LOCK_EX:
+            calls["n"] += 1
+            raise BlockingIOError("locked")
+        return real_flock(fd, op)
+
+    monkeypatch.setattr(handover_render.fcntl, "flock", flaky_flock)
+    monkeypatch.setattr(handover_render.time, "sleep", lambda s: None)
+
+    from marrow import handover_diff
+    conn = _conn(db)
+    result = handover_diff.apply_diff(
+        conn, "sid-lock",
+        {"close": [], "keep": [], "update": [],
+         "add": ["[Marrow] - new\n  - Current: s\n  - Next: n"
+                 "\n  - Reference: N/A"]}, [])
+    rows = conn.execute(
+        "SELECT summary FROM audit_log WHERE action='handover_lock_failed'"
+    ).fetchall()
+    conn.close()
+    assert calls["n"] >= 3
+    assert "partial" in result.name
+    assert result.exists()
+    assert len(rows) == 1
 
 
-def test_session_start_is_readonly_for_handover(env, monkeypatch, tmp_path):
-    """SessionStart hook must NEVER mutate handover.md — file mtime unchanged."""
-    import io, json as _json
-    db, _, _, rendered_path = env
-    _write_full(env, "pre-existing", done="- prior session content",
-                plan="- next plan")
-    before_bytes = rendered_path.read_bytes()
-    before_mtime = rendered_path.stat().st_mtime_ns
-
-    monkeypatch.setattr("sys.stdin", io.StringIO(_json.dumps({})))
-    monkeypatch.setattr("sys.stdout", io.StringIO())
-    rc = hooks.main(["session_start"])
-    assert rc == 0
-
-    # File untouched.
-    assert rendered_path.read_bytes() == before_bytes
-    assert rendered_path.stat().st_mtime_ns == before_mtime
-
-
-# ── Unit: dashboard swap ──────────────────────────────────────────────────────
+# ── dashboard swap (independent of handover) ────────────────────────────────
 
 def test_dashboard_top_now_uses_4_sections(env):
     """render_top from dashboard should use top_sections and contain all 4 headers."""
@@ -455,12 +504,10 @@ def test_dashboard_top_now_uses_4_sections(env):
     conn = _conn(db)
     block = dashboard.render_top(conn)
     conn.close()
-
     assert "## Alerts" in block
     assert "## Tasks" in block
     assert "## Milestone candidate" in block
     assert "## Affect" in block
-    # Old "Open Tasks" header must not appear
     assert "## Open Tasks" not in block
 
 
@@ -477,15 +524,29 @@ def test_dashboard_top_markers_present(env):
     assert "## Alerts" in content
 
 
-# ── Unit: hook wiring ─────────────────────────────────────────────────────────
+# ── hook wiring: handover is read-only at session_start / session_end ───────
+
+def test_session_start_is_readonly_for_handover(env, monkeypatch, tmp_path):
+    """SessionStart hook must NEVER mutate handover.md — file mtime unchanged."""
+    import io as _io
+    import json as _json
+    db, _, _, rendered_path = env
+    _apply(env, "pre-existing", _add_raw("Marrow", "prior session content"))
+    before_bytes = rendered_path.read_bytes()
+    before_mtime = rendered_path.stat().st_mtime_ns
+
+    monkeypatch.setattr("sys.stdin", _io.StringIO(_json.dumps({})))
+    monkeypatch.setattr("sys.stdout", _io.StringIO())
+    rc = hooks.main(["session_start"])
+    assert rc == 0
+    assert rendered_path.read_bytes() == before_bytes
+    assert rendered_path.stat().st_mtime_ns == before_mtime
+
 
 def test_session_end_does_not_write_handover(env, monkeypatch, tmp_path):
     """Bug #1 fix: session_end MUST NOT touch handover.md — sessionend_async
-    (spawned detached) is now the single writer.
-    """
+    (spawned detached) is now the single writer."""
     db, dash, _, rendered_path = env
-
-    # Pre-seed handover.md with content the hook must leave alone.
     rendered_path.write_text("PRE-EXISTING CONTENT", encoding="utf-8")
     before = rendered_path.read_bytes()
 
@@ -502,384 +563,3 @@ def test_session_end_does_not_write_handover(env, monkeypatch, tmp_path):
     assert rc == 0
     assert rendered_path.read_bytes() == before
 
-
-# ── render_full + Reference ─────────────────────────────────────────────────
-
-def test_render_full_injects_reference_body(env):
-    db, _, _, _ = env
-    conn = storage.connect(db)
-    out = handover_render.render_full(
-        conn, sid="s1",
-        done="- did X", open_="- N/A", plan="- pick up Y",
-        reference="- `marrow/foo.py:42` — entry point\n- skill: tdd",
-        now_epoch=1700000000,
-    )
-    assert "## Reference\n" in out
-    assert "`marrow/foo.py:42` — entry point" in out
-    assert "skill: tdd" in out
-
-
-def test_render_full_reference_defaults_to_na(env):
-    db, _, _, _ = env
-    conn = storage.connect(db)
-    out = handover_render.render_full(
-        conn, sid="s2",
-        done="- did X", open_="- N/A", plan="- pick up Y",
-        reference="",
-        now_epoch=1700000000,
-    )
-    assert "## Reference\n- N/A" in out
-
-
-def test_strip_instruction_preserves_trailing_newline():
-    src = "## A\n> hide\n> hide2\n"
-    out = handover_render._strip_instruction_lines(src)
-    assert out.endswith("\n"), "trailing \\n must survive so regex inject sites still match"
-
-
-# ── Plan H: tombstone + snapshot + flock + structural invariants ────────────
-
-def test_snapshot_audit_row_written_each_write(env):
-    """Each write captures the body it is about to atomic_write as a
-    handover_snapshot row — that becomes the diff baseline for the next write.
-    A second `handover_overwritten` row captures the pre-overwrite text."""
-    db, _, _, _ = env
-    _write_full(env, "s1", done="- first body", plan="- next1")
-    _write_full(env, "s2", done="- second body", plan="- next2")
-
-    conn = _conn(db)
-    snapshots = conn.execute(
-        "SELECT summary FROM audit_log"
-        " WHERE action='handover_snapshot' ORDER BY id"
-    ).fetchall()
-    overwritten = conn.execute(
-        "SELECT summary FROM audit_log"
-        " WHERE action='handover_overwritten' ORDER BY id"
-    ).fetchall()
-    conn.close()
-    # Two snapshot rows — one per write.
-    assert len(snapshots) == 2
-    # Latest snapshot reflects the most recent write.
-    assert "- second body" in snapshots[-1]["summary"]
-    # Overwritten row captured the pre-overwrite body (from s1).
-    assert len(overwritten) == 1
-    assert "- first body" in overwritten[0]["summary"]
-    assert "sha256=" in snapshots[0]["summary"]
-
-
-def test_flock_retry_then_partial(env, monkeypatch):
-    """flock contention → 3x retry then partial file + audit row, no crash."""
-    db, _, _, rendered_path = env
-    rendered_path.parent.mkdir(parents=True, exist_ok=True)
-    rendered_path.write_text("seed", encoding="utf-8")
-
-    calls = {"n": 0}
-    real_flock = handover_render.fcntl.flock
-
-    def flaky_flock(fd, op):
-        if op & handover_render.fcntl.LOCK_EX:
-            calls["n"] += 1
-            raise BlockingIOError("locked")
-        return real_flock(fd, op)
-
-    monkeypatch.setattr(handover_render.fcntl, "flock", flaky_flock)
-    monkeypatch.setattr(handover_render.time, "sleep", lambda s: None)
-
-    conn = _conn(db)
-    result = handover_render.write_handover_full(
-        conn, "sid-lock", done="- new", open_="- N/A", plan="- next",
-        reference="- N/A")
-    rows = conn.execute(
-        "SELECT summary FROM audit_log WHERE action='handover_lock_failed'"
-    ).fetchall()
-    conn.close()
-    assert calls["n"] >= 3
-    assert "partial" in result.name
-    assert result.exists()
-    assert len(rows) == 1
-
-
-def test_user_deleted_bullet_tombstoned_and_filtered_on_next_render(env):
-    """End-to-end Lumi-edit survival:
-    1. Auto-write places `- decision X` and `- decision Y` in Done.
-    2. Lumi edits handover.md and removes `- decision Y` by hand.
-    3. Next auto-write re-emits `- decision Y` in Done.
-    Tombstone records the diff and the next render drops it again."""
-    db, _, _, rendered_path = env
-
-    # Step 1: initial auto-write.
-    _write_full(env, "s1",
-                done="- decision X\n- decision Y",
-                plan="- pick up Z")
-    body_1 = rendered_path.read_text(encoding="utf-8")
-    assert "- decision Y" in body_1
-
-    # Step 2: Lumi removes "- decision Y" from the rendered file directly.
-    edited = body_1.replace("\n- decision Y", "")
-    rendered_path.write_text(edited, encoding="utf-8")
-
-    # Step 3: sonnet re-emits both bullets — the next auto-write must filter Y.
-    _write_full(env, "s2",
-                done="- decision X\n- decision Y",
-                plan="- pick up Z")
-    body_2 = rendered_path.read_text(encoding="utf-8")
-    done_section = body_2.split("## Done")[1].split("## Open")[0]
-    assert "- decision X" in done_section
-    assert "- decision Y" not in done_section, (
-        "Tombstone-filter regression: Lumi-deleted bullet revived by sonnet.")
-
-
-def test_tombstone_rows_persist_in_md_index(env):
-    """MdIndexTombstoneStore writes through to md_index, keyed on handover path."""
-    db, _, _, rendered_path = env
-
-    _write_full(env, "s1", done="- keep\n- drop me")
-    body_1 = rendered_path.read_text(encoding="utf-8")
-    rendered_path.write_text(body_1.replace("\n- drop me", ""),
-                             encoding="utf-8")
-    _write_full(env, "s2", done="- keep\n- drop me")
-
-    conn = _conn(db)
-    rows = conn.execute(
-        "SELECT block_id, content_hash FROM md_index"
-        " WHERE path=? AND tombstone_at IS NOT NULL",
-        (str(rendered_path),),
-    ).fetchall()
-    conn.close()
-    assert len(rows) >= 1
-    # content_hash carries the bullet summary (truncated to 200 chars).
-    assert any("drop me" in (r["content_hash"] or "") for r in rows)
-
-
-def test_empty_inputs_render_na_in_all_sections(env):
-    """No content for any section → `- N/A` in all four blocks."""
-    db, _, _, rendered_path = env
-    _write_full(env, "s-empty")
-    content = rendered_path.read_text(encoding="utf-8")
-    for header in ("## Done", "## Open", "## Plan", "## Reference"):
-        section = content.split(header)[1].split("##")[0]
-        assert "- N/A" in section, f"{header} missing N/A placeholder"
-
-
-# ── Hand-added bullet preservation (symmetric with tombstone delete) ────────
-
-def test_user_added_bullet_survives_next_write(env):
-    """User adds a bullet in Done; sonnet next run doesn't re-emit it; merger
-    appends it back so the addition is not lost."""
-    db, _, _, rendered_path = env
-    _write_full(env, "s1", done="- alpha", plan="- p")
-    body_1 = rendered_path.read_text(encoding="utf-8")
-    edited = body_1.replace("- alpha\n", "- alpha\n- hand-added\n")
-    rendered_path.write_text(edited, encoding="utf-8")
-
-    _write_full(env, "s2", done="- alpha", plan="- p")
-    body_2 = rendered_path.read_text(encoding="utf-8")
-    done_section = body_2.split("## Done")[1].split("## Open")[0]
-    assert "- alpha" in done_section
-    assert "- hand-added" in done_section
-
-
-def test_user_added_bullet_into_na_section(env):
-    """User adds a bullet into a section sonnet leaves as N/A; the N/A
-    placeholder drops and the user bullet stands alone."""
-    db, _, _, rendered_path = env
-    _write_full(env, "s1", done="- a", open_="- N/A", plan="- p")
-    body_1 = rendered_path.read_text(encoding="utf-8")
-    edited = body_1.replace(
-        "## Open\n- N/A\n", "## Open\n- 自己加的 open 项\n")
-    rendered_path.write_text(edited, encoding="utf-8")
-
-    _write_full(env, "s2", done="- a", open_="- N/A", plan="- p")
-    body_2 = rendered_path.read_text(encoding="utf-8")
-    open_section = body_2.split("## Open")[1].split("## Plan")[0]
-    assert "- 自己加的 open 项" in open_section
-    assert "- N/A" not in open_section
-
-
-def test_user_added_bullet_dedup_with_sonnet_reemit(env):
-    """Sonnet later emits the same bullet sonnet missed before; merger must
-    not duplicate it."""
-    db, _, _, rendered_path = env
-    _write_full(env, "s1", done="- alpha", plan="- p")
-    body_1 = rendered_path.read_text(encoding="utf-8")
-    edited = body_1.replace("- alpha\n", "- alpha\n- beta\n")
-    rendered_path.write_text(edited, encoding="utf-8")
-
-    _write_full(env, "s2", done="- alpha\n- beta", plan="- p")
-    body_2 = rendered_path.read_text(encoding="utf-8")
-    done_section = body_2.split("## Done")[1].split("## Open")[0]
-    assert done_section.count("- beta") == 1
-
-
-def test_user_added_then_deleted_does_not_revive(env):
-    """User adds X, then on a later edit deletes X. Tombstone wins — X must
-    not come back via the user-added path."""
-    db, _, _, rendered_path = env
-    _write_full(env, "s1", done="- alpha", plan="- p")
-    # Round 1: user adds beta.
-    body_1 = rendered_path.read_text(encoding="utf-8")
-    rendered_path.write_text(
-        body_1.replace("- alpha\n", "- alpha\n- beta\n"), encoding="utf-8")
-    _write_full(env, "s2", done="- alpha", plan="- p")
-    # Round 2: user deletes beta.
-    body_2 = rendered_path.read_text(encoding="utf-8")
-    assert "- beta" in body_2
-    rendered_path.write_text(
-        body_2.replace("\n- beta", ""), encoding="utf-8")
-    _write_full(env, "s3", done="- alpha", plan="- p")
-    body_3 = rendered_path.read_text(encoding="utf-8")
-    done_section = body_3.split("## Done")[1].split("## Open")[0]
-    assert "- beta" not in done_section
-
-
-# ── Note passthrough section (hand-edit only, never auto-modified) ──────────
-
-def test_note_section_present_on_first_render(env):
-    """First-ever write places `## Note` with template default body."""
-    db, _, _, rendered_path = env
-    _write_full(env, "s-note-1")
-    content = rendered_path.read_text(encoding="utf-8")
-    assert "## Note" in content
-    note_section = content.split("## Note")[1].split("<!--")[0]
-    assert note_section.strip() == "- N/A"
-
-
-def test_note_hand_edit_survives_next_write(env):
-    """User hand-edits Note; next auto-write preserves it verbatim."""
-    db, _, _, rendered_path = env
-    _write_full(env, "s1", done="- a", plan="- b")
-    body_1 = rendered_path.read_text(encoding="utf-8")
-    edited = body_1.replace(
-        "## Note\n- N/A\n",
-        "## Note\n- carryover idea\n- 自己写的备忘\n")
-    rendered_path.write_text(edited, encoding="utf-8")
-
-    _write_full(env, "s2", done="- a2", plan="- b2")
-    body_2 = rendered_path.read_text(encoding="utf-8")
-    note_section = body_2.split("## Note")[1].split("<!--")[0]
-    assert "- carryover idea" in note_section
-    assert "- 自己写的备忘" in note_section
-    # And the auto-managed sections still updated.
-    assert "- a2" in body_2 and "- b2" in body_2
-
-
-def test_note_edit_does_not_pollute_tombstones(env):
-    """Adding then removing a Note bullet must not tombstone any Done bullet,
-    even if the Note bullet text happens to hash like a real Done bullet."""
-    db, _, _, rendered_path = env
-    _write_full(env, "s1", done="- decision X", plan="- next")
-    body_1 = rendered_path.read_text(encoding="utf-8")
-    # Lumi writes a Note bullet with the same text as a Done bullet, then deletes it.
-    with_note = body_1.replace(
-        "## Note\n- N/A\n", "## Note\n- decision X\n- decision Y\n")
-    rendered_path.write_text(with_note, encoding="utf-8")
-    _write_full(env, "s2", done="- decision X", plan="- next")
-    body_2 = rendered_path.read_text(encoding="utf-8")
-
-    # Done bullet survives — Note edit must not tombstone it.
-    done_section = body_2.split("## Done")[1].split("## Open")[0]
-    assert "- decision X" in done_section
-
-    # No tombstone rows landed for either Note bullet.
-    conn = _conn(db)
-    rows = conn.execute(
-        "SELECT content_hash FROM md_index WHERE path=?"
-        " AND tombstone_at IS NOT NULL",
-        (str(rendered_path),),
-    ).fetchall()
-    conn.close()
-    joined = " ".join((r["content_hash"] or "") for r in rows)
-    assert "decision X" not in joined
-    assert "decision Y" not in joined
-
-
-def test_note_empty_after_user_clears(env):
-    """User clears Note body entirely; renderer keeps it empty (no N/A revive)."""
-    db, _, _, rendered_path = env
-    _write_full(env, "s1", done="- a", plan="- b")
-    body_1 = rendered_path.read_text(encoding="utf-8")
-    cleared = body_1.replace("## Note\n- N/A\n", "## Note\n")
-    rendered_path.write_text(cleared, encoding="utf-8")
-    _write_full(env, "s2", done="- a", plan="- b")
-    body_2 = rendered_path.read_text(encoding="utf-8")
-    note_section = body_2.split("## Note")[1].split("<!--")[0]
-    assert note_section.strip() == ""
-
-
-# ── wt-md-f: MdIndex-backed tombstone adapter ───────────────────────────────
-
-def test_new_store_is_md_index_backed(env):
-    """_new_store() returns an MdIndex-backed adapter; tombstones land in
-    md_index table, not audit_log."""
-    db, _, _, rendered_path = env
-    conn = _conn(db)
-    store = handover_render._new_store(conn)
-    h = "deadbeef" * 5
-    store.tombstone(h, summary="some bullet")
-    listed = store.list_tombstones()
-    # Ensure tombstone surfaces via the new store.
-    assert h in listed
-    # Confirm row landed in md_index, not audit_log.
-    rows = conn.execute(
-        "SELECT COUNT(*) FROM md_index WHERE path=? AND block_id=?"
-        " AND tombstone_at IS NOT NULL",
-        (str(rendered_path), h),
-    ).fetchone()
-    conn.close()
-    assert rows[0] == 1
-
-
-def test_new_store_clear_tombstone_via_md_index(env):
-    db, _, _, rendered_path = env
-    conn = _conn(db)
-    store = handover_render._new_store(conn)
-    h1, h2 = "aaa" * 10, "bbb" * 10
-    store.tombstone(h1, summary="a")
-    store.tombstone(h2, summary="b")
-    assert {h1, h2}.issubset(store.list_tombstones())
-    store.clear_tombstone(h1)
-    listed = store.list_tombstones()
-    conn.close()
-    assert h1 not in listed
-    assert h2 in listed
-
-
-def test_new_store_record_and_get_hash_use_md_index(env):
-    """record_block / get_hash flow through MdIndex; baseline survives."""
-    db, _, _, rendered_path = env
-    conn = _conn(db)
-    store = handover_render._new_store(conn)
-    bid = "blk-handover-1"
-    store.record_block(bid, "hash-v1")
-    assert store.get_hash(bid) == "hash-v1"
-    store.record_block(bid, "hash-v2")
-    assert store.get_hash(bid) == "hash-v2"
-    conn.close()
-
-
-def test_user_deleted_bullet_uses_md_index_table(env):
-    """End-to-end Lumi-edit survival flow: tombstone row lands in md_index,
-    bullet stays filtered on next auto-write."""
-    db, _, _, rendered_path = env
-
-    _write_full(env, "s1",
-                done="- decision X\n- decision Y",
-                plan="- pick up Z")
-    body_1 = rendered_path.read_text(encoding="utf-8")
-    edited = body_1.replace("\n- decision Y", "")
-    rendered_path.write_text(edited, encoding="utf-8")
-    _write_full(env, "s2",
-                done="- decision X\n- decision Y",
-                plan="- pick up Z")
-    body_2 = rendered_path.read_text(encoding="utf-8")
-    done_section = body_2.split("## Done")[1].split("## Open")[0]
-    assert "- decision Y" not in done_section
-
-    conn = _conn(db)
-    rows = conn.execute(
-        "SELECT block_id FROM md_index WHERE path=?"
-        " AND tombstone_at IS NOT NULL",
-        (str(rendered_path),),
-    ).fetchall()
-    conn.close()
-    assert rows, "tombstone row did not land in md_index for handover path"

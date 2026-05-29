@@ -294,7 +294,7 @@ def test_seg_task_cand_done_updates_not_inserts(conn, tmp_path):
     before = conn.execute("SELECT COUNT(*) c FROM tasks WHERE title='Fix bug'").fetchone()["c"]
     assert before == 1
 
-    raw = '===TASK_CAND===\n[{"title": "Fix bug", "status": "done", "category": "Project"}]\n===END==='
+    raw = '===TASK===\n[{"title": "Fix bug", "status": "done", "category": "Project"}]\n===END==='
     _seg_task_cand(conn, raw)
 
     rows = conn.execute("SELECT status FROM tasks WHERE title='Fix bug'").fetchall()
@@ -309,7 +309,7 @@ def test_seg_task_cand_skips_archived(conn, tmp_path):
 
     _insert_task(conn, "Old task", status="archived")
 
-    raw = '===TASK_CAND===\n[{"title": "Old task", "status": "active", "category": "Others"}]\n===END==='
+    raw = '===TASK===\n[{"title": "Old task", "status": "active", "category": "Others"}]\n===END==='
     _seg_task_cand(conn, raw)
 
     count = conn.execute("SELECT COUNT(*) c FROM tasks WHERE title='Old task'").fetchone()["c"]
