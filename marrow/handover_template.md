@@ -1,20 +1,18 @@
-# Marrow handover — {{YYYY-MM-DD HH:MM}}
+# Handover — {{YYYY-MM-DD HH:MM}}
 
 ## Done
-> decisions, findings, work useful for next session.
+> Resolved this session, rolling 24h. Code-managed — don't hand-edit.
 - N/A
 
-## Open
-> unfinished / blocked / undecided — state + blocker.
+## Doing
+> Open threads (open+plan merged). The <!-- id:N --> comment is code-managed — don't hand-write it.
+> Format per thread:
+>   N. [scope] - <title>
+>     - Current: <state>
+>     - Next: <next step / N/A>
+>     - Reference: <path / url / N/A>
 - N/A
 
-## Plan
-> next-step plans. exclude user-disagreed or FUTURE items. items may sit for days; sonnet drops only on explicit cancel/complete.
-- N/A
-
-## Reference
-> file:line + 4-6 word hint. path / doc URL / skill / commit. drop when stale.
-- N/A
-
-## Note
+## Lumi's Note
+> Freeform, yours. Auto-write only removes lines you've clearly completed — never adds/rewrites.
 - N/A

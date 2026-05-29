@@ -4,9 +4,10 @@ Two sonnet calls per session. Both prompts START with byte-identical
 _TRANSCRIPT_BLOCK so Anthropic's prompt-caching reuses the second call's
 prefix from the first call's cache. Instructions come AFTER the transcript.
 
-- STATE call → SEGMENT A (TASK_CAND) + SEGMENT B (HANDOVER)
-  Same attention: (what was done + audit). Emits ACTIVE_TASKS tick rows +
-  DONE/OPEN/PLAN/REFERENCE bullet blocks.
+- STATE call → SEGMENT A (TASK board) + SEGMENT B (DOING diff) + NOTE_DONE.
+  One judgement, two segments: tick the human to-do by id, then diff the
+  Doing threads (CLOSE/UPDATE/KEEP/ADD). NOTE_DONE lists Note lines clearly
+  completed this session (remove-only — never add/rewrite).
 
 - NARRATIVE call → SEGMENT A (AFFECT) + SEGMENT B (DIGEST)
   Same voice: prose + per-episode emotion. Free-text persona contract holds.
@@ -15,6 +16,9 @@ Persona for narrative free-text (AFFECT, DIGEST): first person = 屿忱;
 second person = 你/念念; no third person. Source language carries through.
 """
 from __future__ import annotations
+
+import json
+import re
 
 # Byte-identical transcript fence used by BOTH calls — cache-prefix anchor.
 _TRANSCRIPT_BLOCK = (
@@ -25,123 +29,155 @@ _TRANSCRIPT_BLOCK = (
 )
 
 
-# ── STATE prompt (TASK_CAND + HANDOVER) ─────────────────────────────────────
+# ── STATE prompt v2 (TASK board + DOING diff + NOTE_DONE) ────────────────────
 
 STATE_PROMPT = _TRANSCRIPT_BLOCK + """
-You run end-of-session state extraction on the conversation above. Emit two \
-segments — TASK_CAND, HANDOVER — between their markers. Segments are \
-independent; if one cannot be produced cleanly, still emit the other.
+You read the session transcript above and extract this session's work state in \
+ONE pass: for every work thread decide COMPLETED / ADVANCED / UNTOUCHED / \
+NEWLY-RAISED, then write that single judgement into the segments below. Never \
+decide twice.
 
-═══════════════════════════════════════════
-SEGMENT A — TASK_CAND
-═══════════════════════════════════════════
-
-Currently active tasks in the system (db snapshot — use this list to \
-tick completions; do not invent titles):
-
+Inputs:
+- Active tasks in db (tick source, fed WITH id — line form: \
+`- [#12] <title> (<category>)`):
 ===ACTIVE_TASKS===
 {active_tasks}
 ===END===
+- Current Doing threads (each carries a stable id — reference it, never invent):
+===DOING===
+{doing}
+===END===
+- Commits this session (project ground-truth for "done"; empty for study / \
+ny chat):
+===GITLOG===
+{git_log}
+===END===
+- Lumi's Note (her own to-do for the next window — read-only context):
+===NOTE===
+{note}
+===END===
 
-Tick rule:
-- If 念念 completed any task from ACTIVE_TASKS during this session, emit it \
-as a TASK_CAND row with:
-  * title: copy EXACTLY from the list (no rephrase, no translate, no truncation)
-  * status: "done"
-  * category: keep the category shown in the list
-- New tasks discovered this session (not in the list) → emit with \
-status: "active".
-- Do not emit a row for an active task 念念 did NOT touch / complete this \
-session — silence = still active, code keeps it.
+═══════════════════════════════════════════
+SEGMENT A — TASK   (the human to-do board)
+═══════════════════════════════════════════
+Maintain Lumi's to-do list: tick what got done, add genuinely new ones.
+You decide STATUS only. Code owns rendering, dates, ordering, grouping — never \
+sort or format the list yourself.
 
-Extract task-like items from the session. Both completed (today only) and \
-active. Discard uncertain items.
+Emit JSON rows:
+1. Tick by id — an ACTIVE_TASKS item completed this session → \
+{{"id": 12, "status": "done"}}.
+   Reference the #id; never retype the title (code flips WHERE id=?, so a \
+reworded title can't miss the tick).
+2. New task (NOT in ACTIVE_TASKS) → a full row with title + category, status \
+"active". Code dedups new adds semantically.
+3. Untouched active task → emit nothing (silence = still active, code keeps it).
 
-Include — by category: examples
-- Appointment: GP / physio / dining with friend
-- Assignment: 370AT2 Essay, exams
-- Study: Lec note 3, GAMSAT S1 20 MCQs
-- Project: large task or project phase only. 
-- Daily: flu vac / recharge SIM / buy hand cream
+Grain is everyday, by category:
+- Appointment: GP / physio / dinner with a friend
+- Assignment: 370 AT2 essay, exam
+- Study: lec note 3, GAMSAT S1 20 MCQs
+- Project (not everyday): large phase ONLY, max 2/day. Never debug / py / \
+config / launchd steps.
+- Daily: flu vac, recharge SIM, buy hand cream, groceries
 - Others: anything not above
 
-IMPORTANT
-- For study and project, add title prefix in title.
-  Study: Uni-/Gamsat-, e.g. Uni-370 AT2 essay
-  Project: e.g. mw-phase 2
-- Project: record large phase ONLY. 
-  - Max 2 per day - overwrite or append for the same project.
-    - Exclude all steps/details in task section.
-    - e.g. currently working on marrow then just leave mw-phase 2-3 as active. \
-    Don't add debug, py, config, launchd ... as a task.
+Title prefix: Study → Uni- / Gamsat- ; Project → mw- (e.g. mw-phase 2).
 
-Field semantics:
-- title: short imperative phrase
-- category: one of Appointment / Assignment / Study / Project / Daily / Others. \
-Unknown → Others. Required.
-- status: active / done
-- due: ISO date string or null
-- completed_at: ISO timestamp if status=done, else null
-- note: optional. 1–2 short sentences leftover / plan.
+How code renders it for Lumi (shown so you match the GRAIN, not the format — \
+you only output the JSON below):
+[Appointment] GP Followup - Fri 3:50 PM Medifirst Family Clinic [2026-06-05]
+[Study] Gamsat-S1 - 10 MCQ [2026-05-26]
+[Project] mw-phase 3-5 [2026-05-25]
 
-===TASK_CAND===
+===TASK===
 [
-  {{"title": "...", "category": "Study", "status": "active", \
-"due": null, "completed_at": null, "note": "..."}}
+  {{"id": 12, "status": "done"}},
+  {{"title": "Uni-370 AT3 essay", "category": "Assignment", \
+"status": "active", "due": null, "note": "..."}}
 ]
 ===END===
 
 ═══════════════════════════════════════════
-SEGMENT B — HANDOVER
+SEGMENT B — DOING   (handover continuation for the next AI window)
 ═══════════════════════════════════════════
+A diff against the current Doing threads: one verdict per existing id, plus new \
+threads. Drop anything vague, or that Lumi disagreed with / ignored.
 
-Prior handover (last window's 4 state-axis sections — use it to judge what \
-is still alive vs done vs abandoned this session):
+- CLOSE <id> — done / resolved this session. Evidence = a GITLOG commit or an \
+explicit completion in the transcript. Code moves it to ## Done (rolls off \
+after 24h).
+- UPDATE <id> — still open, moved forward. Rewrite its Current + Next. Lead the \
+block with `#<id>` so code knows which thread to replace.
+- KEEP <id> — untouched this session, still open. id only.
+- ADD — a NEW open thread. If it's the same as an existing id → UPDATE that id \
+instead, don't add.
+- Any existing id you do NOT mention → code keeps it untouched.
 
-===PRIOR_HANDOVER===
-{prior_handover}
+On-file thread format (match it exactly):
+N. [scope] - <title> (what it is)
+  - Current: <state — decision / finding / where it stopped>
+  - Next: <next step> (N/A if none)
+  - Reference: <file path / url> (N/A if none)
+
+[scope] is a free label you pick from content — Marrow / Study / Daily / \
+<project> / … It groups visually only. There is ONE handover file; no per-scope \
+split, nothing is dropped for being "off scope" (a GP appt in a study session \
+still belongs in TASK).
+
+Examples:
+1. [Marrow] - Auto handover feature
+  - Current: prompt + plan + template done
+  - Next: py + test
+  - Reference: sessionend_prompts.py:30; docs/plans/ho-redesign.md
+2. [Study] - SLE370 AT1
+  - Current: research round 1 done
+  - Next: intro + background
+  - Reference: SLE370/AT1/Instruction.md; Lund 2023.pdf
+3. [Daily] - New hair colour
+  - Current: discussed black → purple, went to gym @2000
+  - Next: continue when Lumi's back
+  - Reference: N/A
+
+===DOING_DIFF===
+CLOSE: <id>, <id>
+KEEP: <id>, <id>
+UPDATE:
+#<id> [scope] - <title>
+  - Current: ...
+  - Next: ...
+  - Reference: ...
+ADD:
+[scope] - <title>
+  - Current: ...
+  - Next: ...
+  - Reference: ...
 ===END===
 
-1. Classify each PRIOR bullet
-  - Drop: completed / resolved / cancelled / abandoned items.
-  - Keep: untouched and unresolved items
-    - tag [N] if unsure e.g. Write eassy P2-4 ... [N]
-    - Always keep bullets with [P](pin)
-  - Merge: updated but still unresolved items
-    - merge new info into the prior ones - no duplicates
-  
+═══════════════════════════════════════════
+BOUNDARY — anti-overlap
+═══════════════════════════════════════════
+TASK and DOING are two different tables, two readers. The same thread may \
+appear in both but in different FORM: a one-line title in TASK, a Current+Next \
+block in DOING. Decide completion ONCE: a finished thread → tick it in TASK AND \
+CLOSE its id in DOING, same call. The two outputs must never contradict.
 
-2. Write four bullet sections that drop into `## Done / ## Open / ## Plan / \
-## Reference` of the handover document.
+═══════════════════════════════════════════
+SEGMENT C — NOTE_DONE   (remove-only Note cleanup)
+═══════════════════════════════════════════
+The handover file has a `## Lumi's Note` section Lumi hand-writes (shown above \
+in ===NOTE===). You may ONLY flag lines to REMOVE — never add, rewrite, \
+reorder, or move a Note line.
 
-Global rules:
-- Flat bullets, concise and dense.
-- Language: default English; CN OK for pure casual chat.
-- Merge overlapping items into one bullet.
-- Do NOT restate content captured in other artifacts (plans, commits, diffs, \
-instruction, rubric). Point to them in REFERENCE.
-- If a section is totally empty, output a single bullet `- N/A`.
+List one VERBATIM Note line per row that is CLEARLY completed this session.
+- Evidence required: a matching commit in ===GITLOG=== OR an explicit \
+completion in the transcript. No hard proof / any doubt → omit the line \
+(leave it untouched).
+- Copy the line text exactly as it appears in ===NOTE===.
+- Nothing to remove → output a single `N/A`.
 
-Marker bodies:
-> Do not duplicate points into both open and plan. Choose one that fits best.
-> Exclude ideas / plan user ignored or rejected during the session.
-> Exclude plan that sounds too broad / vague / far away.
-- DONE: decisions, findings, work useful for next session.
-  - It's fine to keep a few significant items from previous sessions but only \
-  if relevant to current or future items.
-- OPEN: unfinished / blocked / undecided (state + blocker).
-- PLAN: next-step plans; exclude user-disagreed or FUTURE.
-- REFERENCE: file:line — 4-6 word hint (path / doc URL / skill / commit).
-
-===HANDOVER===
-===DONE===
-- bullet
-===OPEN===
-- bullet
-===PLAN===
-- bullet
-===REFERENCE===
-- `marrow/handover_render.py:60` — render entry
+===NOTE_DONE===
+N/A
 ===END===
 """
 
@@ -273,14 +309,115 @@ def _slice(raw: str, open_tag: str, *close_tags: str) -> str:
     return raw[start:end].strip()
 
 
-def parse_handover_output(raw: str) -> tuple[str, str, str, str]:
-    """Slice DONE / OPEN / PLAN / REFERENCE bullet blocks from STATE output.
-    Each defaults to empty if its marker is missing."""
-    done = _slice(raw, "===DONE===",
-                  "===OPEN===", "===PLAN===", "===REFERENCE===", "===END===")
-    open_ = _slice(raw, "===OPEN===",
-                   "===PLAN===", "===REFERENCE===", "===END===")
-    plan = _slice(raw, "===PLAN===",
-                  "===REFERENCE===", "===END===")
-    reference = _slice(raw, "===REFERENCE===", "===END===")
-    return done, open_, plan, reference
+def parse_task_rows(raw: str) -> list[dict]:
+    """JSON list between ===TASK===/===END===. Empty list on miss/parse error.
+
+    Rows are either tick rows ({"id": N, "status": "done"}) or full new-task
+    rows ({"title": ..., "category": ..., "status": ...}). seg_task_cand
+    routes on the presence of an id.
+    """
+    body = _slice(raw, "===TASK===", "===END===")
+    if not body:
+        return []
+    try:
+        parsed = json.loads(body)
+    except (json.JSONDecodeError, ValueError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [r for r in parsed if isinstance(r, dict)]
+
+
+def _parse_id_list(text: str) -> list[int]:
+    """Parse a comma/space separated id list, tolerant of `#` and junk."""
+    out: list[int] = []
+    for tok in (text or "").replace(",", " ").split():
+        t = tok.strip().lstrip("#").strip()
+        if not t:
+            continue
+        try:
+            out.append(int(t))
+        except ValueError:
+            continue
+    return out
+
+
+# A thread head is `#<id> ...` (UPDATE), `N. ...` (ordinal), or `[scope] ...`
+# (ADD). Sub-lines (`  - Current: ...`) never match. `>` instruction lines and
+# blanks are ignored as continuation/junk.
+_DOING_HEAD_RE = re.compile(r"^\s*(?:#\d+\b|\d+\.\s|\[)")
+
+
+def _split_blocks(text: str) -> list[str]:
+    """Split an UPDATE/ADD body into per-thread blocks. A new block starts on a
+    head line: `#<id> ...` (UPDATE), `N. ...` (ordinal), or `[scope] ...`
+    (ADD). Sub-lines stay with their thread; junk before the first head is
+    ignored."""
+    blocks: list[str] = []
+    cur: list[str] = []
+    for ln in (text or "").splitlines():
+        if _DOING_HEAD_RE.match(ln):
+            if cur:
+                blocks.append("\n".join(cur).rstrip())
+            cur = [ln]
+        elif cur:
+            cur.append(ln)
+    if cur:
+        blocks.append("\n".join(cur).rstrip())
+    return [b for b in blocks if b.strip()]
+
+
+def parse_doing_diff(raw: str) -> dict:
+    """Slice ===DOING_DIFF===/===END=== and parse CLOSE/KEEP/UPDATE/ADD.
+
+    Returns {"close": [int], "keep": [int],
+             "update": [{"id": int, "block": str}], "add": [str]}.
+
+    Tolerant: a missing sub-block yields an empty result; a bad id token is
+    skipped, never raises. UPDATE blocks lead with `#<id>`; the first integer
+    after `#` on the head line is the target id. No id found → block dropped
+    (cannot target safely).
+    """
+    body = _slice(raw, "===DOING_DIFF===", "===END===")
+    out: dict = {"close": [], "keep": [], "update": [], "add": []}
+    if not body:
+        return out
+
+    close_txt = _slice(body, "CLOSE:", "KEEP:", "UPDATE:", "ADD:")
+    keep_txt = _slice(body, "KEEP:", "CLOSE:", "UPDATE:", "ADD:")
+    # UPDATE: and ADD: bodies — handle either order in the output.
+    u_i = body.find("UPDATE:")
+    a_i = body.find("ADD:")
+    if u_i >= 0 and a_i >= 0 and a_i < u_i:
+        update_txt = _slice(body, "UPDATE:")
+        add_txt = _slice(body, "ADD:", "UPDATE:")
+    else:
+        update_txt = _slice(body, "UPDATE:", "ADD:")
+        add_txt = _slice(body, "ADD:")
+
+    out["close"] = _parse_id_list(close_txt)
+    out["keep"] = _parse_id_list(keep_txt)
+
+    id_head = re.compile(r"#(\d+)")
+    for blk in _split_blocks(update_txt):
+        m = id_head.search(blk.splitlines()[0])
+        if not m:
+            continue
+        out["update"].append({"id": int(m.group(1)), "block": blk})
+    out["add"] = _split_blocks(add_txt)
+    return out
+
+
+def parse_note_done(raw: str) -> list[str]:
+    """Lines between ===NOTE_DONE===/===END=== naming Note lines to remove.
+    Drops `N/A` / empty lines; verbatim text otherwise."""
+    body = _slice(raw, "===NOTE_DONE===", "===END===")
+    if not body:
+        return []
+    out: list[str] = []
+    for ln in body.splitlines():
+        s = ln.strip()
+        if not s or s.upper() == "N/A":
+            continue
+        out.append(s)
+    return out
