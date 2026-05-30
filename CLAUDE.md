@@ -22,9 +22,11 @@
 > You should proactively update these files when relevant. Check before you write handover.
 > grep in notes when I mention note
 
+- MAP.md - What/why/how of each section. key facts of implementation.
+- DESIGN.md — goal + structure + hard constraints + sub-pages. No still-changing decisions.
 - DECISIONS.md - 有争议讨论出来的技术性/细节
     - every line confidence-tagged (verified/reasoned/assumed).
-- DESIGN.md — goal + structure + hard constraints + sub-pages. No still-changing decisions.
+
 - docs/plans/FUTURE.md — unbuilt plans, by phase.
 - PROGRESS.md — historical action log. Auto append by sessionend hook.
 - docs — notes for hand issues and research scratch / archive / day-plan
