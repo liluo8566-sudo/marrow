@@ -336,36 +336,23 @@ Total: 7 plists; watcher is the only persistent process, the other 6 are schedul
 - Surface: dashboard `## Alerts` (top_sections.render_alerts) + SessionStart handoff payload. Resolve: `mw resolve <id>` manual; aging auto-resolves `milestone_added` > 7d.
 - **Where**: marrow/storage.py:106 · marrow/repo.py:68 · marrow/top_sections.py:88 · marrow/aging.py:99
 
-### 8.1 Call-site listing
+### 8.1 Scenarios
 
-- marrow/backup.py:127 · critical · backup_local · local VACUUM INTO failed
-- marrow/backup.py:140 · warn · backup_offsite · iCloud leg copy failed
-- marrow/daily.py:167 · warn · daily_routine · candidate extract block parse failure
-- marrow/daily.py:228 · critical · daily_routine · diary write failed
-- marrow/daily.py:258 · warn · daily_routine · per-day partial failure
-- marrow/daily.py:301 · warn · subpages_render · daily subpage render failure
-- marrow/daily.py:313 · warn · goose_bites · goose pick failed
-- marrow/daily.py:322 · critical · daily_routine · run aborted
-- marrow/dashboard.py:150 · warn · reconcile_candidate · milestone candidate reconcile raised
-- marrow/dashboard.py:158 · warn · reconcile_task · task reconcile raised
-- marrow/dashboard.py:166 · warn · reconcile_affect · affect reconcile raised
-- marrow/drift_sweep.py:452 · info/warn/critical · drift_* · move/rename apply paths (via _emit_alert)
-- marrow/hooks.py:211 · warn · catchup_spawn · sessionstart_catchup popen failed
-- marrow/hooks.py:333 · warn · sessionend_spawn · sessionend_async popen failed
-- marrow/hooks.py:679 · info · atlas_hook · PreToolUse atlas guidance failure
-- marrow/hooks.py:704 · warn · hook_main · top-level hook crash
-- marrow/reconcile.py:794 · warn · unanchored_task · task in md with no DB id
-- marrow/sessionend_async.py:233 · critical/warn · catchup_retry · catchup re-spawn outcome
-- marrow/sessionend_async.py:486 · warn · dashboard_write · sessionend-tail render failed
-- marrow/sessionend_async.py:496 · warn · embed_pending · embed lane raised (alert #169)
-- marrow/sessionstart_catchup.py:273 · critical · silent_death · session vanished mid-flight
-- marrow/sessionstart_catchup.py:330 · warn · catchup_spawn · respawn popen failed
-- marrow/subpages.py:118 · warn · db_pages · subpage render raised
-- marrow/subpages.py:129 · warn · db_pages · sync_file_observe raised
-- marrow/subpages.py:136 · warn · db_pages · reconcile route raised
-- marrow/subpages.py:293 · warn · atlas_sweep · atlas_sweep_fs failure via subpage path
-- marrow/subpages.py:378 · warn · db_pages · inserter write failure
-- marrow/subpages.py:388 · warn · db_pages · md_index update failure
+- backup · critical/warn · local VACUUM or iCloud offsite copy failed · backup.py:127,140
+- daily routine · critical/warn · daily run aborted / diary write failed / candidate parse or per-day partial fail · daily.py:167,228,258,322
+- daily subroutine · warn · daily subpage render or goose-bites pick failed · daily.py:301,313
+- dashboard reconcile · warn · milestone/task/affect reconcile raised during dashboard render · dashboard.py:150,158,166
+- dashboard write · warn · sessionend-tail dashboard render failed · sessionend_async.py:486
+- subpage db_pages · warn · subpage render / sync / reconcile / inserter / md_index path failed · subpages.py:118,129,136,378,388
+- atlas sweep · warn · atlas_sweep_fs via subpage path failed · subpages.py:293
+- atlas hook · info · PreToolUse atlas guidance raised · hooks.py:679
+- hook main · warn · top-level hook crash · hooks.py:704
+- hook spawn · warn · catchup or sessionend_async popen failed · hooks.py:211,333 + sessionstart_catchup.py:330
+- catchup retry · critical/warn · sessionend_async catchup respawn outcome · sessionend_async.py:233
+- catchup silent death · critical · sessionstart_catchup found a session vanished mid-flight · sessionstart_catchup.py:273
+- embed lane · warn · embed_pending raised (alert #169 site) · sessionend_async.py:496
+- unanchored task · warn · task line in md with no DB id · reconcile.py:794
+- drift sweep · info/warn/critical · move/rename apply paths (dynamic via _emit_alert) · drift_sweep.py:452
 
 ### 8.2 Known gaps
 
