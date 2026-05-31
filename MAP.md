@@ -323,7 +323,7 @@ Both 2 and 3 call `write_dashboard` which runs reconcile (idempotent) then atomi
 - com.marrow.dashboard-tick: daily 06:01 · force-render dashboard at startup · deploy/mw-dashboard-tick.plist
 - com.marrow.goose-bites: daily 06:30 · distil best-of-day quote from goose pipeline · deploy/mw-goose-bites.plist
 - com.marrow.daily-routine: daily 07:00 · full candidate extraction + diary write for yesterday · deploy/mw-daily-routine.plist
-- com.marrow.daily-catchup: daily 19:00 · backfill missing diary days in last 7d, cap 3/run · deploy/mw-daily-catchup.plist
+- com.marrow.daily-catchup: daily 19:00 · backfill last 7d event-days with no diary, cap 3/run · deploy/mw-daily-catchup.plist
 - com.marrow.db-backup: daily 03:00 · VACUUM INTO local + iCloud offsite, keep newest 14 · deploy/mw-db-backup.plist
 - com.marrow.aging: weekly Sun 12:00 · five-pass cleanup (memes/tasks/milestone alerts/goose blocks/md_index tombstones) · deploy/mw-aging.plist
 Total: 7 plists; watcher is the only persistent process, the other 6 are scheduled jobs. MCP daemon has no plist — CC launches it on-demand via .mcp.json. (CC's own jsonl-cleanup lives in ~/.claude/settings.json, separate from marrow.)

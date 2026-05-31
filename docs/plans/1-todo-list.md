@@ -1,73 +1,109 @@
-# Marrow — todo (from MAP §14 drift, 2026-05-31)
+# Marrow — todo
 
-> Real problems pulled from the MAP audit. Each one needs code, not docs. Ordered roughly by user-visible blast radius.
-
----
-
-## 1. Subpage bidirectional reconcile — expand beyond milestone + atlas
-
-**Why it matters**: today, 9 of 11 subpages are DB→md only. Anything Lumi hand-edits on those pages (meme pin toggle, entity fact rewrite, sticker description, goose-bite revote) gets silently overwritten on the next render.顺便看一下dormant的问题
-
-- **Already bidirectional**: milestone (reconcile_milestones), atlas (reconcile_atlas)
-- **Missing md→DB**: profile · diary · memes · stickers · wallet · goose-bites · study (index + children) · projects (index + children) · cheatsheet (by design, disk SoT)
-- **First targets (highest user value)**:
-  - memes — pin / unpin toggle via emoji or `<!-- pin:1 -->`
-  - profile — entity fact / aliases edit (Lumi already hand-edits entities and they revert)
-  - goose-bites — revote / pick a different quote of the day
-- **Pattern to follow**: copy reconcile_milestones (marrow/reconcile.py:162). Parse the rendered block by id anchor, diff vs DB row, INSERT/UPDATE/DELETE with audit_log entry. Hook into write_subpage so reconcile runs before render.
-- **Acceptance**: edit a meme pin in dashboard → save → next sync_loop tick → DB pin column changes, render re-emits the edit.
+> Active backlog. Merged from MAP audit + 2026-05-31 affect-recall brainstorm. Order ≈ user-visible blast radius.
 
 ---
 
-## 2. Alert system — rewrite §8 as a listing, mirror catchup style
+## Bugs
 
-**Why it matters**: Lumi flagged §8 as 一坨 prose with no actual fail-path coverage. catchup §9 lists each self-heal path explicitly (sessionstart_catchup, daily_catchup, affect-heartbeat, etc.) — §8 should do the same for alerts.
-
-- **Inventory (from rg add_alert sweep, 2026-05-31)**:
-  - backup.py: 127 critical local · 140 warn offsite
-  - daily.py: 167/258 warn · 228/322 critical · 301/313 warn (subpages, goose-bites)
-  - dashboard.py: 150/158/166 warn (candidate / task / affect reconcile)
-  - drift_sweep.py: 452 dynamic (info/warn/critical via _emit_alert)
-  - hooks.py: 211 warn catchup spawn · 333 warn sessionend spawn · 679 info atlas_hook · 704 warn hook main
-  - reconcile.py: 794 warn unanchored task
-  - sessionend_async.py: 233 critical/warn catchup retry · 486 warn dashboard write · 496 warn embed
-  - sessionstart_catchup.py: 273 critical silent_death · 330 warn catchup spawn
-  - subpages.py: 118/129/136/293/378/388 warn (db_pages + atlas sweep)
-- **Real gaps the rewrite must fix**:
-  - watcher crash — no alert anywhere; watchdog.Observer dying silently kills the whole sync layer
-  - embed_pending UNIQUE conflict — alert #169 type, currently fail-soft only on the LLM-call try/except, DB-level UNIQUE collisions vanish
-  - sync_loop reconcile exception — no alert; reconcile inside sync_loop tick raises and the next tick just tries again forever
-  - atlas_sweep_fs standalone — alert only fires when called through subpages.py:293, the launchd path doesn't alert
-- **Shape of the rewrite**: keep §8 as "what alerts are + storage + dashboard render". Add §8.1 = listing table, one row per alert site (file:line · severity · type · trigger). Add §8.2 = known gaps (the four above).
+### BUG-2 · memes daily 路径绕 3 次门槛 [中等]
+- memes id 11/12/13 (weclaude headless / CC picker / handover symlink) 21:02 一口气 10s 内 3 条新增，全部 `use_count=1`、`source_hash='daily'`、`pinned=1`
+- 你以为的门槛是 7d 内 ≥3 次才成 cand
+- 实际 daily writer 路径没该门槛或 pinned 绕过
+- 排查：sessionend writer vs daily writer 是不是两条独立路径？阈值一致否？pinned=1 谁设的？应否统一走 `memes_cand → memes`？
+- 影响：低频一次性术语污染 memes 表
 
 ---
 
-## 3. embed_pending lane — add catchup + tighter alert
+## Phases — affect recall redesign (brainstorm 2026-05-31)
 
-**Why it matters**: alert #169 has been quietly warning for a while. The lane is fail-soft so the visible symptom is "embeddings just stop updating" — silent rot of recall quality.
+### Phase A · affect dual-stream + event anchor (最痛，先做)
+- Dual-stream affect:
+  - `subject:念念` — sessionend sonnet 提取，照旧
+  - `subject:屿忱` — self-tag，每 session 最多 1-2 条强度门槛之上
+  - `subject:both` — 共同氛围（晚安、亲密时刻）
+  - 实现：affect 表加 `subject` 字段；assistant turn hook 写 self-tag 进 invisible comment；sessionend 收集时区分主体
+- `affect.event_id` 反向链补全（schema 有、writer 漏）→ 顺带解 BUG-3:
+  - sessionend extract prompt 加 `event_anchor` 字段（单 event_id 或 `[start, end]` 范围）
+  - `marrow/sessionend_writers.py:104` INSERT 加 event_id 列
+  - 历史 NULL 行不回填
 
-- **Diagnosis first**: run `mw embed --apply` manually, look at the actual sqlite error message (UNIQUE constraint failed on events_vec primary key). Decide whether the cause is (a) rowid collision after a DELETE+INSERT, (b) a stale meta row pointing to a vanished events row, or (c) something else.
-- **Fix candidate A**: in embed_pending, catch UNIQUE on insert, attempt UPDATE on the conflicting rowid, log if both fail.
-- **Fix candidate B**: add a sweep before insert that purges vec_meta rows whose rowid no longer maps to a base table row (this already exists for diary at marrow/recall.py:340 — generalise to all 6 lanes).
-- **Catchup leg**: add embed_pending to §9 — either a periodic sweep in aging.py or a check at sessionstart_catchup that backlog ≤ N rows, alert critical if exceeded.
+### Phase B · milestone ↔ affect 双向绑 + render 归并
+- `milestones` 表加 `affect_id`（或 `milestone_affect_map` 万一一对多）
+  - importance=5 自动 milestone 时写入触发它的 aff.id
+  - 三层链: `milestones.affect_id → affect.event_id → events`
+- 绑定范围限制（不全表加）:
+  - 绑: affect ↔ event · milestone ↔ affect ↔ event
+  - 不绑: memes / entities / diary / tasks（aggregate/连续剧型 FTS 自然浮）
+- render 归并层 (fusion 之后):
+  - 同主题命中多张表 → 取最高级别一条显示，分数取 `max(event, affect, milestone)`
+  - 优先级: milestone > affect > event
+  - milestone description 大多数场景够用，event snippet 不再单独浮
+  - fusion 权重不动（不要改 w_*_vec）
+
+### Phase C · recall context window + 独立 mood 块
+- event 召回带 ±1-2 条同 session 同时间窗上下文 → 顺带解 BUG-4:
+  - `recall.py:727/740` 命中 event 后顺手拉相邻行
+  - render 成对话块而不是孤立 snippet
+  - 这是 recall 整体改进，不只服务 affect
+- 独立 `## Mood (auto)` 块 (UserPromptSubmit 注入):
+  - 跟 `## Recall (auto)` 分开
+  - Gate: (1) prompt 含情绪/关系信号 OR (2) entity 命中过往强 ep；纯技术问题不触发
+  - 召回单位: 单条 affect row，按 entity overlap + 时间 decay + unresolved boost 排序，vec 辅助
+- SessionStart 3 行保持不动
+
+### Phase D · decay 公式升级
+- 公式: `weight = importance × exp(-Δt/τ × (1 - arousal/2))`
+  - τ 起步 24h；arousal 高的拉长有效 τ
+- resolved 不删除，权重降到 5%（沉底但可被 keyword 钓上）
+- recall 回温 (二期): 每次 affect 被召回时 last_seen 刷新或 weight +0.1
+
+### Phase E · MAP 文档补 binding 小节
+- §7 (Storage) 下新加 binding 小节，登记每张表的反向链状态
+- 等 Phase A/B 落地后补
 
 ---
 
-## 4. Decay floor — `imp >= 8` is unreachable on the 1–5 scale
+## Audit items (MAP review)
 
-**Why it matters**: `_decay_floor` (marrow/recall.py:436) gates the "Permanent FLOOR 0.5" tier on `imp >= 8`, leftover from an old 1–10 scale. Importance was locked 1–5 from day one, so the permanent floor never triggers — high-importance rows decay the same as imp 4–7.
+### 1. Subpage 双向 reconcile 扩散到剩下 9 个 subpage
+- 现状: 11 个 subpage 里只有 milestone + atlas 双向，其余 9 个 (profile/diary/memes/stickers/wallet/goose-bites/study/projects/cheatsheet) 你手改会被下次 render 覆盖
+- 顺手提: milestone 现在双向也有遗留 bug — 短时间剪贴 id 直接 dead，希望"id 消失 X 分钟内还能复活"，超时才 dead
+- 已 done: BUG-1 reconcile 死循环 (fc78e16)
+- 模式: 复制 `reconcile_milestones` (marrow/reconcile.py:162)，按 id anchor parse rendered block、diff vs DB、INSERT/UPDATE/DELETE + audit_log
+- 首批高价值: memes (pin toggle via emoji or `<!-- pin:1 -->`) · profile (entity fact / aliases) · goose-bites (revote)
+- Acceptance: dashboard 改 meme pin → save → 下次 sync tick → DB pin 列变，render 重发改动
+- 顺带看 dormant 问题
 
-- **Fix**: re-tier on 1–5. e.g. `imp == 5 (or source=override) → 0.5`; `3 ≤ imp ≤ 4 → 0.18`; `imp ≤ 2 & age > 90d → dormant`. Keep `_is_dormant` aligned.
-- **Acceptance**: imp-5 row >90d still scores ≥ 0.5 * raw at read time; recall test surfaces a milestone-tier memory after long gap.
+### 2. Alert system — 加这几条 (§8 重写已 done, §8.2 gap 待补)
+- 已 done: §8 重写按 scenario listing (48862fd)；§8.2 列了 4 个 gap (watcher crash · embed UNIQUE · sync_loop reconcile · atlas_sweep launchd)
+- 还要加的 alert type:
+  - **rapid-fire write detector** (critical) — 同表 1 分钟 INSERT >20 条自动 alert + 暂停 writer (BUG-1 这种再来立刻知道)
+  - **plist job 没触发** (warn) — daily-routine / daily-catchup / backup / aging 任何 ≥24h 没跑过 alert (笔记本睡了 launchd 跳过)
+  - **LLM extract 失败/超时** (warn) — sessionend / daily / affect 三处现在都靠外层 try 吃掉
+  - **MCP daemon down** (warn) — 跟 watcher 同级进程监控
+- 备选 (先不加): handover.md 写失败 · recall hook >2s · disk full · DB lock
+
+### 3. embed_pending — 加 catchup + 紧 alert
+- alert #169 静默警告了一段时间。lane fail-soft → "embed 停了" → recall 质量悄悄烂
+- 诊断先: `mw embed --apply` 手跑看 sqlite 报错 (UNIQUE on events_vec PK)。根因: (a) DELETE+INSERT 后 rowid 撞 (b) stale meta 指向消失的基表行 (c) 其他
+- Fix A: embed_pending 捕 UNIQUE on insert，转 UPDATE on conflicting rowid，再失败 log
+- Fix B: insert 前 sweep purge vec_meta 孤儿 (diary 已有 marrow/recall.py:340，泛化到 6 lane)
+- Catchup leg: embed_pending 加进 §9 — aging.py 定期 sweep 或 sessionstart_catchup 检查 backlog ≤ N、超了 critical alert
+
+### 5. Memes aging — `DELETE` 改 `demote dormant`
+- 现状: `retire_memes` (marrow/aging.py:48) `pinned=0 AND last_seen > 90d` 硬删
+- DECISIONS:46 写的是降级 dormant (recall 排除，FTS 命中复活)
+- Schema: memes 表加 `dormant INTEGER DEFAULT 0` (migration)。recall lane filter `dormant=0`
+- Aging: DELETE 改 `UPDATE memes SET dormant=1`
+- Revive: FTS phrase 命中 dormant key → `UPDATE memes SET dormant=0, last_seen=now`。也加 `mw memes promote <key>`
+- Acceptance: meme 100d ago + pinned=0 → aging 后 row 还在、dormant=1。Recall 排除。fresh event 含 trigger phrase → 下次 sync 复活
 
 ---
 
-## 5. Memes aging — `DELETE` should be `demote dormant`
-
-**Why it matters**: `retire_memes` (marrow/aging.py:48) hard-deletes rows with `pinned=0 AND last_seen > 90d`. DECISIONS:46 says aging should demote to dormant (recall excludes, FTS-key match revives). Hand-delete from md still goes through reconcile and stays DELETE — only the 90d auto-pass changes.
-
-- **Schema**: add `dormant INTEGER DEFAULT 0` to memes table (migration step). recall lane filters `dormant=0`.
-- **Aging pass**: flip the DELETE to `UPDATE memes SET dormant=1`.
-- **Revive**: FTS phrase hit on a dormant key → `UPDATE memes SET dormant=0, last_seen=now`. Also `mw memes promote <key>`.
-- **Acceptance**: meme last_seen 100d ago, pinned=0 → after aging, row still exists with `dormant=1`. Recall excludes it. Trigger phrase in a fresh event → next sync brings it back.
-
+## Done (this session, 2026-05-31)
+- BUG-1 milestone rapid-fire dup loop — `fc78e16`
+- todo #4 decay_floor 1-5 重排 — `e14b703`
+- todo #2 alert §8 重写 + scenario regroup — `1024541` `48862fd` (新 alert type 见 §2)
+- MAP §7 daily-catchup 描述修正 — pending (在本 todo 之外、是 doc 修)
+- BUG-3 折入 Phase A · BUG-4 折入 Phase C
