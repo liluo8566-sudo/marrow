@@ -221,6 +221,36 @@ def test_alert_idempotent(db_env):
     assert count == 1, f"expected 1 alert row, got {count}"
 
 
+def test_silent_death_writes_to_alerts_table(db_env):
+    """Regression: silent_death must also write to the `alerts` table so the
+    dashboard 'Alerts' section surfaces it. Prior bug: only audit_log got
+    the row, dashboard read alerts table and showed 'none' while sessions
+    silently dropped."""
+    db, _ = db_env
+    sid = "dash-alert-sid"
+    old_ts = _ago_ts(31 * 60)
+    _insert_lifecycle(db, sid, "session_lifecycle:start",
+                      "ppid=66666,source=cc,started_at=1000", occurred_at=old_ts)
+    _insert_user_events(db, sid, 5)
+
+    with patch("marrow.sessionstart_catchup.popen_detach"):
+        from marrow import sessionstart_catchup
+        sessionstart_catchup.main()
+
+    conn = storage.connect(db)
+    try:
+        row = conn.execute(
+            "SELECT severity, type, message FROM alerts"
+            " WHERE type='silent_death' AND resolved=0"
+            " AND message LIKE ? LIMIT 1",
+            (f"sid={sid[:8]}%",),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None, "silent_death must surface in alerts table"
+    assert row["severity"] == "warn"
+
+
 def test_classify_legacy_ok_without_lifecycle_end_skips(db_env):
     """Regression: a sid processed before the lifecycle plan deployment has
     sessionend_extract:ok but NO session_lifecycle:end. _classify used to

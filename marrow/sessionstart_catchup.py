@@ -311,6 +311,18 @@ def main(argv: list[str] | None = None) -> int:  # noqa: ARG001
                     )
             except Exception:  # noqa: BLE001
                 pass
+            # Surface to dashboard via alerts table. add_alert is idempotent on
+            # (severity, type, message, source) for unresolved rows — re-runs
+            # won't dupe. Best-effort: never block catchup on alert write.
+            try:
+                repo.add_alert(
+                    "warn", "silent_death",
+                    f"sid={sid[:8]} no lifecycle:end "
+                    f"(>= {_SILENT_DEATH_MIN}min, ppid dead)",
+                    source="sessionstart_catchup.py", db=db,
+                )
+            except Exception:  # noqa: BLE001
+                pass
 
         spawned = 0
         failures: list[str] = []
