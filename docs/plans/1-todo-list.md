@@ -105,24 +105,25 @@
   - 同时把那行原文整理成 `##### [today] xxx` 格式 atomic_write 回 md，下次 parse 走 strict 路径
 - 注意: 跟 BUG-1 修法 B 同源 — 都走 line splice + atomic_write。两个 feature 共享一套 line-mutation helper
 
-### 6. MAP drift check — `/marrow:map-check` skill only
+### 6. MAP drift check — daily cron + append staging
 - 真正怕的: structure/mechanism 改了 (函数还在但逻辑/阈值/tick 频率变了)。anchor 失效是小事
-- 这种 drift **只有 sonnet 读 diff + 读 py + 比 MAP 才能判**，grep/ast 抓不到 → cron + drift detector 价值低、删掉
-- **唯一入口: `/marrow:map-check` skill** (手动触发):
-  - `/marrow:map-check` 全 diff (last check → HEAD)
-  - `/marrow:map-check --since HEAD~10` 指定 commit range
-  - `/marrow:map-check §5.3` 锁定某节
-- skill 执行: main session spawn sonnet agent，输入 = `git diff <range> -- marrow/` + 整张 MAP
-- agent 任务: 读 diff 影响的 py 模块 + MAP 相关节，判断描述是否还对
-  - 含 anchor 失效 (rename/move) + mechanism drift (阈值/逻辑/频率改了)
-- agent 输出 staging file: `docs/plans/map-drift-pending.md`，**不动 MAP**
-  - 每条 finding: `## §x.y · <issue 一句>` + MAP 原节引用 + diff hunk + 建议改法
-  - 缺 evidence (没 diff hunk 没原节) 的 finding 直接 reject
-- 你审完 → 改 MAP → 清 staging。staging 跟其他 todo 同目录，看 todo 时顺手扫到
-- alert: 一行汇总 `add_alert('warn', 'map_drift', 'N findings, see docs/plans/map-drift-pending.md')` — 不刷屏
-- 长度护栏: staging 单文件 ≤ 200 行 (超就 skill 报 "drift 太多，先 merge 一波再跑")
+- 这种 drift **只有 sonnet 读 diff + 读 py + 比 MAP 才能判**
+- **节奏: daily 08:00 cron** · deploy/mw-map-check.plist
+- 执行: main session spawn sonnet agent，输入 = `git diff <last_check_commit>..HEAD -- marrow/` + 整张 MAP
+- agent 任务双查 (两种都要找):
+  - **drift**: MAP 已有节描述过时 (mechanism / 阈值 / 频率变了)
+  - **gap**: diff 里出现 MAP 完全没记的新 file/feature → propose 加一节
+- 输出 **append** 到 `docs/plans/map-drift.md`，**不动 MAP**
+  - 每条 finding: `## [YYYY-MM-DD] §x.y or NEW · <issue 一句>` + MAP 原节引用 (drift) 或 "MAP 没记" (gap) + diff hunk + 建议改法
+  - 缺 evidence (没 diff hunk) 的 finding 直接 reject
+- 处理流: 你随时审，改完 MAP 就手动从 staging 删那条 finding。Session 帮你改时也要主动删处理完的
+- alert (2 个 trigger):
+  - `map_check_failed` (warn) — agent 跑挂/超时
+  - `map_drift_overflow` (warn) — staging > 50 行，催你 batch 处理 (低频不打扰)
+- 也可手动跑: `/marrow:map-check` (同 prompt，append 同文件，按需触发不等明天 8 点)
+- WeChat 等独立 repo (synapse-wx) 不在 `marrow/` 下、扫不到 → 要么 synapse-wx 自己一份 map-check 走它自己的 MAP，要么只扫 marrow MCP server 接入点变动
 - Acceptance:
-  - 改 reconcile.py dedup 阈值从 cosine 改 exact + commit → 跑 `/marrow:map-check --since HEAD~1` → staging 出现一条 "§5.3 dedup 描述过时: was cosine, now exact match" + diff hunk + 建议改法 → MAP 正文不变 → 你 review 后改 MAP § 5.3 → 清 staging
+  - 改 reconcile.py dedup 阈值 commit + 加新 mcp endpoint commit → 次日 08:00 cron 跑 → staging append 两条: "§5.3 dedup mechanism drift" + "NEW: MCP endpoint xx MAP 未记" → 都带 diff hunk + 建议 → MAP 正文不动
 
 ### 5. Memes aging — `DELETE` 改 `demote dormant`
 - 现状: `retire_memes` (marrow/aging.py:48) `pinned=0 AND last_seen > 90d` 硬删
