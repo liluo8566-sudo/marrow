@@ -448,6 +448,84 @@ def test_reconcile_age_row_single_bracket(db, tmp_path):
     assert not rpt.any_change()
 
 
+def test_reconcile_unanchored_writes_id_back_and_dedups(db, tmp_path):
+    """BUG-1 regression: unanchored md row → INSERT once; the user's heading
+    line gets ` <!-- id:N -->` appended in-place so the next reconcile tick
+    treats it as anchored (no rapid-fire duplicate inserts).
+    """
+    folder = tmp_path / "ny"
+    state = tmp_path / "state"
+    md = _render_to_md(db, folder, state)
+    text = md.read_text(encoding="utf-8")
+    new_block = (
+        "##### [2026-05-22] Round 2 milestone\n"
+        "added by Lumi\n\n"
+    )
+    text = text.replace("## Me\n\n", "## Me\n\n" + new_block)
+    md.write_text(text, encoding="utf-8")
+
+    conn = storage.connect(db)
+    try:
+        rpt1 = reconcile.reconcile_milestones(conn, md)
+        rpt2 = reconcile.reconcile_milestones(conn, md)
+        rows = conn.execute(
+            "SELECT id, title FROM milestones WHERE title='Round 2 milestone'"
+        ).fetchall()
+    finally:
+        conn.close()
+    # First pass inserts exactly once; second pass is a no-op (anchor written
+    # back means the parser now sees it as an existing row).
+    assert rpt1.inserted == 1
+    assert rpt2.inserted == 0
+    assert len(rows) == 1
+    rid = rows[0]["id"]
+    # The user's heading line itself now carries the anchor — not appended as
+    # a separate block elsewhere in the file.
+    txt = md.read_text(encoding="utf-8")
+    assert f"##### [2026-05-22] Round 2 milestone <!-- id:{rid} -->" in txt
+
+
+def test_reconcile_unanchored_dedup_when_db_row_already_exists(db, tmp_path):
+    """Safety-net: if an exact (scope,date,title) row already exists in DB
+    (e.g. a prior tick inserted but anchor-write failed), reconcile must NOT
+    INSERT again — it should reuse the existing id and rewrite the anchor.
+    """
+    folder = tmp_path / "ny"
+    state = tmp_path / "state"
+    md = _render_to_md(db, folder, state)
+    # Pre-seed a DB row matching the (scope,date,title) we'll add to md.
+    conn = storage.connect(db)
+    with conn:
+        cur = conn.execute(
+            "INSERT INTO milestones(scope,date,title,pinned) "
+            "VALUES('me','2026-05-23','Dup probe',1)"
+        )
+        seeded_id = cur.lastrowid
+    conn.close()
+    # Re-render so the seeded row lands in md with its anchor, then strip
+    # the anchor to simulate "anchor-write failed last tick".
+    md = _render_to_md(db, folder, state)
+    text = md.read_text(encoding="utf-8")
+    text = text.replace(f" <!-- id:{seeded_id} -->", "")
+
+    md.write_text(text, encoding="utf-8")
+
+    conn = storage.connect(db)
+    try:
+        rpt = reconcile.reconcile_milestones(conn, md)
+        rows = conn.execute(
+            "SELECT id FROM milestones WHERE title='Dup probe'"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert rpt.inserted == 0
+    assert len(rows) == 1
+    assert rows[0]["id"] == seeded_id
+    # Anchor restored on the heading line.
+    txt = md.read_text(encoding="utf-8")
+    assert f"<!-- id:{seeded_id} -->" in txt
+
+
 def test_reconcile_unchanged_is_inert(db, tmp_path):
     folder = tmp_path / "ny"
     state = tmp_path / "state"

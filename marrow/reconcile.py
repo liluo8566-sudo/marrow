@@ -20,6 +20,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ._atomic import atomic_write as _atomic_write
+
 
 MILESTONE_KEY = "milestone"
 _M0 = f"<!-- marrow:{MILESTONE_KEY}:start -->"
@@ -80,7 +82,7 @@ def _parse(md_text: str) -> list[dict]:
         cur = None
         body = []
 
-    for line in md_text.splitlines():
+    for lineno, line in enumerate(md_text.splitlines()):
         s = line.rstrip()
         if _M0 in s:
             in_block = True
@@ -101,7 +103,19 @@ def _parse(md_text: str) -> list[dict]:
             else:
                 section = None
             continue
-        m = _H5_RE.match(s)
+        # Strip any inline `<!-- id:N -->` anchor off the heading before
+        # matching — bidirectional reconcile may have spliced the id onto
+        # the heading line itself (BUG-1 fix). Keep the captured id for flush.
+        heading_id: int | None = None
+        s_for_h5 = s
+        m_inline = _ID_RE.search(s)
+        if m_inline:
+            try:
+                heading_id = int(m_inline.group("id"))
+            except ValueError:
+                heading_id = None
+            s_for_h5 = _ID_RE.sub("", s).rstrip()
+        m = _H5_RE.match(s_for_h5)
         if m and section is not None:
             flush()
             cur = {
@@ -111,13 +125,14 @@ def _parse(md_text: str) -> list[dict]:
                 "theme": None,
                 "pinned": 1,
                 "description": None,
-                "id": None,
+                "id": heading_id,
+                "_heading_line": lineno,
             }
             continue
         # Historical Me — single-bracket form `##### [<title>]` (no date in
         # bracket). Only honoured under `## Me`; date is unknown here and
         # must be recovered from DB via the row's id anchor.
-        m_age = _H5_AGE_RE.match(s)
+        m_age = _H5_AGE_RE.match(s_for_h5)
         if m_age and section == "me":
             flush()
             cur = {
@@ -127,7 +142,8 @@ def _parse(md_text: str) -> list[dict]:
                 "theme": None,
                 "pinned": 1,
                 "description": None,
-                "id": None,
+                "id": heading_id,
+                "_heading_line": lineno,
             }
             continue
         # Stale legacy `- [date] ...` bullet rows from a pre-H5 file are
@@ -177,7 +193,9 @@ def reconcile_milestones(conn: sqlite3.Connection,
     md_path = Path(md_path)
     if not md_path.exists():
         return rpt
-    md_rows = _parse(md_path.read_text(encoding="utf-8"))
+    md_text = md_path.read_text(encoding="utf-8")
+    md_lines = md_text.splitlines()
+    md_rows = _parse(md_text)
     # Reconcile operates on pinned=1 only — the confirmed subpage set.
     # pinned=0 candidates live outside the md ↔ db sync loop; daily.py
     # writes them, dashboard renders them, Lumi promotes via pinned=1.
@@ -189,6 +207,8 @@ def reconcile_milestones(conn: sqlite3.Connection,
     }
 
     seen: set[int] = set()
+    # (heading_line_index, new_id) pairs to splice into md after INSERT lands.
+    line_anchor_writes: list[tuple[int, int]] = []
 
     with conn:
         # inserts + updates
@@ -239,17 +259,34 @@ def reconcile_milestones(conn: sqlite3.Connection,
                         f"{row['title'][:40]}"
                     )
                     continue
-                h = _hash(row)
-                cur = conn.execute(
-                    "INSERT INTO milestones "
-                    "(scope, date, title, description, theme, pinned, "
-                    " source_hash) VALUES (?, ?, ?, ?, ?, 1, ?)",
-                    (row["scope"], row["date"], row["title"],
-                     row["description"], row["theme"], h),
-                )
-                _audit(conn, cur.lastrowid, "insert",
-                       f"md-reconcile: {row['title'][:60]}")
-                rpt.inserted += 1
+                # Safety net: exact-match dedup. Prevents runaway loop if the
+                # md anchor-write fails for any reason (file lock, perm, race).
+                existing = conn.execute(
+                    "SELECT id FROM milestones "
+                    "WHERE scope=? AND date=? AND title=? LIMIT 1",
+                    (row["scope"], row["date"], row["title"]),
+                ).fetchone()
+                if existing is not None:
+                    new_id = existing["id"]
+                else:
+                    h = _hash(row)
+                    cur = conn.execute(
+                        "INSERT INTO milestones "
+                        "(scope, date, title, description, theme, pinned, "
+                        " source_hash) VALUES (?, ?, ?, ?, ?, 1, ?)",
+                        (row["scope"], row["date"], row["title"],
+                         row["description"], row["theme"], h),
+                    )
+                    new_id = cur.lastrowid
+                    _audit(conn, new_id, "insert",
+                           f"md-reconcile: {row['title'][:60]}")
+                    rpt.inserted += 1
+                # Queue heading-line anchor write so the next inserter pass
+                # sees the row as present in md (prevents dup canonical block).
+                hl = row.get("_heading_line")
+                if hl is not None:
+                    line_anchor_writes.append((hl, new_id))
+                seen.add(new_id)
 
         # deletes: db rows whose ids are not present in md
         for rid in list(db_rows.keys()):
@@ -263,6 +300,23 @@ def reconcile_milestones(conn: sqlite3.Connection,
             conn.execute("DELETE FROM milestones WHERE id=?", (rid,))
             _audit(conn, rid, "delete", "md-reconcile: removed from md")
             rpt.deleted += 1
+
+    # Splice new ids back into the user's heading lines (idempotent: skip if
+    # the line already carries any `<!-- id:N -->` anchor). Atomic write keeps
+    # the watcher from racing on a half-written file.
+    if line_anchor_writes:
+        changed = False
+        for hl, new_id in line_anchor_writes:
+            if hl < 0 or hl >= len(md_lines):
+                continue
+            line = md_lines[hl]
+            if _ID_RE.search(line):
+                continue
+            md_lines[hl] = line.rstrip() + f" <!-- id:{new_id} -->"
+            changed = True
+        if changed:
+            trailing_nl = "\n" if md_text.endswith("\n") else ""
+            _atomic_write(str(md_path), "\n".join(md_lines) + trailing_nl)
 
     return rpt
 
