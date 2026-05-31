@@ -409,8 +409,8 @@ def _run_writer(conn, sid: str, name: str, writer) -> bool:
     not a session-wide blowup.
     """
     try:
-        n = writer()
-        _write_segment_audit(conn, sid, name, f"ok:{n}" if n else "ok:0")
+        writer()
+        _write_segment_audit(conn, sid, name, "ok")
         return True
     except Exception as e:  # noqa: BLE001
         try:

@@ -734,7 +734,7 @@ def test_sessionend_two_calls_routes_to_four_writers(db_env, tmp_path,
         # affect/digest from NARRATIVE). No 'progress' writer (frozen).
         seg_oks = [r for r in seg_rows
                    if r["action"].startswith("sessionend_extract_")
-                   and r["summary"].startswith("ok:")]
+                   and r["summary"] == "ok"]
         assert len(seg_oks) == 4
         assert not any(r["action"].endswith("_progress") for r in seg_rows)
     finally:
@@ -1276,9 +1276,9 @@ def test_sessionend_writer_operationalerror_partial_not_fail(db_env, tmp_path,
         f"expected OperationalError name in summary, got {h_summary!r}"
     )
     # Other writers in the same call ran to completion.
-    assert seg_map.get("sessionend_extract_task_cand", "").startswith("ok:")
-    assert seg_map.get("sessionend_extract_affect", "").startswith("ok:")
-    assert seg_map.get("sessionend_extract_digest", "").startswith("ok:")
+    assert seg_map.get("sessionend_extract_task_cand") == "ok"
+    assert seg_map.get("sessionend_extract_affect") == "ok"
+    assert seg_map.get("sessionend_extract_digest") == "ok"
 
     # And the persisted side-effects of the surviving writers landed.
     conn = storage.connect(db)
