@@ -35,6 +35,17 @@ MEMES_ANCHOR_KEYS: frozenset[str] = frozenset({
 })
 
 
+def _repair_json(body: str) -> str:
+    """Best-effort repair of common LLM JSON errors before json.loads."""
+    import re as _re
+    # Strip markdown code fences
+    body = _re.sub(r"^```(?:json)?\s*", "", body)
+    body = _re.sub(r"\s*```$", "", body)
+    # Trailing commas before ] or }
+    body = _re.sub(r",\s*([}\]])", r"\1", body)
+    return body
+
+
 def extract_block(text: str, marker: str) -> list | None:
     """Pull JSON list between ===<marker>=== and the next ===END===.
     Returns None on miss or parse error.
@@ -46,11 +57,15 @@ def extract_block(text: str, marker: str) -> list | None:
     tail = text[i + len(open_tag):]
     j = tail.find("===END===")
     body = tail[:j].strip() if j != -1 else tail.strip()
-    try:
-        parsed = json.loads(body)
-    except (json.JSONDecodeError, ValueError):
-        return None
-    return parsed if isinstance(parsed, list) else None
+    # Try raw first, then repaired
+    for attempt in (body, _repair_json(body)):
+        try:
+            parsed = json.loads(attempt)
+            if isinstance(parsed, list):
+                return parsed
+        except (json.JSONDecodeError, ValueError):
+            continue
+    return None
 
 
 def _alias_dedup_lookup(conn, kind: str, name: str,

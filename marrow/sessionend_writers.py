@@ -54,6 +54,8 @@ def _normalise_category(raw: str | None) -> str:
 def seg_affect(conn, raw: str, sid: str, date: str) -> int:
     """Insert affect rows with importance clamp + unresolved/reconcile linkage."""
     items = candidates.extract_block(raw, "AFFECT")
+    if items is None and "===AFFECT===" in raw:
+        raise ValueError("AFFECT marker present but JSON parse failed")
     if not items:
         return 0
     n = 0
@@ -231,6 +233,8 @@ def seg_task_cand(conn, raw: str) -> int:
 def seg_digest(conn, raw: str, sid: str, date: str) -> int:
     """Persist DIGEST text into session_digests. INSERT OR REPLACE on sid."""
     body = _extract_text_block(raw, "DIGEST")
+    if not body and "===DIGEST===" in raw:
+        raise ValueError("DIGEST marker present but extraction empty")
     if not body:
         return 0
     ts_now = _dt.datetime.now(_dt.timezone.utc).strftime(
