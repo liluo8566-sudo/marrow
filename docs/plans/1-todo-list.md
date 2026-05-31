@@ -78,10 +78,10 @@
 ### 2. Alert system — 加这几条 (§8 重写已 done, §8.2 gap 待补)
 - 已 done: §8 重写按 scenario listing (48862fd)；§8.2 列了 4 个 gap (watcher crash · embed UNIQUE · sync_loop reconcile · atlas_sweep launchd)
 - 还要加的 alert type:
+  - **persistent process health** (critical) — watcher 进程死 + MCP daemon 死 — 现在都没监控，sync layer / recall 静默挂掉
   - **rapid-fire write detector** (critical) — 同表 1 分钟 INSERT >20 条自动 alert + 暂停 writer (BUG-1 这种再来立刻知道)
   - **plist job 没触发** (warn) — daily-routine / daily-catchup / backup / aging 任何 ≥24h 没跑过 alert (笔记本睡了 launchd 跳过)
   - **LLM extract 失败/超时** (warn) — sessionend / daily / affect 三处现在都靠外层 try 吃掉
-  - **MCP daemon down** (warn) — 跟 watcher 同级进程监控
 - 备选 (先不加): handover.md 写失败 · recall hook >2s · disk full · DB lock
 
 ### 3. embed_pending — 加 catchup + 紧 alert
