@@ -125,6 +125,51 @@ def _has_prior_lifecycle_start(conn: sqlite3.Connection, sid: str) -> bool:
     return row is not None
 
 
+def _primary_worktree(cwd: str) -> str | None:
+    """Return realpath of the primary worktree of the repo containing *cwd*,
+    or None if cwd is not in a git repo.
+
+    `git worktree list --porcelain` lists the primary worktree FIRST.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "-C", cwd, "worktree", "list", "--porcelain"],
+            capture_output=True, text=True, check=False, timeout=2,
+        ).stdout
+    except Exception:  # noqa: BLE001
+        return None
+    for line in out.splitlines():
+        if line.startswith("worktree "):
+            return os.path.realpath(line[len("worktree "):].strip())
+    return None
+
+
+def _is_worktree_session(cwd: str) -> bool:
+    """True iff *cwd* is inside a NON-primary git worktree.
+
+    Worktree sessions are independent cc processes (new sid, new jsonl) doing
+    task-isolated work; their dialogue is not part of the user's continuous
+    memory and must not enter marrow events. Detection: cwd's git toplevel
+    differs from the repo's primary worktree (first row of `git worktree list
+    --porcelain`).
+    """
+    if not cwd or not os.path.isdir(cwd):
+        return False
+    try:
+        top = subprocess.run(
+            ["git", "-C", cwd, "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, check=False, timeout=2,
+        ).stdout.strip()
+    except Exception:  # noqa: BLE001
+        return False
+    if not top:
+        return False
+    primary = _primary_worktree(cwd)
+    if not primary:
+        return False
+    return os.path.realpath(top) != primary
+
+
 def _started_at_for(ppid: int) -> int:
     """Return process start time as epoch for *ppid* via `ps -o lstart=`.
     Falls back to current time on any failure.
@@ -268,6 +313,8 @@ def session_start() -> int:
     try:
         # Write lifecycle:start marker so catchup can detect live vs dead sessions.
         sid = inp.get("session_id") if isinstance(inp, dict) else None
+        cwd = inp.get("cwd") if isinstance(inp, dict) else None
+        is_worktree = _is_worktree_session(cwd or "")
         if sid:
             # Fresh window or resume — drop prior recall dedup state either way
             # (cheap; resume re-shows seen rows once, acceptable).
@@ -280,34 +327,41 @@ def session_start() -> int:
                     _write_manual_skip_flag(conn, sid, _STATUS_SKIP_CLEARED)
                 ppid = os.getppid()
                 started_at = _started_at_for(ppid)
+                summary = f"ppid={ppid},source=cc,started_at={started_at}"
+                if is_worktree:
+                    summary += ",worktree=1"
                 with conn:
                     conn.execute(
                         "INSERT INTO audit_log"
                         " (target_table, target_id, action, summary)"
                         " VALUES ('events', ?, 'session_lifecycle:start', ?)",
-                        (sid, f"ppid={ppid},source=cc,started_at={started_at}"),
+                        (sid, summary),
                     )
             except Exception:  # noqa: BLE001 — never block session_start
                 pass
 
-        parts: list[str] = []
+        if is_worktree:
+            # Worktree session: task-isolated work, no personal memory needed.
+            ctx = ""
+        else:
+            parts: list[str] = []
 
-        # Heartbeat block goes first so it is never buried.
-        heartbeat = _affect_heartbeat(conn)
-        if heartbeat:
-            parts.append(heartbeat)
+            # Heartbeat block goes first so it is never buried.
+            heartbeat = _affect_heartbeat(conn)
+            if heartbeat:
+                parts.append(heartbeat)
 
-        parts.append(_handoff_text(conn))
+            parts.append(_handoff_text(conn))
 
-        backdrop = top_sections.render_affect(conn)
-        if backdrop:
-            parts.append(backdrop)
+            backdrop = top_sections.render_affect(conn)
+            if backdrop:
+                parts.append(backdrop)
 
-        ctx = "\n\n".join(p for p in parts if p)
+            ctx = "\n\n".join(p for p in parts if p)
 
-        # Hard cap: never exceed 6000 chars total for SessionStart.
-        if len(ctx) > SESSION_START_HARD_CAP:
-            ctx = ctx[: SESSION_START_HARD_CAP - 1] + "…"
+            # Hard cap: never exceed 6000 chars total for SessionStart.
+            if len(ctx) > SESSION_START_HARD_CAP:
+                ctx = ctx[: SESSION_START_HARD_CAP - 1] + "…"
     finally:
         conn.close()
 
@@ -328,6 +382,31 @@ def session_end() -> int:
         return 0
     if transcript.is_headless(tpath):
         return 0  # spawned claude -p fires SessionEnd too; not our session
+
+    # Worktree-session gate: cc instances launched inside a NON-primary git
+    # worktree are task-isolated runs; their dialogue must not enter marrow.
+    # Skip archive_events + LLM spawn entirely. Still write lifecycle:end so
+    # catchup doesn't tag this sid as silent_death.
+    cwd = inp.get("cwd") or ""
+    if _is_worktree_session(cwd):
+        sid = inp.get("session_id") or ""
+        if sid:
+            try:
+                _conn = storage.connect(config.db_path())
+                try:
+                    with _conn:
+                        _conn.execute(
+                            "INSERT INTO audit_log"
+                            " (target_table, target_id, action, summary)"
+                            " VALUES ('events', ?, 'session_lifecycle:end', 'worktree=1')",
+                            (sid,),
+                        )
+                finally:
+                    _conn.close()
+            except Exception:  # noqa: BLE001 — never block session_end
+                pass
+        return 0
+
     db = config.db_path()
     conn = storage.connect(db)
     try:

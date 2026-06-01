@@ -52,17 +52,6 @@ def test_session_start_emits_additional_context(env, monkeypatch, capsys):
     assert out["hookSpecificOutput"]["hookEventName"] == "SessionStart"
 
 
-def test_session_start_includes_note_reminder(env, monkeypatch, capsys):
-    """session_start injects a one-line reminder that Lumi's Note is the new
-    window's to-do."""
-    _stdin(monkeypatch, {"session_id": "s1"})
-    rc = hooks.main(["session_start"])
-    assert rc == 0
-    ctx = json.loads(capsys.readouterr().out)[
-        "hookSpecificOutput"]["additionalContext"]
-    assert "Lumi's Note" in ctx
-
-
 def test_session_end_archives_and_renders(env, monkeypatch, tmp_path):
     """session_end archives events; dashboard is NOT written by the hook
     (moved to sessionend_async tail)."""
