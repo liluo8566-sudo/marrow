@@ -29,6 +29,13 @@ CREATE TABLE IF NOT EXISTS events (
   source_hash TEXT,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
+-- Deleted events: source_hash of rows Lumi purged. archive_events skips any
+-- hash listed here so a SessionEnd/catchup re-archive can't resurrect them.
+CREATE TABLE IF NOT EXISTS event_tombstones (
+  source_hash TEXT PRIMARY KEY,
+  reason TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
 CREATE TABLE IF NOT EXISTS tasks (
   id INTEGER PRIMARY KEY,
   category TEXT NOT NULL,

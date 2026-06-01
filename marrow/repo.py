@@ -115,7 +115,9 @@ def archive_events(conn: sqlite3.Connection, rows: list[dict]) -> int:
             h = _hash(r["session_id"], r["timestamp"], r["role"],
                       r["content"])
             if conn.execute(
-                "SELECT 1 FROM events WHERE source_hash = ?", (h,)
+                "SELECT 1 FROM events WHERE source_hash=? "
+                "UNION ALL SELECT 1 FROM event_tombstones WHERE source_hash=? "
+                "LIMIT 1", (h, h)
             ).fetchone():
                 continue
             conn.execute(
