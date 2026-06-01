@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from . import config, dashboard, storage, subpages
+from . import config, dashboard, repo, storage, subpages
 
 
 PROTECTED = {"id", "created_at", "updated_at", "source_hash", "occurred_at"}
@@ -107,6 +107,18 @@ def cmd_resolve(args) -> int:
         "resolved_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
         "resolved via mw",
     )
+
+
+def cmd_add_alert(args) -> int:
+    sev = args.severity
+    if sev not in {"warn", "critical"}:
+        return _fail(f"severity must be warn|critical (got {sev})")
+    msg = (args.message or "").strip()
+    if not msg:
+        return _fail("message required")
+    aid = repo.add_alert(sev, args.type, msg, args.source, db=args.db)
+    print(f"alert #{aid} [{sev}/{args.type}] {msg[:80]}")
+    return 0
 
 
 def cmd_done(args) -> int:
@@ -460,6 +472,14 @@ def build_parser() -> argparse.ArgumentParser:
     rs = sub.add_parser("resolve", parents=[common])
     rs.add_argument("id")
     rs.set_defaults(fn=cmd_resolve)
+
+    aa = sub.add_parser("add-alert", parents=[common],
+                        help="insert one alert row (idempotent on dup)")
+    aa.add_argument("severity", choices=["warn", "critical"])
+    aa.add_argument("type")
+    aa.add_argument("message")
+    aa.add_argument("--source", default=None)
+    aa.set_defaults(fn=cmd_add_alert)
 
     dn = sub.add_parser("done", parents=[common])
     dn.add_argument("id")
