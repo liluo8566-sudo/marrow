@@ -347,8 +347,9 @@ def test_query_tokens_empty():
 
 
 def test_milestone_surfaces_by_exact_term(db):
+    """Title substring of query → reverse-substring hit (kw=1.0)."""
     _make_milestone(
-        db, title="鸭鸭昵称诞生",
+        db, title="鸭子",
         description="你说我是你的鸭子，没有鸭德。",
     )
     with patch.object(rm, "_ensure_embedder", return_value=None):
@@ -361,9 +362,9 @@ def test_milestone_surfaces_by_exact_term(db):
 
 
 def test_milestone_partial_token_match(db):
-    """大笨鸭子 → 鸭+子 match in milestone, score = 2/4 * 0.30 = 0.15."""
+    """Short title inside long query still hits via reverse-substring (kw=1.0)."""
     _make_milestone(
-        db, title="鸭鸭昵称诞生",
+        db, title="鸭子",
         description="你说我是你的鸭子，没有鸭德。",
     )
     with patch.object(rm, "_ensure_embedder", return_value=None):
@@ -400,12 +401,12 @@ def test_milestone_mixed_with_events(db):
     """One event hit + one milestone hit appear in the same result set.
 
     Note: events_fts trigram needs >=3 char phrase for CN, so the query
-    is a 3-char phrase that both event content and milestone description
-    contain.
+    is a 3-char phrase that both event content and milestone title
+    contain (milestone lane needs title-in-query for reverse-substring).
     """
     _make_event(db, "今天聊到了鸭德的话题")
     _make_milestone(
-        db, title="鸭鸭昵称诞生",
+        db, title="鸭德的",
         description="你的鸭德的故事",
     )
     with patch.object(rm, "_ensure_embedder", return_value=None):
@@ -417,13 +418,12 @@ def test_milestone_mixed_with_events(db):
 
 
 def test_milestone_long_query_dilution_still_surfaces(db):
-    """Regression: long user prompt dilutes kw_score below min_score, but
-    milestones are evergreen identity anchors and must surface on any token
-    hit. Concrete case from real diagnosis: '老公你知道鸭子梗么' = 9 tokens,
-    only 鸭/子 hit → kw=0.22 → raw=0.066, well under min_score=0.1.
-    Old policy: dropped. New policy: enters, ranked by raw."""
+    """Regression: long user prompt would dilute token-fraction kw_score below
+    min_score under the old policy. New reverse-substring policy: title (or
+    any ≥2-char split component) found inside the query → kw=1.0, anchor
+    surfaces. Title (鸭子) inside (老公你知道鸭子梗么)."""
     _make_milestone(
-        db, title="鸭鸭昵称诞生",
+        db, title="鸭子",
         description="你说我是你的鸭子，没有鸭德。",
     )
     with patch.object(rm, "_ensure_embedder", return_value=None):
@@ -432,12 +432,14 @@ def test_milestone_long_query_dilution_still_surfaces(db):
         )
     hits = [r for r in results if r.get("kind") == "milestone"]
     assert len(hits) == 1
-    assert "鸭鸭昵称诞生" in hits[0]["content"]
+    assert "鸭子" in hits[0]["content"]
 
 
-def test_milestone_any_token_hit_enters_regardless_of_min_score(db):
-    """Milestone gate removed: even a tiny match (1/4 tokens) surfaces."""
-    _make_milestone(db, title="子曰", description="孔丘语录")
+def test_milestone_surfaces_under_min_score_gate(db):
+    """Milestone lane has no min_score gate. Title (鸭子) is substring of
+    query → kw=1.0, raw = 0.30 + anchor_bias 0.10 = 0.40 (below caller's
+    min_score=0.5) but still returned because the gate doesn't apply."""
+    _make_milestone(db, title="鸭子", description="孔丘语录")
     with patch.object(rm, "_ensure_embedder", return_value=None):
         results = rm.recall_fusion(db, "大笨鸭子", min_score=0.5)
     hits = [r for r in results if r.get("kind") == "milestone"]
@@ -447,28 +449,27 @@ def test_milestone_any_token_hit_enters_regardless_of_min_score(db):
 
 def test_milestone_content_renders_title_and_desc(db):
     _make_milestone(
-        db, title="鸭鸭昵称诞生",
+        db, title="鸭子昵称诞生",
         description="你的鸭子，没有鸭德",
     )
     with patch.object(rm, "_ensure_embedder", return_value=None):
-        results = rm.recall_fusion(db, "鸭子", min_score=0.1)
+        results = rm.recall_fusion(db, "鸭子昵称诞生", min_score=0.1)
     hit = next(r for r in results if r.get("kind") == "milestone")
-    assert "鸭鸭昵称诞生" in hit["content"]
+    assert "鸭子昵称诞生" in hit["content"]
     assert "鸭德" in hit["content"]
 
 
 def test_milestone_pinned_only_boost_when_pinned(db):
-    """Pinned milestones get an additive boost so they outrank unpinned at
-    equal kw_score. Score >= bm25*kw + boost."""
+    """Pinned milestones get an additive boost. Substring hit (kw=1.0) →
+    raw = 0.30*1.0 + anchor_bias 0.10 + pinned 0.10 = 0.50."""
     _make_milestone(
-        db, title="子曰", description="孔丘语录", pinned=1,
+        db, title="鸭子", description="孔丘语录", pinned=1,
     )
     with patch.object(rm, "_ensure_embedder", return_value=None):
         results = rm.recall_fusion(db, "大笨鸭子", min_score=0.1)
     hits = [r for r in results if r.get("kind") == "milestone"]
     assert len(hits) == 1
-    # 1/4 kw=0.25, raw=0.075; pinned boost +0.10 → 0.175
-    assert hits[0]["score"] >= 0.175 - 1e-9
+    assert hits[0]["score"] >= 0.50 - 1e-9
 
 
 # ── shared config-driven entrypoint (hook + MCP parity) ─────────────────────
@@ -479,7 +480,7 @@ def test_recall_with_config_reads_rcfg(db, monkeypatch):
     from marrow import config as cfg_mod
     _make_event(db, "完全是个鸭子梗的对话")
     _make_milestone(
-        db, title="鸭鸭昵称诞生",
+        db, title="鸭子",
         description="你的鸭子，没有鸭德",
     )
     fake_cfg = {"recall": {

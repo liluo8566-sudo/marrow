@@ -572,19 +572,54 @@ def _query_tokens(q: str) -> list[str]:
     return out
 
 
+def _anchor_triggers(name: str) -> list[str]:
+    """Anchor-table trigger list for reverse-substring match.
+
+    Returns [name] plus split components on `/` and whitespace, trimmed and
+    filtered to len >= 2. Dedup preserves order. Used by milestone / memes
+    candidate scans — see entity_recall.entity_force_include for the
+    canonical reverse-substring pattern.
+    """
+    name = (name or "").strip()
+    if not name:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    parts = [name]
+    for slash_part in name.split("/"):
+        for sp in slash_part.split():
+            sp = sp.strip()
+            if sp:
+                parts.append(sp)
+    for p in parts:
+        if len(p) < 2:
+            continue
+        key = p.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(p)
+    return out
+
+
 def _milestone_candidates(
     conn: sqlite3.Connection, query: str, limit: int
 ) -> list[dict]:
-    """LIKE-scan milestones; rank by matched-token ratio + pinned boost.
+    """Reverse-substring scan over milestones; pinned + kw sort.
 
-    Reverse-substring fallback: if title.lower() is a substring of query.lower(),
-    boost kw_score to 1.0 — catches direct title typing past noisy tokens.
+    Trigger = title + split components (by `/` and whitespace, len >= 2).
+    If any trigger.lower() is substring of query.lower() → kw_score = 1.0.
+    No token-fraction fallback — vec lane covers semantic matches. Pattern
+    mirrors entity_recall.entity_force_include so multi-char CN anchor names
+    don't get diluted by `_query_tokens` single-char CJK splits in long
+    queries.
 
-    Returns rows already shaped for fusion: timestamp (date as ISO),
-    content (title[: description]), bm25 (kw_score), pinned.
+    Returns rows shaped for fusion: timestamp (date as ISO), content
+    (title[: description]), bm25 (kw_score), pinned.
     """
-    tokens = _query_tokens(query)
-    q_lower = query.lower()
+    q_lower = query.lower().strip()
+    if not q_lower:
+        return []
     rows = conn.execute(
         "SELECT id, scope, date, title, description, pinned "
         "FROM milestones"
@@ -595,15 +630,10 @@ def _milestone_candidates(
     for r in rows:
         title = r["title"] or ""
         desc = r["description"] or ""
-        hay = (title + " " + desc).lower()
-        title_l = title.lower()
-        title_match = bool(title_l) and title_l in q_lower
-        hits = sum(1 for t in tokens if t in hay) if tokens else 0
-        if not hits and not title_match:
+        triggers = _anchor_triggers(title)
+        if not any(t.lower() in q_lower for t in triggers):
             continue
-        kw_score = 1.0 if title_match else (hits / len(tokens))
-        # Pinned only matters as a tiebreaker once final raw is computed;
-        # carry the flag through so the fusion loop can add the boost.
+        kw_score = 1.0
         date = r["date"] or ""
         ts = date if "T" in date else (date + "T00:00:00Z" if date else "")
         content = title if not desc else f"{title}: {desc}"
@@ -631,19 +661,20 @@ def _milestone_candidates(
 def _memes_candidates(
     conn: sqlite3.Connection, query: str, limit: int
 ) -> list[dict]:
-    """Two-way keyword scan over active memes rows.
+    """Reverse-substring scan over active memes rows; pinned + kw + use_count sort.
 
-    Forward (kw=1.0): key.lower() is substring of query.lower() — short
-    key inside long query (e.g. (Plan) in (我的 plan 是什么)).
-    Reverse (kw=hits/tokens): any query token appears in key/value/context —
-    long key with short query (e.g. query (大龙虾) hits key
-    (Openclaw / 大龙虾)).
+    Trigger = key + split components (by `/` and whitespace, len >= 2).
+    If any trigger.lower() is substring of query.lower() → kw_score = 1.0.
+    No token-fraction fallback — vec lane covers semantic matches. Pattern
+    mirrors entity_recall.entity_force_include so multi-char CN anchor keys
+    (e.g. (Openclaw / 大龙虾)) survive long queries without `_query_tokens`
+    single-char CJK dilution.
+
     Shape parallels milestone candidates; kind="memes".
     """
     q_lower = query.lower().strip()
     if not q_lower:
         return []
-    tokens = _query_tokens(query)
     rows = conn.execute(
         "SELECT id, type, key, value, context, pinned, use_count "
         "FROM memes WHERE status='active'"
@@ -655,13 +686,10 @@ def _memes_candidates(
         key = r["key"] or ""
         value = r["value"] or ""
         ctx = r["context"] or ""
-        key_l = key.lower()
-        hay = (key + " " + value + " " + ctx).lower()
-        forward = bool(key_l) and key_l in q_lower
-        token_hits = sum(1 for t in tokens if t in hay) if tokens else 0
-        if not forward and not token_hits:
+        triggers = _anchor_triggers(key)
+        if not any(t.lower() in q_lower for t in triggers):
             continue
-        kw_score = 1.0 if forward else (token_hits / max(1, len(tokens)))
+        kw_score = 1.0
         content = f"{key}: {value}" if value else key
         if ctx:
             content = f"{content} ({ctx})"

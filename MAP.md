@@ -171,7 +171,14 @@ Schema version: 13. Migrations: idempotent numbered functions (_migrate_to_v2…
 - **Thresholds**: `min_score=0.35` for events (milestones / memes / entities skip this gate) · vec-only floor `0.40` (cross-table) · dormant rule: importance ≤ 3 AND age > 90d excluded unless FTS keyword hit revives
 - **Where**: marrow/recall.py:693 · marrow/recall.py:433 · marrow/recall.py:444 · marrow/recall.py:455 · marrow/entity_recall.py:73
 
----
+### 4.4 Anchor lane tokenizer
+
+Anchor tables (memes / milestone / entity) use **reverse-substring** matching: if name/title/key is substring of `query.lower()`, kw_score = 1.0.
+
+- Trigger list: full name + split components on `/` / whitespace, len ≥ 2 (e.g. Openclaw / 大龙虾 → [Openclaw / 大龙虾, Openclaw, 大龙虾]).
+- No token-fraction fallback: if no trigger in query, row out — semantic vec still picks up.
+- Anchor-style subpage lanes (project / pit / study / pending wallet) use reverse-substring, not `_query_tokens`.
+- **Where**: marrow/entity_recall.py:73 · marrow/recall.py:605 (`_milestone_candidates`) · marrow/recall.py:661 (`_memes_candidates`) · marrow/recall.py:575 (`_anchor_triggers`)
 
 ## 5. Surface (DB ↔ md)
 
