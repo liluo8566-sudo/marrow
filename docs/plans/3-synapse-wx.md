@@ -39,7 +39,22 @@ WeChat ──▶ synapse-wx (this repo, Python, independent, MIT)
 
 ---
 
-## Phase 0 — preflight (do before A1)
+## Status (2026-06-02)
+
+- **Phase 0 ✓ done** — P0.A realpath landed (marrow `4eeea14`); P0.B archive completed pre-session; P0.D env gate landed (`4eeea14` + `cddddec` 12h TTL); P0.C dropped.
+- **Phase A ✓ done** — A1–A8 all landed in `~/CC-Lab/synapse-wx/`. 14 commits, 152 pytest passing, ruff clean, `scripts/live_verify.py` 29/29 PASS (incl. AlertSink → marrow alerts table round-trip via new `mw add-alert` CLI). WeChat live verified 2026-06-02 04:03: `/info` returned `default | SID-— | ?(5h) ?(7d) | 0.0k` to Lumi's phone from the synapse-wx LaunchAgent.
+- **Marrow-side change shipped** — `mw add-alert <warn|critical> <type> <message> [--source]` added to `marrow/cli.py` (`94b499d`) so synapse-wx's `AlertSink.marrow_repo_cmd` has a real endpoint.
+
+## Next session backlog (capture, not yet planned)
+
+- **sid display name** — cc's session picker shows LLM-summary titles (e.g. "Initialize synapse-wx Phase A project structure"); current bridge `/info` shows only `SID-xxxxxxxx`. Want either a label (LLM-summarised) or `[YYYY-MM-DD HH:MM]` prefix surfaced in `/info` and any future `/ss` list. Discuss design before building.
+- **Monorepo CLAUDE.md move** — Lumi wants `~/CC-Lab/CLAUDE.md` shared across marrow/synapse-wx so cc cwd anywhere under CC-Lab inherits the same project memory. cc only walks cwd → git root for project-level CLAUDE.md, so this needs either a symlink trick, a build step, or splitting global vs. project memory differently. Discuss before touching.
+- **`wx` alias** — add `alias wx="cd ~/CC-Lab/synapse-wx && claude"` to `~/.zshrc`, symmetric with existing `mm`/`ny`/`nyr`/`study`. Trivial; do once monorepo CLAUDE.md decision is settled.
+- **typing indicator** — port weclaude `send_typing` so WeChat shows "正在输入" again. ~30 LOC; Phase B candidate.
+
+---
+
+## Phase 0 — preflight (do before A1) ✓ done
 
 ### P0.A — `marrow/_atomic.py` realpath
 - Add `path = os.path.realpath(path)` as first line of `atomic_write()`
@@ -65,7 +80,11 @@ WeChat ──▶ synapse-wx (this repo, Python, independent, MIT)
 
 ---
 
-## Phase A — MVP ⭐ (target: WeChat + 屿忱 fresh conversation working)
+## Phase A — MVP ⭐ ✓ DONE (target: WeChat + 屿忱 fresh conversation working)
+
+> Landed 2026-06-02. All 8 subtasks ✓. Exit criteria all met (`/info` round-trip confirmed live from Lumi's WeChat).
+> Commits: `8e40cf6` A1 · `56a976b` deps · `47f85e5` A7 · `f77ca13` A6 · `9913350` A2 · `53ae901` A3 · `9ca8c63` A4 · `e6c8737` A5 · `ef1dca7` A8 · `f91a812` entry-module fix · `954c6f7` capability harness · `6df12a0` AlertSink --source flag + marrow round-trip · `526144d` finish_phase_a.sh · `a5c74ef` launchd PATH `~/.local/bin`.
+
 
 ### A1 — repo bootstrap
 - Location: `/Users/Gabrielle/CC-Lab/synapse-wx/`
@@ -146,6 +165,12 @@ WeChat ──▶ synapse-wx (this repo, Python, independent, MIT)
   - Replaces all the "never sleep / caffeinate" workarounds Lumi was relying on
 
 **Phase A exit criteria**: chat with 屿忱 via WeChat · `/model` aliases work · `4.7` switches model · 6h inactive fires marrow sessionend · sleep/wake cleanly handled · death self-heals · alert on systemic fail.
+
+**Verification (2026-06-02)**:
+- Unit: 152 pytest, ruff clean.
+- Live harness `scripts/live_verify.py` 29/29 PASS — slash commands (6/6), idle fire + real popen → marrow row (5/5), idle live integration (2/2), sleep/wake handler chain (3/3), AlertSink + HealthGate (6/6), AlertSink → marrow alerts round-trip (3/3), provider echo (4/4).
+- WeChat: `/info` answered live from Lumi's phone via synapse-wx LaunchAgent (sid `8934`, then re-loaded).
+- launchd PATH fix: `__USER_HOME__/.local/bin` prepended so `claude` CLI resolves under the LaunchAgent environment.
 
 ---
 
