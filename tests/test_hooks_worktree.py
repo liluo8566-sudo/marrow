@@ -23,6 +23,7 @@ from marrow.hooks import (
     _primary_worktree,
     session_end,
     session_start,
+    user_prompt_submit,
 )
 
 
@@ -195,3 +196,47 @@ class TestSessionEndWorktreeGate:
             rc = session_end()
         assert rc == 0
         mclean.assert_not_called()
+
+
+# ── user_prompt_submit ────────────────────────────────────────────────────────
+
+class TestUserPromptSubmitWorktreeGate:
+    def test_worktree_skips_recall(
+        self, env, repo_with_worktree, monkeypatch, capsys
+    ):
+        """Worktree sessions: no recall injection, no token spend, no log
+        spam — short-circuit before config load + db connect + recall_fusion."""
+        _, wt = repo_with_worktree
+        _stdin(monkeypatch, {
+            "session_id": "wt-prompt-1",
+            "cwd": wt,
+            "prompt": "go fix the lint warning in bridge.py",
+        })
+        # Any call into config.load / storage.connect / recall_fusion would
+        # mean the gate failed to fire — patch them as canaries.
+        with patch.object(hooks.config, "load") as mload, \
+             patch.object(hooks.storage, "connect") as mconn:
+            rc = user_prompt_submit()
+        assert rc == 0
+        mload.assert_not_called()
+        mconn.assert_not_called()
+        # No additionalContext on stdout — pure no-op for worktree turn.
+        assert capsys.readouterr().out == ""
+
+    def test_primary_recall_still_runs(
+        self, env, repo_with_worktree, monkeypatch
+    ):
+        """Sanity: primary worktree path must NOT short-circuit — config.load
+        is reached (will then hit recall.vector gate; we don't care about the
+        downstream behavior here, only that the gate didn't preempt it)."""
+        primary, _ = repo_with_worktree
+        _stdin(monkeypatch, {
+            "session_id": "primary-prompt-1",
+            "cwd": primary,
+            "prompt": "what's left on this branch",
+        })
+        with patch.object(hooks.config, "load",
+                          return_value={"recall": {"vector": False}}) as mload:
+            rc = user_prompt_submit()
+        assert rc == 0
+        mload.assert_called()

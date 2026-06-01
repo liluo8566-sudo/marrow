@@ -627,6 +627,14 @@ def user_prompt_submit() -> int:
     if isinstance(inp, dict) and _handle_mm_prefix(inp):
         return 0  # no additionalContext injection for control prompts
 
+    # Worktree-session gate: cc instances in a NON-primary git worktree are
+    # task-isolated runs. They take direction from the user prompt + main
+    # session only; no personal recall context, no token spend on hits the
+    # worktree session can't act on anyway.
+    cwd = inp.get("cwd") if isinstance(inp, dict) else None
+    if _is_worktree_session(cwd or ""):
+        return 0
+
     cfg = config.load()
     if not cfg.get("recall", {}).get("vector", False):
         return 0
