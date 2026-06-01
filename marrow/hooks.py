@@ -666,7 +666,10 @@ def _append_recall_log(prompt_text: str, hits: list[dict]) -> None:
         kind = h.get("kind") or "event"
         hid = h.get("id", "?")
         score = h.get("score", 0.0)
-        snip = (h.get("content") or "").replace("\n", " ")[:120]
+        content = (h.get("content") or "").replace("\n", " ")
+        # Mirror injection-side shaping: anchor tables ship full content
+        # (rows are short + dense); only event hits get the 120-char cap.
+        snip = content if kind in _TABLE_KINDS else content[:120]
         parts.append(f"- `{kind}#{hid}` score={score:.2f} — {snip}")
         for c in h.get("_context", []) or []:
             arrow = "↑prev" if c.get("rel") == "prev" else "↓next"
