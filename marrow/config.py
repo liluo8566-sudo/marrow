@@ -46,7 +46,7 @@ def load() -> dict:
     backup = paths.get("backup_dir") or str(DATA_DIR / "backup")
     offsite = paths.get("offsite_backup_dir") or str(
         Path.home() / "Library" / "Mobile Documents"
-        / "com~apple~CloudDocs" / "marrow-backup"
+        / "com~apple~CloudDocs" / "Backup" / "marrow"
     )
     dash = paths.get("dashboard") or str(_mpaths.dashboard_md)
     # `db_pages` = folder of md files rendered from DB (was `sub_pages` until

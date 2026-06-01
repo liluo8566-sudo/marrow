@@ -6,7 +6,7 @@
 db = ""
 backup_dir = ""
 # iCloud offsite copy of the daily DB snapshot. Empty =
-# ~/Library/Mobile Documents/com~apple~CloudDocs/marrow-backup
+# ~/Library/Mobile Documents/com~apple~CloudDocs/Backup/marrow
 offsite_backup_dir = ""
 # Dashboard renders here (Obsidian vault). Empty = ~/Desktop/NY/dashboard.md
 dashboard = ""
