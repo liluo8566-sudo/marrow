@@ -208,3 +208,44 @@ def test_catchup_bridge_owns_superseded_by_fail_spawns(env):
         conn.close()
     # End marker + no ok row + > 5min elapsed → state 5 spawn.
     assert result == "spawn"
+
+
+# ── catchup: bridge_owns marker older than TTL falls through ─────────────────
+
+def test_catchup_bridge_owns_ttl_expired_spawns(env):
+    """Bridge crashed and never recovered. Marker > 12h old, no manual fire
+    ever happened. TTL must let catchup fall through to state 5 spawn so the
+    sid isn't orphaned forever."""
+    db, _ = env
+    sid = "bridge-sid-4"
+    conn = storage.connect(db)
+    try:
+        with conn:
+            # lifecycle:start/end + bridge_owns marker all stamped 24h ago.
+            conn.execute(
+                "INSERT INTO audit_log"
+                " (target_table, target_id, action, summary, occurred_at)"
+                " VALUES ('events', ?, 'session_lifecycle:start',"
+                " 'ppid=99999,source=cc,started_at=0',"
+                " '2026-05-01T00:00:00Z')",
+                (sid,),
+            )
+            conn.execute(
+                "INSERT INTO audit_log"
+                " (target_table, target_id, action, summary, occurred_at)"
+                " VALUES ('events', ?, 'session_lifecycle:end', '',"
+                " '2026-05-01T00:00:00Z')",
+                (sid,),
+            )
+            conn.execute(
+                "INSERT INTO audit_log"
+                " (target_table, target_id, action, summary, occurred_at)"
+                " VALUES ('events', ?, 'manual_skip', 'bridge_owns',"
+                " '2026-05-01T00:00:00Z')",
+                (sid,),
+            )
+        result = _classify(conn, sid, set())
+    finally:
+        conn.close()
+    # Stale marker (> 12h) → TTL kicks in → fall through to state 5.
+    assert result == "spawn"

@@ -151,19 +151,27 @@ def _ts_to_epoch(ts: str) -> float:
         return 0.0
 
 
+_BRIDGE_OWNS_TTL_SECONDS = 12 * 3600
+
+
 def _bridge_owns_active(conn, sid: str) -> bool:
-    """True iff sid's latest manual_skip row is 'bridge_owns' AND no newer
-    sessionend_extract row has appeared. The bridge writes the marker on
-    SessionEnd; once it manually fires sessionend_async and that run writes
-    an ok/fail/partial row (newer audit_log id), the marker is superseded
-    and the regular 7-state table takes over (state 5 retry, etc.)."""
+    """True iff sid's latest manual_skip row is 'bridge_owns', it's younger
+    than the TTL, AND no newer sessionend_extract row has appeared. The bridge
+    writes the marker on SessionEnd; once it manually fires sessionend_async
+    and that run writes an ok/fail/partial row (newer audit_log id), the
+    marker is superseded. TTL guards the bridge-crash-forever scenario —
+    after 12h with no manual fire, fall through to state 5 spawn so the sid
+    isn't orphaned indefinitely."""
     row = conn.execute(
-        "SELECT id, summary FROM audit_log"
+        "SELECT id, summary, occurred_at FROM audit_log"
         " WHERE action='manual_skip' AND target_id=?"
         " ORDER BY id DESC LIMIT 1",
         (sid,),
     ).fetchone()
     if not row or row["summary"] != "bridge_owns":
+        return False
+    marker_epoch = _ts_to_epoch(row["occurred_at"])
+    if marker_epoch and (time.time() - marker_epoch) > _BRIDGE_OWNS_TTL_SECONDS:
         return False
     newer = conn.execute(
         "SELECT 1 FROM audit_log"
