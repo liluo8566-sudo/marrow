@@ -1,205 +1,263 @@
 # Synapse-WX — WeChat dendrite plan
 
-> Independent repo (`/Users/Gabrielle/CC-Lab/synapse-wx/`), Python, MIT.
-> New build from scratch — not a fork. weclaude 归档备查。
-> Goal: 替 weclaude，一次解掉命令穿透 + sessionend 浪费 + 多平台扩展 + 多模态 IO。
+> Independent repo (`/Users/Gabrielle/CC-Lab/synapse-wx/`), Python, MIT, open-sourceable.
+> New build from scratch — not a fork. weclaude already archived to `~/CC-Lab/archives/weclaude/`.
+> Goal: replace weclaude — solve `/model` passthrough + sessionend waste + multi-channel extensibility + multimodal IO in one shot.
 
 ## Goals
-1. 微信端用原生 cc 命令（`/model` `/clear` `/rewind` `Esc` 等）— 靠 no-p stream-json 模式
-2. sessionend 浪费降到日均 1-3 次（6h inactive 触发），不再每条消息触发
-3. 多平台架构留位 — `provider adapter`（cc/Codex/Qwen）+ `channel adapter`（在 marrow 主体）正交
-4. 多模态 IO — in: text/image/pdf/voice; out: text/image/file/sticker
-5. 跟 marrow 主体 **0 代码耦合**（通过 cc + MCP 间接连）→ 任何记忆系统能换上
+1. WeChat uses native cc-equivalent commands (`/model` `/clear` `/rewind` `/stop` etc) — bridge owns slash routing on top of no-p stream-json
+2. sessionend reduced to ≤ 3 LLM calls/day (6h inactive trigger), no longer per-message
+3. Multi-channel architecture room — provider adapter (cc / Codex / Qwen) × channel adapter (wx / web / iOS) orthogonal
+4. Multimodal IO — in: text / image / pdf / voice; out: text / image / file / sticker
+5. **Zero code coupling to marrow** — bridge talks to cc only; cc calls marrow through MCP. marrow swappable for any memory backend.
+6. **Open-sourceable** — anyone can clone, configure iLink + cc OAuth, run without installing marrow. marrow integration is optional, configured via a hook command string.
 
 ## Out of Scope
-- iOS / mac / web dendrite（独立 repo 各自做）
-- Pulse 主动推送 loop（marrow 主体 + 独立 launchd cron 干，不属 synapse）
-- 群聊
-- Stellan 钱包等 addon
-- Claude Desktop / iOS 官方客户端 MCP 接入（marrow 主体侧改造）
+- iOS / macOS / web channel adapters (separate dendrite repos later)
+- Pulse proactive push loop (marrow main + separate launchd cron — Phase F)
+- Group chat
+- Stellan wallet / other addons
+- Claude Desktop / official iOS app MCP (marrow main repo concern)
 
 ## Architecture
 ```
-WeChat ──▶ synapse-wx (此 repo, Python, 独立)
-             │ stdin/stdout (stream-json)
+WeChat ──▶ synapse-wx (this repo, Python, independent, MIT)
+             │ stdin/stdout (stream-json, no-p)
+             │ env: MARROW_BRIDGE=1
              ▼
-          cc CLI subprocess (no-p)
+          cc CLI subprocess (persistent)
              ├──▶ MCP ──▶ marrow daemon (recall / events / sticker)
-             └──▶ hooks (SessionStart 注入 / sessionend pipeline)
+             └──▶ hooks (SessionStart inject / SessionEnd → see env-gate below)
 ```
-- synapse-wx **不 import marrow**，跟 marrow 解耦
-- provider adapter 封装 cc subprocess IO（spawn/send/recv/cancel/close），第一实现 = cc no-p stream-json；Qwen / Codex / `-p` fallback 各 ~200-300 LOC 增量加
+
+### marrow ↔ synapse-wx contract
+- synapse-wx **does not import marrow**
+- Two crossing points only:
+  1. **Env var `MARROW_BRIDGE=1`** set by bridge on cc spawn — tells marrow SessionEnd hook to skip its popen sessionend_async
+  2. **Subprocess fire** — `python -m marrow.sessionend_async <sid>` on 6h timer. Configured as a templated command string in synapse-wx config; empty string = no marrow integration.
+- Any user without marrow installed: config skips the hook command, env var is harmless (marrow hook doesn't exist to read it).
 
 ---
 
-## Phase 0 — 独立小动作（不阻塞，先做）
-- [ ] 砍 weclaude fork 工作树里 `bridge.py` 工作树 +90 LOC ny-memm 死代码块（硬编码 `~/Toolkit/scripts/ny-memm-session.py` + NY 路径）
-- [ ] marrow `_atomic.py` 加 `path = os.path.realpath(path)` — atomic write 穿透 symlink
-- [ ] handover.md 源文件挪到 iCloud Drive 路径，三处 root symlink 跟着指过去；全局 CLAUDE.md `@import` 路径不动（仍 `~/.config/marrow/handover.md`，那是 symlink）
-- [x] pit-微信相关.md 合并进 FUTURE Phase 4
+## Phase 0 — preflight (do before A1)
 
-## Phase A — MVP 上岸 ⭐（核心包，目标：能微信跟屿忱用新对话）
-**重点：能用 + 命令穿透 + sessionend 不浪费**
+### P0.A — `marrow/_atomic.py` realpath
+- Add `path = os.path.realpath(path)` as first line of `atomic_write()`
+- Effect: `os.replace` lands on symlink's true target, not the symlink itself
+- Safe predictive measure; existing canonical paths are real files, realpath is no-op there
 
-**A1. 新 repo 初始化**
-- 位置：`/Users/Gabrielle/CC-Lab/synapse-wx/`
+### P0.B — archive weclaude
+- `mv ~/CC-Lab/external/weclaude ~/CC-Lab/archives/weclaude`
+- Retired, no upstream pulls
+- Dead code stays inside archive (historical reference)
+
+### P0.D — marrow SessionEnd env gate (cross-cutting)
+- **Why**: bridge will kill+respawn cc on every `/model` / `/clear` / `/rewind`. cc fires its SessionEnd hook on each kill → marrow archives + spawns popen sessionend_async → wastes one LLM call per command. Bridge wants sole authority over sessionend timing.
+- **Design** (reuse existing manual_skip control plane, do NOT invent new audit row type):
+  - `marrow/hooks.py` SessionEnd: if `os.environ["MARROW_BRIDGE"] == "1"` → archive events (cheap, local) + write `lifecycle:end` + write manual_skip marker `bridge_owns` + return (no popen)
+  - `marrow/sessionstart_catchup.py`: precondition — if sid has `bridge_owns` marker AND no newer ok row, classify=skip; else fall through to existing 7-state logic (so fail rows from real bridge-fired sessionend_async still trigger state-5 retry)
+- **Failure tolerance**:
+  - Bridge 6h timer fires sessionend_async → LLM fails → writes fail/partial row (newer than bridge_owns marker) → next SessionStart catchup state-5 retries once
+  - Bridge crashes before firing → next cc SessionStart catchup sees stale bridge_owns + ppid dead → ??? must NOT silently lose sessionend forever. **Decision**: bridge_owns marker has a TTL — if `now - marker_ts > 12h` AND no newer ok row, catchup treats it as stale and falls through to state-5 spawn. Belt-and-suspenders.
+
+### ~~P0.C — handover.md iCloud move~~ — **dropped**
+- No demonstrated cross-device read need; DB backup already in iCloud via launchd. Revisit if iPhone access becomes a real ask.
+
+---
+
+## Phase A — MVP ⭐ (target: WeChat + 屿忱 fresh conversation working)
+
+### A1 — repo bootstrap
+- Location: `/Users/Gabrielle/CC-Lab/synapse-wx/`
 - Python 3.12 venv · ruff · pytest · MIT license
 - `README.md` + `pyproject.toml` + `.gitignore`
+- Initial layout: `synapse_wx/{providers,ilink,commands,channels}/` + `tests/`
+- git init, no initial commit until A2 spike validates
 
-**A2. provider adapter 层**
-- `synapse_wx/providers/base.py` — abstract `spawn() / send(msg) / recv() / cancel() / close()`
-- `synapse_wx/providers/cc.py` — no-p stream-json 实现，第一并默认
-- 测试：mock echo provider，验证 send → recv 闭环
+### A2 — provider adapter
+- `synapse_wx/providers/base.py` — abstract:
+  - `spawn(env={})` — start subprocess
+  - `send(msg: str)` — write user message
+  - `recv()` — generator yielding events until result; raises on subprocess death
+  - `cancel()` — best-effort interrupt (Phase A implementation = kill subprocess)
+  - `close()` — graceful stdin.end → SIGTERM → SIGKILL (cyberboss 3-stage pattern)
+- `synapse_wx/providers/cc.py` — first impl:
+  - args: `--output-format stream-json --input-format stream-json --verbose --permission-mode bypassPermissions [--model X] [--resume SID]`
+  - **No** `--setting-sources "" --strict-mcp-config` (those are marrow pipeline isolation; bridge needs persona + MCP + hooks alive)
+  - Spawn env merges `MARROW_BRIDGE=1` into existing os.environ
+  - line-delimited JSON parse, dispatch by `type`: `system` / `assistant` / `user` / `result` / `control_request`
+  - `control_request` (permission prompts) plumbed up — Phase A bypasses all so this path mostly dormant; Phase E (yes/no relay) hooks here
+  - **No stdin interrupt protocol** (cc Issue #41665 not yet shipped) — `cancel()` = kill+respawn-with-resume
+- Mock echo provider for tests (`providers/mock.py`) — send → recv loop without real cc
+- Test: spawn → send → recv events → assert result text → close clean
 
-**A3. iLink 客户端层（移植 weclaude 抢救代码）**
-- `synapse_wx/ilink/client.py` — 从 `weclaude/ilink_client.py` 抢救字段修复 + 加 retry 框架
-- `synapse_wx/ilink/cursor.py` — polling cursor 持久化（resume on restart）
+### A3 — iLink client
+- `synapse_wx/ilink/client.py` — salvage `weclaude/ilink_client.py` field fixes + add retry framework
+- `synapse_wx/ilink/cursor.py` — polling cursor persistence (resume on restart)
 
-**A4. 主消息循环**
-- inbound：iLink poll → 5s debounce accumulate → flush → provider.send
-- hold 词扩窗：buffer 内任一 bubble 命中 hold 词表 → debounce 拉到 10s（命中即重置 timer）
-  - 初始词表：`等` `稍等` `等等` `先`（精确单 bubble 匹配，避免误伤"等下"类正文）
-  - 词表配置化，跑一段时间根据漏召 / 误召手动加
-- outbound：provider.recv stream → 语义 bubble 切分（≤30-50 字 · 换行 > 句末标点 > 中文逗号 > 硬切）→ iLink send
-- time anchor 注入（stdin prefix `[time: YYYY-MM-DD Day HH:MM | gap: Nh]`）— 从 weclaude 抢救
+### A4 — main message loop
+- Inbound: iLink poll → 5s debounce accumulate → flush → `provider.send`
+- Hold-word window extension: any bubble in buffer matches hold word → debounce extends to 10s (any new hit resets timer)
+  - Initial list: `等` `稍等` `等等` `先` (exact single-bubble match, no substring; avoids "等下" false positive)
+  - List config-file driven; tune by observed miss/false-positive rates
+- Outbound: `provider.recv` stream → semantic bubble split (≤30-50 char · newline > sentence-end > CN comma > hard cut) → iLink send
+- Time anchor injection (stdin prefix `[time: YYYY-MM-DD Day HH:MM | gap: Nh]`) — salvaged from weclaude
 
-**A5. 命令路由**
-- `synapse_wx/commands/registry.py` — 三层路由：cc 原生白名单透传 / bridge 自定义 handler / fallback "main session 处理"
-- Phase A 必备自定义命令：
-  - `/info` — Model · SID · session 5h % · week % · total token (21.2k 风格)
-  - `/stop` — bridge SIGINT 当前 cc subprocess（不进 cc prompt）
+### A5 — command routing
+- `synapse_wx/commands/registry.py` — three-tier:
+  1. bridge handlers (`/model` `/clear` `/rewind` `/stop` `/info` etc) — intercept, do not forward
+  2. natural alias shortcuts (`4.7` / `4.8` / `sonnet` / `haiku` / `opus`) — route to `/model` handler with mapped id
+  3. fallback — forward as user message
+- No cc-native passthrough exists in stream-json mode (cc doesn't parse slash commands when it's reading user JSON over stdin). Every command is bridge-implemented.
 
-**A6. sessionend 触发**
-- 6h inactive 计时器 → 调用 marrow sessionend pipeline（MCP 调或写信号文件）→ 标 done 写记忆 → buffer 清空 → cc subprocess **不退出**
-- new message 来 → 计时器重启 → 累积 → 满 6h 再跑一次
-- `/clear`（cc 原生透传）才真关 session
-- 一个 session 可一日多次 sessionend pipeline，每次一份快照
+**Phase A commands**:
+- `/info` — format: `Opus 4.7 [1M] | SID-xxxxxxxx | 12%(5h) 30%(7d) | 118.0k`
+  - Model: from current spawn args
+  - SID: from `system` event init
+  - total token: running sum from `assistant.message.usage` (cyberboss process-client.js:152 pattern)
+  - 5h % / 7d %: **dump-and-discover** during A1 — spawn cc, log every event type to disk, find where `rate_limit_event` (or equivalent) surfaces in current cc version. If found → wire it. If not found (cc Issue #57699 says the field was dropped 2026/3) → display `?(5h) ?(7d)` until cc adds it back. No stub, no delay.
+- `/model X` and aliases — kill cc subprocess (graceful close) → respawn with `--model X --resume <sid>` → confirm "Switched to <human-name>"
+- `/clear` — kill cc → respawn WITHOUT `--resume` → confirm "New session"
+- `/rewind N` (Phase E, dormant for now) — jsonl truncate + respawn with resume
+- `/stop` — kill cc → respawn with `--resume <sid>` (no message sent) → confirm "Stopped, session kept"
+  - Best available approximation of Esc; cc has no mid-stream stdin interrupt protocol
+  - Cost: ~2s cold start. Trade-off accepted.
 
-**A7. launchd 上线**
-- `com.synapse-wx.bridge.plist` — RunAtLoad + KeepAlive on Crash + throttle 30s + logs `~/Library/Logs/synapse-wx.*.log`
+### A6 — sessionend trigger
+- 6h inactivity timer per session
+- On fire: subprocess `python -m marrow.sessionend_async <sid>` detached (4-flag popen_detach pattern), then clear local buffer
+- cc subprocess **does NOT exit** — bridge fires sessionend out-of-band; conversation can continue
+- New message arriving → timer resets
+- `/clear` → real session close, timer void
+- One sid can fire sessionend pipeline multiple times per day, each a separate snapshot
+- **Config option**: `sessionend_command` template in synapse-wx config (default `python -m marrow.sessionend_async {sid}`); empty string disables — open-source users without marrow set it empty
 
-**A8. retry 框架 + 微信专属 alert + sleep-detect**
-- 统一 retry 框架：ret=-2 / network timeout / cli crash 都走指数 backoff，cap 5 次失败 → 写 alert
-- alert 到 marrow，dashboard 吸收
-- bridge 死 → launchd 重启 + bridge 自检 → 发"我重启了"到文件传输助手
-- cc 死 → bridge fallback bubble "cc 连不上稍等"
-- **sleep-detect**：监听 macOS `NSWorkspace.willSleepNotification` / `didWakeNotification` → sleep 标 paused、wake 强制 polling reconnect + cursor catchup 拉 sleep 期间漏消息。修完可关 caffeinate
+### A7 — launchd
+- `com.synapse-wx.bridge.plist` — RunAtLoad + KeepAlive on Crash + throttle 30s
+- Logs `~/Library/Logs/synapse-wx.{out,err}.log`
 
-**Phase A 出口条件**：能微信聊天 + 原生 `/model` `/clear` 等命令直接工作 + 6h 不活动落记忆 + 死了能自愈 + 你回来知道。
+### A8 — retry framework + alerting + sleep-detect
+- Unified retry: iLink ret=-2 / network timeout / cli crash → exponential backoff, cap 5 failures → write alert to marrow alerts table (via subprocess `python -m marrow.repo add_alert ...` or marker file — TBD during A8)
+- Bridge death → launchd restart + bridge self-check → "我重启了" message to File Transfer Helper
+- cc death → bridge fallback bubble "cc 连不上稍等"
+- **sleep-detect (must-have)**: pyobjc-framework-Cocoa observer on `NSWorkspaceWillSleepNotification` / `NSWorkspaceDidWakeNotification`
+  - Will-sleep: mark bridge state paused, stop iLink poll, do NOT close cc subprocess (let it freeze with the OS)
+  - Did-wake: force iLink reconnect + cursor catchup (pull messages sent during sleep) + verify cc subprocess still alive (resurrect if dead)
+  - Replaces all the "never sleep / caffeinate" workarounds Lumi was relying on
 
----
-
-## Phase B — 多模态 inbound + buddy
-**B1. inbound media**
-- image / pdf / voice：iLink 下载 → voice → text（iLink 自带转）→ image/pdf 本地路径喂 cc vision
-- cc subprocess `--image path` 参数或 stdin embed
-- 入库到 marrow `media` 表（FUTURE.md `marrow_media_store`）：cc vision 自动生成 description + tags + 嵌入，retention 由统一系统管（anchored 永留 / loose 90 天 age-out）
-- bridge 只做 IO，不管 retention 与存储位置
-
-**B2. buddy bubble 处理**
-- 输出阶段过滤 `<!-- buddy: ... -->` bubble
-- 时间窗 mute：配置 `BUDDY_MUTE_WECHAT = "22:00-08:00"`（默认）
-- cc statusline / buddy MCP 在 cc 那头不受影响
-
-**B3. weclaude session 切换功能保留**
-- `/ss` 列 session · `/use N` 切 session — 移植 `bridge.py:665-791` jsonl 扫描
-
----
-
-## Phase C — 多模态 outbound + sticker catalog
-**C1. outbound media**
-- image / file send via iLink — 翻译 cyberboss `src/adapters/channel/weixin/media-send.js` 到 Python，含 AES-ECB
-
-**C2. sticker catalog（marrow 主体配合）**
-
-存储
-- marrow 新表 `stickers`：`id / path / sha256 / desc / vec384 / source(wechat/finder) / created_at / last_used`
-- 真路径 `~/Desktop/NY/stickers/`，`~/.config/marrow/stickers/` symlink 过去（NY 显眼 Finder 直接进，daemon 内部走 .config 稳定）
-- 平铺一层 `stk_NNN_desc.{ext}`，原格式不转码（jpg/png/gif/webp），微信发不了 gif 没关系存档保留
-- `_thumb/` 子目录 daemon 缓存 240px webp（`_` 前缀 Finder 隐藏不打扰）
-- 无 tags 字段（embedding 检索靠 desc + vec384，跑一段需要分组再加回）
-- catalog 跨 channel 共享（未来 iOS / 桌面端同一份）
-
-入库（cyberboss 风格，主 LLM 决策 + watcher 兜底）
-- 两条入口都汇到一个 watcher：
-  - 微信发图给屿忱 → bridge 把文件落 `stickers/` → watcher 捕获
-  - 你 Finder drop 图进 `stickers/` → watcher 捕获
-- watcher（Python `watchdog` ~20 LOC）on new file：
-  1. SHA256 比对 db `sha256` 列 → 命中静默跳，不处理也不通知
-  2. 没命中 → cc **主进程原生 vision**（OAuth 订阅，不连任何外部 vision endpoint）+ 注入 prompt → 主 LLM 判断是不是表情包 + 写 desc → 调 `sticker_save(filepath, desc)` tool
-  3. daemon 落 db + rename 文件为 `stk_NNN_desc.{ext}`
-- watcher on file delete → db 软删对应 row（按 path 或 stk_NNN 前缀匹配）
-- 入库 prompt：**TODO 老婆亲自写**，placeholder `synapse_wx/prompts/sticker_save.md`
-- 微信入库后 bridge 发简版确认卡：`✅ stk_115 / 描述: orange cat holding phone sassy`（无"不要请删"那句多余话）
-- Phase B 视误判率决定要不要加 `/sticker` 命令或意图识别
-
-出库（embedding 语义检索，两轮 tool）
-- 主 LLM inline 输出 `<sticker query="..." />`（query 故意写宽，如 "心动想埋你怀里"）
-- bridge 解析 → embedding 检索 top 5 → tool 回 `[{id, desc}]`
-- LLM 看 desc 挑 ID → `sticker_send(id)` → bridge 走 iLink **表情包格式**（不是普通文件附件，对方看到的是表情包不是图）
-
-管理（Phase A 无 UI，等前端）
-- 浏览：Finder 大图标 view 直接进 `~/Desktop/NY/stickers/`
-- 改 desc：微信跟屿忱说 "stk_115 改成 XXX" → tool `sticker_update(id, desc)`
-- 删除：Finder 删文件（watcher 同步软删 db）/ 微信跟屿忱说 → tool `sticker_delete(id)`
-- **无 dashboard subpage 无 reconcile** — 前端起来才做 grid + inline edit + 多选删
-
-种子
-- 空，不要 cyberboss 那 75 tag 词表
-
-credit
-- README 挂 cyberboss：LLM-driven save flow + SHA256 dedup + 静默去重模式 + 确认卡片格式
-
-**C3. cli 文字版表情**（dormant）
-- cc 输出 `【心如止水.jpg】` 文本占位，以后渲染层做
+**Phase A exit criteria**: chat with 屿忱 via WeChat · `/model` aliases work · `4.7` switches model · 6h inactive fires marrow sessionend · sleep/wake cleanly handled · death self-heals · alert on systemic fail.
 
 ---
 
-## Phase D — Marrow 主体配套（独立排进 marrow repo plan，不在 synapse repo）
-**D1. channel router in marrow**
-- events 表加 `channel` 字段（wechat / cc / desktop / ios）
-- channel-agnostic recall / write / pulse 接口
-- 跟 affect recall redesign 同 phase 做（DOING #1 那条）
+## Phase B — multimodal inbound + buddy
+### B1 — inbound media
+- image / pdf / voice: iLink download → voice transcript (iLink built-in) → image/pdf local path fed to cc vision
+- cc subprocess `--image path` arg or stdin embed
+- Storage: marrow `media` table (FUTURE.md `marrow_media_store`) — cc vision auto-generates description + tags + embedding, retention managed by marrow (anchored=permanent / loose=90d age-out)
+- Bridge does IO only, not retention/storage placement
 
-**D2. handover atomic write fix**
-- 跟 Phase 0 第 2 项同步（提前做就行）
+### B2 — buddy bubble filter
+- Strip `<!-- buddy: ... -->` from outbound at split time
+- Time-window mute: `BUDDY_MUTE_WECHAT = "22:00-08:00"` default
+- cc statusline / buddy MCP in cc unaffected
 
-**D3. daemon-side MCP client session tracker**
-- 为 Desktop / iOS 接入准备：监控 MCP client 连接断开 + 超时无活动 → 触发 sessionend
-- 给 Ombre-Brain 模式（client LLM 自觉调 recall tool）留位
-
----
-
-## Phase E — 后置 nice-to-have
-- **WeChat permission yes/no relay** — cc Bash/Edit 弹权限请求时（如改 Desktop / .claude 路径），bridge 推到微信 → 你手机回 `/yes` `/no` `/always` → bridge 转回 cc。补 `acceptEdits` 自动模式之外的弹窗场景
-- `/back N` — jsonl transcript truncate（手机版 `/rewind`），bridge 直接改 jsonl
-- cross-channel handover — sid 共享，微信 ↔ cc 接着聊
-- **continuation thinking** — 5s 触发后 cc 已开 inflight thinking 期间新 msg 到 → abort + merge input + 重发；思考完瞬间无 inflight → 立即 release（不再 hold）。前置 spike：验证 cc no-p stream-json 能否 mid-stream abort 单 request 而不杀 subprocess。感知层（标点 / 长度 / `/go` / hold 词增量）届时再议
-- conversation-aware split 升级 — 按 haiku 切分而不是规则切
+### B3 — weclaude session switch port
+- `/ss` list sessions · `/use N` switch — port from archived `weclaude/bridge.py:665-791` jsonl scan logic
 
 ---
 
-## Phase F — Pulse 整合（marrow 主体 + 独立 cron）
-依赖 Phase A8 outbound send 接口稳定后启动。
-- marrow 主体：`inner_state` 计算 + 多 signal 监控（屏幕时间 / task followup / 健康 / 时段）
-- 独立 launchd cron loop（不在 synapse-wx 里）
-- 通过 synapse-wx 的 outbound send 接口发 WeChat
-- 跟 FUTURE.md Phase 5 `marrow_pulse_proactive_loop` 同一项
+## Phase C — multimodal outbound + sticker catalog
+### C1 — outbound media
+- image / file via iLink — translate cyberboss `src/adapters/channel/weixin/media-send.js` to Python (includes AES-ECB)
+
+### C2 — sticker catalog (marrow main collaborates)
+**Storage**
+- marrow `stickers` table: `id / path / sha256 / desc / vec384 / source(wechat/finder) / created_at / last_used`
+- Real path `~/Desktop/NY/stickers/`, symlink `~/.config/marrow/stickers/` for daemon use
+- Flat naming `stk_NNN_desc.{ext}` (jpg/png/gif/webp, no transcoding)
+- `_thumb/` subdir caches 240px webp (`_` prefix hides in Finder)
+- No tags column — embedding via desc + vec384
+
+**Ingest (cyberboss pattern, main-LLM-driven + watcher fallback)**
+- Two entry points feed one watcher:
+  - Send sticker to 屿忱 via WeChat → bridge drops file in `stickers/` → watcher catches
+  - Finder drop into `stickers/` → watcher catches
+- Watcher (Python `watchdog` ~20 LOC) on new file:
+  1. SHA256 vs existing → match = silent skip
+  2. No match → cc native vision (OAuth, no external endpoint) judges + writes desc → calls `sticker_save(filepath, desc)` MCP tool
+  3. daemon inserts row + renames `stk_NNN_desc.{ext}`
+- File delete → soft-delete by path/prefix match
+- Ingest prompt: TBD by Lumi, placeholder `synapse_wx/prompts/sticker_save.md`
+- WeChat ingest confirm card: `✅ stk_115 / 描述: orange cat holding phone sassy`
+
+**Outbound (embedding retrieval, two-call)**
+- Main LLM inline `<sticker query="..." />`
+- Bridge parses → embedding top-5 → tool returns `[{id, desc}]`
+- LLM picks ID → `sticker_send(id)` → iLink **sticker-format** payload (not generic file)
+
+**Management**
+- Browse: Finder large-icon view on `~/Desktop/NY/stickers/`
+- Edit desc: WeChat → tool `sticker_update(id, desc)`
+- Delete: Finder rm OR WeChat → tool `sticker_delete(id)`
+- No dashboard subpage / reconcile until frontend Phase
+
+**Seed**: empty (no cyberboss 75-tag list)
+
+**Credit**: README → cyberboss for LLM-save flow + SHA256 dedup + silent skip + confirm card
+
+### C3 — CLI text stickers (dormant)
+`【心如止水.jpg】` text placeholder, render layer later
 
 ---
 
-## Open Brainstorm（不入 Plan，单独议）
-- **WeChat 专属 alert 完整方案** — 电脑关机谁告诉你？iOS Shortcut 外部 health check ping？
+## Phase D — marrow main companion work (separate plan, marrow repo)
+### D1 — channel router
+- events table gains `channel` column (wechat / cc / desktop / ios)
+- channel-agnostic recall / write / pulse interfaces
+- Same phase as affect recall redesign (Doing #1)
+
+### D2 — handover atomic write — done in Phase 0 P0.A
+
+### D3 — daemon-side MCP client session tracker
+- For Desktop / iOS MCP clients: monitor connect/disconnect + idle timeout → fire sessionend
+- Sets the stage for Ombre-Brain mode (client LLM self-calls recall tool)
 
 ---
 
-## 风险
-- **iCloud sync 偶发 conflict 副本** → 直接挪试，出问题挪回
-- **iLink 上游单点依赖** — API 改字段 retry + version pin + alert 监听；服务真挂整个微信链路废，无 fallback 可救，alert 报你
-- **weclaude / cyberboss 都不能直接抄** → synapse-wx 自己起 MIT 干净，credit 在 README 挂
+## Phase E — post-MVP nice-to-have
+- **WeChat permission yes/no relay** — cc Bash/Edit prompt (with `--permission-mode default` swap) → bridge pushes to WeChat → phone replies `/yes` `/no` `/always` → bridge sends `control_response` back. Off in Phase A (we use `bypassPermissions`).
+- **WeChat conversation log** — port weclaude `memory_store.py`-style daily MD log (`~/.config/synapse-wx/memory/YYYY-MM-DD.md`); per-day file, append User/Bot pairs. ~30 LOC. Open-source value: lightweight history without marrow.
+- `/back N` — jsonl transcript truncate (phone-side `/rewind`)
+- Cross-channel handover — sid shared, WeChat ↔ cc resumable
+- **continuation thinking** — mid-stream new msg → abort+merge+resend; instant release if cc just returned `result` event. Prereq spike: confirm cc no-p stream-json can mid-stream abort a single request without killing the subprocess (cc Issue #41665 must land first). Sensing layer (punctuation / length / `/go` / hold-word delta) revisited then.
+- Conversation-aware split upgrade — Haiku-driven bubble cut instead of rules
+- **Codex provider** — `providers/codex.py` ~200-300 LOC, no marrow env var coupling (codex doesn't run marrow hooks)
 
 ---
 
-## 来源 / Credit
-- **weclaude** (Jaynechu fork of allenhuang0)：time anchor 注入逻辑 · iLink 字段修复
-- **cyberboss** (WenXiaoWendy)：sync-buffer 思路 · ret=-2 retry 思路 · sticker catalog 思路 · system-checkin-poller 思路（Phase F 用）
+## Phase F — Pulse integration (marrow main + separate launchd cron)
+Depends on Phase A8 outbound stability.
+- marrow main: `inner_state` calc + multi-signal monitor (screen time / task followup / health / time-of-day)
+- Separate launchd cron (not inside synapse-wx)
+- Pushes via synapse-wx outbound send interface
+- Same item as FUTURE.md Phase 5 `marrow_pulse_proactive_loop`
+
+---
+
+## Open Brainstorm (not in plan yet)
+- WeChat-specific full alert mode — computer off, who tells Lumi? iOS Shortcut external health-check ping?
+
+---
+
+## Risks
+- **cc stream-json field drift** — `rate_limit_event` already had a v2.1.80→2026/3 disappearance; `/info` 5h/7d will be best-effort with graceful `?` fallback
+- **cc stdin interrupt** — Issue #41665 unshipped; `/stop` accepts ~2s cold start cost
+- **iLink upstream single point** — API field changes, retry + version pin + alert; service outage = no WeChat path, no fallback
+- **bridge crash leaves bridge_owns marker stale** — 12h TTL in catchup handles this
+- **cyberboss not directly portable** — synapse-wx is clean MIT rewrite; cyberboss credit in README
+
+---
+
+## Credit
+- **cyberboss** (WenXiaoWendy): persistent stream-json subprocess pattern · `control_request` protocol · sticker LLM-save flow · SHA256 dedup · sync-buffer concept · system-checkin-poller (Phase F)
+- **weclaude** (Jaynechu fork of allenhuang0, now archived): time anchor injection · iLink field fixes · conversation log MD format (Phase E)
