@@ -51,6 +51,7 @@ WeChat ──▶ synapse-wx (this repo, Python, independent, MIT)
 - **Monorepo CLAUDE.md move** — Lumi wants `~/CC-Lab/CLAUDE.md` shared across marrow/synapse-wx so cc cwd anywhere under CC-Lab inherits the same project memory. cc only walks cwd → git root for project-level CLAUDE.md, so this needs either a symlink trick, a build step, or splitting global vs. project memory differently. Discuss before touching.
 - **`wx` alias** — add `alias wx="cd ~/CC-Lab/synapse-wx && claude"` to `~/.zshrc`, symmetric with existing `mm`/`ny`/`nyr`/`study`. Trivial; do once monorepo CLAUDE.md decision is settled.
 - **typing indicator** — port weclaude `send_typing` so WeChat shows "正在输入" again. ~30 LOC; Phase B candidate.
+- **`/info` field redesign** — Lumi wants real 5h usage %, not "hours until reset". cc 2.1.159 stream-json does NOT expose `percentUsed` (only `resetsAt` + `isUsingOverage`); cc's own statusline reads quota via internal endpoint not exposed here. Options surfaced (pick later): (A) display cumulative `total_cost_usd` + reset countdown — cheap, immediate; (B) short `claude -p "/status"` subprocess to parse cc's own status — ~3-5s blocking + extra LLM call + may not work in -p mode; (C) wait for cc to re-add `percentUsed` in stream-json. Lumi to decide what else she wants surfaced before we touch this — possibly token total / session label / cost-this-window in one line.
 
 ---
 
