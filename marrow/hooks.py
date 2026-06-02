@@ -894,41 +894,65 @@ def pretool_use() -> int:
                 except ValueError:
                     return p
 
+            # "Own" naming = raw naming_hint that isn't empty and isn't the
+            # P/p inherit marker. Only own rules get a Naming: line so the
+            # root rule isn't redundantly echoed at every descendant.
+            _P_MARKERS = {"p", "P"}
+
+            def _own_naming(row: dict | None) -> str:
+                if not row:
+                    return ""
+                nh = (row.get("naming_hint") or "").strip()
+                if not nh or nh in _P_MARKERS:
+                    return ""
+                return nh
+
+            def _emit_block(path_str: str, row: dict | None,
+                            is_root: bool = False) -> list[str]:
+                blk: list[str] = [_tilde(path_str)]
+                desc = (row or {}).get("description") if row else None
+                desc = (desc or "").strip()
+                if desc:
+                    blk.append(f"- Description: {desc}")
+                own = _own_naming(row)
+                if own:
+                    blk.append(f"- Naming: {own}")
+                elif is_root:
+                    # Root must always show resolved naming as the source of truth.
+                    blk.append(f"- Naming: {_atlas_mod.resolve_naming(conn, path_str, roots)}")
+                # Leaf placeholder: no description, no own rule -> hint at siblings.
+                if not desc and not own and not is_root:
+                    blk.append("- (empty -> ls siblings for pattern)")
+                return blk
+
             lines: list[str] = []
             lines.append("[Path/Naming rules]")
             lines.append("- Do not dump files in ~/")
             lines.append("- Unsure = stop + clarify")
-            lines.append("- Atlas Naming/Description empty -> mimic sibling rows")
+            lines.append("- Naming inherits from nearest ancestor with a rule")
             lines.append("- rename/move -> sweep all refs")
             lines.append("")
             lines.append(f"[Atlas slice for {_tilde(str(target))}]")
 
             root_str = str(root)
-            root_row = chain_rows.get(root_str, {})
-            lines.append(_tilde(root_str))
-            lines.append(f"- Description: {root_row.get('description') or ''}")
-            lines.append(f"- Naming: {_atlas_mod.resolve_naming(conn, root_str, roots)}")
+            lines.extend(_emit_block(root_str, chain_rows.get(root_str, {}), is_root=True))
 
-            # Mid-chain (between root and parent, exclusive)
+            # Mid-chain (between root and parent, exclusive) -
+            # only emit if the row has its own description or own naming.
             mid_chain = chain[1:-1] if len(chain) > 2 else []
             for mp in mid_chain:
                 ms = str(mp)
                 mr = chain_rows.get(ms)
-                if mr and (mr.get("description") or mr.get("naming_hint")):
+                if mr and ((mr.get("description") or "").strip() or _own_naming(mr)):
                     lines.append("")
-                    lines.append(_tilde(ms))
-                    lines.append(f"- Description: {mr.get('description') or ''}")
-                    lines.append(f"- Naming: {_atlas_mod.resolve_naming(conn, ms, roots)}")
+                    lines.extend(_emit_block(ms, mr))
 
-            # Parent block (always emit, even if same as root)
+            # Parent block - always emit when distinct from root.
             if len(chain) > 1:
                 parent = chain[-1]
                 parent_str = str(parent)
-                parent_row = chain_rows.get(parent_str, {})
                 lines.append("")
-                lines.append(_tilde(parent_str))
-                lines.append(f"- Description: {parent_row.get('description') or ''}")
-                lines.append(f"- Naming: {_atlas_mod.resolve_naming(conn, parent_str, roots)}")
+                lines.extend(_emit_block(parent_str, chain_rows.get(parent_str, {})))
 
             _emit("\n".join(lines))
         finally:
