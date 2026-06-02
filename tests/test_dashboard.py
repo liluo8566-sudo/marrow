@@ -48,14 +48,16 @@ def test_render_top_has_alerts_and_tasks(db):
 
 
 def test_alert_rendered_with_severity(db):
-    # Format changed in 2.5b: severity: message (no id prefix, per template spec).
+    # severity: message + inline `<!-- id:alert.N -->` anchor so
+    # reconcile_alerts can map an md-side delete back to the row.
     conn = storage.connect(db)
     try:
         block = dashboard.render_top(conn)
     finally:
         conn.close()
     line = next(ln for ln in block.splitlines() if "recall returned 0" in ln)
-    assert line == "- warn: recall returned 0"
+    assert line.startswith("- warn: recall returned 0 <!-- id:alert.")
+    assert line.endswith(" -->")
 
 
 def test_write_creates_file_with_block(db, tmp_path):

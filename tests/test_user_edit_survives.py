@@ -109,8 +109,11 @@ def test_dashboard_alerts_block_is_db_authoritative(tmp_path, monkeypatch):
 def test_dashboard_alerts_recovers_from_stale_md_index_hash(tmp_path, monkeypatch):
     """Regression: sticky-empty bug — alerts hidden for 3 days because
     md_index stored a stale hash and _resolve_blocks took the
-    'preserve user edit' branch. ALWAYS_OVERWRITE_BLOCK_IDS bypass
-    must restore live DB content on the next refresh."""
+    'preserve user edit' branch. alerts is now in RECONCILED_BLOCK_IDS so
+    md-side edits are absorbed (delete=resolve) and DB content always
+    re-emits. Wiping the block (no id markers) does NOT resolve any rows
+    because the md mtime predates any subsequent alert inserts — but
+    even if it did, the next render snaps DB live content back in."""
     db = str(tmp_path / "t.db")
     conn = storage.init_db(db)
     conn.execute(
@@ -127,21 +130,114 @@ def test_dashboard_alerts_recovers_from_stale_md_index_hash(tmp_path, monkeypatc
 
     assert cli.main(["refresh", "--db", db]) == 0
 
-    # Simulate the in-the-wild drift: dashboard block emptied externally
-    # while md_index still carries the previous (non-empty) hash. Pre-fix
-    # this combination locked the alerts block as 'preserve user edit'.
+    # Simulate the in-the-wild drift: alerts block wiped externally to bare
+    # H2 (no id markers). Pre-fix this locked the block as 'preserve user
+    # edit'. Backdate mtime so the reconcile mtime gate spares all alerts.
+    import os as _os
     text = dash.read_text(encoding="utf-8")
-    emptied = text.replace(
-        "## Alerts\n- critical: live alert from DB",
-        "## Alerts",
-        1,
-    )
+    h2_idx = text.index("## Alerts")
+    next_block = text.index("\n## ", h2_idx + 1)
+    emptied = text[:h2_idx] + "## Alerts\n" + text[next_block + 1:]
     dash.write_text(emptied, encoding="utf-8")
+    _os.utime(str(dash), (0, 0))  # mtime = epoch → predates all alerts
 
     assert cli.main(["refresh", "--db", db]) == 0
     final = dash.read_text(encoding="utf-8")
-    assert "- critical: live alert from DB" in final, \
+    assert "live alert from DB" in final, \
         "alerts must recover from md_index hash drift"
+
+
+def test_dashboard_alerts_zero_anchor_guard(tmp_path, monkeypatch):
+    """Safety: legacy/first-render md has no `<!-- id:alert.N -->` markers.
+    reconcile_alerts must refuse to mass-resolve in that case — otherwise
+    the first refresh after upgrade would nuke every live alert."""
+    import os as _os
+    db = str(tmp_path / "t.db")
+    conn = storage.init_db(db)
+    for msg in ("a", "b", "c"):
+        conn.execute(
+            "INSERT INTO alerts(severity,type,message) VALUES('warn','x',?)",
+            (msg,),
+        )
+    conn.commit()
+    conn.close()
+    dash = tmp_path / "dashboard.md"
+    monkeypatch.setattr(config, "dashboard_path", lambda: str(dash))
+    monkeypatch.setattr(config, "sub_pages_path", lambda: str(tmp_path / "x"))
+    monkeypatch.setattr(config, "sub_pages_state_path", lambda: str(tmp_path / "y"))
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+
+    # Hand-write a legacy-style dashboard.md: alerts block without anchors.
+    dash.write_text(
+        "<!-- marrow:top:start -->\n"
+        "<!-- id:dashboard.alerts -->\n"
+        "## Alerts\n"
+        "- warn: a\n- warn: b\n- warn: c\n\n"
+        "<!-- id:dashboard.tasks -->\n## Tasks\n### Completed [0]\n_none_\n"
+        "### To-Do List [0]\n_none_\n"
+        "<!-- marrow:top:end -->\n",
+        encoding="utf-8",
+    )
+    _os.utime(str(dash), (10**9, 10**9))  # ancient mtime
+
+    assert cli.main(["refresh", "--db", db]) == 0
+    conn2 = storage.connect(db)
+    unresolved = conn2.execute(
+        "SELECT count(*) FROM alerts WHERE resolved=0"
+    ).fetchone()[0]
+    conn2.close()
+    assert unresolved == 3, (
+        "first-render against legacy md (no anchors) must NOT mass-resolve"
+    )
+
+
+def test_dashboard_alert_md_delete_resolves_db_row(tmp_path, monkeypatch):
+    """md-side delete IS the resolve gesture. Remove the bullet from the
+    Alerts block → reconcile_alerts marks resolved=1 → next render omits."""
+    import os as _os
+    import time as _time
+    db = str(tmp_path / "t.db")
+    conn = storage.init_db(db)
+    conn.execute(
+        "INSERT INTO alerts(severity,type,message) "
+        "VALUES('warn','x','to-be-dismissed')"
+    )
+    conn.execute(
+        "INSERT INTO alerts(severity,type,message) "
+        "VALUES('critical','x','keep-me')"
+    )
+    conn.commit()
+    conn.close()
+    dash = tmp_path / "dashboard.md"
+    monkeypatch.setattr(config, "dashboard_path", lambda: str(dash))
+    monkeypatch.setattr(config, "sub_pages_path", lambda: str(tmp_path / "x"))
+    monkeypatch.setattr(config, "sub_pages_state_path", lambda: str(tmp_path / "y"))
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+
+    assert cli.main(["refresh", "--db", db]) == 0
+    text = dash.read_text(encoding="utf-8")
+    assert "to-be-dismissed" in text and "keep-me" in text
+    # Strip the warn line entirely.
+    pruned = "\n".join(
+        ln for ln in text.splitlines() if "to-be-dismissed" not in ln
+    )
+    dash.write_text(pruned, encoding="utf-8")
+    # Bump mtime forward so the alert's created_at predates md snapshot.
+    future = _time.time() + 5
+    _os.utime(str(dash), (future, future))
+
+    assert cli.main(["refresh", "--db", db]) == 0
+    final = dash.read_text(encoding="utf-8")
+    assert "to-be-dismissed" not in final, \
+        "deleted alert must not re-render after reconcile_alerts"
+    assert "keep-me" in final, "untouched alert must still render"
+
+    conn3 = storage.connect(db)
+    row = conn3.execute(
+        "SELECT resolved FROM alerts WHERE message='to-be-dismissed'"
+    ).fetchone()
+    conn3.close()
+    assert row[0] == 1, "md-delete must flip alerts.resolved to 1"
 
 
 def test_dashboard_user_edit_survives_watcher_sync(env, tmp_path):

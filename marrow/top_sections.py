@@ -87,12 +87,18 @@ def _tag_key(row) -> int:
 
 def render_alerts(conn: sqlite3.Connection) -> str:
     rows = conn.execute(
-        "SELECT severity, message FROM alerts WHERE resolved = 0 "
+        "SELECT id, severity, message FROM alerts WHERE resolved = 0 "
         "ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'warn' THEN 1 "
         "ELSE 2 END, created_at ASC"
     ).fetchall()
     lines = ["## Alerts"]
-    lines += [f"- {r[0]}: {r[1]}" for r in rows] if rows else ["_none_"]
+    # Each row carries `<!-- id:alert.N -->` so reconcile_alerts can map a
+    # deleted bullet back to the row to resolve. Lumi's md-side delete IS
+    # the resolve gesture.
+    lines += (
+        [f"- {r[1]}: {r[2]} <!-- id:alert.{r[0]} -->" for r in rows]
+        if rows else ["_none_"]
+    )
     return "\n".join(lines)
 
 
@@ -446,18 +452,12 @@ DASHBOARD_BLOCK_IDS = (
 
 # Blocks whose user edits are absorbed into the DB by a reconcile pass before
 # render — safe to overwrite the block body with fresh DB-driven content.
+# alerts: reconcile_alerts treats a deleted bullet as `resolved=1`.
 RECONCILED_BLOCK_IDS = frozenset({
+    "dashboard.alerts",
     "dashboard.tasks",
     "dashboard.milestone_cand",
     "dashboard.affect",
-})
-
-# Display-only blocks. DB is the sole source of truth; user never edits these.
-# Always overwrite regardless of stored md_index hash — protects against
-# sticky-empty bugs where a hash drift would otherwise hide live DB content
-# (e.g. alerts vanished from dashboard for 3 days when md_index lost sync).
-ALWAYS_OVERWRITE_BLOCK_IDS = frozenset({
-    "dashboard.alerts",
 })
 
 

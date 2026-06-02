@@ -1223,3 +1223,81 @@ def reconcile_affect(conn: sqlite3.Connection,
             )
             rpt.updated += 1
     return rpt
+
+
+# ── alerts reconcile ─────────────────────────────────────────────────────────
+_ALERT_H2 = "## Alerts"
+_ALERT_ID_RE = re.compile(r"<!-- id:alert\.(?P<id>\d+) -->")
+
+
+def reconcile_alerts(conn: sqlite3.Connection,
+                     dashboard_path: str | Path) -> ReconcileReport:
+    """Absorb md-side alert deletions back into the alerts table.
+
+    Each rendered alert bullet carries `<!-- id:alert.N -->`. If Lumi
+    removes a bullet from the dashboard md, that row is treated as
+    `resolved=1` — the md-side delete IS the resolve gesture. Idempotent;
+    no-op when md is absent or the Alerts block is missing.
+
+    md mtime gates the deletion path so alerts created AFTER the md
+    snapshot (e.g. by a background hook) are not misread as user deletes.
+    """
+    rpt = ReconcileReport()
+    dashboard_path = Path(dashboard_path)
+    if not dashboard_path.exists():
+        return rpt
+    text = dashboard_path.read_text(encoding="utf-8")
+    start = text.find(_ALERT_H2)
+    if start == -1:
+        return rpt
+    after_h2 = text[start + len(_ALERT_H2):]
+    next_h2 = re.search(r"\n##\s", after_h2)
+    block = after_h2[: next_h2.start()] if next_h2 else after_h2
+
+    md_ids: set[int] = set()
+    for raw in block.splitlines():
+        m = _ALERT_ID_RE.search(raw)
+        if not m:
+            continue
+        try:
+            md_ids.add(int(m.group("id")))
+        except ValueError:
+            continue
+
+    # Safety: zero anchors in the Alerts block means either first-render
+    # against legacy md (no anchors yet) OR user wiped the entire block.
+    # These are indistinguishable, so refuse to mass-resolve. Lumi uses
+    # `mw resolve <id>` for nuke; this path handles the per-row case.
+    if not md_ids:
+        return rpt
+
+    md_mtime_iso: str | None = None
+    try:
+        md_mtime_iso = time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ",
+            time.gmtime(dashboard_path.stat().st_mtime),
+        )
+    except OSError:
+        pass
+
+    sql = "SELECT id FROM alerts WHERE resolved=0"
+    params: list = []
+    if md_mtime_iso:
+        sql += " AND created_at <= ?"
+        params.append(md_mtime_iso)
+    db_unresolved = {r[0] for r in conn.execute(sql, params).fetchall()}
+
+    deleted = db_unresolved - md_ids
+    if not deleted:
+        return rpt
+    now_iso = _now()
+    with conn:
+        for aid in deleted:
+            conn.execute(
+                "UPDATE alerts SET resolved=1, "
+                "resolved_at=COALESCE(resolved_at, ?) "
+                "WHERE id=? AND resolved=0",
+                (now_iso, aid),
+            )
+            rpt.deleted += 1
+    return rpt

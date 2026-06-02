@@ -25,7 +25,8 @@ from pathlib import Path
 from . import repo, top_sections
 from ._atomic import atomic_write as _atomic_write
 from .md_index import MdIndex
-from .reconcile import (reconcile_affect, reconcile_milestone_candidates,
+from .reconcile import (reconcile_affect, reconcile_alerts,
+                        reconcile_milestone_candidates,
                         reconcile_tasks)
 
 M0 = "<!-- marrow:top:start -->"
@@ -113,13 +114,6 @@ def _resolve_blocks(path: str, conn, fresh: list[tuple[str, str]],
             # User deleted this block — watcher tombstoned it; do not re-emit.
             continue
         cur_body = current.get(bid)
-        # Display-only blocks: DB is SoT, user never edits, never sticky.
-        # Bypass the hash-compare branch so a stored-hash drift can't hide
-        # live content (alerts sticky-empty regression — see top_sections.py).
-        if bid in top_sections.ALWAYS_OVERWRITE_BLOCK_IDS:
-            out.append(fresh_body)
-            pending.append((bid, _hash(fresh_body)))
-            continue
         # Reconciled blocks: reconcile_* already absorbed any user edit into
         # the DB, so the fresh body IS the resolved state. Always overwrite.
         if bid in top_sections.RECONCILED_BLOCK_IDS:
@@ -173,6 +167,14 @@ def write_dashboard(path: str, conn, *, state_dir: str,
             repo.add_alert(
                 "warn", "dashboard",
                 f"affect reconcile failed: {e}; falling through to render",
+                source="dashboard.py", db=db,
+            )
+        try:
+            reconcile_alerts(conn, Path(path))
+        except Exception as e:
+            repo.add_alert(
+                "warn", "dashboard",
+                f"alerts reconcile failed: {e}; falling through to render",
                 source="dashboard.py", db=db,
             )
     Path(state_dir).mkdir(parents=True, exist_ok=True)
