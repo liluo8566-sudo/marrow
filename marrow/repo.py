@@ -66,29 +66,56 @@ def handoff(conn: sqlite3.Connection) -> dict:
 
 
 def upsert_session(sid: str, model: str | None, channel: str | None,
-                   title: str = "", *, db: str | None = None) -> None:
+                   title: str = "", *, last_active: str | None = None,
+                   db: str | None = None) -> None:
     """B1: record/refresh the sessions row for `sid`. Bridge calls this on
     every swap_provider so /resume can read the model back later.
 
     Idempotent — INSERT OR REPLACE keyed on PK sid. last_active bumps to now
-    on every call.
+    on every call unless `last_active` is provided explicitly (used by the
+    one-shot backfill to preserve historical jsonl mtimes).
+
+    model/channel update semantics: never blank-overwrite a previously-set
+    value. Keeps a cli backfill (channel='cli', model=None) from clobbering
+    a later bridge write (channel='wx', model='claude-...').
     """
     if not sid:
         return
     conn = storage.connect(db)
     try:
         with conn:
-            conn.execute(
-                "INSERT INTO sessions (sid, model, channel, last_active, title) "
-                "VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), ?) "
-                "ON CONFLICT(sid) DO UPDATE SET "
-                "  model=excluded.model,"
-                "  channel=COALESCE(excluded.channel, sessions.channel),"
-                "  last_active=excluded.last_active,"
-                "  title=CASE WHEN excluded.title='' THEN sessions.title "
-                "             ELSE excluded.title END",
-                (sid, model, channel, title or ""),
-            )
+            # Sticky channel — once a sid is on a channel it stays (a sid only
+            # lives in one cc subprocess). Backfill (channel='cli') never
+            # clobbers a bridge-written channel='wx'.
+            # Model: latest non-empty wins (so /model swap reflects). Empty new
+            # (cli backfill / session_start hook) keeps the prior model.
+            if last_active:
+                conn.execute(
+                    "INSERT INTO sessions (sid, model, channel, last_active, title) "
+                    "VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(sid) DO UPDATE SET "
+                    "  model=COALESCE(NULLIF(excluded.model, ''), sessions.model),"
+                    "  channel=CASE WHEN sessions.channel IS NULL OR sessions.channel='' "
+                    "               THEN excluded.channel ELSE sessions.channel END,"
+                    "  last_active=CASE WHEN excluded.last_active > sessions.last_active "
+                    "                  THEN excluded.last_active ELSE sessions.last_active END,"
+                    "  title=CASE WHEN excluded.title='' THEN sessions.title "
+                    "             ELSE excluded.title END",
+                    (sid, model, channel, last_active, title or ""),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO sessions (sid, model, channel, last_active, title) "
+                    "VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), ?) "
+                    "ON CONFLICT(sid) DO UPDATE SET "
+                    "  model=COALESCE(NULLIF(excluded.model, ''), sessions.model),"
+                    "  channel=CASE WHEN sessions.channel IS NULL OR sessions.channel='' "
+                    "               THEN excluded.channel ELSE sessions.channel END,"
+                    "  last_active=excluded.last_active,"
+                    "  title=CASE WHEN excluded.title='' THEN sessions.title "
+                    "             ELSE excluded.title END",
+                    (sid, model, channel, title or ""),
+                )
     finally:
         conn.close()
 

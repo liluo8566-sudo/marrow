@@ -119,6 +119,7 @@ def cmd_add_session(args) -> int:
         args.model or None,
         args.channel or None,
         args.title or "",
+        last_active=getattr(args, "last_active", None) or None,
         db=args.db,
     )
     print(f"session {sid} model={args.model or '-'} channel={args.channel or '-'}")
@@ -527,6 +528,9 @@ def build_parser() -> argparse.ArgumentParser:
     asn.add_argument("--model", default="")
     asn.add_argument("--channel", default="")
     asn.add_argument("--title", default="")
+    asn.add_argument("--last-active", default="",
+                     help="ISO8601 timestamp (default: now). Used by backfill "
+                          "to preserve historical jsonl mtimes.")
     asn.set_defaults(fn=cmd_add_session)
 
     gsm = sub.add_parser("get-session-model", parents=[common],

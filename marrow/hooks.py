@@ -367,6 +367,16 @@ def session_start() -> int:
                     )
             except Exception:  # noqa: BLE001 — never block session_start
                 pass
+            # B1 cli half: every cc session (cli or bridge-spawned) lands a row in
+            # `sessions` so /resume's recent-picker sees all channels. Channel
+            # hint from MARROW_CHANNEL env (bridge sets =wx; default cli).
+            # No-op for worktree sessions to keep /resume focused on real work.
+            if not is_worktree:
+                try:
+                    channel = os.environ.get("MARROW_CHANNEL") or "cli"
+                    repo.upsert_session(sid, None, channel, db=db)
+                except Exception:  # noqa: BLE001 — never block session_start
+                    pass
 
         if is_worktree:
             # Worktree session: task-isolated work, no personal memory needed.
