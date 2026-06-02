@@ -243,3 +243,63 @@ def test_auto_3turn_still_works(env, monkeypatch):
     summaries = [r["summary"] for r in rows]
     assert any(s.startswith("skip:short_session") for s in summaries), (
         f"expected skip:short_session, got: {summaries!r}")
+
+
+# ── Test 6: mm- blocks entire session_end archive path ────────────────────────
+
+def test_mm_minus_blocks_session_end_archive(env, monkeypatch, tmp_path):
+    """mm- writes session_block=archive flag; session_end MUST NOT call
+    transcript.clean or repo.archive_events. Events table stays empty for
+    this sid. Lifecycle:end is still written with mm_minus_blocked marker
+    so catchup doesn't flag silent_death.
+    """
+    db, _ = env
+    sid = "test-mm-minus-blocks-archive"
+
+    # Step 1: user types mm- → control plane fires.
+    _stdin(monkeypatch, {"prompt": "mm-", "session_id": sid})
+    rc = hooks.main(["user_prompt_submit"])
+    assert rc == 0
+
+    # Both flags present: manual_skip (legacy LLM pipeline gate)
+    # and session_block (new archive gate).
+    skip_rows = _audit_rows(db, sid, action="manual_skip")
+    assert len(skip_rows) == 1 and skip_rows[0]["summary"] == "skip"
+    block_rows = _audit_rows(db, sid, action="session_block")
+    assert len(block_rows) == 1 and block_rows[0]["summary"] == "archive"
+
+    # Step 2: session_end fires later with a real transcript path.
+    tpath = tmp_path / "fake.jsonl"
+    tpath.write_text("")
+    _stdin(monkeypatch, {
+        "session_id": sid,
+        "cwd": str(tmp_path),
+        "transcript_path": str(tpath),
+    })
+    with patch.object(hooks.transcript, "is_headless", return_value=False), \
+         patch.object(hooks, "_is_worktree_session", return_value=False), \
+         patch.object(hooks.transcript, "clean") as mclean, \
+         patch.object(hooks.repo, "archive_events") as march, \
+         patch.object(hooks, "popen_detach") as mpop:
+        rc = hooks.session_end()
+    assert rc == 0
+
+    # Zero archive work. Zero spawn.
+    mclean.assert_not_called()
+    march.assert_not_called()
+    mpop.assert_not_called()
+
+    # events table is genuinely empty for this sid.
+    conn = storage.connect(db)
+    try:
+        cnt = conn.execute(
+            "SELECT COUNT(*) FROM events WHERE session_id=?", (sid,)
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert cnt == 0, f"expected 0 events for mm- session, got {cnt}"
+
+    # lifecycle:end recorded with mm_minus_blocked marker.
+    lifecycle = _audit_rows(db, sid, action="session_lifecycle:end")
+    assert len(lifecycle) == 1
+    assert lifecycle[0]["summary"] == "mm_minus_blocked"

@@ -89,6 +89,8 @@ _MANUAL_SKIP_ACTION = "manual_skip"
 _STATUS_SKIP = "skip"
 _STATUS_SKIP_CLEARED = "skip_cleared"
 _STATUS_SKIP_BRIDGE_OWNS = "bridge_owns"
+_SESSION_BLOCK_ACTION = "session_block"
+_STATUS_BLOCK_ARCHIVE = "archive"
 
 
 def _write_manual_skip_flag(conn: sqlite3.Connection, sid: str, status: str) -> None:
@@ -99,6 +101,28 @@ def _write_manual_skip_flag(conn: sqlite3.Connection, sid: str, status: str) -> 
             " VALUES ('events', ?, ?, ?)",
             (sid, _MANUAL_SKIP_ACTION, status),
         )
+
+
+def _write_session_block_flag(conn: sqlite3.Connection, sid: str, status: str) -> None:
+    """Write a session_block audit row. status = 'archive' -> block events insert."""
+    with conn:
+        conn.execute(
+            "INSERT INTO audit_log (target_table, target_id, action, summary)"
+            " VALUES ('events', ?, ?, ?)",
+            (sid, _SESSION_BLOCK_ACTION, status),
+        )
+
+
+def _is_session_blocked(conn: sqlite3.Connection, sid: str) -> bool:
+    """True iff sid has a session_block=archive row — session_end must skip
+    archive_events entirely (zero rows enter events table)."""
+    row = conn.execute(
+        "SELECT 1 FROM audit_log"
+        " WHERE action=? AND target_id=? AND summary=?"
+        " LIMIT 1",
+        (_SESSION_BLOCK_ACTION, sid, _STATUS_BLOCK_ARCHIVE),
+    ).fetchone()
+    return row is not None
 
 
 def _is_manual_skip(conn: sqlite3.Connection, sid: str) -> bool:
@@ -411,6 +435,25 @@ def session_end() -> int:
     db = config.db_path()
     conn = storage.connect(db)
     try:
+        # mm- block gate: if Lumi typed mm- at any point during this session,
+        # _handle_mm_prefix wrote a session_block=archive flag. Skip the entire
+        # archive path so events table receives ZERO rows for this sid. Still
+        # write lifecycle:end so catchup doesn't flag this as silent_death.
+        early_sid = (inp.get("session_id") or "").strip()
+        if early_sid and _is_session_blocked(conn, early_sid):
+            try:
+                with conn:
+                    conn.execute(
+                        "INSERT INTO audit_log"
+                        " (target_table, target_id, action, summary)"
+                        " VALUES ('events', ?, 'session_lifecycle:end', 'mm_minus_blocked')",
+                        (early_sid,),
+                    )
+            except Exception:  # noqa: BLE001 — never block session_end
+                pass
+            _wipe_recall_seen(early_sid)
+            return 0
+
         rows = transcript.clean(tpath)
         if rows:
             repo.archive_events(conn, rows)
@@ -591,6 +634,10 @@ def _handle_mm_prefix(inp: dict) -> bool:
             if prefix == "mm-":
                 if target_sid:
                     _write_manual_skip_flag(conn, target_sid, _STATUS_SKIP)
+                    # Block events archive entirely for this sid — session_end
+                    # will skip transcript.clean + archive_events, leaving the
+                    # events table with zero rows for this session.
+                    _write_session_block_flag(conn, target_sid, _STATUS_BLOCK_ARCHIVE)
             else:  # mm+
                 if target_sid:
                     # Force-clear any done marker so sessionend_async reruns.
