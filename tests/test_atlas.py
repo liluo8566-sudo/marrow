@@ -1219,7 +1219,16 @@ def test_pretool_use_literal(tmp_path, monkeypatch, capsys):
         sys.stdin = old_stdin
 
     captured = capsys.readouterr()
-    assert captured.out.strip() == "[Path] Use paths with /, not bare filenames."
+    # PreToolUse hook ships its message inside a JSON envelope
+    # ({"hookSpecificOutput": {"hookEventName": "PreToolUse",
+    # "additionalContext": "..."}}) — the only stdout form cc injects into
+    # assistant context. Plain-string stdout was the Phase 1 shape.
+    payload = json.loads(captured.out.strip())
+    assert (
+        payload["hookSpecificOutput"]["additionalContext"]
+        == "[Path] Use paths with /, not bare filenames."
+    )
+    assert payload["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
     assert "[Path/Naming rules]" not in captured.out
 
 
