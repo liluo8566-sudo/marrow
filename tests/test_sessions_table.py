@@ -114,3 +114,65 @@ def test_sessions_schema_columns_present(db) -> None:
         assert {"sid", "model", "channel", "last_active", "title"}.issubset(cols)
     finally:
         conn.close()
+
+
+# ── channel filter (cross-channel /res-oth) ────────────────────────────────
+
+
+def test_list_recent_sessions_exclude_channels(db) -> None:
+    repo.upsert_session("sid-wx", "m", "wx", db=db)
+    repo.upsert_session("sid-cli", "m", "cli", db=db)
+    repo.upsert_session("sid-tg", "m", "tg", db=db)
+    out = repo.list_recent_sessions(
+        limit=10, exclude_channels=["cli"], db=db,
+    )
+    sids = {r["sid"] for r in out}
+    assert sids == {"sid-wx", "sid-tg"}
+
+
+def test_list_recent_sessions_include_channels(db) -> None:
+    repo.upsert_session("sid-wx", "m", "wx", db=db)
+    repo.upsert_session("sid-cli", "m", "cli", db=db)
+    out = repo.list_recent_sessions(limit=10, channels=["wx"], db=db)
+    assert [r["sid"] for r in out] == ["sid-wx"]
+
+
+def test_list_recent_sessions_mutually_exclusive(db) -> None:
+    with pytest.raises(ValueError):
+        repo.list_recent_sessions(
+            limit=5, channels=["wx"], exclude_channels=["cli"], db=db,
+        )
+
+
+def test_cli_list_recent_sessions_exclude_channels(db, capsys) -> None:
+    repo.upsert_session("sid-wx", "m", "wx", db=db)
+    repo.upsert_session("sid-cli", "m", "cli", db=db)
+    rc = cli.main([
+        "list-recent-sessions", "--db", db, "--limit", "10",
+        "--exclude-channels", "cli",
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "sid-wx\t" in out
+    assert "sid-cli\t" not in out
+
+
+def test_cli_list_recent_sessions_channels(db, capsys) -> None:
+    repo.upsert_session("sid-wx", "m", "wx", db=db)
+    repo.upsert_session("sid-cli", "m", "cli", db=db)
+    rc = cli.main([
+        "list-recent-sessions", "--db", db, "--limit", "10",
+        "--channels", "wx,tg",
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "sid-wx\t" in out
+    assert "sid-cli\t" not in out
+
+
+def test_cli_list_recent_sessions_rejects_both(db, capsys) -> None:
+    rc = cli.main([
+        "list-recent-sessions", "--db", db,
+        "--channels", "wx", "--exclude-channels", "cli",
+    ])
+    assert rc != 0

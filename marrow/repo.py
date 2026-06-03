@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+from collections.abc import Sequence
 
 from . import storage
 from . import recall as _recall_mod
@@ -136,15 +137,36 @@ def get_session(sid: str, *, db: str | None = None) -> dict | None:
         conn.close()
 
 
-def list_recent_sessions(limit: int = 5, *, db: str | None = None) -> list[dict]:
-    """B6: 5 most-recent sessions for the WeChat /resume picker."""
+def list_recent_sessions(
+    limit: int = 5,
+    *,
+    exclude_channels: Sequence[str] | None = None,
+    channels: Sequence[str] | None = None,
+    db: str | None = None,
+) -> list[dict]:
+    """B6: N most-recent sessions for the /resume picker.
+
+    `channels` / `exclude_channels` are mutually exclusive; pass at most one.
+    """
+    if channels and exclude_channels:
+        raise ValueError("channels and exclude_channels are mutually exclusive")
+    sql = "SELECT sid, model, channel, last_active, title FROM sessions"
+    params: list = []
+    if channels:
+        chans = [c for c in channels if c]
+        if chans:
+            sql += " WHERE channel IN (" + ",".join("?" * len(chans)) + ")"
+            params.extend(chans)
+    elif exclude_channels:
+        chans = [c for c in exclude_channels if c]
+        if chans:
+            sql += " WHERE channel NOT IN (" + ",".join("?" * len(chans)) + ")"
+            params.extend(chans)
+    sql += " ORDER BY last_active DESC LIMIT ?"
+    params.append(limit)
     conn = storage.connect(db)
     try:
-        rows = conn.execute(
-            "SELECT sid, model, channel, last_active, title "
-            "FROM sessions ORDER BY last_active DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
+        rows = conn.execute(sql, tuple(params)).fetchall()
         return [dict(r) for r in rows]
     finally:
         conn.close()

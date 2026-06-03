@@ -136,9 +136,24 @@ def cmd_get_session_model(args) -> int:
     return 0
 
 
+def _split_csv(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
 def cmd_list_recent_sessions(args) -> int:
     """B6: print the N most-recent sessions, one per line."""
-    rows = repo.list_recent_sessions(limit=max(1, args.limit), db=args.db)
+    include = _split_csv(getattr(args, "channels", None))
+    exclude = _split_csv(getattr(args, "exclude_channels", None))
+    if include and exclude:
+        return _fail("--channels and --exclude-channels are mutually exclusive")
+    rows = repo.list_recent_sessions(
+        limit=max(1, args.limit),
+        channels=include or None,
+        exclude_channels=exclude or None,
+        db=args.db,
+    )
     for r in rows:
         sid = r.get("sid") or ""
         model = r.get("model") or "-"
@@ -544,6 +559,10 @@ def build_parser() -> argparse.ArgumentParser:
     lrs = sub.add_parser("list-recent-sessions", parents=[common],
                          help="print N most-recent sessions, tab-sep")
     lrs.add_argument("--limit", type=int, default=5)
+    lrs.add_argument("--channels", default="",
+                     help="comma-separated channel allow-list (e.g. wx,tg)")
+    lrs.add_argument("--exclude-channels", default="",
+                     help="comma-separated channel deny-list (e.g. cli)")
     lrs.set_defaults(fn=cmd_list_recent_sessions)
 
     dn = sub.add_parser("done", parents=[common])
