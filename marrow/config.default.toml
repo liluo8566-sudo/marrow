@@ -81,6 +81,18 @@ event_max_chars = 120
 # stale answer carries its correction. 0 = disabled.
 event_context_window = 1
 
+[recall.buckets]
+# cwd -> recall bucket (substring match, case-insensitive). same-bucket
+# events get +same_boost, cross-bucket events take -diff_penalty, missing
+# cwd stays neutral. Lists below are sample needles — adapt to your tree
+# (e.g. add (~/work/code) to project, (~/journal) to daily). Empty list
+# disables that bucket; clearing all three turns off cwd bias entirely.
+project = ["/cc-lab"]
+daily   = ["/desktop/ny"]
+study   = ["/study"]
+same_boost   = 0.10
+diff_penalty = 0.10
+
 [sessionend]
 # Sessions with ≤ this many user turns skip async LLM extraction (§2.7).
 # Threshold tunes after 1-week sample.

@@ -568,30 +568,60 @@ _CJK_STOP = frozenset(
     "好很太多少能可以又再还只很真个又"
 )
 
-# cwd → recall bucket mapping. Same-bucket events get +CWD_SAME_BOOST; known
-# cross-bucket events take -CWD_DIFF_PENALTY (soft cut, still possible to win
+# cwd → recall bucket mapping. Same-bucket events get +same_boost, known
+# cross-bucket events take -diff_penalty (soft cut, still possible to win
 # on strong raw score). Anchors (milestones / memes / diary / tasks / entity
 # force-include) are evergreen and skip the bucket bias entirely.
-_CWD_BUCKETS: tuple[tuple[str, str], ...] = (
+#
+# Defaults below are the FALLBACK shape used when no [recall.buckets] config
+# section is present (e.g. test fixtures, fork without config). Live config
+# wins via _load_bucket_rules() — see config.default.toml [recall.buckets].
+_DEFAULT_BUCKETS: tuple[tuple[str, str], ...] = (
     ("/cc-lab", "project"),
     ("/desktop/ny", "daily"),
     ("/study", "study"),
 )
-_CWD_SAME_BOOST = 0.10
-_CWD_DIFF_PENALTY = 0.10
+_DEFAULT_SAME_BOOST = 0.10
+_DEFAULT_DIFF_PENALTY = 0.10
 
 
-def _cwd_bucket(cwd: str | None) -> str:
+def _load_bucket_rules() -> tuple[tuple[tuple[str, str], ...], float, float]:
+    """Read [recall.buckets] from live config. Falls back to _DEFAULT_* on
+    missing section / parse error. Returns (needle->bucket tuples, same_boost,
+    diff_penalty). Empty needle lists mean the bucket is disabled.
+    """
+    try:
+        from . import config as _config
+        bcfg = _config.load().get("recall", {}).get("buckets", {})
+    except Exception:
+        bcfg = {}
+    if not bcfg:
+        return _DEFAULT_BUCKETS, _DEFAULT_SAME_BOOST, _DEFAULT_DIFF_PENALTY
+    pairs: list[tuple[str, str]] = []
+    for bucket in ("project", "daily", "study"):
+        for needle in (bcfg.get(bucket) or []):
+            if isinstance(needle, str) and needle:
+                pairs.append((needle.lower(), bucket))
+    same = float(bcfg.get("same_boost", _DEFAULT_SAME_BOOST))
+    diff = float(bcfg.get("diff_penalty", _DEFAULT_DIFF_PENALTY))
+    if not pairs:
+        return _DEFAULT_BUCKETS, same, diff
+    return tuple(pairs), same, diff
+
+
+def _cwd_bucket(cwd: str | None, rules: tuple[tuple[str, str], ...] | None = None) -> str:
     """Classify a cwd path into a recall bucket.
 
     Empty / None / unmatched cwd → "" (neutral; no boost, no penalty).
     Matching is substring against the lowercased path so worktrees under
-    `CC-Lab/<repo>/.claude/worktrees/...` still classify as project.
+    `<repo>/.claude/worktrees/...` still classify into the parent bucket.
+    Pass an explicit `rules` tuple to avoid re-reading config in hot loops.
     """
     if not cwd:
         return ""
     p = cwd.lower()
-    for needle, bucket in _CWD_BUCKETS:
+    pairs = rules if rules is not None else _DEFAULT_BUCKETS
+    for needle, bucket in pairs:
         if needle in p:
             return bucket
     return ""
@@ -814,8 +844,10 @@ def recall_fusion(
     emb = _ensure_embedder()
     vec_available = emb is not None
 
-    # cwd bias setup: current bucket drives per-event boost/penalty later.
-    cur_bucket = _cwd_bucket(current_cwd)
+    # cwd bias setup: load rules once, classify the query's bucket. Per-event
+    # classification happens in the scoring loop using the same `rules`.
+    bucket_rules, same_boost, diff_penalty = _load_bucket_rules()
+    cur_bucket = _cwd_bucket(current_cwd, bucket_rules)
 
     # ── FTS candidates ────────────────────────────────────────────────────────
     fts_q = '"' + q.replace('"', '""') + '"'
@@ -1059,15 +1091,15 @@ def recall_fusion(
         # cwd-bucket bias: nudge same-context events up, cross-context down.
         # Only fires when BOTH the current cwd and the event's session cwd
         # classify into a known bucket — sessions without recorded cwd stay
-        # neutral so the backfill gap (1551 pre-cwd events) doesn't get
-        # silently demoted.
+        # neutral so the backfill gap (pre-cwd events) doesn't get silently
+        # demoted. Rules + magnitudes come from [recall.buckets] config.
         if cur_bucket:
-            ev_bucket = _cwd_bucket(c.get("session_cwd"))
+            ev_bucket = _cwd_bucket(c.get("session_cwd"), bucket_rules)
             if ev_bucket:
                 if ev_bucket == cur_bucket:
-                    raw += _CWD_SAME_BOOST
+                    raw += same_boost
                 else:
-                    raw -= _CWD_DIFF_PENALTY
+                    raw -= diff_penalty
 
         # mention_count booster via affect.entities JSON column.
         if af_entities_raw:
