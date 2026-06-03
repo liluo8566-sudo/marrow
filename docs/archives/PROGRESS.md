@@ -1,0 +1,471 @@
+# Marrow Build Ledger
+
+Format: [YYYY-MM-DD] <unit> done | <delta vs DESIGN, or "as designed"> | verify: <cmd/test>
+Delta only. Never restate DESIGN / SCHEMA.
+
+[2026-05-15] grill-with-docs round done | data-lifecycle 3-tier, reconcile split by view type, injection weak-model fallback, README/CONTEXT/ADR-0001 aligned | verify: docs internally consistent, no code yet
+[2026-05-16] grill round 2 done | dir-index dropped; drift sweep 3-layer + convention injection + CLAUDE.md daemon-render marker partition + render guard written into DESIGN | verify: docs internally consistent, no code yet
+[2026-05-16] docs consolidation done | CONVENTIONS folded into CLAUDE.md + non-conflicting rule.md discipline; CLI/data renamed ny→mw (DESIGN 4 refs); handover model = fixed-name overwrite (CLAUDE.md + handoff skill); global naming law rewritten | verify: grep -n '`ny`' DESIGN.md empty; docs internally consistent, no code yet
+[2026-05-16] FUTURE.md sweep done | 106→66 items; removed 40 (dead old-ny-memm code internals + DESIGN-superseded) + agent scan-artifact footer; kept all genuine parked ideas + 8 Lumi/grill recent adds untouched | verify: grep -c '^- \*\*' FUTURE.md = 66; 8 protected items present
+[2026-05-16] FUTURE.md scoped to Marrow-only | 66→30; cut non-Marrow (personal tools, marker, buddy×7, old-weclaude-bridge bugs) — they stay in _pit→dashboard pit page per DESIGN L95; restructured into 5 sections; 6 Lumi adds intact | verify: grep -c '^- \*\*' FUTURE.md = 30
+[2026-05-16] pit.md memm dead-block prune | removed #7 nested-index + #12 summary-pyramid (DESIGN-superseded); #3 auto-memory genesis flagged, kept; backup at NY/memory/backup/pit.md.bak-2026-05-16 | verify: grep -c '^## Memory:' pit.md = 1
+[2026-05-16] workflow upgrade done | CLAUDE.md +docs/notes/ research-scratch landing; FUTURE +workflow_reflection_skill (planning-with-files ref) | verify: grep -n docs/notes CLAUDE.md; grep -n workflow_reflection_skill FUTURE.md
+[2026-05-16] Lumi rulings applied | WeClaude is in-scope (deep rebuild late phase) — restored 14 weclaude items, FUTURE 30→42; dropped /config_auto_memory_off (auto memory off 1wk, moot); _pit #3 deleted by Lumi; archive/ deleted locally | verify: grep -c '^- \*\*' FUTURE.md = 42; archive/ gone
+[2026-05-17] ADR-0002 agent invocation routing done | process-type-not-trigger-source rule; WeChat→stream-json/sub (routine rejected: event-driven), Marrow no paid agent; WeChat rate-limit rejected on usage evidence; ny-memm out of scope (retires at parallel-window end); DESIGN unchanged (already source of truth) | verify: docs/adr/0002 present, no code yet
+[2026-05-17] prompt-lint hook added | haiku trims Write/Edit bloat meta-doc+rules; degrade-open, .bak rollback, atomic; .claude+marrow test | verify: Write/Edit exit2 trimmed, non-whitelist/recursion exit0, .bak original (5 cases)
+[2026-05-17] diary pipeline finalized | SessionEnd code-only clean+archive (strip tool/fetch/system, keep full dialogue), no LLM; lessons off SessionEnd; 04:00 routine haiku-digest -> sonnet-diary + haiku-lessons; diary prompt +ignore-venting rule (skip work/study venting unless serious fight); DESIGN/SCHEMA/handover synced | verify: grep -n 'code-only' DESIGN.md
+[2026-05-17] LLM provider client done | call(role,body,tier) intent-only; claude_cli isolation built-in (--setting-sources "" --strict-mcp-config, verified clean+subscription, no token); chain default->emergency generic; on_alert decoupled; timeout->LLMError; delta vs DESIGN: dropped fake claude_sub/claude_pool split (both -p; sub-vs-pool=6/15 billing not a flag; cyberboss no-`-p` sub stream-json stays Phase 4 Pending) | verify: pytest 15/15 + live MARROW_LIVE_OK clean
+[2026-05-17] diary scheduling decided | diary moved off SessionEnd -> nightly 04:00 cc-native routine writing previous day; SessionStart catchup (scan event-days lacking diary, idempotent) replaces resident watcher for Phase 1; DESIGN 5 refs synced (hooks/SessionEnd/SessionStart/phase-plan/catchup) | verify: grep -n '04:00' DESIGN.md
+[2026-05-17] Phase 1 foundation: scaffold + config + storage | pyproject/pkg layout; config.py reads ~/.config/marrow/config.toml; storage.py 11 Phase1 tables + events_fts + events_vec(vec0); sqlite-vec v0.1.9; WAL+busy_timeout; embedder deferred (fork #1, Pending) | verify: pytest 7/7 (tables, phase2-absent, fts CRUD sync, vec0, idempotent, FK)
+[2026-05-17] #5 migrate.py done | 5 parsers (2026→events / timeline→milestones / cipher→memes / _pit→pit / 语录→goose_bites) + Lighthouse; source_hash idempotent, dry-run + --apply; SCHEMA: 3d/10d/Open-Threads/Garden dropped; schema ALTER backfill | verify: pytest 40/40, dry-run events3/goose36/milestones21/pit23/memes5
+[2026-05-17] #4 daemon done | FastMCP stdio server (recall tool) + repo.py (recall/open_threads/open_alerts/handoff/add_alert/archive_events); handoff = open threads+alerts only, DESIGN L128/140/145/159 who-i-am+cold-start wording dropped per Lumi; LLMClient on_alert → add_alert → alerts+audit_log wired; .mcp.json + mcp>=1.27 dep | verify: pytest 32/32
+[2026-05-17] #6 mw CLI done | marrow/cli.py: ls/show/set/rm/resolve/done; field whitelist via PRAGMA (block id/created_at/updated_at/source_hash/occurred_at + pk), unknown-table/missing-id -> rc1 + rollback, every write mirrored to audit_log, diary keyed by TEXT date; --db override for tests | verify: pytest 57/57, mw entrypoint smoke (ls/set/show/rm-missing rc1)
+[2026-05-17] #7 code-only hooks + #8 dashboard render done | transcript.clean (jsonl->event rows, keep user+assistant text, drop tool/thinking/system/attachment/meta/sidechain); dashboard.render_top + write_dashboard (marker-partition, hand-zone preserved, atomic temp+replace, hash-guard -> backup+1 alert on hand-edit); hooks.py session_start (handoff additionalContext) + session_end (clean->archive->dashboard), degrade-open + alert on hook failure; config +paths.dashboard (~/Desktop/NY/dashboard.md). NOT wired into global settings.json yet (Lumi gate). PreToolUse already covered (prompt-guard.py:21 scope). UserPromptSubmit must-never-fade deferred — no Phase-1 content source (convention layer DESIGN Pending). Nightly 04:00 routine + 3 prompt bodies NOT built (DESIGN L53 review gate) | verify: pytest 68/68
+[2026-05-17] LLM provider -> subscription-window stream-json | _run_claude_stream default: no-`-p` `claude --output-format stream-json --input-format stream-json --verbose` + isolation, one user-msg over stdin, read to result event, threading.Timer kill; _run_claude_p kept as config fallback (mode="p"); config mode default "stream"; live-verified haiku PONG 2.7s + rate_limit_event rateLimitType=five_hour isUsingOverage=false (rides OAuth window, not 6/15 pool) | verify: pytest 77/77 + live stream call
+[2026-05-17] #7 nightly diary pipeline + catchup limiting done | diary.py: pending_days->run_day->run; haiku digest (cheap) -> sonnet diary (mid) -> haiku lessons (cheap); idempotent by diary.date; Lumi-reviewed+edited prompt bodies (digest keeps soul, diary 文艺+humor cap500, lessons scope+study/others); _LESSON_SCOPES synced; lessons -> lessons table + info alert; catchup window 7d cap 3 + warn alert on overflow; default=yesterday, --catchup=scan; hooks.py SessionStart catchup spawn removed (no -p from hooks) -> catchup is schedule-only 16:00 | verify: pytest 77/77 (8 diary, fake LLM)
+[2026-05-17] catchup scheduling = local launchd + ADR-0003 | /schedule rejected (cloud remote agent: no local SQLite/.venv/OAuth claude); macOS launchd ~/Library/LaunchAgents/mw-diary-catchup.plist, StartCalendarInterval 16:00 local (DST auto), repo source deploy/mw-diary-catchup.plist; PATH env carries .local/bin+venv so launchd minimal-PATH finds claude; ADR-0003 fixes stream-vs-`-p`/flag-meaning/launchd-not-credit so it is never re-explained; llm.py docstring points to it | verify: plutil lint OK, launchctl bootstrap registered (calendarinterval, state=not running), minimal-PATH probe import+claude OK; not kickstarted (live pending day, first real run = 16:00)
+[2026-05-18] diary day-boundary + per-session map-reduce + dual jobs | BUGFIX: was grouping by UTC substr (misaligned w/ Lumi local-04:00 day) AND feeding whole day to one haiku (would blow context at 5-10 sessions/day). Now: diary day = local [D04:00,D+1 04:00) via zoneinfo Australia/Melbourne; run_day per-session map (1 haiku/session, oversized session char-chunked incl single huge line) -> reduce (merged digests -> sonnet diary + haiku lessons); 04:00 routine writes just-closed day, 16:00 catchup backfills last 7d (cap3+overflow alert) — two independent launchd jobs (deploy/mw-diary-{routine,catchup}.plist) so one failing never starves the other; ADR-0003 updated | verify: pytest 78/78, both launchctl bootstrap registered (state not running, calendarinterval), args routine=no-flag catchup=--catchup
+[2026-05-18] mw on PATH | #6 gap: `mw` was venv-only (console script .venv/bin/mw), bare `mw` = command not found. Fixed: symlink ~/.local/bin/mw -> .venv/bin/mw (~/.local/bin already on PATH). Migration: after `pip install -e`, recreate the symlink | verify: env -i PATH=~/.local/bin mw ls diary rc=0
+[2026-05-18] diary de-templated + buddy strip | root cause: per-session digests fed to sonnet tagged '## session' (1 para/session + aphorism) and DIGEST_PROMPT dropped pleasantries (lost intimate convo). Now 3-layer map(volume-only)->haiku stitch(timeline weave, tags dropped, weight uneven)->sonnet write; prompts forbid per-para epiphany + motive/character inference; buddy <!-- --> stripped at transcript clean + 42 archived events backwashed | verify: pytest 80/80, mw show diary 2026-05-17 rerun
+[2026-05-18] prompt-lint hook idempotent | infinite-trim loop: recycled() keyed on haiku output hash, haiku never re-trims byte-identical so re-send never passed. Fixed: state key = sha1(tool+path+old_string), each edit site trimmed exactly once, re-send always passes | verify: DESIGN L53/L144 edits trimmed once then passed, py_compile OK
+[2026-05-18] diary turn-routed digest + 3-tier skip + lessons dropped | code: _session_digest routes by user-turn count (<=3 code-drop, 4-10 DIGEST_SHORT may SKIP no-outcome chore, >10 DIGEST_LONG never SKIP + stub guard), run_day kept-filter + all-trivial placeholder row, _sessions counts turns; lessons extraction removed -> FUTURE lesson_extraction_rework (over-extracted facts/decisions). Verified b1f6c86b 22-turn Phase1 no longer SKIP-vanishes (LONG craft kept). Prompt tuning still open (Lumi): diary work-visibility too weak, 4-10 SHORT may mis-SKIP a short session with outcome, DIGEST_LONG meta-shell not closed | verify: pytest 83/83, 5-17 rerun
+[2026-05-18] session_end missing-transcript no-op | alert #11 root cause: transcript.clean() open()'d transcript_path unconditionally; SessionEnd from unflushed/headless `claude -p` passes a jsonl that never landed -> FileNotFoundError -> main() swallowed it into a warn alert polluting handoff. Fixed: clean() catches FileNotFoundError -> returns [] (I/O boundary no-op), dashboard regen still runs; fake alert #11 marked resolved (audit kept). | verify: pytest 84/84 (+test_missing_file_returns_empty)
+[2026-05-18] stitch span tag carries local date | bug: cross-04:00 diary day (e.g. 5-17 afternoon + 5-18 00:00-04:00, same diary day) wove out of order — _sessions sorted by UTC correctly but _stitch tagged blocks with HH:MM only; haiku saw 01:00<14:30 and reordered post-midnight session to the front. Fixed: new _local_md(), stitch span = "MM-DD HH:MM–HH:MM" so date disambiguates; _sessions/STITCH_PROMPT unchanged | verify: pytest 85/85 (+test_stitch_span_tag_carries_local_date)
+[2026-05-18] events headless-pollution root fix | spawned `claude -p` (prompt-lint haiku, diary digest) fires SessionEnd too; transcript.clean ingested them as fake sessions. Fixed structurally: transcript.is_headless() reads CC `entrypoint` marker (interactive="cli", spawn="sdk-cli"; absent=legacy→keep), clean() returns [] for headless, hooks.session_end() no-ops before DB/dashboard. One-time DB cleanup: 518→464 rows (44 structural + 10 orphan payload-evident; 8 real + /config + legacy seed kept), backup marrow.db.bak-20260518-220058 | verify: pytest 88/88 (+4 entrypoint cases)
+[2026-05-18] cleanup.py jsonl disk reaper + weekly job | NEW module marrow/cleanup.py reuses transcript.is_headless(); scan() pure, run(apply) shell, grace_days=1 protects in-flight jsonl; deploy/mw-jsonl-cleanup.plist Sunday 05:00 --apply, bootstrapped from deploy/ (3rd marrow job, decoupled); ADR-0003 scheduling updated (3 jobs + bootstrap-from-repo wording) | verify: pytest 95/95 (+7 cleanup), plutil OK, launchctl com.marrow.jsonl-cleanup registered, live dry-run 244 del/405 kept/35.9MB
+[2026-05-18] BLEED-STOP: is_headless false premise (review-caught) | acafd60+8f2747f+b46deb1 assumed entrypoint sdk-cli == headless claude -p. Wrong: global census 653 jsonl = sdk-cli 389 / cli 259 / claude-vscode 4 / claude-desktop 1; sdk-cli also tags real clawbot/微信/Task-agent/worktree human sessions (verified: 72-turn 微信 convo carried sdk-cli). clean()->[] silently dropped real sessions from events (hook live acafd60 22:02→22:53, ~51min); cleanup.py --apply weekly launchd Sun 05:00 would f.unlink() real convo .jsonl (6-day fuse). Stopped: launchctl bootout com.marrow.jsonl-cleanup; is_headless hard-False; cleanup.py provably no-op (dry-run del 0 / kept 653); test_cleanup.py rewritten to no-op contract. Last round's 518→464 purge used the SAME flawed judge — 54 rows recoverable from marrow.db.bak-20260518-220058 | verify: pytest 91/91, cleanup dry-run 0, launchd job gone, commit 24830a3
+[2026-05-19] blocker#1 is_headless rewrite per ADR-0004 done | entrypoint abandoned (24830a3 reversed); assistant model-set predicate + empty-set spawn-head backstop; worker_models config single-source + sync-guard test; cleanup.py auto-follows | verify: pytest 105, live jsonl real-opus/clawbot=False haiku-spawn=True
+[2026-05-19] Major#3 diary same-day-correction + concurrent-write lock done | run_day(force=) deletes+rewrites (catchup stays idempotent); fcntl.flock app-lock serializes routine/catchup/manual (DESIGN L188 REQUIRED net); #7 routine_target adjudicated NOT-a-bug (02:00->prev-closed-day correct under [04:00,04:00) boundary), regression-locked 03:59/04:01 | verify: pytest 113, live _routine_target 3 pts
+[2026-05-19] Major#5 archive_events->audit_log mirror done | one batch row/call (action=insert, target_id=session or count, n==0 writes none) in same txn as inserts; biggest writer now Monitor-visible | verify: pytest 117 (+4)
+[2026-05-19] Major#4 DB backup done | marrow/backup.py VACUUM INTO+os.replace atomic local + iCloud offsite, keep=14 prune, dry-run/--apply, per-leg add_alert on fail (DESIGN L186 net); deploy/mw-db-backup.plist daily 03:00 | verify: pytest 125 (+8), live dry-run plan no-write
+[2026-05-19] alert#12 + id-visibility + #2 restore done | session_end dashboard PermissionError->skip (lossless, alert#11 sibling); alert/thread/handoff id line-front; #2 restored ids 453-456 (48 spawn stayed purged); #6->Phase2 FUTURE w/ fusion-ref urls | verify: pytest 128, alert12 resolved, events 701 FTS-synced
+[2026-05-19] #8 timeout process-group kill done | llm.py both paths start_new_session=True + os.killpg whole group; _run_claude_stream Timer/finally and _run_claude_p (subprocess.run->Popen+communicate) kill descendants not just direct child; _kill_group helper errno-tolerant; test_timeout_becomes_llmerror (patched unused subprocess.run) -> stream+p group-kill tests proving detached grandchild dies | verify: pytest 129 (+1 net), no leaked gc
+[2026-05-19] lessons subsystem retired (Lumi: keep no lessons) | generation code already gone (diary.py 0 refs since lessons-off-SessionEnd); removed storage.py DDL + cli.py field + test_storage entry, DROP TABLE lessons (2 stale src=NULL rows, backup marrow-2026-05-19.db); SCHEMA/DESIGN lesson refs (self-correction goal, corrections-store reuse, Open-Threads lesson class) left for Phase-2 grill — same-file concurrent edit | verify: pytest 129, lessons table gone, marrow/ grep lesson clean
+[2026-05-19] launchd 4 jobs activated | db-backup + jsonl-cleanup bootstrapped (dry-run pre-checked: cleanup 253 sdk-cli del/457 kept, no real session; backup plan-only); diary-routine/catchup were ghost-loaded (disk plist missing) -> restored to ~/Library/LaunchAgents | verify: launchctl list 4 com.marrow.* loaded, 4 disk plists present
+[2026-05-19] grill round 3 (Phase 2 emotion) done | feel layer rejected (diary IS the lived layer); emotion=diary.mood valence/arousal via diary-sonnet single call (no new agent, no SessionEnd LLM); decay decoupled, score=importance×e^(-λ·days_idle); Demote-sink only lazy; session-start fused-rank entry once, generic recall unbounded; coord→tag=addon; DESIGN rewritten not patched, ADR-0005, CONTEXT terms | verify: docs consistent, no code (Phase 2 not started)
+[2026-05-19] grill round 4 (lesson out of base) done | ADR-0006: lesson → FUTURE addon (transcript+summary chain, small consumer revival); DESIGN 8 refs + SCHEMA 4 refs + FUTURE entry retired | verify: grep -ri lesson DESIGN.md SCHEMA.md = ADR-pointer only, marrow/ clean, no code change
+[2026-05-19] grill round 4 (emotion/recall boundary) done | ADR-0007 from Lumi screenshots: breath=Ombre recall engine N/A (Marrow=SQLite); recall scheme=claude-imprint chosen; generic recall (event+diary, Claude self-pull, unbounded) vs SessionStart entry (once, fused-rank top-N over diary, no re-pull) never fuse; decay = importance×e^(-λ·days_idle) ONLY (Ombre full formula rejected); read Ombre+imprint source to verify; DESIGN Emotion rewritten, SessionStart/fusion synced | verify: Ombre decay_engine.py + INTERNALS read; bad 0ae253d reverted (9d9725d); docs consistent, no code (Phase 2 not started)
+[2026-05-19] diary no-p exoneration + 3 fixes done | full-day replay proved no-p NOT the failure cause (5-18 21/21, 5-17 7/7 on 2.1.141); real cause = transient claude miss × zero-retry × ollama-down. diary.py _fence() wraps {events}/{parts} only (prompt bodies untouched) — stops haiku role-play, post-fence 5-18 replay 21/21 + faithful diary; llm.py _MUTE_OLLAMA drops ollama from chain (code intact); _RETRIES=1 same-provider retry pre-rotate, no alert on transient | verify: pytest 132 (+3), fenced replay 5-18 WROTE OK 21/21, chain==['claude_cli']
+[2026-05-19] grill round 5 + doc-system rebuild done | three-way collision converged A1/A2/A3; new DECISIONS.md (confidence dimension) = single current truth; DESIGN slimmed + absorbed SCHEMA; FUTURE re-grouped by phase; docs/adr deleted (conclusions→DECISIONS + pointers); CONTEXT 3 conflicts fixed, placement unchanged; handover rewritten clean; 6 historical contradictions cleared; B(entity) hold | verify: review agent + pytest unbroken
+[2026-05-19] Phase 2 hard-verify done | 1M empirically real on claude_cli stream-json sonnet path (cacheCreation 344K-428K, needles @197K/305K); heaviest real day 2026-05-18 = 151K net tok (0.66 tok/char); policy-refusal filter content-type-dependent (plain-EN @136K refused, real CN+EN @171K passed) | verify: docs/notes/2026-05-19_1m-probe-and-token-census.md + /tmp probes
+[2026-05-19] grill P1 single-call contract converged | adversarial proponent/adversary/adjudication; DECISIONS Phase 2 rewritten (per-event→per-episode +date-keyed cascade, 3-layer→1 isomorphic call, refusal sentinel P0, over-volume 200K tok/303K char, fusion normalization, in-process bge-m3, entity hold lifted, B5/B7); CONTEXT per-event→per-episode; DESIGN 4 stale refs synced (Lumi-authorized); affect-skew = Lumi self-curated | verify: DECISIONS Phase 2 consistent, no stack
+[2026-05-21] /rr phase 2 adjudication done | 10 material findings cross-checked across blind + traceability + code-quality, archived docs/notes/review-phase-2.md. Main fix-now (8 items, 174 green): storage.py FTS5 tokenize=trigram migration (Phase 1 unicode61 silently dropped CN tokens, line 163; live DB rebuilt 1827 rows, CN ≥3-char match works); storage.py events_vec dim mismatch now writes warn alert instead of silent leave; config.py shallow→deep merge defaults under user keys (new [recall] keys land on existing installs, prereq for worktree-D); llm.py refusal fingerprints +9 CN entries (CN-major content path was inert); subpages.py atomic hash-file write + Path.read_text (crash between md+hash no longer triggers false hand-edit alert); hooks.py session_end PermissionError emits warn alert (DESIGN L33 every-step-alert), test renamed eperm_alerts_warn; test_diary.py catchup test now pins today=2026-05-17 via monkeypatch (was fixture-date-drifted). Speaker-label fix (main + worktree-A): _SPEAKER_LABELS maps user→念念 / assistant→屿忱 in _sessions; raw [user]/[assistant] role tags were colliding with sonnet's training-default identity and flipping pronoun POV in diary | verify: pytest 174/174, live trigram migration applied (events_fts.sql contains tokenize='trigram', 11 hits on "老婆我")
+[2026-05-22] Phase 2 worktree merge A/C/D + UserPromptSubmit wire done | clean ort auto-merge for C (recall, 0 conflicts), A (diary single-call, 2-file auto-merge); D (hooks/backdrop/heartbeat) had 2 conflicts (storage.py FTS rebuild + dim alert / config.default.toml [embedding].model) both keep-HEAD. Connected D's UserPromptSubmit stub to C's recall.recall_fusion: prompt → recall.recall_fusion(conn, q, weights from config[recall]) → ## Recall block via additionalContext, fail-soft on any exception. Test contracts updated from stub-noop to real (explicit-disable / no-hits / empty-prompt / emits-recall). Lumi-authored Portability section in DECISIONS + matching DESIGN goal 1 rewrite captured alongside | verify: pytest 234/234 (174→202 C, 202→215 A, 215→233 D, +1 positive recall test = 234)
+[2026-05-23] phase 2.5a design landing + 2 independent fixes done | 3 commits on main: 8863cf5 docs(phase-2.5) spine reset (DESIGN min-diff L34/L68/L100, DECISIONS +6 reasoned re narrative race/catchup marker/Popen stderr/DIGEST flex/DIGEST prompt confirm gate/SessionEnd skip<=5turns, CLAUDE.md MCP restart caveat, docs/notes/2026-05-23_sessionend-llm-pipeline.md 16 sections); 678f64f fix(recall) per-item budget_chars cap so long event cannot eat whole window; 5c23742 feat(diary) entities table INSERT (2.5c step 2 cherry-pick, no schema change) | verify: pytest 274/274 (271->272 recall test, 272->274 entities tests x2)
+[2026-05-23] md hand-edit policy: Lumi-input-wins + silent overwrite + no .bak/alert on Lumi edit (alert retained for AI/bug/DB-write-failure). Code: subpages.py, dashboard.py, tests aligned (b8cf11c, 1e4d308). Cleanup: alert #14 resolved; diary.bak + 7 *.hash removed from ~/.config/marrow/state/. Docs: DESIGN.md:62 hash-conflict removed, L57 old→backup dropped; FUTURE.md aligned. md backups NOT taken by marrow—DB keep14@03:00 recovery source. Tests: 301✓ 1⊘.
+[2026-05-24] phase 2.5c sessionend 7-segment ship | schema v2: +unresolved/reconcile_ref/resolved_at/reconcile_prev_text, session_digests, threads→tasks; sessionend_prompts.py (AFFECT/ENTITY_CAND/TASK_CAND/MILESTONE_CAND/MEMES_CAND/DIGEST/HANDOVER); AFFECT: Lumi Unresolved + 1-5 importance scale; DIGEST: restored + 2 Lumi tuning bullets; MEMES_CAND: expanded (inside-jokes/quotes/news); HANDOVER: ## This Session/## Next Session + git log refs; daily.py (234 LoC) + daily_catchup.py; deleted diary.py; top_sections next_step detail inline, Later bucket split due/no-due; ollama strip (llm.py/config); plist mw-diary-{routine,catchup} → mw-daily-{routine,catchup} (4→7h / 16→19h, jsonl-cleanup Sun 5→12h scheduled to retire next window); DECISIONS overwritten: candidate split, memes aging (Sun weekly + FTS5 7d reverse-scan), handover skeleton Reference=code, narrative→handover stamp; 291/291 tests | verify: pytest 291 passed, 1 skipped (5.88s)
+[2026-05-23] phase 2.5b async LLM framework + render layer done | 9 commits on main: framework (6b52f12 popen_detach §3 4-flag contract — stdin=DEVNULL/log redirect/start_new_session/close_fds; 01cb963 sessionend_async ping-pong + skip<=5-turn gate + idempotent audit row keyed on action='sessionend_extract' summary=ok|fail:<E>|skip:short_session; 8d0ebfd sessionstart_catchup pending-sid detection via events DISTINCT − audit; 0647b18 hooks wire + [sessionend].skip_turn_threshold=5 config), render (c090c30 top_sections.py 205 LoC shared renderer for alerts/tasks/milestone/affect with 9-tone v×a×imp aggregation + stddev>0.3 variance label; e3549c9 handover_render.py atomic write to ~/.config/marrow/handover.md + narrative-pending stamp + template L48 drift fix; 7d90b75 hooks+dashboard wire 4-section top swap; fd8b4c3 test_dashboard format align), 93ee49b test(fixture) tests/conftest.py autouse no-op for hooks.popen_detach (pre-fix 1143 polluted audit rows + 93 sessionend_async_*.log files leaked from hook tests — in-process monkeypatch did not cover spawned-child config load; manually purged + verified clean post-fix). Live ping-pong against real sids c3da9d7a... + 45dace23...: parent_return 1.3ms (<<2s §3 budget), child wrote audit row 'ok' ~30s post-spawn, hook-isolation contract holds in subprocess context (P9 verified live). DIGEST prompt content + diary.py rewrite blocked pending Lumi morning review (rewrite plan drafted at docs/notes/2026-05-23_diary-rewrite-plan.md with 4 explicit Lumi-decision blockers: L3 P7 CN exclude line / L6 DIGEST prompt body / L2 reconcile_prev EN polish / plist shim vs rename). DIGEST/AFFECT/ENTITY/THREAD/MILESTONE/MEMES/NARRATIVE prompt content NOT written this window (TODO marker in sessionend_async.py for 2.5c). handover_render Pending block renders empty until affect.unresolved column lands in 2.5c (P4). dashboard render_top body fully replaced; old Open Threads / Sub Pages nav dropped (kept canonical sub-pages render via subpages.write_all_subpages) | verify: pytest 301/301 + 1 manual-skip (5.7s); live foreground `python -m marrow.sessionend_async --sid c3da9d7a-...` audit ok at 08:21:25Z; live fire-and-forget `popen_detach([...sessionend_async --sid 45dace23-...])` parent return 1.3ms, audit ok at 08:21:52Z; prod DB sessionend_extract row count 0 after re-running full test suite (no pollution)
+
+[2026-05-24] phase 2.5d closeout — aging job + jsonl-cleanup retire | marrow/aging.py (185 LoC) weekly maintenance: memes promote (>=3 distinct event hits last 7d -> use_count+=hits, last_seen=now, status=active) / memes demote (last_seen>90d AND pinned=0 -> status=dormant) / task auto-archive (status=active AND 0 events mention last 30d -> archived) / milestone alert auto-confirm (alert.type=milestone_added AND created_at>7d AND resolved=0 -> resolved=1+resolved_at=now); single txn + audit_log row per run; schema v3 memes.status TEXT NOT NULL DEFAULT active added on top of fa54662 memes.pinned (status=code-written by aging, pinned=LLM-written by MEMES_CAND prompt); enforce_anchor_pins reads candidates.MEMES_ANCHOR_KEYS (single source: 鸭子/念念/老公/老婆/Lumi/屿忱/Stellan) to idempotent-force pinned=1; deploy/mw-aging.plist Sun 12:00 (Weekday=0, com.marrow.aging, not yet launchctl loaded — Lumi loads manually); marrow/cleanup.py + tests/test_cleanup.py + deploy/mw-jsonl-cleanup.plist deleted (cc cleanupPeriodDays=30 in ~/.claude/settings.json now owns jsonl); A+B worktrees merged into main (3e9bd0b cleanup retire, this commit aging+v3-status); DESIGN:98 / DECISIONS:18 4-jobs list updated daily-routine/catchup/db-backup/aging | verify: pytest 319 passed + 1 skipped (6.27s), plutil mw-aging.plist OK, smoke `python -m marrow.aging` on empty DB -> promoted=0 demoted=0 archived=0 confirmed=0
+
+[2026-05-24] subpage layout refactor + dashboard Content + candidate buttons + timeline backfill | (a) subpages.py: hardwired build_all_configs replaced by registry + `[subpages]` config (top/bottom/hidden) per DESIGN L43-65; 10 known keys (profile/milestone/diary/memes/stickers/wallet/goose/study/projects/cheatsheet); unknown key = warn alert + skip; defaults fall through when config absent. (b) 3 new stubs (profile/stickers/wallet) in subpages_render.py — position-reserved markers with placeholder line; full render lands with entity fix (Profile) / Phase 5 (Wallet). (c) milestone render switched to `[YYYY-MM-DD] subject: description <!-- id:N -->` per milestone_format_unify (theme col kept nullable, dropped from render); reconcile regex updated to match. (d) dashboard adds `## Content` section below Affect via top_sections.render_content — top numbered, `---` divider, bottom unnumbered, md links relative to dashboard dir. (e) candidate anchor buttons (pin/drop/edit) on milestone-candidate rows; reconcile.reconcile_milestone_candidates runs before render in write_dashboard, drop writes audit_log tombstone (anti-revive), all-three-chars = no decision yet, drop beats pin if both linger. (f) migrate.import_timeline + --timeline-only CLI flag: idempotent on (scope,date,title), description backfill only when empty (never overwrites Lumi edits); live run +9 inserted (8 Me + 1 Us 2026-05-11), idempotent on re-run. (g) FUTURE.md cleanup: subpage_redo deleted (now in DESIGN), dashboard_v2_redo sub-items (b)(c)(d) struck (now shipped). Daemon restart NOT required this session — code changes apply on next `cc` launch. | verify: pytest 356/356 + 1 skipped (6.4s); live dashboard regen shows 5 candidate rows with buttons + Content section with 10 subpage links; milestone subpage renders bracketed-date format as Lumi spec'd.
+
+[2026-05-24] db-pages rename + 5 stale .bak rm done | folder ~/Desktop/NY/sub_pages → ~/Desktop/NY/db-pages (signals "rendered from DB" vs hand-written notes); config.toml key sub_pages → db_pages (legacy key still read as fallback so old configs survive); new accessors config.db_pages_path() / db_pages_state_path(), legacy sub_pages_path / sub_pages_state_path retained as aliases (Python identifier rename deferred — other-window pending diff in daily.py still calls the old names, alias keeps zero conflict); subpages.py alert tags + folder default updated; dashboard ## Content links now point to db-pages/<name>.md; tests/test_config + test_hooks + test_handover_render + test_sessionend_async aligned; on-disk: 5 stale milestone.*.bak.md (1779445743/605839/615389/626762/626847) deleted from sub_pages before the mv — leftover artifacts from pre-b8cf11c reconcile backups (code path itself was already removed in commits b8cf11c / 1e4d308; the running other-window has the corresponding strip in its uncommitted diff and will land it next commit). | verify: pytest 375/375 + 1 skipped (6.77s); live re-render: ls ~/Desktop/NY/db-pages shows 10 md + projects/, dashboard ## Content lists Profile→Cheatsheet with db-pages/<name>.md links, ~/Desktop/NY/sub_pages absent
+
+[2026-05-24] phase 2.5d candidate split + sessionend 4→1 call + memes pinned done | sessionend_prompts.py rewritten: single combined SESSIONEND_PROMPT emits ===AFFECT===/===TASK_CAND===/===DIGEST===/===HANDOVER=== in one sonnet call (was 7 calls); per-block writer with independent try/except + audit row per segment + final ok/partial/fail summary; sessionend_async.py drops ENTITY/MILESTONE/MEMES seg + _extract_block moved to candidates module; new marrow/candidates.py shared module (~165 LoC) — extract_block JSON parser + write_entity/milestone/memes_cand writers, fixed latent source→source_hash bug in milestone INSERT (was never tested in 2.5c); new marrow/daily_prompts.py — combined DAILY_CAND_PROMPT emits 3 marker blocks on day-aggregated session_digests text; daily.py inserts _extract_candidates(conn, llm, date, material) before DIARY call (best-effort, LLMError logs warn alert and continues, never blocks diary); storage v3: memes.pinned column + _migrate_to_v3 ALTER (SCHEMA_VERSION 2→3); write_memes_cand respects MEMES_ANCHOR_KEYS (鸭子 / 念念 / 老公 / 老婆 / Lumi / 屿忱 / Stellan) + type='cipher' force pinned=1; pinned never downgrades (upgrade-only on re-mention); tests +9 (sessionend single-call routing + 4 per-segment audit rows; daily candidate 3-block extraction; memes anchor + cipher force; cand LLM failure does not block diary; pinned upgrade-only) | verify: pytest 294/294 + 1 manual-skip (6.21s); status='dormant' column NOT added — aging worktree B owns it
+
+
+[2026-05-25] milestone-candidate drop-by-row-delete + 2 anti-revive holes plugged done | render_milestone_candidate trails `<!-- cand:milestone:ids=[..] -->`; reconcile picks "row deleted" as drop+tombstone; tombstone sha=<natkey_hash>|title=<title> where natkey=milestones|scope|date|title; write_milestone_cand + migrate._insert LIKE-match before INSERT; closes revive holes (sonnet re-extraction, timeline.md id 34-38); pinned-row skipped; tests +2 | verify: pytest 387/387 + 1 skipped (6.95s)
+
+[2026-05-26] user-edit survival fix (md=SoT honoured end-to-end) | (A) md_index split sync_file into full (tests/migrations) + sync_file_observe (watcher debounce + boot + `mw refresh` + full_scan(observe=True)) — observers insert/tombstone only, never overwrite content_hash; baseline = last hash marrow auto-wrote; dashboard inserter recognises user edits. (B) reconcile_tasks absorbs title text edits: peels `[<tag>] ` prefix and trailing `[<date>]` / `: <next_step>`, UPDATEs tasks.title when md differs from DB; independent of tick/untick; malformed rows log conflict + skip. (C) dashboard.affect flipped hash-skip → RECONCILED with per-row anchors (`<!-- id:affect.<id> -->`); reconcile_affect parses anchored lines, UPDATEs description/label on text diff. test_dashboard "clobber" test inverted to assert new contract. New modules: tests/test_user_edit_survives.py (mw refresh/watcher end-to-end on affect/alerts/task title) + tests/test_subpage_edits.py (preserves anchored blocks). | verify: pytest 545 passed + 1 skipped (+15 net). Out-of-scope: cold-start, popen_detach, short_session gate, ML deps, body_nonempty — untouched.
+
+[2026-05-26 sid:06d6b901]
+- `day-plan` skill created at `marrow/.claude/skills/day-plan/SKILL.md` (111 lines): morning/evening modes, Scan 6-source ordered (handover→DESIGN→DECISIONS→FUTURE→git status→git log), Brainstorm → conditional Self-grill → Plan output with ≤8 bite-sized step bullets, active ≤3 session cap, plan file on Desktop slug ≤4 words, machine-checkable done cmd required
+- PROGRESS auto-append: sessionend_writers.py post-handover write hook, flock+atomic+skip-empty, 606 tests green; same DONE block feeds both handover.md and PROGRESS.md without duplication
+- Marrow 4 commits (1156aef day-plan, 8f4cd06 PROGRESS append, 0d22c82 day-plan refine wt/agent + ≤3 cap, 49a6eb0 comms+workflow+sessionend pass-through); ~/.claude 3 commits (741e3dd skill bundle rotation, db03375 drop fetcher/subagents, e81d6ba rules+handoff+marrow commands)
+- wt vs agent distinction settled: agent=single-run ephemeral (search/scan/review/small patch), wt=independent session with own SID (hours-long, multi-file, experimental); main session always opens wt, user never manually
+- Grill scope: grill-me for daily use, grill-with-doc reserved for phase kickoff; brainstorming skill for new module-level feature only; day-plan internal Brainstorm step covers addon-scale items
+
+[2026-05-26 sid:eb3555c3]
+- Three `reconcile.py` bugs fixed + committed (`a078ba6`), 611 tests pass:
+  1. `_parse_task_row_body` now matches prefix *or* suffix — title-with-colon no longer blocks next_step edits
+  2. Deleting a done-row from dashboard now archives it instead of resurrecting on next render
+  3. Rebound guard: `body == db_title` skips colon-split when `db_next_step` is NULL
+- Hook timing root cause confirmed: `sessionend_async` / `mw refresh` / launchd import **disk code** at call time — half-patched code runs live during edits; `mw refresh` safe as long as DB isn't corrupted by bad write
+- Lesson locked in: patches to `reconcile.py` / `dashboard` / `top_sections` must go through worktree to avoid live disk pollution
+
+[2026-05-26 sid:164b0073]
+- Phase 3 closeout complete: 6 outcomes merged — HIGH-1 (dashboard/inserter write-before-record_block), MED-3 (writer exception catch broadened), watchdog round-trip integration test, SoT audit doc, recall body_nonempty filter, md_index 30-day tombstone prune (weekly aging job)
+- Additional fixes landed: inserter h3/h4 substring match corrected (`"\n## "`), subpages legacy full-render fallback now logs alert, recall early-return guard removed so entity force-include surfaces alone, `_atomic_write` consolidated into `marrow/_atomic.py`
+- Phase 3 review fully closed: HIGH-2 already resolved by MdIndexTombstoneStore refactor; MED-2 fd-leak is intentional design; handover partial fallback non-issue (user never renames partial files)
+- Subagent file-writing rules updated: agents report inline to main session by default; write to `docs/` only when main prompt explicitly specifies path
+- Both repos pushed; main at `4fb6d45`, pytest 621 pass / 1 skip
+
+[2026-05-26 sid:73fbf47d]
+- entity write-dedup fixed (commit `cc118de`): added `_alias_dedup_lookup` + `_merge_aliases_into` helpers; `write_entity_cand` now bidirectional alias-aware (new name ↔ existing aliases; new aliases ↔ existing name/aliases), case-insensitive; hit → skip + merge aliases into existing row; 627 pass / 1 skip
+- Phase 3 closeout (carried): 6 outcomes merged — HIGH-1 dashboard/inserter write-before-record_block, MED-3 writer exception, watchdog integration test, SoT audit doc, recall body_nonempty filter, md_index 30-day tombstone prune
+
+[2026-05-26 sid:013295f5]
+- Note passthrough section added to handover (commit `f5ddf93`): `## Note` appended to template after Reference; renderer extracts prior Note body and re-injects verbatim; Note stripped from diff before tombstone hash to avoid pollution; 4 tests added
+- User-added bullet protection for Done/Open/Plan/Reference (commit `ff0b90f`): `_diff_user_added` diffs `last_snapshot ↔ prior_text`; hash-merges hand-added bullets into sonnet's new body; N/A body replaced by user content; tombstone takes priority over revival; partial path excluded (unstable prior); 4 tests added — 635 pass / 1 skip
+- Template cleanup (commit `8cb47cb`): removed top `>` markers + flanking blank lines; handover now opens directly with `# Marrow handover — …` then `## Done` with no gap
+- Phase 3 closeout (carried): 6 outcomes merged — HIGH-1 dashboard/inserter write-before-record_block, MED-3 writer exception, watchdog integration test, SoT audit doc, recall body_nonempty filter, md_index 30-day tombstone prune
+
+[2026-05-26 sid:103cb368]
+- FUTURE.md全面重组：`docs/plans/brainstorm-future.md` 确认内容全收后删除；4条SHIPPED条目删除；文件从根目录移至`docs/plans/FUTURE.md`；极简英文风格重写；共47条
+- Phase 4 condensed 27→9：`weclaude_runtime_rebuild`吸收8条，`weclaude_bridge_bugfix_pile`(new)吸收7条bugfix，4条Stellan主动行为类删除（Phase 5 pulse loop已覆盖）
+- Affect三件套合并为`affect_advanced_holdoff` dormant（dashboard已有lastsession+today mean+week mean+peak轨迹，chord_progression_dim只是存储层）
+- Recall校准7条合并为`recall_calibration_holdoff` dormant（study/project走grep，diary/tasks vec召不出但不降0.40，anchor +0.10继续观察）
+- P3过度设计删除：`convention_injection`+`claude_md_render_guard`删除（rules/commands/agents是cc官方机制自动注入，不需要daemon写CLAUDE.md）
+- 新增条目：`dir_tree_for_cc`（工作区目录树给cc grep用）、`cheatsheet_index`（MCP/skill/py/shortcut/plist一张表）、`weclaude_multimsg_window_5s`（微信多消息窗口，无法监测typing，pending/cyberboss方向）、`ny_memm_retire`（P1 closeout，memm系统退休+code-project部分archive）
+- Dashboard & Subpages单独成节（跨phase输出层，不归属某一phase）；Stale节3条由用户手动删除
+
+[2026-05-26 sid:535f9a3a]
+- Semantic dedup layer shipped (`61c2d86`): new `marrow/semantic_dedup.py` shared bge-m3 helper; tasks/milestones/entities all get cosine ≥0.85 on top of existing string-match layer
+- Tasks dedup scope: archived **excluded** (user decision — archived = time-distant, re-open = new task); active + 24h done only
+- Milestones dedup scope: **all-in** full table (only ~21 rows, no time window needed)
+- Entities: cosine hit → **merge alias**, not block; alias field serves this purpose
+- `memes_dedup.cosine_dup_score` refactored to call shared helper; external signature unchanged
+- Fixed `test_day_events_filters_by_6am` (`79151a4`): root cause was missing `date.today()` freeze (fixture used 2026-05-16; cutoff = today−9d = 2026-05-18 → fixture rows filtered out). Not a timezone bug. Monkeypatched to 2026-05-17; 6 tests green.
+- 641 pass + 1 skip, zero regression
+
+[2026-05-26 sid:564b7f0c]
+- `docs/plans/drift-sweep.md` created: full spec for three parallel wt tasks (wt-drift L1, wt-paths L2, wt-ssarchive mm+/mm-)
+- DESIGN.md patched: cheatsheet promoted from read-only to md-as-SoT (Phase 3 contract); was an open conflict with Phase 3 reversal
+- FUTURE.md patched: `paths_registry_early` absorbed into drift_sweep L2; cheatsheet expanded (scan sources + md-as-SoT); drift_sweep L1/L2/L3 layers clarified
+- Authorized roots locked: `~/CC-Lab/` · `~/.config/marrow/` · `~/.claude/` · `~/Toolkit/` · `~/Desktop/NY/` · iCloud Study
+- Trigger strategy locked: FSEvents watcher (real-time) for same-root mv; content-hash + 30-min TTL queue for cross-root mv; CLI `mw drift <old> <new>` for manual/batch; always dry-run → `mw drift confirm/reject <id>`; batch mv within 30s merged to one alert
+- Delete policy: refs=0 → silent; refs>0 →悬挂引用 report in Alert, nothing auto-deleted
+- Same-name overwrite (`on_modified`) → drift_sweep ignores; md-as-SoT watcher handles content change
+- mm+ unified: bare = current sid immediate sessionend rerun (overrides done + ≤3-turn skip); `mm+ <sid>` = historical sid rerun; both identical pipeline
+- /goal text finalized (drift-sweep.md scope, 3 parallel sonnet wt, merge order paths→drift→ssarchive, pytest exit 0)
+
+[2026-05-26 sid:07d1a56e]
+- Dashboard ghost bug investigated: audit_log clean (no background writes in 24h), catchup/sessionend_async did NOT fire spuriously today — mechanism exists but not the active cause
+- watcher.log shows dashboard.md modified ~dozen times 14:42–16:10 UTC with zero corresponding audit_log entries → external writer (iCloud sync / editor undo) is leading hypothesis
+- task 150 ("123") confirmed archived in db since 11:16:50; any "completed" appearance is from stale markdown content, not db state
+- Diagnostic one-liner ready (`;`-separated, not `&&`) to capture ghost event in the act: cp snapshot + stat mtime + lsof + watcher tail + audit_log tail
+- drift-sweep.md spec complete, DESIGN.md + FUTURE.md patched, authorized roots locked, trigger/delete/mm+ strategy locked (carried from prior)
+
+
+[2026-05-27] paths.toml L2 done | new marrow/paths.py loader + ~/.config/marrow/paths.toml with 10 keys (marrow_db / ny_root / dashboard_md / handover_md / drift_pending_dir / drift_backup_dir / dir_tree_md / logs_dir / state_dir / goose_log_dir); MARROW_PATHS_FILE env override; fallback to baked defaults when toml absent; aging / config / goose_bites / migrate / sessionend_async / sessionstart_catchup / subpages_render swapped to paths.xxx; config.DATA_DIR retained as runtime monkeypatch surface for tests (paths = external truth, config = test redirect); 8 tests | verify: pytest tests/test_paths_toml.py -q → 8 passed; commit a5bf4ef
+
+[2026-05-27] drift_sweep L1 done | new marrow/drift_sweep.py (583 LOC): 6 authorized roots, hardcoded binary/dir/size excludes, ripgrep + os.walk Python fallback (rg shell wrapper guard), batch debounce 30s, path-shaped match rule (quoted/slash/.ext + word boundary), Triggers A (on_moved same-root) + B (cross-root via basename+size cache on delete+create) + C (dangling delete reports only) + D CLI; mw drift <old> <new> queues pending json, mw drift confirm/reject id applies/discards (git add first then replace, non-git backed up to drift_backup_dir); dir_tree.md side-output refreshed per-root max-depth=4 after each run; 8 tests | verify: pytest tests/test_drift_sweep.py -q → 8 passed; commit 907abe0
+
+[2026-05-27] session_archive_skip_manual done | mm- writes manual_skip/skip row → sessionend_async bypasses LLM+diary+handover + writes skip:manual audit; mm+ (no arg = current sid, mm+ <sid> = named) fires sessionend rerun via reset:mm_plus audit; SessionStart resume detection (_has_prior_lifecycle_start) writes skip_cleared so resumed sids run normally; latest manual_skip row wins (ORDER BY id DESC); sessionend_async _already_done honors reset:* as force-rerun; new mw sessionend rerun <sid> CLI; ≤3-turn auto-skip + stale-skip recovery unchanged; 5 tests | verify: pytest tests/test_session_archive_skip.py -q → 5 passed; pytest -q → 668 passed + 1 skipped (zero regression); commit bf72f1a
+
+
+[2026-05-26 sid:07d1a56e]
+- Dashboard ghost-revert bug fully resolved: root cause was incomplete pytest fixture isolation — `db_env` in `test_sessionend_async.py` patched `db_path`/`DATA_DIR` but not `dashboard_path`/`sub_pages_path`, so tests wrote fixture data (`id=1 "unrelated task"`, affect `"测试"`) directly to prod `~/Desktop/NY/dashboard.md`
+- Fix: autouse session-scoped fixture in `tests/conftest.py:26-55` now patches all three paths to tmp vault for every test; `test_config.py` reverse fixture preserves fallback-behavior tests; 668 tests green
+- `repo.add_alert` made idempotent — same (severity, type, message, source) dedupes instead of inserting; 88 stale missing-inserter alerts cleared
+- Culprit: subagent worktree `agent-a9f0536b81ef43b1f`, commit `0ffe8c0`, ran pytest 03:48 AEST → dashboard polluted by 03:50; both orphan worktrees cleaned up
+- Commit `ca668b2` landed: test isolation lock + alert idempotency + 88-alert cleanup
+
+[2026-05-26 sid:a0ee6d77]
+- drift-sweep plan fully shipped: wt-paths / wt-drift / wt-ssarchive merged in order, 21/21 done condition + 668 full suite green, commits a5bf4ef / 907abe0 / bf72f1a / d3aa65c
+- `EXCLUDE_DIRS` split into `EXCLUDE_DIRS_SCAN` (narrow, drift ref scan) and `EXCLUDE_DIRS_TREE` (wide, dir_tree render) — no longer shared; max_depth and scan are fully independent
+- `dir_tree.md`: dirs-only depth=2, ~174 lines / 4.5KB (was 337KB); symlinked `~/Desktop/NY/db-pages/dir_tree.md → ~/.config/marrow/dir_tree.md`
+- `paths.toml` + `marrow/paths.py`: 10-key central loader, env override, fallback defaults; `config.py` updated to use it
+- push done: 4fb6d45..5f17c3c (12 commits) + d3aa65c to origin/main
+- test vault isolation (conftest autouse fixture, `ca668b2`) still in effect — 668 tests clean
+
+[2026-05-27 sid:7545d090]
+- Phase 3 session 1 complete (4 commits): `_has_mm_plus_reset` uses latest non-start row; `build_study_index_spec` wired to study index; pit retired from SUBPAGE_BUILDERS; study/projects children `read_only=True`; watcher detail-page denylist; 674 tests green
+- Pit 23 rows exported to `~/.config/marrow/db-pages/projects/pit.md`; file is now manual inbox, refresh no longer overwrites
+- Alerts #114 #115 resolved; #53 (leak-test probe) resolved; refresh runs two rounds clean
+- mm+/mm- arg parsing three-branch fix (commit `b2627fd`): empty→current sid; UUID→explicit sid; natural language→`additionalContext` injection to main session; mm- named-sid support added; 687 green
+- Natural language branch live-verified: `mm+ 测一下看看` correctly routed to additionalContext, no fake-sid audit row written
+- mm+ active-session archive fix (agent, 690 tests green): before spawn, calls `transcript.clean()` + `repo.archive_events()` on current cc jsonl; `_locate_jsonl` glob fallback covers missing `transcript_path` in payload — **pending live verify**
+
+[2026-05-27 sid:7545d090]
+- mm+ active-session archive fix live-verified: `transcript.clean()` + `repo.archive_events()` called before spawn; events 0→61 rows, full audit chain `reset:mm_plus → start → writers ok → ok,user_count=14`; handover.md rewritten; commit `f3c40d1` pushed
+- Phase 3 session 1 all done (4 commits): `_has_mm_plus_reset` latest-non-start semantics; `build_study_index_spec` wired to study index; pit retired from SUBPAGE_BUILDERS; study/projects children `read_only=True`; watcher detail-page denylist; pit 23 rows exported to `pit.md` (manual inbox, refresh-safe); alerts #114 #115 #53 resolved; 674→690 tests green
+- mm+/mm- three-branch arg parsing shipped (`b2627fd`): empty→current sid+spawn; UUID→explicit sid+spawn; natural language→`additionalContext` injection to main session; mm- named-sid support added; both branches live-verified
+- Verification discipline locked in session: pytest green = "no regression", not "goal done"; done requires live observable artifact (events row count, audit ok row, dashboard mtime, file diff)
+
+[2026-05-27 sid:3de818c6]
+- Atlas subpage design finalized: 6-field schema (path/note/write/naming/depth/stale), `##`→`######` heading tree render, depth-aware sweep (render only, drift_sweep stays full-tree), reconcile hash-guard race defense, `stale=1` on missing dir (not auto-delete)
+- `.claude` whitelist locked: CLAUDE.md / rules / commands / skills / agents / output-styles / hooks / keybindings.json / settings.json; blacklist: projects/ image-cache/ statsig/ shell-snapshots/ *.jsonl
+- Sync_loop design: 5s tick bidirectional (md_mtime > db_mtime → reconcile, db_mtime > md_mtime → render); covers all subpages + dashboard; hash-guard兜底 race; `_reconcile_boot` already exists
+- DriftWatcher attach decision: exists at `drift_sweep.py:493`, needs wiring into `watcher.py` main observer — 50 LOC est.
+- S2a/S2b/S2c dispatch brief created with live-verify probes and /goal block; today.md condensed to 8 lines
+- cc-lab structure decided: `~/CC-Lab/external/` for OSS forks, shared `.claude` via symlink, workspace root = `~/CC-Lab/`; pending 念念 confirm before mv
+- Cheatsheet redesigned as independent subpage parallel to atlas (not merged); prior "upper=dir_tree / lower=cheatsheet" layout abandoned
+- Verification discipline: pytest green ≠ done; /goal evaluator requires raw shell output in transcript for live probes
+
+[2026-05-27 sid:57392adb]
+- S2a/b/c shipped and merged: drift_sweep `.claude` whitelist + DriftWatcher in watcher; sync_loop 5s md↔db tick; atlas subpage (schema v12, parser/render/spec, depth-aware sweep, 30 tests); 750 passed live
+- Main-session atlas fixes committed (`b2d36c9`): reconcile DELETE skips root rows + stub-only rows; `_build_atlas_config` re-seeds roots every refresh via INSERT OR IGNORE
+- Live verify complete: DriftWatcher 30s batch alert confirmed; md→db within 7s; db→md dashboard mtime +10s; race defence (last write wins); atlas 6 sections ≥5; mkdir stub / rmdir stale / note round-trip
+- Doc updates pushed `1ee2843`: DECISIONS Phase-3 S2 block, DESIGN atlas line, FUTURE prunes, `~/.claude/rules/files.md` atlas pre-write line
+- Recall hook (`8409e8d`): injected context block now labelled as background-only with do-not-answer guard
+- Root cause of dashboard ~1 min slow refresh: atlas inserter throws transaction nesting errors every 5s tick (alerts 118–122), corrupts shared conn, drags all other subpages until next clean reconcile cycle
+- Sweep full fs walk (ignoring atlas row depth) confirmed already shipped — not on fix list
+- Discussed: recall hook marker can be trimmed to 1 line to save ~50 tokens/turn; `.claude/rules/agent-dispatch.md` needs worktree self-check rule (pwd + branch guard before any commit) — discussed but not yet committed
+
+[2026-05-27 sid:cbe330f7]
+- **5-bug bundle** fixed: sqlite per-thread conn (3 threads were sharing `self.conn`), atlas marker emit, atlas parser marker-based, dir-mv atlas rekey, `cmd_refresh` uses `init_db` — commit `306cb56`
+- **md_index `_ID_RE`** extended to allow `/` and spaces in path markers (was silently dropping `Mobile Documents`, `GPA & Medical Schools` etc) — commit `18dcb92`
+- **Atlas render format locked**: `## [ShortName/](file://...)` root section → `##### [dir/](link)` first level → indented `-` list for deeper levels; folder name is the link, no separate `[open]` — commits `3fd0844`, `24b8535`, `4d8adfe`
+- **depth retract**: shrinking depth removes stub-only rows from db + md within ~15s; rows with user-written note/write/naming preserved — commit `4d8adfe`
+- **tombstone bypass** (`respect_tombstones=False` on atlas inserter) so db-as-SoT can always resurrect deep stubs watcher previously marked deleted — commit `cd9ec6a`
+- **reconcile → immediate sweep**: depth edit triggers sweep in same tick, no longer waits 60s AtlasSweepLoop cycle — commit `24b8535`
+- **Python SIGBUS root cause ID'd**: `grp.cpython-314-darwin.so` FS pagein EINVAL (macOS 26 + Python 3.14 early GA env bug); warmup cannot fix OS-level page eviction; incident `393B9588-DB23-41B4-8A8F-1774A742988A`; launchd keepalive auto-restarts, no data loss
+- atlas.md at `~/Desktop/NY/db-pages/atlas.md` is real on-disk markdown; db is SoT; bidirectional sync confirmed working
+
+[2026-05-27 sid:206272fc]
+- **Root section adds fields**: each atlas root `## header` now renders marker + `note/write/naming/depth` inline — commit `9247de9`
+- **`.config` root expanded**: `AUTHORIZED_ROOTS` `.config/marrow` → `.config`; `CONFIG_BLACKLIST = {"wechat-claude-bridge"}` added; rg + python fallback both prune blacklist — commit `9247de9`
+- **Retract fix (depth collapse)**: all atlas rows evaluated as retract candidates (not just depth>0 seeds); root depth=1→0 now removes stub-only children — commit `6c8208b`
+- **Epsilon deadlock broken**: `_atomic.atomic_write` skips file IO when content unchanged; `sync_loop` 1s epsilon removed → dashboard + atlas 5s refresh now works — commit `2967a86`
+- **`protected=md_paths` guard stripped**: retract now only preserves `has_manual` rows; stub-only rows in md_paths are retractable — commit `84f2ba3`
+- **12 commits pushed** to remote: `8409e8d..06fdaae` (includes prior session's 7 unpushed + 4 new + 1 reorder HO note)
+- **Python SIGBUS** root cause confirmed: macOS 26 + Python 3.14 dylib page eviction; launchd auto-restarts, no data loss
+
+[2026-05-27 sid:6d50697d]
+- **Provider plug-and-play completed**: 念念 confirmed free provider-switching (自由插拔) finished this session
+- **WeChat recall confirmed**: bridge.py does have recall hook auto-inject; not a bare chain as previously assumed — 念念 verified live
+- **atlas verified working**: 屿忱 confirmed atlas 修通 post-fix series (commits `9247de9 6c8208b 2967a86 84f2ba3`)
+- **Epsilon deadlock + retract fix + `.config` root expand**: shipped and stable (prior session)
+
+[2026-05-27 sid:6d50697d]
+- **Provider plug-and-play complete**: 念念 confirmed 自由插拔 finished; Claude/other providers hot-swappable
+- **WeChat recall confirmed**: bridge.py has recall hook auto-inject; not bare chain — verified live
+- **atlas verified working**: post-fix commits `9247de9 6c8208b 2967a86 84f2ba3` stable
+- **Epsilon deadlock + retract fix + `.config` root expand**: shipped and stable
+
+[2026-05-27 sid:6d50697d]
+- **Provider plug-and-play complete**: 念念 confirmed 自由插拔 finished; Claude/other providers hot-swappable
+- **WeChat recall confirmed**: bridge.py has recall hook auto-inject; verified live again this session
+- **atlas verified working**: post-fix commits `9247de9 6c8208b 2967a86 84f2ba3` stable
+- **Epsilon deadlock + retract fix + `.config` root expand**: shipped and stable
+
+[2026-05-27 sid:6d50697d]
+- **Provider plug-and-play complete**: 念念 confirmed again this session — 自由插拔 finished, Claude/other providers hot-swappable
+- **WeChat recall confirmed**: bridge.py recall hook auto-inject verified live again this session
+- **atlas verified working**: post-fix commits `9247de9 6c8208b 2967a86 84f2ba3` stable
+- **Epsilon deadlock + retract fix + `.config` root expand**: shipped and stable
+
+[2026-05-27 sid:6d50697d]
+- **Provider plug-and-play complete**: 念念 confirmed done this session — 自由插拔 finished, Claude/other providers hot-swappable
+- **WeChat recall confirmed**: bridge.py recall hook auto-inject verified live this session (念念 tested live in WeChat)
+- **atlas verified working**: post-fix commits `9247de9 6c8208b 2967a86 84f2ba3` stable
+- **Epsilon deadlock + retract fix + `.config` root expand**: shipped and stable
+
+[2026-05-27 sid:6d50697d]
+- **Provider plug-and-play complete**: 念念 confirmed done ("反正做好了，自由插拔") — Claude/other providers hot-swappable
+- **WeChat recall confirmed**: bridge.py recall hook auto-inject verified live (念念 tested live in WeChat)
+- **atlas verified working**: post-fix commits `9247de9 6c8208b 2967a86 84f2ba3` stable
+- **Epsilon deadlock + retract fix + `.config` root expand**: shipped and stable
+
+[2026-05-27 sid:6d50697d]
+- **Provider plug-and-play complete**: confirmed done ("反正做好了，自由插拔") — Claude/other providers hot-swappable
+- **WeChat recall confirmed**: bridge.py recall hook auto-inject verified live
+- **atlas verified working**: post-fix commits `9247de9 6c8208b 2967a86 84f2ba3` stable
+- **Epsilon deadlock + retract fix + `.config` root expand**: shipped and stable
+- **User cache tier clarified**: 念念 is on 1-hour cache TTL (not 5-min); corrected this session
+
+[2026-05-27 sid:6d50697d]
+- **Provider plug-and-play complete**: confirmed ("反正做好了，自由插拔") — Claude/other providers hot-swappable
+- **WeChat recall confirmed**: bridge.py recall hook auto-inject verified live
+- **atlas verified working**: post-fix commits `9247de9 6c8208b 2967a86 84f2ba3` stable
+- **Epsilon deadlock + retract fix + `.config` root expand**: shipped and stable
+- **User cache tier**: 念念 is on 1-hour TTL (confirmed again this session)
+
+[2026-05-27 sid:6d50697d]
+- **Provider plug-and-play complete**: hot-swap confirmed live ("反正做好了，自由插拔")
+- **WeChat recall confirmed**: bridge.py auto-inject hook verified working in-session
+- **atlas stable**: commits `9247de9 6c8208b 2967a86 84f2ba3` holding
+- **User cache tier**: 念念 on 1-hour TTL (confirmed again)
+
+[2026-05-27 sid:37158cb3]
+- **agent-dispatch.md rewritten**: ghost agent `worktree-implementer` removed; model selection consolidated into dedicated `<models>` block (haiku/sonnet/opus tiers); worktree contract clarified — agent commits own work, no push/merge/out-of-scope; commit `a052a59`
+- **workflow.md grammar fixed**: `dru-run→dry-run`, `it's→its`, verb agreement patched; density maintained at 89 lines
+- **Decision A locked**: use `general-purpose` + `isolation: "worktree"` param rather than creating a new `worktree-implementer.md` agent — no new maintenance cost
+
+[2026-05-27 sid:0398d1d3]
+- **recall.py simplified**: 1237 → 1171 (-66 LOC); 5 findings executed (3× affect_live de-dup, `_affect_bonus` drop, scored partition, datetime/json hoist, rcfg default de-dup); 4 refactor commits local on main, **not pushed**
+- **Two agent false positives cleared**: `_blob_to_vec` + 5 `embed_*` wrappers kept (tests directly monkeypatch them); `affect`/`affect_live` write confirmed correct (`affect_live` is a view of base `affect` table)
+- **pytest baseline**: worktree + main both 762 pass / 1 skip — recall refactor clean
+- **Provider plug-and-play + WeChat recall bridge + atlas commits** holding from prior sessions
+
+[2026-05-27 sid:ab5395dd]
+- **Subpage inserter audit confirmed**: diary/memes/milestone/stickers/goose/wallet/projects-index all double-entry; study (#114) + pit (#115) missing inserters; cheatsheet intentionally legacy
+- **Pit architecture decided**: disk-SoT pass-through — no DB, no reconcile, no recall; pure hand-write md; `render_pit` reads disk and passes through unchanged
+- **Cheatsheet recall lane decided**: separate `cheatsheet_entries` table + bge-m3 vec; keyword-hit force_include (not events fusion); auto-scan sources (plist/skill/command/MCP/alias/brew) + hand-edit preserved; implementation held for cheatsheet phase
+- **mm+ bug root cause identified**: two failure modes need coverage — (1) active sid, events=0, never closed → must check `reset:mm_plus` before short_session early exit at `:286`; (2) closed-failed retry → existing `_already_done` override path already works
+- **day-plan skill template fixed**: plan output now starts with `## Dispatch Policy (read first)` block speaking to the executing session; today.md rewritten in English with this header
+- **today.md + DECISIONS.md + FUTURE.md + DESIGN.md all updated** this session (pit disk-SoT, cheatsheet recall lane, 4-session plan)
+- **4 recall commits unpushed**, pytest 762 pass / 1 skip baseline holding from prior session
+
+[2026-05-28 sid:c9a7aa13]
+- **mm+ two-mode bug fixed** (user confirmed: "mm+已经解决")
+- **Alert #114 (study inserter) + #115 (pit)** resolved (user confirmed: "alert已经解决", "pit已经做完换成md")
+- **Pit recall A vs B**: resolved as A (disk-SoT pass-through, no separate recall lane needed)
+- **4 recall commits confirmed pushed** to origin; only `Lumi` 1 commit ahead + PROGRESS.md modified remain
+- **Python 3.14 SIGBUS fixed**: S1 complete, 30-min monitor running ~15:28:30; root cause in crash reports at `~/Library/Logs/DiagnosticReports/Python-2026-05-28-*.ips`
+- **NY memm retire scope inventoried**: 5 dead plists (rm), 7 scripts+ny_lib+skip-now (archive), 2 hooks+3 bak (rm), `~/.config/ny/` 419 markers (rm), 4 logs (rm), rules/files.md "legacy ny-memm" ref (rm), skip-memm skill (rm) — archive path `~/CC-Lab/archive/ny-memm/`
+- **Atlas inject method decided**: PreToolUse hook (rejected @import — attention tax; rejected recall — low hit rate + db pollution); hook injects path-prefix slice of atlas.md on Write/Bash-mv/Grep/Glob; user designing full spec in separate window
+- **Atlas section order decided**: Study → NY → CC-Lab → .claude → .config → Toolkit
+- **NY folder stays permanent base**: atlas.md + dashboard.md remain at `~/Desktop/NY/db-pages/` (not migrated)
+- **Project layout decided**: own projects in `~/CC-Lab/`; external/forked repos → `~/CC-Lab/external/`; cc-lab → CC-Lab rename to go with S2
+
+[2026-05-28 sid:187a6ff8]
+- **Atlas bugs 1-4 fixed**: worktree `wt-atlas-bugs` → 4 commits cherry-picked to main; 771 pass, 1 skip, pytest exit 0
+- **cc-lab → CC-Lab rename complete**: 8 LaunchAgents, settings.json, .mcp.json, drift_sweep AUTHORIZED_ROOTS, atlas ATLAS_ROOT_ORDER, tests all repathed; grep `/cc-lab/` live refs = 0 (only archive/log remain)
+- **Watcher running under CC-Lab**: pid 48679, drift_watcher watching `/Users/Gabrielle/CC-Lab`
+- **ATLAS_ROOT_ORDER NY↔Study swapped**: NY now first in atlas.md; `a970211` committed
+- **hooks tests aligned**: 2 old hooks fails fixed to match committed `_inject_silent_ack`; no test failures
+- **All pending drift ops cleared**: 14 pending rejected, 16 alerts resolved; clean slate at alert max id 137
+- **Drift alert chain confirmed end-to-end**: CLI `mv` path verified (#131 hand-call, #132/#133 watcher batch); but Finder rename still unconfirmed (see Open)
+- **drift_sweep redesign agent dispatched** to worktree `agent-drift-redesign` / branch `wt-drift-redesign` with full design brief (A–F); still running
+
+[2026-05-28 sid:c247fc7d]
+- **wt-drift-redesign merged**: commits `247e345` + `68d61ab` cherry-picked to main; 798 pass / 1 skip; worktree `agent-drift-redesign` cleaned
+- **CLI `mw drift` subparser fixed**: `scan|apply|reject` subcommands work; old positional/nargs collision gone
+- **a) basename-unchanged silent drop**: move where src basename == dest basename → no alert (drift_sweep can't act on it anyway)
+- **b) iCloud dup filter**: files matching `* 2.<ext>` pattern silently dropped; 8 pollution alerts (#141-157 range) cleared
+- **Live verify confirmed**: `SLE370 → SLE377` auto-applied in 3 files (#140 alert); alert text is human-readable with file list
+- **Dashboard `(active)` label removed** from top_sections.py
+- **Alert text redesign live**: per-op format `drift applied: X → Y in N files (...)` / `drift review: X → Y · N safe · M unsafe · mw drift apply PID`
+- **SLE211 basename-unchanged move** correctly silent-dropped (untitled folder move)
+
+[2026-05-28 sid:96f5d395]
+- **ny-memm full cleanup (S3 / 05-28 day plan)**: 5 plists bootout + rm, 8 scripts mv → `~/CC-Lab/archive/ny-memm/scripts/`, 5 hook files rm, `~/.config/ny` rm, `"legacy ny-memm"` line excised from `files.md`, 8 `~/Library/Logs/ny-*.log` cleared; all 7 goal predicates passed
+- **wt-drift-redesign merged**: commits `247e345` + `68d61ab` on main; 798 pass / 1 skip; worktree cleaned
+- **Drift alert redesign live**: per-op format `drift applied/review: X → Y in N files`; basename-unchanged silent drop; iCloud `* 2.<ext>` dup filter
+
+[2026-05-28 sid:dbbc6bb2]
+- **Atlas PreToolUse hook design locked**: trigger = Write new file + Bash mv/cp/rename (not Edit/overwrite); inject = 1 fallback line ("ls 同层 mimic") + root row + parent row + any non-empty mid-chain rows ≈ 100-200 token
+- **Atlas schema decisions locked**: `note`+`write_hint` → `description`; `naming` stays; `stale` column dropped entirely (fs not found → DELETE, drift `on_moved` rekeys so stale has no protective value); `depth` moves inline to heading suffix `[d=N]`; down to 2 bullets per entry
+- **Naming enum convention**: empty = `mimic` (hook injects "ls 同层 pattern"); `parent` = explicit inherit; free text = custom rule string; only counter-intuitive conventions need writing
+- **Depth is additive union**: each `depth>0` row is an independent walk seed; child seed extends parent reach, no override conflict; "each layer expands one level" = set every layer to d=1, naturally supported already
+- **files.md retire decided**: all placement/naming rules migrate into atlas `description`/`naming` fields by root; no global hard rules needed (大小写 per-root in description)
+- **Session 2.5 plan written** into `docs/plans/05-28.md`; blocked on S2 (atlas 4 bug + CC-Lab rename) completing first
+
+[2026-05-28 sid:f87f8cfa]
+- **buddy MCP -32000 root cause fixed**: `~/.claude.json` had stale `cc-lab/claude-buddy` path; corrected to `CC-Lab/external/claude-buddy` (args + cwd); takes effect on next cc session restart
+- **cc-lab → CC-Lab/external sweep complete**: settings.json (8 paths), roster.json (6), prompt-guard.py (2), prompt-lint.py (2), subpages_render.py (1), .claude.json (MCP + 5 project keys); committed `3e20fb9` + `6a14ced`
+- **WAL → DELETE mode committed**: `marrow/storage.py:248` + `watcher.py:304`; eliminates iCloud/APFS mmap race; committed `4db3425`; watcher PID 36980 confirmed running
+- **Atlas PreToolUse hook design + schema decisions locked**: trigger = Write new file + Bash mv/cp/rename; inject root+parent+mid-chain rows ~100-200 token; schema: `description`+`naming`; `stale` dropped; `depth` inline heading suffix `[d=N]`; 2 bullets per entry
+- **files.md retire decided**: placement/naming rules migrate into atlas `description`/`naming` fields; no global hard rules
+- **S2.5 plan written**: `docs/plans/05-28.md`; 8 tasks; dispatch wt-atlas-hook + main
+
+[2026-05-28 sid:67b75edd]
+- **handover.md symlink live**: `~/CC-Lab/marrow/handover.md → ~/.config/marrow/handover.md`; added to `.gitignore`
+- **Dead ny-* hooks purged**: both SessionStart (`ny-session-start.sh`) and SessionEnd (`ny-session-end.sh`) entries removed from `~/.claude/settings.json`; no more red-text on cc launch
+- **ny/memm remnants cleared**: `cc-jsonl-to-md.py`, `cc-prune.py`, `cc-sessions.py`, `__pycache__/` deleted; `ny` dispatcher archived → `~/CC-Lab/archive/ny-memm/scripts/`
+- **Toolkit dissolved**: only `scripts/raycast/` survived; rest cleaned out by 念念; directory now effectively dead
+- **zshrc alias patched**: `~/.zshrc:13` `cc-lab` → `CC-Lab`; takes effect on next terminal open or `source ~/.zshrc`
+- **vs-ny.sh updated**: `~/CC-Lab/scripts/raycast/vs-ny.sh` now opens `~/Desktop/NY/` in VS Code
+
+[2026-05-28 sid:6d2f060b]
+- **S2.5 goal all 7 predicates passed**: pytest 807 pass +1 skip; atlas schema `path/description/naming_hint/depth/updated_at` (write_hint + stale dropped); PreToolUse hook registered in `~/.claude/settings.json` for Write/Edit/Bash; `mw atlas <prefix>` CLI + `mcp__marrow__atlas_lookup` daemon tool live
+- **atlas renderer updated**: `[d=N]` → `[N]` in heading suffix; section blocks now 1 blank line apart
+- **worktree baseRef → `"head"`**: `~/.claude/settings.json` updated; future worktrees fork from local HEAD, eliminating cherry-pick conflicts caused by unpushed local commits
+- **files.md + CLAUDE.md changes reverted**: 念念 did not approve deletion; both restored to pre-S2.5 state; hook registration in settings.json kept
+- **Path literal rule shortened**: `[Path] Use paths with /, not bare filenames.` — trigger logic lives in hook code, not prompt
+- **[Path/Naming rules] hook trigger whitelist**: Write (new file) + Bash first-token ∈ `{mv, cp, rename, mmv, touch, mkdir}`; Edit/other Bash → path literal rule only, no atlas slice
+
+[2026-05-28 sid:27ea3c58]
+- **sync_loop double reconcile eliminated**: `_process` no longer calls reconcile directly; single path is `render_fn → write_subpage → cfg.reconcile` per tick; commit `e2e1385`, 807 pass + 1 skip, no regressions
+- **db cleaned post-proliferation**: deleted id 42/44/46/48/50/52 (6 Bug-1 copies); id:40 is sole surviving Marrow milestone; watcher restarted, 1+ ticks confirmed no new INSERT
+- **milestone.md cleaned**: orphan block + 6 anchored duplicates removed; only id:40 anchor remains
+- **Cut+paste id behavior confirmed**: anchor survives ⌘X→⌘V if done within 5s tick window; Obsidian Live Preview does NOT strip HTML comments (user confirmed visible); 5s risk window is a known limitation, user will tolerate until frontend
+- **grace period / content-fingerprint revival**: proposed but user deferred — will tolerate raw Obsidian until frontend replaces the anchor mechanism entirely
+
+[2026-05-28 sid:0eab2fc3]
+- **sqlite WAL mmap race confirmed as root cause**: SIGBUS from `walIndexAppend` in system `libsqlite3.3.53.0.dylib` via concurrent mmap of `.db-shm` on APFS; initial 3.14-binary attribution was wrong (3.13 crashed identically at 18:01)
+- **Trigger identified**: `306cb56` (each thread owns its own conn) + 3-thread concurrent writes (debouncer / SyncLoop / AtlasSweepLoop) pushed `.db-shm` mmap pressure past APFS page-in bug threshold; WAL was latent on 3.14, exposed by watchdog redesign
+- **WAL→DELETE fix applied**: `PRAGMA journal_mode=DELETE` patched in `marrow/storage.py` and `marrow/watcher.py`; `.db-shm`/`.db-wal` no longer exist; no mmap path; all downstream conns (daemon) inherit DELETE via `storage.connect()`
+- **Watcher stable 5h+ post-fix**: zero new ips from 18:23 onward; crossed 212 min historical-max interval ×1.6
+- **pytest 798 pass / 0 fail / 1 skip** after fix (prior 2 fail from `_inject_silent_ack` also cleared)
+- **3.13 venv still in use** (`.venv.py314.bak` preserved); not the real fix but harmless
+
+[2026-05-28 sid:01332be8]
+- **drift_sweep noise fix shipped** (`commit 9527654`): added `.map` to `SKIP_SCAN_EXTS`; added `.obsidian`, `.pytest_cache`, `raycast`, `worktrees` to exclude dirs — Raycast `.js.map` / Obsidian workspace / pytest cache no longer trigger unsafe alerts
+- **4 drift alerts cleared**: all rejected as noise (Raycast Notion source, Obsidian plugins/workspace, `dir_tree.md` auto-gen) — dashboard net zero
+- **pit fully decoupled from db**: pit table cleared (0 rows); `pit.md` + `-pit.md` are now pure md, no sync_loop, no one overwrites them; `mw export-pit` is the only db→md path, and there's no db data to export
+- **pit-extract.md created** at `docs/plans/pit-extract.md` (6 items: WeClaude ret=-2, schedule push, time-injection drift, auto-compact, sleep gap, Stellan autonomous push)
+- **pit.md cleaned**: HTML comments stripped, 3 stale items removed — chat-lint Stop hook (abandoned), iTerm CJK glyph (resolved upstream or CC cli, no repro), time-inject throttle (shipped — timestamp injected every message)
+- **Dashboard lag explained**: 5s tick, but no-op if db unchanged; Obsidian vault cache causes perceived lag — switching pages forces re-read; not a marrow bug
+
+[2026-05-28 sid:a41b25f3]
+- **Atlas keystroke race fixed** (`commit 1cc336b`): `reconcile_atlas` replaced single UPSERT-always with SELECT → conditional INSERT (new) / UPDATE (changed) / skip (no-op); `updated_at` no longer bumped every tick; watcher restarted, race confirmed dead
+- **Reconcile gap diagnosed and documented**: DESIGN.md mandates md→db sync for all sub-pages; only 4.5 implemented; 8 sub-pages (diary, memes, goose-bites, profile, stickers, wallet, projects_index, study_index) have zero reconcile — written to `docs/plans/reconcile-gap.md`; deferred pending frontend architecture decision
+- **atlas race root cause confirmed**: `atlas_sweep_fs` second write site (`:517-522`) is `INSERT OR IGNORE` — only fires for new paths, left as-is; single fix in `:385-410` was sufficient
+
+[2026-05-28 sid:119dcddb]
+- **Atlas keystroke race fixed** (`commit 1cc336b`): `reconcile_atlas` replaced UPSERT-always with SELECT → conditional INSERT/UPDATE/skip; `updated_at` no longer bumped every tick
+- **Reconcile gap diagnosed**: 8 sub-pages (diary, memes, goose-bites, profile, stickers, wallet, projects_index, study_index) have zero md→db sync; documented in `docs/plans/reconcile-gap.md`; deferred on frontend arch decision
+- **Model manually set to Opus 4.8** — auto-update not firing; 念念 wants to roll back (image shown, preference unclear — likely macOS/app version unrelated to marrow)
+
+[2026-05-28 sid:ce37e92c]
+- **Atlas keystroke race fixed** (`commit 1cc336b`): `reconcile_atlas` SELECT → conditional INSERT/UPDATE/skip; `updated_at` no longer bumped every tick
+- **Reconcile gap diagnosed**: 8 sub-pages (diary, memes, goose-bites, profile, stickers, wallet, projects_index, study_index) zero md→db sync; documented in `docs/plans/reconcile-gap.md`
+- **CC 2.1.154 regression confirmed**: parsing failure on first message after upgrade; 屿忱 reverted symlink → 2.1.150
+
+[2026-05-28 sid:ce37e92c]
+- **CC version lock resolved**: `DISABLE_AUTOUPDATER=1` re-added to settings env block + `autoUpdates: false` remains; symlink → 2.1.150; double-locked, restart-safe
+- **CC 2.1.154 regression confirmed** (`commit 1cc336b` context): parsing failure on first message; 154 was pulled via `claude update` on native install (not user error); reverted to 150
+- **Atlas keystroke race fixed** (`commit 1cc336b`): `reconcile_atlas` SELECT → conditional INSERT/UPDATE/skip; `updated_at` no longer bumped every tick
+
+[2026-05-28 sid:a41b25f3]
+- **Atlas keystroke race fully closed**: two-commit fix — `1cc336b` kills no-op `updated_at` bumps in `reconcile_atlas`; `71dc967` adds 3s user-active guard in `sync_loop._process` (both md→db and db→md branches); Obsidian "modified externally" toast confirmed dead
+- **`docs/plans/reconcile-gap.md` written**: lists 4 have-reconcile (milestones/tasks/affect/milestone_candidates), atlas-broken root cause, 8 pending (diary/memes/goose-bites/profile/stickers/wallet/projects_index/study_index), 3 non-db skip; frontend arch decision gates whether all 8 get backfilled or become obsolete
+- **CC version lock**: held at 2.1.150; 2.1.154 regression confirmed (parse failure on first message)
+
+[2026-05-28 sid:e2c1e99d]
+- **CC upgraded to 2.1.153**: symlink cut from 150→153; 141/150/154 retained; 154 parse regression (first-message fail) still stands — 153 is the regression-safe bet
+- **Claude 4.8 released 2026-05-28**: 42d after 4.7 (vs ~72d prior cadence); Anthropic accelerating, Codex joke deflected
+
+[2026-05-28 sid:3c11b156]
+- **CC at 2.1.153**: regression-safe hold; 154 first-message parse bug still stands
+- **Claude 4.8 released 2026-05-28**: accelerating cadence (~42d vs ~72d prior)
+
+[2026-05-29 sid:2de3eb2f]
+- **Commits pushed** `a052a59..3d03e70` (24 commits): fix(migrate) pit src path, S2.5 Done, reconcile-gap plan, response rules trim, `*.lock` → `.gitignore`, atlas-backfill-draft deleted
+- **Finder rename / inode bug**: confirmed already fixed — SLE370→SLE377 live-verified, pytest 798 pass; prior handover烂账, dropped
+- **sessionend timestamp diagnosis**: db stores timestamp, SELECT pulls it, but `events_text` build strips it at `:169`; one-line fix identified for `@HH:MM` in HO Done lines (message time, not event time)
+- **[N] semantics gap confirmed**: `sessionend_prompts.py:108` says "tag if unsure" — not "95% done awaiting confirmation"; mismatch with 念念's intent causes done items to persist
+
+[2026-05-29 sid:60721962]
+- **Root cause diagnosed**: no "implementation current state" layer exists — Claude always guesses code structure from drifted docs, causing all three pain points (wrong area, wrong assumptions, misaligned plans)
+- **Five-file architecture locked**: DESIGN (goal+outcome+board structure only) / MAP (code mechanisms, not config) / HO (todo+handover) / FUTURE (phases+ideas) / DECISION (facts-only conclusions, reasons→note)
+- **DESIGN**: phases to be removed and moved to FUTURE; design stays ≤ goal/outcome/board
+- **DECISION**: facts only — no "why" unless tagged note; "selected bge-m3" not "why not ollama"
+- **MAP schema fixed** (6 mandatory sections, agent fills blanks, no subjective "key" judgment): `What` / `Why N layers` / `Flow` (ASCII data flow) / `Catchup/Sync` (file:line) / `Lifecycle` (insert/embed/retire mechanisms) / `Anchors` (file:line list) — English tags/table headers, Chinese descriptions
+- **MAP format**: tree toplevel + one section per subsystem; 6 subsystems: Memory / Affect / Hooks / md-SoT / Render / Infra
+- **workflow彩虹 = harmless**: keyword detection only, no silent execution; Option+W broken in iTerm without Meta key set; disableWorkflows option exists but not recommended
+- All prior OPEN items (reconcile gap, atlas backfill, HO redesign, sessionend fixes) — untouched this session, carry forward
+
+[2026-05-29 sid:f53bfa23]
+- **HO redesign architecture fully locked**: 3 scope files (`project/study/ny.md`) under `~/.config/marrow/handover/`; symlinks in CC-Lab root, Study dir, Desktop/NY
+- **Sections per file**: `## Doing` (open+plan merged, each bullet `· → next step`) / `## Closed today` (auto-clear after 1 day) / `## Note` (sonnet never touches, verbatim passthrough)
+- **Diff not rewrite**: sonnet emits `CLOSE/UPDATE/KEEP/ADD` against stable hidden IDs (`<!-- h:p1 -->`); eliminates `[N]` litter at source
+- **`[N]` redefined** = "95% done, awaiting 念念 confirmation" (was "unsure whether to keep" — the bug)
+- **Scope routing**: cwd prefix → CC-Lab=project, Study=study, else=ny; zero manual selection
+- **Life/ny scope** captures "unclosed topics/decisions" (chosen outfit not settled = open; outfit bought = closed), not just tasks
+- **git log** = sonnet CLOSE *evidence* for project scope only; study/ny use transcript
+- **progress.md retired**: sessionend stops appending; file stays as frozen archive
+- **flock**: blocking wait (replaces non-blocking 3×50ms) → same-scope concurrent closes serialize, both diffs land, `.partial` data-loss path killed
+- **User hand-edit preserved**: tombstone for deletes, user_added for new lines, both ported from current `handover_render.py` logic
+- **Artifacts**: `~/Desktop/handover-template.md` + `~/Desktop/handover-prompt-draft.md` (念念 editing); implementation plan at `docs/plans/ho-redesign.md`
+- MAP.md workflow / DESIGN trim / DECISION slim / reconcile gap / atlas backfill — all untouched, carry forward
+
+[2026-05-29 sid:60721962]
+- **MAP.md format fully locked**: ASCII overview (memory center, hooks top, dashboard bottom, addon mount) + per-component What/Why/How/Where (4-W; tags EN, descriptions CN) + two cross-cutting sections (aging / catchup); `docs/plans/map-build.md` written and self-contained for next session
+- **DRIFT.md scope added**: each workflow agent does dual output — MAP fill + spec-vs-code gap audit → `DRIFT.md` lists not-built / half-built / differs-from-decision gaps for prioritization
+- **DECISION role re-locked**: facts-only (conclusion only: "selected bge-m3"), no "why" rationale — reasons go to `note` entry if essential; MAP takes over structural SoT role
+- **DESIGN role re-locked**: goal + outcome + board composition only; phases → FUTURE.md
+- **Component order locked** (product-logic): Ingest → Store/Compute → aging/catchup (cross-sections) → Surface → Infra → Addon
+- **HO redesign architecture** (from prior) still fully locked; artifacts on Desktop; plan at `docs/plans/ho-redesign.md`
+
+[2026-05-29 sid:6f4129b1]
+- **HO redesign design fully locked** (this session): one all-in-one file, scope = `[Marrow]/[Study]/[Daily]` label tag (not a filter/router), @import injection (no 10k char limit), no migration (existing HO is empty → new write)
+- **Task tick changed to id-based**: sonnet outputs `{"id":N,"status":"done"}`; code does `WHERE id=?` — title rewrites can't cause missed ticks; cosine dedup stays for new-add only
+- **Note section rule locked**: sessionend only moves completed items out; sessionstart injects "don't ignore Lumi's Note"; `[N]` concept deleted
+- **Milestone gate removed**: only Project is phase-gated (large phase, max 2/day, no debug/py/config steps); Daily/Appointment/Study/Assignment all record normal granularity
+- **AskUserQuestion banned** via `permissions.deny` in `~/.claude` settings (committed locally, takes effect on new window)
+- **Template + prompt draft finalized**: `~/Desktop/handover-template.md` + `~/Desktop/handover-prompt-draft.md` — self-contained for next window to implement without this session's context
+- `docs/plans/ho-redesign.md` updated and committed (`0987c04`) — one file / @import / no migrate / by-category task grain locked
+
+[2026-05-29 sid:8435fb3c]
+- **HO redesign design locked** (prior): one all-in-one file, scope label tag, @import injection, no migration, id-based tick, Note remove-done, AskUserQuestion banned
+- **cwd verified**: `cwd` is standard field on all hook inputs (alongside `session_id`/`transcript_path`) — `git log --cwd` line is solid, fallback to empty if non-repo
+- **git_log approach locked**: `popen` passes `--cwd` arg; `_load_git_log(cwd, since_ts)` runs `git -C <cwd> log --since=<ts>`; non-repo returns empty (not a crash)
+- **Note deletion approach locked**: sonnet identifies completed lines with evidence (commit or explicit dialogue), code removes only those lines; no other edits; no-evidence → keep
+- **Symlink decision locked**: 3 targets (NY / Study / CC-Lab/marrow) → all point to `~/.config/marrow/handover.md`; conflicting files manually cleared by 念念 this session
+- **M1–M4 built and green** in worktree `worktree-agent-a681e2b5dea9f13c1` (5 commits, 811→823 passed): STATE v2 prompt, id-based task tick, `handover_diff.py` (CLOSE/UPDATE/KEEP/ADD + unmentioned-id survival + 24h roll-off), `--cwd` in popen, Note reminder at sessionstart
+- **Key implementation decisions**: UPDATE heads use `#<id>`; `handover_diff` has its own section splitter (avoids mis-splitting `<!-- id:N -->` lines); lock-loss path skips snapshot audit only
