@@ -198,6 +198,57 @@ def _is_worktree_session(cwd: str) -> bool:
     return os.path.realpath(top) != primary
 
 
+_PPID_MODEL_RE = _re.compile(r"--model[\s=]+['\"]?([^\s'\"]+)['\"]?")
+
+
+def _maybe_set_session_title(sid: str | None, prompt_text: str) -> None:
+    """Sticky title — first non-empty prompt of a session lands as sessions.title.
+
+    Runs on every user_prompt_submit, but `upsert_session`-with-title is gated
+    on `sessions.title` being empty so existing titles never get rewritten.
+    Powers wx /resume picker's `— <title>` suffix for cli + wx sessions alike.
+    """
+    if not sid or not prompt_text:
+        return
+    try:
+        cur = repo.get_session(sid)
+        if cur and (cur.get("title") or "").strip():
+            return  # already titled — sticky
+        head = prompt_text.splitlines()[0].strip()
+        head = _re.sub(r"\s+", " ", head)[:40]
+        if not head:
+            return
+        channel = (cur or {}).get("channel") or os.environ.get("MARROW_CHANNEL") or "cli"
+        repo.upsert_session(sid, None, channel, title=head)
+    except Exception:  # noqa: BLE001 — never block user prompt
+        pass
+
+
+def _cli_model_from_ppid(ppid: int) -> str | None:
+    """Read `--model <id>` from cc's launch args via `ps -p <ppid> -o command=`.
+
+    cc's jsonl strips the `[1m]` context-window suffix from `model`, so wx
+    /resume picker can't tell a 1M-mode cli session from a 200k one. This
+    peeks at the parent process's argv and returns the model id verbatim only
+    when it carries the `[1m]/[1M]` suffix — bare ids are already what jsonl
+    fallback produces, so writing them here would add no information.
+    """
+    try:
+        out = subprocess.run(
+            ["ps", "-p", str(ppid), "-o", "command="],
+            capture_output=True, text=True, check=False, timeout=2,
+        ).stdout.strip()
+    except Exception:  # noqa: BLE001 — never block session_start
+        return None
+    if not out:
+        return None
+    m = _PPID_MODEL_RE.search(out)
+    if not m:
+        return None
+    val = m.group(1).strip()
+    return val if _re.search(r"\[1[mM]\]$", val) else None
+
+
 def _started_at_for(ppid: int) -> int:
     """Return process start time as epoch for *ppid* via `ps -o lstart=`.
     Falls back to current time on any failure.
@@ -374,7 +425,13 @@ def session_start() -> int:
             if not is_worktree:
                 try:
                     channel = os.environ.get("MARROW_CHANNEL") or "cli"
-                    repo.upsert_session(sid, None, channel, db=db)
+                    # cli: peek ppid argv for --model claude-opus-X[1m] so the
+                    # picker can display the [1M] tag (cc jsonl drops it).
+                    cli_model = (
+                        _cli_model_from_ppid(os.getppid())
+                        if channel == "cli" else None
+                    )
+                    repo.upsert_session(sid, cli_model, channel, db=db)
                 except Exception:  # noqa: BLE001 — never block session_start
                     pass
 
@@ -712,11 +769,16 @@ def user_prompt_submit() -> int:
     if _is_worktree_session(cwd or ""):
         return 0
 
+    prompt_text = (inp.get("prompt") or "").strip() if isinstance(inp, dict) else ""
+    sid = inp.get("session_id") if isinstance(inp, dict) else None
+
+    # Sticky title for wx /resume picker — runs regardless of recall config.
+    _maybe_set_session_title(sid, prompt_text)
+
     cfg = config.load()
     if not cfg.get("recall", {}).get("vector", False):
         return 0
 
-    prompt_text = (inp.get("prompt") or "").strip() if isinstance(inp, dict) else ""
     if not prompt_text:
         return 0
 
@@ -724,7 +786,6 @@ def user_prompt_submit() -> int:
     ctx_n = int(rcfg.get("event_context_window", 1))
     event_max = int(rcfg.get("event_max_chars", 150))
     budget_chars = int(rcfg.get("budget_chars", 800))
-    sid = inp.get("session_id") if isinstance(inp, dict) else None
     try:
         from . import recall as recall_mod
         conn = storage.connect(config.db_path())
