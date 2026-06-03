@@ -202,25 +202,63 @@ _PPID_MODEL_RE = _re.compile(r"--model[\s=]+['\"]?([^\s'\"]+)['\"]?")
 
 
 def _maybe_set_session_title(sid: str | None, prompt_text: str) -> None:
-    """Sticky title — first non-empty prompt of a session lands as sessions.title.
+    """Two-stage session title for the wx /resume picker.
 
-    Runs on every user_prompt_submit, but `upsert_session`-with-title is gated
-    on `sessions.title` being empty so existing titles never get rewritten.
-    Powers wx /resume picker's `— <title>` suffix for cli + wx sessions alike.
+    Stage 1 (sync) — first prompt: write the prompt's head line (≤40 chars)
+    as a placeholder so the picker is never blank.
+    Stage 2 (async) — every prompt after that: fire a detached
+    ``marrow.title`` subprocess that LLM-summarises the conversation into
+    a ≤8-unit title (cn chars OR en words), follows the user's dominant
+    language, and writes it back to ``sessions.title``. The audit_log
+    dedup inside ``title.summarize`` makes the LLM call run exactly once
+    per session.
     """
-    if not sid or not prompt_text:
+    if not sid:
         return
     try:
         cur = repo.get_session(sid)
-        if cur and (cur.get("title") or "").strip():
-            return  # already titled — sticky
-        head = prompt_text.splitlines()[0].strip()
-        head = _re.sub(r"\s+", " ", head)[:40]
-        if not head:
-            return
-        channel = (cur or {}).get("channel") or os.environ.get("MARROW_CHANNEL") or "cli"
-        repo.upsert_session(sid, None, channel, title=head)
+        if (not cur or not (cur.get("title") or "").strip()) and prompt_text:
+            head = prompt_text.splitlines()[0].strip()
+            head = _re.sub(r"\s+", " ", head)[:40]
+            if head:
+                channel = (cur or {}).get("channel") or os.environ.get("MARROW_CHANNEL") or "cli"
+                repo.upsert_session(sid, None, channel, title=head)
+        _maybe_fire_title_summarize(sid)
     except Exception:  # noqa: BLE001 — never block user prompt
+        pass
+
+
+def _maybe_fire_title_summarize(sid: str) -> None:
+    """Detached `python -m marrow.title --sid <sid>` for the LLM summariser.
+
+    Pre-checks ``audit_log`` inline (cheap SELECT) so an already-titled
+    session does not even fork — only sessions still eligible for
+    summarisation pay the popen cost.
+    """
+    if not sid:
+        return
+    try:
+        conn = storage.connect(config.db_path())
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM audit_log "
+                "WHERE action='title_summarize' AND target_table='sessions' AND target_id=? "
+                "LIMIT 1",
+                (sid,),
+            ).fetchone()
+            if row:
+                return  # sticky — already summarised
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        return
+    try:
+        log_path = Path(config.DATA_DIR) / "logs" / "title_summarize.log"
+        popen_detach(
+            [sys.executable, "-m", "marrow.title", "--sid", sid],
+            log_path,
+        )
+    except Exception:  # noqa: BLE001 — fire-and-forget
         pass
 
 
