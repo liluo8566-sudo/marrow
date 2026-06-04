@@ -15,11 +15,15 @@ read-only render path.
 from __future__ import annotations
 
 import calendar
+import re
 import sqlite3
 from pathlib import Path
 
 from .inserter import InserterSpec
 from . import atlas as _atlas_mod
+
+# Shared anchor pattern — matches `<!-- id:N -->` anywhere on a line.
+_ANCHOR_RE = re.compile(r"\s*<!-- id:[^>]+ -->\s*$")
 
 
 def _year(date_str: str) -> str:
@@ -76,12 +80,29 @@ def build_profile_spec(folder: str) -> InserterSpec:
         fact = f" — {r['fact']}" if r.get("fact") else ""
         return f"- [{r['kind']}] **{r['name']}**{fact} {_anchor(r['id'])}"
 
+    # Pattern: `- [kind] **name**{ — fact} <!-- id:N -->`
+    _PROFILE_RE = re.compile(
+        r"^-\s+\[(?P<kind>[^\]]+)\]\s+\*\*(?P<name>[^*]+)\*\*"
+        r"(?:\s+—\s+(?P<fact>.+?))?\s*<!-- id:(?P<id>\d+) -->"
+    )
+
+    def parse_profile(line: str) -> dict | None:
+        m = _PROFILE_RE.match(line.strip())
+        if not m:
+            return None
+        return {
+            "kind": m.group("kind").strip(),
+            "name": m.group("name").strip(),
+            "fact": (m.group("fact") or "").strip() or None,
+        }
+
     return InserterSpec(
         key="profile",
         path=str(Path(folder) / "profile.md"),
         fetch=fetch,
         block_id_of=lambda r: str(r["id"]),
         render_row=render,
+        parse_row=parse_profile,
         group_by="tag",
         section_of=lambda r: r["kind"],
         section_order=_canonical_order(["person", "pref", "place"]),
@@ -164,12 +185,17 @@ def build_diary_spec(folder: str) -> InserterSpec:
         # so parse_blocks can scope cleanly to this day.
         return f"#### {r['date']}{mood}\n{anchor}\n\n{body}"
 
+    # Diary blocks span multiple lines (heading + anchor + body); parse_row
+    # operates on single lines so it can't extract content. reconcile_diary
+    # uses a dedicated block scanner instead — parse_row stays None.
+
     return InserterSpec(
         key="diary",
         path=str(Path(folder) / "diary.md"),
         fetch=fetch,
         block_id_of=lambda r: str(r["date"]),
         render_row=render,
+        parse_row=None,
         group_by="date",
         section_of=lambda r: _year(r["date"]),
         section_order=lambda labels: sorted(set(labels)),
@@ -206,12 +232,32 @@ def build_memes_spec(folder: str) -> InserterSpec:
         return (f"- [{r['type']}] **{r['key']}**{val}{ctx} "
                 + _anchor(r["id"]))
 
+    # Pattern: `- [type] **key**{ → value}{ _context_} <!-- id:N -->`
+    _MEME_RE = re.compile(
+        r"^-\s+\[(?P<type>[^\]]+)\]\s+\*\*(?P<key>[^*]+)\*\*"
+        r"(?:\s+→\s+(?P<value>.+?))?"
+        r"(?:\s+_(?P<context>[^_]+)_)?"
+        r"\s*<!-- id:(?P<id>\d+) -->"
+    )
+
+    def parse_meme(line: str) -> dict | None:
+        m = _MEME_RE.match(line.strip())
+        if not m:
+            return None
+        return {
+            "type": m.group("type").strip(),
+            "key": m.group("key").strip(),
+            "value": (m.group("value") or "").strip() or None,
+            "context": (m.group("context") or "").strip() or None,
+        }
+
     return InserterSpec(
         key="memes",
         path=str(Path(folder) / "memes.md"),
         fetch=fetch,
         block_id_of=lambda r: str(r["id"]),
         render_row=render,
+        parse_row=parse_meme,
         group_by="tag",
         section_of=lambda r: ("Personal" if r["type"] in _MEME_PERSONAL
                               else "Public"),
@@ -246,12 +292,30 @@ def build_stickers_spec(folder: str) -> InserterSpec:
         mime = f" ({r['mime_type']})" if r.get("mime_type") else ""
         return f"- **{r['key']}** `{r['asset_path']}`{mime} {_anchor(r['id'])}"
 
+    # Pattern: `- **key** `asset_path`{ (mime_type)} <!-- id:N -->`
+    _STICKER_RE = re.compile(
+        r"^-\s+\*\*(?P<key>[^*]+)\*\*\s+`(?P<asset_path>[^`]+)`"
+        r"(?:\s+\((?P<mime_type>[^)]+)\))?"
+        r"\s*<!-- id:(?P<id>\d+) -->"
+    )
+
+    def parse_sticker(line: str) -> dict | None:
+        m = _STICKER_RE.match(line.strip())
+        if not m:
+            return None
+        return {
+            "key": m.group("key").strip(),
+            "asset_path": m.group("asset_path").strip(),
+            "mime_type": (m.group("mime_type") or "").strip() or None,
+        }
+
     return InserterSpec(
         key="stickers",
         path=str(Path(folder) / "stickers.md"),
         fetch=fetch,
         block_id_of=lambda r: str(r["id"]),
         render_row=render,
+        parse_row=parse_sticker,
         group_by="tag",
         section_of=lambda r: r.get("meme_key") or "Other",
         section_order=lambda labels: sorted(set(labels)),
@@ -272,12 +336,24 @@ def build_wallet_spec(folder: str) -> InserterSpec:
     def render(r: dict) -> str:
         return f"- {r.get('summary', '')} {_anchor(r['id'])}"
 
+    # Pattern: `- <summary> <!-- id:N -->`
+    _WALLET_RE = re.compile(
+        r"^-\s+(?P<summary>.+?)\s*<!-- id:(?P<id>\d+) -->"
+    )
+
+    def parse_wallet(line: str) -> dict | None:
+        m = _WALLET_RE.match(line.strip())
+        if not m:
+            return None
+        return {"summary": m.group("summary").strip()}
+
     return InserterSpec(
         key="wallet",
         path=str(Path(folder) / "wallet.md"),
         fetch=fetch,
         block_id_of=lambda r: str(r["id"]),
         render_row=render,
+        parse_row=parse_wallet,
         group_by="append",
         empty_message=(
             "_Bank-statement render lands with Phase 5 stellan_wallet._"
@@ -308,12 +384,24 @@ def build_goose_spec(folder: str) -> InserterSpec:
     def render(r: dict) -> str:
         return f"- [{r['date']}]{r['bites']} {_anchor(r['id'])}"
 
+    # Pattern: `- [YYYY-MM-DD]<bites> <!-- id:N -->`
+    _GOOSE_RE = re.compile(
+        r"^-\s+\[\d{4}-\d{2}-\d{2}\](?P<bites>.+?)\s*<!-- id:(?P<id>\d+) -->"
+    )
+
+    def parse_goose(line: str) -> dict | None:
+        m = _GOOSE_RE.match(line.strip())
+        if not m:
+            return None
+        return {"bites": m.group("bites").strip()}
+
     return InserterSpec(
         key="goose",
         path=str(Path(folder) / "goose-bites.md"),
         fetch=fetch,
         block_id_of=lambda r: str(r["id"]),
         render_row=render,
+        parse_row=parse_goose,
         group_by="date",
         section_of=lambda r: _year(r["date"]),
         section_order=lambda labels: sorted(set(labels)),

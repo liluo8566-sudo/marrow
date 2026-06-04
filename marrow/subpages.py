@@ -25,7 +25,15 @@ from ._atomic import atomic_write as _atomic_write
 from .atlas import atlas_sweep_fs, reconcile_atlas, seed_atlas_from_roots
 from .inserter import InserterSpec, write_subpage_inserter
 from .md_index import MdIndex
-from .reconcile import reconcile_milestones, reconcile_memes, reconcile_profile
+from .reconcile import reconcile_milestones
+from .reconcile_inserter import (
+    reconcile_memes,
+    reconcile_profile,
+    reconcile_diary,
+    reconcile_stickers,
+    reconcile_wallet,
+    reconcile_goose,
+)
 from .subpages_render import (
     render_cheatsheet,
     render_diary,
@@ -314,20 +322,24 @@ _REGISTRY: dict[str, Callable[[sqlite3.Connection, str, str], SubPageConfig]] = 
         reconcile=reconcile_milestones),
     "diary":      _flat_with_inserter(
         "diary", render_diary, "diary.md",
-        subpage_specs.build_diary_spec),
+        subpage_specs.build_diary_spec,
+        reconcile=reconcile_diary),
     "memes":      _flat_with_inserter(
         "memes", render_memes, "memes.md",
         subpage_specs.build_memes_spec,
         reconcile=reconcile_memes),
     "stickers":   _flat_with_inserter(
         "stickers", render_stickers, "stickers.md",
-        subpage_specs.build_stickers_spec),
+        subpage_specs.build_stickers_spec,
+        reconcile=reconcile_stickers),
     "wallet":     _flat_with_inserter(
         "wallet", render_wallet, "wallet.md",
-        subpage_specs.build_wallet_spec),
+        subpage_specs.build_wallet_spec,
+        reconcile=reconcile_wallet),
     "goose":      _flat_with_inserter(
         "goose", render_goose, "goose-bites.md",
-        subpage_specs.build_goose_spec),
+        subpage_specs.build_goose_spec,
+        reconcile=reconcile_goose),
     "cheatsheet": lambda c, f, s: SubPageConfig(
         "cheatsheet", render_cheatsheet, str(Path(f) / "cheatsheet.md"), s,
         read_only=True),

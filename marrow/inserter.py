@@ -89,6 +89,12 @@ class InserterSpec:
     # type-keyed dividers between fact|paw etc.). goose-style "every month
     # gets its own ### header" stays as default (False).
     subsection_separator_only: bool = False
+    # Inverse of render_row: given one md line carrying `<!-- id:N -->`,
+    # return a dict of the row's editable fields (same shape render_row
+    # consumes), or None when the line can't be parsed. Required for
+    # reconcile_inserter_sync to absorb hand-edits. None = legacy spec,
+    # reconcile skips update pass (only delete-by-absence still runs).
+    parse_row: Callable[[str], "dict | None"] | None = None
 
     def m0(self) -> str:
         return _M0.format(key=self.key)
