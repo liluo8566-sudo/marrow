@@ -107,6 +107,56 @@ def test_done_marks_task(db):
     assert _rows(db, "SELECT status FROM tasks WHERE id=1")[0]["status"] == "done"
 
 
+# ── pin / unpin shortcuts ──────────────────────────────────────────────────────
+
+def _insert_meme(p, mtype: str, pinned: int) -> None:
+    conn = storage.connect(p)
+    try:
+        conn.execute(
+            "INSERT INTO memes(type,key,value,pinned) VALUES(?,?,?,?)",
+            (mtype, "k", "v", pinned),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_pin_sets_memes_pinned(db):
+    _insert_meme(db, "others", 0)
+    rc = cli.main(["pin", "memes", "1", "--db", db])
+    assert rc == 0
+    assert _rows(db, "SELECT pinned FROM memes WHERE id=1")[0]["pinned"] == 1
+    a = _rows(db, "SELECT action,summary FROM audit_log "
+                  "WHERE target_table='memes' AND target_id='1'")
+    assert a[0]["action"] == "update"
+    assert "pinned" in a[0]["summary"]
+
+
+def test_unpin_clears_memes_pinned(db):
+    _insert_meme(db, "fact", 1)
+    rc = cli.main(["unpin", "memes", "1", "--db", db])
+    assert rc == 0
+    assert _rows(db, "SELECT pinned FROM memes WHERE id=1")[0]["pinned"] == 0
+
+
+def test_pin_rejects_table_without_pinned_column(db):
+    # alerts has no pinned column
+    rc = cli.main(["pin", "alerts", "1", "--db", db])
+    assert rc != 0
+
+
+def test_pin_rejects_unknown_table(db):
+    rc = cli.main(["pin", "robots", "1", "--db", db])
+    assert rc != 0
+
+
+def test_pin_missing_id_fails(db):
+    rc = cli.main(["pin", "memes", "999", "--db", db])
+    assert rc != 0
+    assert _rows(db, "SELECT COUNT(*) c FROM audit_log "
+                     "WHERE target_table='memes'")[0]["c"] == 0
+
+
 # ── show / ls read paths ───────────────────────────────────────────────────────
 
 def test_show_prints_row(db, capsys):

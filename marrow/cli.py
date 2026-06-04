@@ -109,6 +109,29 @@ def cmd_resolve(args) -> int:
     )
 
 
+def _pin_toggle(args, val: int, summary: str) -> int:
+    with _conn(args.db) as conn:
+        cols = _columns(conn, args.table)
+        if not cols:
+            return _fail(f"unknown table: {args.table}")
+        if "pinned" not in cols:
+            return _fail(f"{args.table} has no pinned column")
+        kc = _key(args.table)
+        return _write(
+            conn, args.table, args.id,
+            f"UPDATE {args.table} SET pinned=? WHERE {kc}=?",
+            (val, args.id), "update", summary,
+        )
+
+
+def cmd_pin(args) -> int:
+    return _pin_toggle(args, 1, "pinned via mw")
+
+
+def cmd_unpin(args) -> int:
+    return _pin_toggle(args, 0, "unpinned via mw")
+
+
 def cmd_alerts_clear(args) -> int:
     """Bulk-resolve every unresolved alert. One audit_log row per id.
 
@@ -598,6 +621,18 @@ def build_parser() -> argparse.ArgumentParser:
     dn = sub.add_parser("done", parents=[common])
     dn.add_argument("id")
     dn.set_defaults(fn=cmd_done)
+
+    pn = sub.add_parser("pin", parents=[common],
+                        help="set pinned=1 on a memes/milestones row")
+    pn.add_argument("table")
+    pn.add_argument("id")
+    pn.set_defaults(fn=cmd_pin)
+
+    upn = sub.add_parser("unpin", parents=[common],
+                         help="set pinned=0 on a memes/milestones row")
+    upn.add_argument("table")
+    upn.add_argument("id")
+    upn.set_defaults(fn=cmd_unpin)
 
     sh = sub.add_parser("show", parents=[common])
     sh.add_argument("table")
