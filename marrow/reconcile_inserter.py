@@ -120,25 +120,34 @@ def reconcile_inserter_sync(
                     updates.append((rid, changes))
 
             if updates:
+                # Pre-check updated_at column existence — try/except after a
+                # failed execute leaves sqlite cursor mid-abort and the
+                # fallback statement errors with "SQL logic error".
+                try:
+                    _cols = {
+                        r[1] for r in conn.execute(
+                            f"PRAGMA table_info({table})"
+                        ).fetchall()
+                    }
+                except sqlite3.Error:
+                    _cols = set()
+                has_updated_at = "updated_at" in _cols
                 with conn:
                     for rid, changes in updates:
                         set_clause = ", ".join(f"{c}=?" for c in changes)
-                        vals = list(changes.values()) + [_now(), rid]
-                        try:
-                            conn.execute(
+                        if has_updated_at:
+                            sql = (
                                 f"UPDATE {table} SET {set_clause},"
-                                f" updated_at=? WHERE {block_id_col}=?",
-                                vals,
+                                f" updated_at=? WHERE {block_id_col}=?"
                             )
-                        except sqlite3.OperationalError:
-                            # Table has no updated_at (e.g. diary uses date PK)
-                            set_clause2 = ", ".join(f"{c}=?" for c in changes)
-                            vals2 = list(changes.values()) + [rid]
-                            conn.execute(
-                                f"UPDATE {table} SET {set_clause2}"
-                                f" WHERE {block_id_col}=?",
-                                vals2,
+                            vals = list(changes.values()) + [_now(), rid]
+                        else:
+                            sql = (
+                                f"UPDATE {table} SET {set_clause}"
+                                f" WHERE {block_id_col}=?"
                             )
+                            vals = list(changes.values()) + [rid]
+                        conn.execute(sql, vals)
                         summary = "md-reconcile: " + ", ".join(
                             f"{c}={str(v)[:40]}" for c, v in changes.items()
                         )
