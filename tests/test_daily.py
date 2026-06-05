@@ -424,3 +424,52 @@ def test_main_force_flag_routes_to_run_day(db, monkeypatch, tmp_path):
         assert "forced" in row["content"]
     finally:
         fresh.close()
+
+
+def test_main_alerts_when_written_day_silently_deleted(
+    db, monkeypatch, tmp_path
+):
+    """Post-condition: a day daily.run claimed to write must still be in
+    diary after write_all_subpages returns. If reconcile (or anything else)
+    sweeps it in the same pass, emit a critical alert. Regression for
+    2026-06-04 silent delete (caused by reconcile_diary DELETE pass on a
+    row that hadn't yet been rendered to md).
+    """
+    p, conn = db
+    conn.close()
+
+    sub_folder = tmp_path / "sub_pages"
+    sub_state = tmp_path / "sub_state"
+    monkeypatch.setattr(daily.config, "db_path", lambda: p)
+    monkeypatch.setattr(daily.config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(daily.config, "sub_pages_path",
+                        lambda: str(sub_folder))
+    monkeypatch.setattr(daily.config, "sub_pages_state_path",
+                        lambda: str(sub_state))
+    monkeypatch.setattr(daily, "LLMClient",
+                        lambda **k: FakeLLM(prose="alpha"))
+
+    # Simulate the bug: pretend write_all_subpages succeeds, but during
+    # that call something deletes the row daily.py just wrote.
+    real_write = daily.subpages.write_all_subpages
+
+    def evil_write(conn, *, folder, state_dir, db=None):
+        real_write(conn, folder=folder, state_dir=state_dir, db=db)
+        conn.execute("DELETE FROM diary WHERE date='2026-05-16'")
+        conn.commit()
+
+    monkeypatch.setattr(daily.subpages, "write_all_subpages", evil_write)
+    rc = daily.main(["--day", "2026-05-16"])
+    assert rc == 0
+
+    fresh = storage.connect(p)
+    try:
+        row = fresh.execute(
+            "SELECT severity, type, message FROM alerts"
+            " WHERE type='routine' AND severity='critical'"
+            " AND message LIKE '%silent-delete%'"
+        ).fetchone()
+    finally:
+        fresh.close()
+    assert row is not None
+    assert "2026-05-16" in row["message"]

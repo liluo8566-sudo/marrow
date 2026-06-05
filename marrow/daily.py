@@ -303,6 +303,22 @@ def main(argv: list[str] | None = None) -> int:
                     f"daily {mode} skipped sub-pages write: {e}",
                     source="daily.py", db=db,
                 )
+            # Post-condition: each day daily.run claimed to write must still
+            # be in the diary table after subpages render. Catches the
+            # "reconcile sweeps a freshly-inserted row in the same pass"
+            # silent-delete class of bug (2026-06-04 incident). Emits a
+            # critical alert so the missing day is visible at next dashboard
+            # refresh; idempotent via repo.add_alert dedup.
+            silent = [d for d in wrote
+                      if not daily_catchup.has_diary(conn, d)]
+            if silent:
+                repo.add_alert(
+                    "critical", "routine",
+                    f"daily {mode} silent-delete: wrote {silent} but row "
+                    f"absent post-refresh — rerun `mw daily --day <date> "
+                    f"--force` after diagnosis",
+                    source="daily.py", db=db,
+                )
         if catchup:
             try:
                 from . import goose_bites
