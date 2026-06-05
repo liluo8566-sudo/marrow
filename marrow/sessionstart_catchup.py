@@ -306,7 +306,12 @@ def main(argv: list[str] | None = None) -> int:  # noqa: ARG001
                 pending.append(sid)
 
         # Alert on silent deaths: start >= 30min ago, ppid dead, no lifecycle:end.
-        for sid in candidates:
+        # TEMP gate (2026-06-06): bled 760 rows in one hour because add_alert
+        # dedup key embeds sid -> no dedup across sids. Default OFF until
+        # sessionend_async (aff48a8) bug is fixed and dedup is reworked.
+        # Opt-in for debug: MARROW_SILENT_DEATH=1.
+        silent_death_enabled = os.environ.get("MARROW_SILENT_DEATH") == "1"
+        for sid in candidates if silent_death_enabled else ():
             start_rows = conn.execute(
                 "SELECT summary, occurred_at FROM audit_log"
                 " WHERE action='session_lifecycle:start' AND target_id=?"
