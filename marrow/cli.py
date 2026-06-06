@@ -285,21 +285,6 @@ def cmd_goose_bites(args) -> int:
     return 0
 
 
-def cmd_handover(args) -> int:
-    """Manually fire sessionend_async for a sid — re-renders handover.md.
-    Fire-and-forget popen; logs land in DATA_DIR/logs/sessionend_async_<sid>.log."""
-    if not args.sid:
-        return _fail("mw handover requires --sid <session_id>")
-    from .popen_detach import popen_detach
-    log = config.DATA_DIR / "logs" / f"sessionend_async_{args.sid}.log"
-    popen_detach(
-        [sys.executable, "-m", "marrow.sessionend_async", "--sid", args.sid,
-         "--log-path", str(log)],
-        log_path=log,
-    )
-    print(f"handover async fired for sid={args.sid} (log: {log})")
-    return 0
-
 
 def cmd_sessionend(args) -> int:
     """mw sessionend rerun <sid> — force rerun sessionend_async, overwriting done marker."""
@@ -397,12 +382,11 @@ def _refresh_scan(conn, *, include_subpages: bool) -> None:
     leave their content_hash baseline UNTOUCHED — that is the signal the
     dashboard inserter uses to recognise a user edit and preserve it.
 
-    Always: dashboard.md + handover.md. With include_subpages: db-pages.
+    Always: dashboard.md. With include_subpages: db-pages.
     """
     from .md_index import MdIndex
     idx = MdIndex(conn)
-    file_roots = [config.dashboard_path(),
-                  str(config.DATA_DIR / "handover.md")]
+    file_roots = [config.dashboard_path()]
     dir_roots = [config.sub_pages_path()] if include_subpages else []
     for f in file_roots:
         if Path(f).exists():
@@ -666,11 +650,6 @@ def build_parser() -> argparse.ArgumentParser:
     wt = sub.add_parser("watcher", parents=[common])
     wt.add_argument("action", choices=["start", "stop", "status"])
     wt.set_defaults(fn=cmd_watcher)
-
-    ho = sub.add_parser("handover", parents=[common])
-    ho.add_argument("--sid", required=True,
-                    help="session id to re-extract")
-    ho.set_defaults(fn=cmd_handover)
 
     se = sub.add_parser("sessionend", parents=[common])
     se_sub = se.add_subparsers(dest="sessionend_action", required=True)

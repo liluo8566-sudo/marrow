@@ -60,11 +60,6 @@ def archived_today(conn: sqlite3.Connection) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def handoff(conn: sqlite3.Connection) -> dict:
-    # Phase 1 session-start payload: open tasks + open alerts only.
-    # No who-i-am/persona (static CLAUDE.md layer); emotion is Phase 2.
-    return {"tasks": open_tasks(conn), "alerts": open_alerts(conn)}
-
 
 def upsert_session(sid: str, model: str | None, channel: str | None,
                    title: str = "", *, last_active: str | None = None,

@@ -448,30 +448,6 @@ def _read_input() -> dict:
         return {}
 
 
-def _handoff_text(conn) -> str:
-    h = repo.handoff(conn)
-    lines = ["# Marrow handoff", ""]
-    archived = repo.archived_today(conn)
-    if archived:
-        lines.append(f"## Today Archived [{len(archived)}]")
-        for t in archived:
-            lines.append(f"- [{t['category']}] {t['title']} #{t['id']}")
-        lines.append("")
-    lines.append("## Open Tasks")
-    if h["tasks"]:
-        for t in h["tasks"]:
-            due = f" [Due {t['due']}]" if t.get("due") else ""
-            nxt = f" — {t['next_step']}" if t.get("next_step") else ""
-            lines.append(f"- [{t['category']}] {t['title']}{nxt}{due} #{t['id']}")
-    else:
-        lines.append("- none")
-    lines += ["", "## Alerts"]
-    if h["alerts"]:
-        for a in h["alerts"]:
-            lines.append(f"- #{a['id']} [{a['severity']}] {a['message']}")
-    else:
-        lines.append("- none")
-    return "\n".join(lines)
 
 
 def session_start() -> int:
@@ -550,8 +526,6 @@ def session_start() -> int:
             heartbeat = _affect_heartbeat(conn)
             if heartbeat:
                 parts.append(heartbeat)
-
-            parts.append(_handoff_text(conn))
 
             backdrop = top_sections.render_affect(conn)
             if backdrop:

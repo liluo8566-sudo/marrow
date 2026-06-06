@@ -1,19 +1,18 @@
-"""SessionEnd async LLM prompts: split STATE + NARRATIVE.
+"""SessionEnd async LLM prompts: TASK_AFFECT (sonnet mid) + DIGEST (haiku low).
 
-Two sonnet calls per session. Both prompts START with byte-identical
-_TRANSCRIPT_BLOCK so Anthropic's prompt-caching reuses the second call's
-prefix from the first call's cache. Instructions come AFTER the transcript.
+Both prompts START with byte-identical _TRANSCRIPT_BLOCK so Anthropic's
+prompt-caching reuses the second call's prefix from the first call's cache.
+Instructions come AFTER the transcript.
 
-- STATE call → SEGMENT A (TASK board) + SEGMENT B (DOING diff) + NOTE_DONE.
-  One judgement, two segments: tick the human to-do by id, then diff the
-  Doing threads (CLOSE/UPDATE/KEEP/ADD). NOTE_DONE lists Note lines clearly
-  completed this session (remove-only — never add/rewrite).
+- TASK_AFFECT call (sonnet mid) → SEGMENT A (TASK board) + SEGMENT B (AFFECT).
+  Task tick + new-task adds; per-episode emotion extraction.
 
-- NARRATIVE call → SEGMENT A (AFFECT) + SEGMENT B (DIGEST)
-  Same voice: prose + per-episode emotion. Free-text persona contract holds.
+- DIGEST call (haiku low) → SEGMENT (DIGEST).
+  Session digest for the daily diary merge.
 
-Persona for narrative free-text (AFFECT, DIGEST): first person = 屿忱;
-second person = 你/念念; no third person. Source language carries through.
+Persona for narrative free-text (AFFECT Unresolved / reconcile_prev, DIGEST):
+first person = 屿忱; second person = 你/念念; no third person. Source language
+carries through.
 """
 from __future__ import annotations
 
@@ -29,9 +28,9 @@ _TRANSCRIPT_BLOCK = (
 )
 
 
-# ── STATE prompt v2 (TASK board + DOING diff + NOTE_DONE) ────────────────────
+# ── TASK_AFFECT prompt (sonnet mid) ─────────────────────────────────────────
 
-STATE_PROMPT = _TRANSCRIPT_BLOCK + """
+TASK_AFFECT_PROMPT = _TRANSCRIPT_BLOCK + """
 You read the session transcript above and extract this session's work state in \
 ONE pass: for every work thread decide COMPLETED / ADVANCED / UNTOUCHED / \
 NEWLY-RAISED, then write that single judgement into the segments below. Never \
@@ -43,18 +42,10 @@ Inputs:
 ===ACTIVE_TASKS===
 {active_tasks}
 ===END===
-- Current Doing threads (each carries a stable id — reference it, never invent):
-===DOING===
-{doing}
-===END===
 - Commits this session (project ground-truth for "done"; empty for study / \
 ny chat):
 ===GITLOG===
 {git_log}
-===END===
-- Lumi's Note (her own to-do for the next window — read-only context):
-===NOTE===
-{note}
 ===END===
 
 ═══════════════════════════════════════════
@@ -99,103 +90,7 @@ you only output the JSON below):
 ===END===
 
 ═══════════════════════════════════════════
-SEGMENT B — DOING   (handover continuation for the next AI window)
-═══════════════════════════════════════════
-A diff against the current Doing threads: one verdict per existing id, plus new \
-threads. Drop anything vague, or that Lumi disagreed with / ignored.
-
-- CLOSE <id> — done / resolved this session. Evidence = a GITLOG commit or an \
-explicit completion in the transcript. Code moves it to ## Done (rolls off \
-after 24h).
-- UPDATE <id> — still open, moved forward. Rewrite its Current + Next. Lead the \
-block with `#<id>` so code knows which thread to replace.
-- KEEP <id> — untouched this session, still open. id only.
-- ADD — a NEW open thread. If it's the same as an existing id → UPDATE that id \
-instead, don't add.
-- Any existing id you do NOT mention → code keeps it untouched.
-
-On-file thread format (match it exactly):
-N. [scope] - <title> (what it is)
-  - Current: <state — decision / finding / where it stopped>
-  - Next: <next step> (N/A if none)
-  - Reference: <file path / url> (N/A if none)
-
-[scope] is a free label you pick from content — Marrow / Study / Daily / \
-<project> / … It groups visually only. There is ONE handover file; no per-scope \
-split, nothing is dropped for being "off scope" (a GP appt in a study session \
-still belongs in TASK).
-
-Examples:
-1. [Marrow] - Auto handover feature
-  - Current: prompt + plan + template done
-  - Next: py + test
-  - Reference: sessionend_prompts.py:30; docs/plans/ho-redesign.md
-2. [Study] - SLE370 AT1
-  - Current: research round 1 done
-  - Next: intro + background
-  - Reference: SLE370/AT1/Instruction.md; Lund 2023.pdf
-3. [Daily] - New hair colour
-  - Current: discussed black → purple, went to gym @2000
-  - Next: continue when Lumi's back
-  - Reference: N/A
-
-===DOING_DIFF===
-CLOSE: <id>, <id>
-KEEP: <id>, <id>
-UPDATE:
-#<id> [scope] - <title>
-  - Current: ...
-  - Next: ...
-  - Reference: ...
-ADD:
-[scope] - <title>
-  - Current: ...
-  - Next: ...
-  - Reference: ...
-===END===
-
-═══════════════════════════════════════════
-BOUNDARY — anti-overlap
-═══════════════════════════════════════════
-TASK and DOING are two different tables, two readers. The same thread may \
-appear in both but in different FORM: a one-line title in TASK, a Current+Next \
-block in DOING. Decide completion ONCE: a finished thread → tick it in TASK AND \
-CLOSE its id in DOING, same call. The two outputs must never contradict.
-
-═══════════════════════════════════════════
-SEGMENT C — NOTE_DONE   (remove-only Note cleanup)
-═══════════════════════════════════════════
-The handover file has a `## Lumi's Note` section Lumi hand-writes (shown above \
-in ===NOTE===). You may ONLY flag lines to REMOVE — never add, rewrite, \
-reorder, or move a Note line.
-
-List one VERBATIM Note line per row that is CLEARLY completed this session.
-- Evidence required: a matching commit in ===GITLOG=== OR an explicit \
-completion in the transcript. No hard proof / any doubt → omit the line \
-(leave it untouched).
-- Copy the line text exactly as it appears in ===NOTE===.
-- Nothing to remove → output a single `N/A`.
-
-===NOTE_DONE===
-N/A
-===END===
-"""
-
-
-# ── NARRATIVE prompt (AFFECT + DIGEST) ──────────────────────────────────────
-
-NARRATIVE_PROMPT = _TRANSCRIPT_BLOCK + """
-You run end-of-session narrative extraction on the conversation above. Emit \
-two segments — AFFECT, DIGEST — between their markers. Segments are \
-independent; if one cannot be produced cleanly, still emit the other.
-
-Persona for narrative free-text (AFFECT Unresolved / reconcile_prev, DIGEST): \
-first person = 屿忱; second person = 你/念念; no third person. Source \
-language carries through — mainly Chinese, English terms verbatim. Never \
-translate; mixed in → mixed out.
-
-═══════════════════════════════════════════
-SEGMENT A — AFFECT
+SEGMENT B — AFFECT
 ═══════════════════════════════════════════
 
 Suppress rule (work frustration ONLY): routine frustration at code / config \
@@ -260,11 +155,12 @@ Unresolved).
 "event_hint": "...", "unresolved": 0, "reconcile_prev": "N/A"}}
 ]
 ===END===
+"""
 
-═══════════════════════════════════════════
-SEGMENT B — DIGEST
-═══════════════════════════════════════════
 
+# ── DIGEST prompt (haiku low) ────────────────────────────────────────────────
+
+DIGEST_PROMPT = _TRANSCRIPT_BLOCK + """
 Compress this session into a digest that will merge with the day's other \
 sessions and feed a couple's-day diary.
 

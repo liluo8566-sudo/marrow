@@ -1,4 +1,4 @@
-"""marrow watcher — keep md_index in sync with dashboard.md, db-pages/, handover.md.
+"""marrow watcher — keep md_index in sync with dashboard.md, db-pages/.
 
 Boot: full_scan reconcile (covers crash gap) -> persistent watchdog.Observer
 on three roots. Edits are debounced 200ms per (path, key) to dedup OS event
@@ -60,8 +60,7 @@ def _resolve_roots() -> tuple[list[str], list[str]]:
     cfg = config.load()
     dash = str(Path(cfg["paths"]["dashboard"]).resolve())
     db_pages = str(Path(cfg["paths"]["db_pages"]).resolve())
-    handover = str(Path(config.DATA_DIR) / "handover.md")
-    return [dash, handover], [db_pages]
+    return [dash], [db_pages]
 
 
 class _Debouncer:
@@ -125,14 +124,13 @@ class _MdHandler(FileSystemEventHandler):
         "study.md",
         "projects.md",
         "dashboard.md",
-        "handover.md",
     )
 
     def _is_detail_page(self, path: str) -> bool:
         """True for db-pages/{study,projects}/*.md detail pages; index pages stay watched."""
         # study/<unit>.md and projects/<name>.md (incl. pit.md) flow through
-        # inserter or user edits, not md_index. study.md/projects.md/dashboard.md/
-        # handover.md remain candidates.
+        # inserter or user edits, not md_index. study.md/projects.md/dashboard.md
+        # remain candidates.
         basename = os.path.basename(path)
         if basename in self._DETAIL_INDEX_NAMES:
             return False

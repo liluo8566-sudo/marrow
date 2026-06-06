@@ -1,12 +1,13 @@
-"""SessionEnd async LLM extraction: 2 sonnet calls → 4 segment writers.
+"""SessionEnd async LLM extraction: sonnet TASK_AFFECT + haiku DIGEST.
 
 CLI: python -m marrow.sessionend_async --sid <session_id> [--cwd <path>]
 
-STATE call emits TASK board + DOING diff + NOTE_DONE. NARRATIVE call emits
-AFFECT + DIGEST. Both prompts share a byte-identical transcript-fence prefix
-so the second call's cache_read > 0 (audit_log.llm_call_cost). One call
-failing does not block the other. `--cwd` lets _load_git_log locate the repo
-for CLOSE evidence; absent → "" (study / ny chats have no commits).
+Call 1 (sonnet mid, TASK_AFFECT_PROMPT) → seg_task_cand + seg_affect.
+Call 2 (haiku low,  DIGEST_PROMPT)       → seg_digest.
+Both prompts share a byte-identical transcript-fence prefix so the second
+call's cache_read > 0 (audit_log.llm_call_cost). One call failing does not
+block the other. `--cwd` lets _load_git_log locate the repo for CLOSE
+evidence; absent → "" (study / ny chats have no commits).
 
 Skip rule: sessions with ≤ skip_turn_threshold user turns extract nothing.
 Stale-skip recovery: if a prior skip:short_session row exists but the
@@ -19,7 +20,6 @@ from __future__ import annotations
 
 import atexit as _atexit
 import datetime as _dt
-import re as _re
 import subprocess as _sp
 import sys
 from pathlib import Path as _Path
@@ -31,15 +31,12 @@ from zoneinfo import ZoneInfo
 from .popen_detach import _redirect_stdio_from_argv as _redirect_stdio
 _redirect_stdio()
 
-from . import config, handover_diff, handover_render, repo, storage
+from . import config, repo, storage
 from .hooks import _is_manual_skip
 from .llm import LLMClient, LLMError
-from .paths import paths
-from .sessionend_prompts import NARRATIVE_PROMPT, STATE_PROMPT
-from .sessionend_writers import (seg_affect, seg_digest, seg_handover,
-                                 seg_task_cand)
+from .sessionend_prompts import DIGEST_PROMPT, TASK_AFFECT_PROMPT
+from .sessionend_writers import seg_affect, seg_digest, seg_task_cand
 
-_LOGS_DIR = paths.logs_dir
 _TZ = ZoneInfo("Australia/Melbourne")
 _CUTOFF_H = 6  # 6AM day boundary (per pipeline §6)
 
@@ -48,7 +45,7 @@ _SUMMARY_OK = "ok"  # legacy; kept for backward-compat checks
 _SUMMARY_SKIP = "skip:short_session"
 _SUMMARY_START = "start"
 
-_SEGMENTS = ("affect", "task_cand", "digest", "handover")
+_SEGMENTS = ("affect", "task_cand", "digest")
 
 
 def _cleanup_empty_log(log_path: _Path) -> None:
@@ -263,7 +260,7 @@ def _write_final_audit(conn, sid: str, summary: str) -> None:
             pass
 
 
-# ── sonnet input loaders ────────────────────────────────────────────────────
+# ── input loaders ────────────────────────────────────────────────────────────
 
 def _load_active_tasks_for_sonnet(conn) -> str:
     """db active task snapshot WITH id for sonnet's tick-by-id decisions.
@@ -276,61 +273,6 @@ def _load_active_tasks_for_sonnet(conn) -> str:
         return "_none_"
     return "\n".join(
         f"- [#{r['id']}] {r['title']} ({r['category']})" for r in rows)
-
-
-def _read_handover_text() -> str:
-    try:
-        return handover_render._RENDERED_PATH.read_text(encoding="utf-8")
-    except (FileNotFoundError, OSError):
-        return ""
-
-
-def _load_doing_for_sonnet() -> str:
-    """Current `## Doing` threads, each prefixed `[#id]`, for the DOING_DIFF
-    audit. Empty/missing → placeholder."""
-    text = _read_handover_text()
-    if not text:
-        return "(no prior handover)"
-    body = handover_diff._section_body(text, handover_diff._DOING_HEADER)
-    doing, _ = handover_diff.parse_doing(body)
-    if not doing:
-        return "(no open threads)"
-    parts: list[str] = []
-    for ident in sorted(doing):
-        block = doing[ident]
-        lines = block.splitlines()
-        head = f"[#{ident}] {lines[0]}" if lines else f"[#{ident}]"
-        parts.append("\n".join([head] + lines[1:]))
-    return "\n".join(parts)
-
-
-def _load_note() -> str:
-    """Current `## Lumi's Note` body verbatim, for the {note} prompt input.
-    Empty/missing → 'N/A'."""
-    text = _read_handover_text()
-    if not text:
-        return "N/A"
-    if not handover_diff._section_present(text, handover_diff._NOTE_HEADER):
-        return "N/A"
-    body = handover_diff._section_body(text, handover_diff._NOTE_HEADER).strip()
-    return body or "N/A"
-
-
-_READY_TS_RE = _re.compile(r"<!--\s*handover:\s*ready[^>]*ts:(\d+)")
-
-
-def _since_ts_from_handover() -> int:
-    """Epoch of the last HO write (ts: in the ready stamp). No stamp → 24h ago.
-    git_log uses this as `--since`; double-counting is harmless (CLOSE is
-    idempotent by id)."""
-    text = _read_handover_text()
-    m = _READY_TS_RE.search(text) if text else None
-    if m:
-        try:
-            return int(m.group(1))
-        except ValueError:
-            pass
-    return int(_dt.datetime.now(_dt.timezone.utc).timestamp()) - 24 * 3600
 
 
 def _load_git_log(cwd: str | None, since_ts: int) -> str:
@@ -461,57 +403,55 @@ def _run_writer(conn, sid: str, name: str, writer) -> bool:
 def _run_extraction(conn, sid: str, date: str,
                     events_text: str, cfg: dict, count: int,
                     cwd: str = "") -> int:
-    """Two-call flow: STATE writers run after call1; NARRATIVE writers after
-    call2; dashboard + embed_pending run at tail (fail-soft)."""
+    """Two-call flow: sonnet TASK_AFFECT first; haiku DIGEST second;
+    dashboard + embed_pending run at tail (fail-soft)."""
     from . import dashboard as _dash_mod
     from . import recall as _recall_mod
 
     client = LLMClient(cfg=cfg)
-    doing = _load_doing_for_sonnet()
     active_tasks = _load_active_tasks_for_sonnet(conn)
-    note = _load_note()
-    git_log = _load_git_log(cwd, _since_ts_from_handover())
+    since_ts = int(_dt.datetime.now(_dt.timezone.utc).timestamp()) - 24 * 3600
+    git_log = _load_git_log(cwd, since_ts)
 
-    # ── call 1: STATE (~30s) ──────────────────────────────────────────────────
-    state_raw, state_err = "", None
+    # ── call 1: TASK_AFFECT (sonnet mid) ─────────────────────────────────────
+    task_affect_raw, task_affect_err = "", None
     try:
-        state_raw = client.call(
-            role="sessionend_state",
-            body=STATE_PROMPT.format(
+        task_affect_raw = client.call(
+            role="sessionend_task_affect",
+            body=TASK_AFFECT_PROMPT.format(
                 sid=sid, events=events_text,
-                active_tasks=active_tasks, doing=doing,
-                git_log=git_log, note=note),
+                active_tasks=active_tasks, git_log=git_log),
             tier="mid",
         )
     except (LLMError, ValueError, RuntimeError) as e:
-        state_err = type(e).__name__
+        task_affect_err = type(e).__name__
 
-    if state_err:
-        _write_segment_audit(conn, sid, "state_call", f"fail:{state_err}")
+    if task_affect_err:
+        _write_segment_audit(conn, sid, "task_affect_call",
+                             f"fail:{task_affect_err}")
     else:
-        # State-based writers: handover.md surfaces ~30s after popen.
-        _run_writer(conn, sid, "handover", lambda: seg_handover(conn, state_raw, sid))
-        _run_writer(conn, sid, "task_cand", lambda: seg_task_cand(conn, state_raw))
-
-    # ── call 2: NARRATIVE (~30s; cache_read on events_text fence) ─────────────
-    narrative_raw, narrative_err = "", None
-    try:
-        narrative_raw = client.call(
-            role="sessionend_narrative",
-            body=NARRATIVE_PROMPT.format(sid=sid, events=events_text),
-            tier="mid",
-        )
-    except (LLMError, ValueError, RuntimeError) as e:
-        narrative_err = type(e).__name__
-
-    if narrative_err:
-        _write_segment_audit(conn, sid, "narrative_call",
-                             f"fail:{narrative_err}")
-    else:
+        _run_writer(conn, sid, "task_cand",
+                    lambda: seg_task_cand(conn, task_affect_raw))
         _run_writer(conn, sid, "affect",
-                    lambda: seg_affect(conn, narrative_raw, sid, date))
+                    lambda: seg_affect(conn, task_affect_raw, sid, date))
+
+    # ── call 2: DIGEST (haiku low; cache_read on events_text fence) ───────────
+    digest_raw, digest_err = "", None
+    try:
+        digest_raw = client.call(
+            role="sessionend_digest",
+            body=DIGEST_PROMPT.format(sid=sid, events=events_text),
+            tier="low",
+        )
+    except (LLMError, ValueError, RuntimeError) as e:
+        digest_err = type(e).__name__
+
+    if digest_err:
+        _write_segment_audit(conn, sid, "digest_call", f"fail:{digest_err}")
+    else:
         _run_writer(conn, sid, "digest",
-                    lambda: seg_digest(conn, narrative_raw, sid, date))
+                    lambda: seg_digest(conn, digest_raw, sid, date,
+                                       raw_llm=digest_raw))
 
     # ── tail: slow side-effects (fail-soft; cc can't kill us here) ───────────
     db = config.db_path()
@@ -540,17 +480,18 @@ def _run_extraction(conn, sid: str, date: str,
             pass
 
     # ── final audit ───────────────────────────────────────────────────────────
-    if state_err and narrative_err:
+    if task_affect_err and digest_err:
         _write_final_audit(
-            conn, sid, f"fail:state={state_err},narrative={narrative_err}")
+            conn, sid,
+            f"fail:task_affect={task_affect_err},digest={digest_err}")
         return 1
 
     # Collect failures recorded by _run_writer above.
     seg_rows = conn.execute(
         "SELECT action, summary FROM audit_log"
         " WHERE target_id=? AND action LIKE 'sessionend_extract_%'"
-        " AND action NOT IN ('sessionend_extract_state_call',"
-        "                    'sessionend_extract_narrative_call')",
+        " AND action NOT IN ('sessionend_extract_task_affect_call',"
+        "                    'sessionend_extract_digest_call')",
         (sid,),
     ).fetchall()
     failures: list[str] = [
@@ -559,20 +500,19 @@ def _run_extraction(conn, sid: str, date: str,
         if not r["summary"].startswith("ok")
     ]
     # Implicit skips for the failed call's writers.
-    if state_err:
-        for w in ("handover", "task_cand"):
+    if task_affect_err:
+        for w in ("task_cand", "affect"):
             if w not in failures:
                 _write_segment_audit(
-                    conn, sid, w, f"skip:state_failed_{state_err}")
+                    conn, sid, w, f"skip:task_affect_failed_{task_affect_err}")
                 failures.append(w)
-    if narrative_err:
-        for w in ("affect", "digest"):
-            if w not in failures:
-                _write_segment_audit(
-                    conn, sid, w, f"skip:narrative_failed_{narrative_err}")
-                failures.append(w)
+    if digest_err:
+        if "digest" not in failures:
+            _write_segment_audit(
+                conn, sid, "digest", f"skip:digest_failed_{digest_err}")
+            failures.append("digest")
 
-    all_writers = ("handover", "task_cand", "affect", "digest")
+    all_writers = ("task_cand", "affect", "digest")
     if not failures:
         _write_final_audit(conn, sid, f"{_OK_PREFIX}{count}")
         return 0

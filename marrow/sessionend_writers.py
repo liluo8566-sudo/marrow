@@ -1,8 +1,7 @@
-"""Segment writers for sessionend_async — affect / task_cand / digest / handover.
+"""Segment writers for sessionend_async — affect / task_cand / digest.
 
-Each writer takes the raw LLM output for its segment and persists rows /
-re-renders handover.md. Lifted out of sessionend_async to keep that module
-under 300 LOC.
+Each writer takes the raw LLM output for its segment and persists rows.
+Lifted out of sessionend_async to keep that module under 300 LOC.
 """
 from __future__ import annotations
 
@@ -11,10 +10,13 @@ import json
 import os
 import sys
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
-from . import candidates, handover_diff
-from .sessionend_prompts import (parse_doing_diff, parse_note_done,
-                                 parse_task_rows)
+from . import candidates
+from .sessionend_prompts import parse_task_rows
+
+_TZ = ZoneInfo("Australia/Melbourne")
+_CUTOFF_H = 6  # 6AM local day boundary
 
 
 # ── shared helpers ──────────────────────────────────────────────────────────
@@ -228,8 +230,63 @@ def seg_task_cand(conn, raw: str) -> int:
     return n
 
 
-def seg_digest(conn, raw: str, sid: str, date: str) -> int:
-    """Persist DIGEST text into session_digests. INSERT OR REPLACE on sid."""
+def _digest_log_dir() -> Path:
+    """~/.config/marrow/logs/digest/ — created on first use."""
+    from . import config
+    d = Path(config.DATA_DIR) / "logs" / "digest"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _digest_local_date(utc_now: _dt.datetime) -> str:
+    """UTC datetime → local diary day string (YYYY-MM-DD) with 6AM cutoff."""
+    local = utc_now.astimezone(_TZ) - _dt.timedelta(hours=_CUTOFF_H)
+    return local.date().isoformat()
+
+
+def _append_digest_log(sid: str, raw_llm: str) -> None:
+    """Append raw haiku digest output to today's digest log file."""
+    now = _dt.datetime.now(_dt.timezone.utc)
+    day = _digest_local_date(now)
+    log_path = _digest_log_dir() / f"digest-{day}.log"
+    utc_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    entry = f"[{utc_iso} sid={sid[:8]}]\n{raw_llm}\n\n"
+    with log_path.open("a", encoding="utf-8") as f:
+        f.write(entry)
+
+
+def _prune_digest_logs() -> None:
+    """Delete digest log files older than 2.5 days. Never deletes today or yesterday."""
+    try:
+        now = _dt.datetime.now(_dt.timezone.utc)
+        today = _digest_local_date(now)
+        yesterday = (_digest_local_date(
+            now - _dt.timedelta(days=1)))
+        cutoff = now.timestamp() - 2.5 * 24 * 3600
+        log_dir = _digest_log_dir()
+        for f in log_dir.glob("digest-*.log"):
+            # Safety guard: never delete today or yesterday
+            name = f.stem  # "digest-YYYY-MM-DD"
+            date_part = name[len("digest-"):]
+            if date_part in (today, yesterday):
+                continue
+            try:
+                if f.stat().st_mtime < cutoff:
+                    f.unlink()
+            except OSError:
+                pass
+    except Exception:  # noqa: BLE001 — prune is best-effort
+        pass
+
+
+def seg_digest(conn, raw: str, sid: str, date: str,
+               raw_llm: str | None = None) -> int:
+    """Persist DIGEST text into session_digests. INSERT OR REPLACE on sid.
+
+    raw_llm: the full haiku LLM output (for digest quality monitoring log).
+    When provided, appends to ~/.config/marrow/logs/digest/digest-YYYY-MM-DD.log
+    and prunes files older than 2.5 days.
+    """
     body = _extract_text_block(raw, "DIGEST")
     if not body:
         return 0
@@ -241,19 +298,10 @@ def seg_digest(conn, raw: str, sid: str, date: str) -> int:
             " VALUES (?, ?, ?, ?)",
             (sid, date, body, ts_now),
         )
-    return 1
-
-
-def seg_handover(conn, raw: str, sid: str) -> int:
-    """Apply the DOING_DIFF + NOTE_DONE to the single 3-section handover file.
-
-    Diff-based, id-keyed (NOT hash tombstone): CLOSE/UPDATE/KEEP/ADD against
-    existing `<!-- id:N -->` threads, Done 24h roll-off, Note remove-done.
-    Single-writer rule (Bug #1) — SessionStart hooks are read-only and never
-    invoke this path. No DOING_DIFF marker → no-op (file untouched)."""
-    if "===DOING_DIFF===" not in raw:
-        return 0
-    diff = parse_doing_diff(raw)
-    note_done = parse_note_done(raw)
-    handover_diff.apply_diff(conn, sid, diff, note_done)
+    if raw_llm is not None:
+        try:
+            _append_digest_log(sid, raw_llm)
+        except Exception:  # noqa: BLE001 — log is best-effort
+            pass
+        _prune_digest_logs()
     return 1
