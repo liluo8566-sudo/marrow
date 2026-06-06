@@ -2,7 +2,7 @@
 
 Feature: session_archive_skip_manual
 - mm- prefix: UserPromptSubmit writes audit_log manual_skip/skip row for sid
-- sessionend_async respects skip flag, bypasses LLM + diary + handover
+- sessionend_async respects skip flag, bypasses LLM + diary
 - mm+ prefix / mw sessionend rerun: force-overwrite done marker, rerun pipeline
 - resume: session_start detects prior lifecycle:start row, clears any skip
 - auto 3-turn skip is unchanged
@@ -84,7 +84,7 @@ def test_mm_minus_writes_skip_flag(env, monkeypatch):
 # ── Test 2: skip blocks sessionend LLM ───────────────────────────────────────
 
 def test_skip_blocks_sessionend_llm(env, monkeypatch):
-    """manual_skip/skip row -> sessionend_async must NOT call LLM, no diary/handover write."""
+    """manual_skip/skip row -> sessionend_async must NOT call LLM, no diary write."""
     db, tmp_path = env
     sid = "test-skip-blocks-sid"
     _insert_events(db, sid, count=10)
@@ -95,17 +95,14 @@ def test_skip_blocks_sessionend_llm(env, monkeypatch):
     conn.close()
 
     llm_called = []
-    h = tmp_path / "handover.md"
 
-    with patch("marrow.sessionend_async.LLMClient") as MockClient, \
-         patch("marrow.handover_render._RENDERED_PATH", h):
+    with patch("marrow.sessionend_async.LLMClient") as MockClient:
         MockClient.return_value.call.side_effect = lambda *a, **kw: llm_called.append(1)
         from marrow import sessionend_async
         rc = sessionend_async.main(["--sid", sid])
 
     assert rc == 0
     assert llm_called == [], "LLM must not be called when manual skip is set"
-    assert not h.exists(), "handover.md must not be written when skipped"
 
     # Audit row must record the manual skip.
     extract_rows = _audit_rows(db, sid, action="sessionend_extract")
@@ -157,9 +154,7 @@ def test_mm_plus_reruns_sid(env, monkeypatch, tmp_path):
 
     # After reset, sessionend_async should call LLM (ok row was overridden by reset row).
     llm_called = []
-    h = data_tmp / "handover.md"
-    with patch("marrow.sessionend_async.LLMClient") as MockClient, \
-         patch("marrow.handover_render._RENDERED_PATH", h):
+    with patch("marrow.sessionend_async.LLMClient") as MockClient:
         MockClient.return_value.call.return_value = "echo done"
         from marrow import sessionend_async
         rc2 = sessionend_async.main(["--sid", sid])
@@ -211,9 +206,7 @@ def test_resume_clears_skip(env, monkeypatch, tmp_path):
 
     # sessionend_async must call LLM now that skip is cleared.
     llm_called = []
-    h = data_tmp / "handover.md"
-    with patch("marrow.sessionend_async.LLMClient") as MockClient, \
-         patch("marrow.handover_render._RENDERED_PATH", h):
+    with patch("marrow.sessionend_async.LLMClient") as MockClient:
         MockClient.return_value.call.return_value = "echo done"
         from marrow import sessionend_async
         rc2 = sessionend_async.main(["--sid", sid])
