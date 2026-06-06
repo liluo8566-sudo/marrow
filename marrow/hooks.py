@@ -834,6 +834,11 @@ def user_prompt_submit() -> int:
     if _is_worktree_session(cwd or ""):
         return 0
 
+    # cwd exclude gate — opt-out per-dir via config.toml [recall].exclude_cwds.
+    _ex_cwds = config.load().get("recall", {}).get("exclude_cwds", []) or []
+    if cwd and any(cwd.startswith(p) for p in _ex_cwds):
+        return 0
+
     prompt_text = (inp.get("prompt") or "").strip() if isinstance(inp, dict) else ""
     sid = inp.get("session_id") if isinstance(inp, dict) else None
 
