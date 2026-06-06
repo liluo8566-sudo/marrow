@@ -22,5 +22,10 @@ pythonpath = ["."]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]
+
 [tool.setuptools.packages.find]
 include = ["marrow*"]
