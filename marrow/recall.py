@@ -874,6 +874,11 @@ def recall_fusion(
     if not q:
         return []
 
+    # Strip emotion punctuation (?/!/？/！, single + repeated) — no FTS/vec signal.
+    q = re.sub(r"[？?！!]+", " ", q).strip()
+    if not q:
+        return []
+
     # Stopword filter: strip config-driven tokens before FTS + vec.
     # List is empty by default; populated by Lumi after reviewing candidates.
     try:
