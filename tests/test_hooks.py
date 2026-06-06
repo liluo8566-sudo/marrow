@@ -399,9 +399,12 @@ def test_user_prompt_submit_explicit_disable(env, monkeypatch, capsys):
     assert capsys.readouterr().out == ""
 
 
-def _force_vector_on(monkeypatch):
+def _force_vector_on(monkeypatch, min_score: float = 0.30):
     base_cfg = config.load()
     base_cfg.setdefault("recall", {})["vector"] = True
+    # Lower min_score so FTS-only event hits (vec=0, bm25+recency ~0.35-0.39)
+    # clear the gate in tests that have no embedder loaded.
+    base_cfg["recall"]["min_score"] = min_score
     monkeypatch.setattr(config, "load", lambda: base_cfg)
 
 

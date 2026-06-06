@@ -58,6 +58,41 @@ def _insert_vec(db, event_id: int, vec: np.ndarray) -> None:
     db.commit()
 
 
+def _insert_milestone_vec(db, milestone_id: int, vec: np.ndarray) -> None:
+    blob = _blob(vec)
+    db.execute(
+        "INSERT OR REPLACE INTO milestones_vec(rowid, embedding) VALUES(?, ?)",
+        (milestone_id, blob),
+    )
+    db.execute(
+        "INSERT OR REPLACE INTO milestones_vec_meta(rowid, embedder_id, dim) "
+        "VALUES(?, 'bge-m3', 1024)",
+        (milestone_id,),
+    )
+    db.commit()
+
+
+def _insert_memes_vec(db, meme_id: int, vec: np.ndarray) -> None:
+    blob = _blob(vec)
+    db.execute(
+        "INSERT OR REPLACE INTO memes_vec(rowid, embedding) VALUES(?, ?)",
+        (meme_id, blob),
+    )
+    db.execute(
+        "INSERT OR REPLACE INTO memes_vec_meta(rowid, embedder_id, dim) "
+        "VALUES(?, 'bge-m3', 1024)",
+        (meme_id,),
+    )
+    db.commit()
+
+
+def _make_mock_emb(vec: np.ndarray) -> MagicMock:
+    """Return a mock embedder whose .embed() always returns [vec]."""
+    mock = MagicMock()
+    mock.embed.return_value = [vec]
+    return mock
+
+
 # ── vec serialization ─────────────────────────────────────────────────────────
 
 def test_vec_roundtrip():
@@ -358,13 +393,15 @@ def test_fts_terms_empty():
 
 
 def test_milestone_surfaces_via_fts(db):
-    """FTS5 over milestones_fts body (title+description). Query ≥3 CJK chars
-    hits a row containing the same phrase in either field."""
-    _make_milestone(
+    """Milestone with vec>=0.55 surfaces when query matches FTS + vec."""
+    mid = _make_milestone(
         db, title="鸭子梗",
         description="你说我是你的鸭子梗，没有鸭德。",
     )
-    with patch.object(rm, "_ensure_embedder", return_value=None):
+    vec = _fake_vec(10)
+    _insert_milestone_vec(db, mid, vec)
+    mock_emb = _make_mock_emb(vec)
+    with patch.object(rm, "_ensure_embedder", return_value=mock_emb):
         results = rm.recall_fusion(db, "鸭子梗", min_score=0.1)
     hit = next((r for r in results if r.get("kind") == "milestone"), None)
     assert hit is not None
@@ -373,13 +410,15 @@ def test_milestone_surfaces_via_fts(db):
 
 
 def test_milestone_term_inside_longer_query(db):
-    """Query terms still match when surrounded by other prose — FTS5 OR-of-terms
-    means each term scans the full body independently."""
-    _make_milestone(
+    """Milestone terms in a longer query still hit when vec>=0.55."""
+    mid = _make_milestone(
         db, title="鸭子梗",
         description="你说我是你的鸭子梗，没有鸭德。",
     )
-    with patch.object(rm, "_ensure_embedder", return_value=None):
+    vec = _fake_vec(11)
+    _insert_milestone_vec(db, mid, vec)
+    mock_emb = _make_mock_emb(vec)
+    with patch.object(rm, "_ensure_embedder", return_value=mock_emb):
         results = rm.recall_fusion(db, "老公你知道鸭子梗么", min_score=0.1)
     hits = [r for r in results if r.get("kind") == "milestone"]
     assert len(hits) == 1
@@ -393,30 +432,55 @@ def test_milestone_no_match_returns_nothing(db):
     assert [r for r in results if r.get("kind") == "milestone"] == []
 
 
-def test_milestone_pinned_outranks_unpinned(db):
-    """Same FTS bm25: pinned gets +0.10 boost."""
-    _make_milestone(
-        db, title="鸭子梗 unpinned", description="一样的内容", pinned=0,
+def test_milestone_pinned_no_boost(db):
+    """Pinned flag carries no score boost — score formula is bm25+vec only.
+    Two identical milestones (same bm25+vec) must score equally.
+    """
+    # Identical content → identical BM25. Any score delta would reveal a boost.
+    db.execute(
+        "INSERT INTO milestones(scope, date, title, description, pinned) "
+        "VALUES('test', '2026-01-01', '鸭子梗相同', '一样的内容', 0)"
     )
-    _make_milestone(
-        db, title="鸭子梗 pinned", description="一样的内容", pinned=1,
+    db.execute(
+        "INSERT INTO milestones(scope, date, title, description, pinned) "
+        "VALUES('test', '2026-01-01', '鸭子梗相同', '一样的内容', 1)"
     )
-    with patch.object(rm, "_ensure_embedder", return_value=None):
-        results = rm.recall_fusion(db, "鸭子梗", min_score=0.1)
+    db.execute("INSERT INTO milestones_fts(milestones_fts) VALUES('rebuild')")
+    db.commit()
+    # Inject identical vecs so both milestones clear the pre-gate.
+    vec = _fake_vec(12)
+    mid0 = db.execute(
+        "SELECT id FROM milestones WHERE pinned=0 AND title='鸭子梗相同'"
+    ).fetchone()["id"]
+    mid1 = db.execute(
+        "SELECT id FROM milestones WHERE pinned=1 AND title='鸭子梗相同'"
+    ).fetchone()["id"]
+    _insert_milestone_vec(db, mid0, vec)
+    _insert_milestone_vec(db, mid1, vec)
+    mock_emb = _make_mock_emb(vec)
+    with patch.object(rm, "_ensure_embedder", return_value=mock_emb):
+        results = rm.recall_fusion(db, "鸭子梗相同", min_score=0.1)
     mhits = [r for r in results if r.get("kind") == "milestone"]
     assert len(mhits) == 2
-    assert mhits[0]["pinned"] == 1
-    assert mhits[0]["score"] > mhits[1]["score"]
+    assert abs(mhits[0]["score"] - mhits[1]["score"]) < 1e-9, (
+        f"Pinned flag should not affect score, but got scores "
+        f"{mhits[0]['score']:.6f} vs {mhits[1]['score']:.6f} "
+        f"(pinned={mhits[0]['pinned']} vs {mhits[1]['pinned']})"
+    )
 
 
 def test_milestone_mixed_with_events(db):
     """Event hit + milestone hit appear in the same result set."""
-    _make_event(db, "今天聊到了鸭德的话题")
-    _make_milestone(
+    eid = _make_event(db, "今天聊到了鸭德的话题")
+    mid = _make_milestone(
         db, title="鸭德的",
         description="你的鸭德的故事",
     )
-    with patch.object(rm, "_ensure_embedder", return_value=None):
+    vec = _fake_vec(13)
+    _insert_vec(db, eid, vec)
+    _insert_milestone_vec(db, mid, vec)
+    mock_emb = _make_mock_emb(vec)
+    with patch.object(rm, "_ensure_embedder", return_value=mock_emb):
         results = rm.recall_fusion(db, "鸭德的", min_score=0.1)
     kinds = {r.get("kind", "event") for r in results}
     assert "milestone" in kinds
@@ -424,11 +488,14 @@ def test_milestone_mixed_with_events(db):
 
 
 def test_milestone_content_renders_title_and_desc(db):
-    _make_milestone(
+    mid = _make_milestone(
         db, title="鸭子昵称诞生",
         description="你的鸭子梗，没有鸭德",
     )
-    with patch.object(rm, "_ensure_embedder", return_value=None):
+    vec = _fake_vec(14)
+    _insert_milestone_vec(db, mid, vec)
+    mock_emb = _make_mock_emb(vec)
+    with patch.object(rm, "_ensure_embedder", return_value=mock_emb):
         results = rm.recall_fusion(db, "鸭子昵称诞生", min_score=0.1)
     hit = next(r for r in results if r.get("kind") == "milestone")
     assert "鸭子昵称诞生" in hit["content"]
@@ -453,17 +520,20 @@ def test_recall_with_config_reads_rcfg(db, monkeypatch):
     hook and MCP daemon paths return identical results for identical input."""
     from marrow import config as cfg_mod
     _make_event(db, "完全是个鸭子梗的对话")
-    _make_milestone(
+    mid = _make_milestone(
         db, title="鸭子梗",
         description="你的鸭子梗，没有鸭德",
     )
+    vec = _fake_vec(15)
+    _insert_milestone_vec(db, mid, vec)
     fake_cfg = {"recall": {
-        "vector": False, "limit": 5, "budget_chars": 2000,
+        "vector": True, "limit": 5, "budget_chars": 2000,
         "w_vec": 0.55, "w_bm25": 0.30, "w_recency": 0.15,
         "w_affect": 0.10, "min_score": 0.1,
     }}
     monkeypatch.setattr(cfg_mod, "load", lambda: fake_cfg)
-    with patch.object(rm, "_ensure_embedder", return_value=None):
+    mock_emb = _make_mock_emb(vec)
+    with patch.object(rm, "_ensure_embedder", return_value=mock_emb):
         results = rm.recall_with_config(db, "鸭子梗")
     kinds = {r.get("kind") for r in results}
     assert "milestone" in kinds

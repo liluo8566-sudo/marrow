@@ -10,6 +10,7 @@ from mcp.server.fastmcp import FastMCP
 
 from . import config, recall as _recall_mod, repo, storage
 from .llm import LLMClient
+from .timeutil import utc_iso_to_local_datetime
 
 mcp = FastMCP("marrow")
 
@@ -26,9 +27,18 @@ def recall(query: str, limit: int = 10) -> list[dict]:
     Call when the user references the past."""
     conn = storage.connect(_DB)
     try:
-        return _recall_mod.recall_with_config(conn, query, limit=limit)
+        # MCP manual recall: include all kinds (diary + task explicitly wanted).
+        rows = _recall_mod.recall_with_config(
+            conn, query, limit=limit, exclude_kinds=()
+        )
     finally:
         conn.close()
+    # Convert UTC timestamps to Melbourne local time at the read boundary.
+    for row in rows:
+        ts = row.get("timestamp")
+        if ts:
+            row["timestamp"] = utc_iso_to_local_datetime(ts)
+    return rows
 
 
 @mcp.tool()

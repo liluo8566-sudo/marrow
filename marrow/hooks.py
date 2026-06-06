@@ -30,6 +30,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from . import config, repo, storage, top_sections, transcript
 from .popen_detach import popen_detach, popen_detach_lazy
+from .timeutil import utc_iso_to_local_date, utc_iso_to_local_datetime
 
 SESSION_START_HARD_CAP = 6000
 
@@ -929,7 +930,7 @@ def user_prompt_submit() -> int:
         "",
     ]
     for h in visible:
-        ts = (h.get("timestamp") or "")[:10]
+        ts = utc_iso_to_local_date(h.get("timestamp") or "")
         kind = h.get("kind") or "event"
         content_full = (h.get("content") or "").replace("\n", " ")
         if kind in _TABLE_KINDS:
@@ -947,7 +948,7 @@ def user_prompt_submit() -> int:
             for c in ctxs:
                 if per_ctx <= 0:
                     break
-                cts = (c.get("timestamp") or "")[:16].replace("T", " ")
+                cts = utc_iso_to_local_datetime(c.get("timestamp") or "")
                 csnip = (c.get("content") or "").replace("\n", " ")[:per_ctx]
                 if not csnip:
                     continue

@@ -1,18 +1,43 @@
-"""TDD red tests for entity-recall + memes-leg + milestone reverse-substring bugs.
+"""Regression tests for entity-recall + memes-leg + milestone live paths.
 
-- entity_recall.entity_force_include must match 2-CJK-char names (南南, 小胖).
-- recall_fusion must surface memes rows (cipher / nickname / phrase) when key
-  appears in query (substring).
-- _milestone_candidates must also reverse-match title against query (fallback).
+Tests directly exercising entity_force_include (now deleted) have been removed.
+Live-path tests (_entity_candidates + fusion, memes FTS leg, milestone FTS leg,
+body_nonempty helper) are kept.
 """
 from __future__ import annotations
 
 import datetime as dt
-from unittest.mock import patch
+import struct
+from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 
-from marrow import entity_recall as er, recall as rm, repo, storage
+from marrow import recall as rm, repo, storage
+
+
+def _fake_vec(seed: int, dim: int = 1024) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    v = rng.random(dim).astype(np.float32)
+    return v / np.linalg.norm(v)
+
+
+def _blob(v: np.ndarray) -> bytes:
+    return struct.pack(f"{len(v)}f", *v.tolist())
+
+
+def _insert_memes_vec(db, meme_id: int, vec: np.ndarray) -> None:
+    blob = _blob(vec)
+    db.execute(
+        "INSERT OR REPLACE INTO memes_vec(rowid, embedding) VALUES(?, ?)",
+        (meme_id, blob),
+    )
+    db.execute(
+        "INSERT OR REPLACE INTO memes_vec_meta(rowid, embedder_id, dim) "
+        "VALUES(?, 'bge-m3', 1024)",
+        (meme_id,),
+    )
+    db.commit()
 
 
 @pytest.fixture()
@@ -30,15 +55,7 @@ def seeded_db(tmp_path):
             "SELECT id FROM events WHERE session_id=?", (sid,)
         ).fetchone()["id"]
 
-    # 2-char CJK entity (南南).
-    nn_eid = add_event("s_nn_1", "今天和南南一起吃饭，聊得很开心。", 0)
-    add_event("s_nn_2", "南南又来了，带了奶茶。", 4)
-    conn.execute(
-        "INSERT INTO entities (kind, name, mention_count, source) "
-        "VALUES ('person', '南南', 5, 'test')"
-    )
-
-    # ASCII entity (Amber).
+    # ASCII entity (Amber) — used by FTS live-path test.
     amber_eid = add_event("s_amber_1", "Amber 今天去 ED 帮忙，超累。", 8)
     conn.execute(
         "INSERT INTO entities (kind, name, mention_count, source) "
@@ -64,39 +81,21 @@ def seeded_db(tmp_path):
         add_event(f"s_noise_{i}", f"完全不相关的内容编号 {i}", 50 + i)
 
     conn.commit()
-    yield conn, nn_eid, amber_eid
+    yield conn, amber_eid
     conn.close()
 
 
-def test_entity_force_include_2char_cjk_name(seeded_db):
-    """2-CJK-char entity (南南) must be found via reverse substring."""
-    conn, nn_eid, _ = seeded_db
-    rows = er.entity_force_include(conn, "你还记得南南么", limit=10)
-    nn_hits = [r for r in rows if "南南" in (r.get("content") or "")]
-    assert len(nn_hits) >= 1, (
-        f"Expected at least 1 (南南) hit, got {len(rows)} total rows"
-    )
-
-
-def test_entity_force_include_ascii_name(seeded_db):
-    """ASCII entity name (Amber) must still match."""
-    conn, _, amber_eid = seeded_db
-    rows = er.entity_force_include(conn, "Amber 在干嘛", limit=10)
-    hits = [r for r in rows if "Amber" in (r.get("content") or "")]
-    assert len(hits) >= 1
-
-
-def test_entity_force_include_does_not_match_unrelated_query(seeded_db):
-    """Query without any entity-name substring returns no force-include rows."""
-    conn, _, _ = seeded_db
-    rows = er.entity_force_include(conn, "今天天气", limit=10)
-    assert rows == []
-
-
 def test_memes_leg_returns_cipher_on_query_match(seeded_db):
-    """recall_fusion must surface memes row when key matches query (substring)."""
-    conn, _, _ = seeded_db
-    with patch.object(rm, "_ensure_embedder", return_value=None):
+    """recall_fusion must surface memes row when key matches query (FTS+vec)."""
+    conn, _ = seeded_db
+    meme_id = conn.execute(
+        "SELECT id FROM memes WHERE key='Plan'"
+    ).fetchone()["id"]
+    vec = _fake_vec(20)
+    _insert_memes_vec(conn, meme_id, vec)
+    mock_emb = MagicMock()
+    mock_emb.embed.return_value = [vec]
+    with patch.object(rm, "_ensure_embedder", return_value=mock_emb):
         results = rm.recall_fusion(conn, "我的 plan 是什么价钱", limit=10)
     memes_hits = [
         r for r in results
@@ -108,52 +107,23 @@ def test_memes_leg_returns_cipher_on_query_match(seeded_db):
     )
 
 
-def test_entity_force_include_tiebreaker_newest_first(tmp_path):
-    """Equal mention_count cards sort newest-first by created_at."""
-    conn = storage.init_db(str(tmp_path / "tb.db"))
-    try:
-        conn.execute(
-            "INSERT INTO entities(kind, name, fact, mention_count, source, created_at)"
-            " VALUES('person', 'Aki', 'older card', 5, 'test', "
-            "'2026-01-01T00:00:00Z')"
-        )
-        conn.execute(
-            "INSERT INTO entities(kind, name, fact, mention_count, source, created_at)"
-            " VALUES('person', 'Bea', 'newer card', 5, 'test', "
-            "'2026-05-01T00:00:00Z')"
-        )
-        conn.commit()
-        rows = er.entity_force_include(conn, "Aki and Bea both showed up", limit=10)
-        cards = [r for r in rows if r.get("kind") == "entity"]
-        assert len(cards) == 2
-        assert cards[0]["content"].startswith("Bea"), (
-            f"Expected newer (Bea) first, got order: "
-            f"{[c['content'] for c in cards]}"
-        )
-        assert cards[0]["score"] == cards[1]["score"]
-    finally:
-        conn.close()
-
-
 def test_milestone_reverse_substring_match(seeded_db):
-    """Milestone title (Bendigo placement) must hit with kw_score=1.0 even
-    when query has extra noise tokens — reverse substring is strongest signal."""
-    conn, _, _ = seeded_db
+    """Milestone title (Bendigo placement) must hit via FTS candidates."""
+    conn, _ = seeded_db
     cands = rm._milestone_candidates(
         conn, "今天 Bendigo placement 怎么样", limit=10
     )
     bendigo = [c for c in cands if c["content"].startswith("Bendigo")]
     assert bendigo, f"Expected Bendigo milestone candidate, got {cands}"
     assert bendigo[0]["bm25"] == 1.0, (
-        f"Expected kw_score=1.0 via reverse-substring boost, "
-        f"got {bendigo[0]['bm25']}"
+        f"Expected kw_score=1.0 (best rank), got {bendigo[0]['bm25']}"
     )
 
 
-# ── Outcome 5 — body_nonempty filter on entity force-include ──────────────
+# ── body_nonempty filter ──────────────────────────────────────────────────────
 
 def test_body_nonempty_unit():
-    """Helper: None / "" / whitespace-only → False; anything with a char → True."""
+    """None / empty / whitespace-only → False; anything with a char → True."""
     from marrow.recall import _body_nonempty
     assert _body_nonempty(None) is False
     assert _body_nonempty("") is False
@@ -161,35 +131,23 @@ def test_body_nonempty_unit():
     assert _body_nonempty("\n\t ") is False
     assert _body_nonempty("x") is True
     assert _body_nonempty(" hello ") is True
-    # Non-string truthy (defensive) → preserved.
     assert _body_nonempty(["non-string"]) is True
 
 
-def test_entity_force_include_card_with_whitespace_fact_dropped(tmp_path):
-    """Seed an entity whose name appears in the query but whose `fact` is
-    whitespace-only. Without body_nonempty, entity_force_include builds a
-    card whose content reads like `"Zara (person):    "` — visible
-    truthy string, but the prose payload is empty whitespace that wastes
-    prompt tokens. body_nonempty must reject the card before recall.
-
-    Setup: one real FTS-matchable event so recall_fusion's early-return
-    guard does not fire before entity force-include runs.
+def test_entity_candidates_whitespace_fact_dropped(tmp_path):
+    """Entity with whitespace-only fact must not surface as an entity card
+    in recall output — the _entity_candidates FTS scan drops empty facts,
+    and the vec-only path also skips them.
     """
-    import datetime as _dt
-    from marrow import recall as rm, repo, storage
-
     conn = storage.init_db(str(tmp_path / "f.db"))
     try:
-        base = _dt.datetime(2026, 5, 1, 10, 0, 0, tzinfo=_dt.timezone.utc)
-        # Real event so recall has at least one candidate (avoids early
-        # return at `not candidates and ...`).
+        base = dt.datetime(2026, 5, 1, 10, 0, 0, tzinfo=dt.timezone.utc)
         repo.archive_events(conn, [{
             "session_id": "good-sid",
             "timestamp": base.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "role": "user",
             "content": "Zara helped me debug recall today",
         }])
-        # Entity row with whitespace-only fact — card surfaces today.
         conn.execute(
             "INSERT INTO entities (kind, name, fact, mention_count, source) "
             "VALUES ('person', 'Zara', '   ', 1, 'test')"
@@ -199,23 +157,17 @@ def test_entity_force_include_card_with_whitespace_fact_dropped(tmp_path):
         with patch.object(rm, "_ensure_embedder", return_value=None):
             results = rm.recall_fusion(conn, "Zara", limit=10, min_score=0.1)
 
-        # No row in the recall output may carry whitespace-only body, and
-        # specifically: no entity card whose content body after the prefix
-        # `"Zara (person):"` is just whitespace.
         for r in results:
             content = r.get("content") or ""
             assert content.strip(), (
                 f"recall returned whitespace-body row: {r!r}"
             )
             if r.get("kind") == "entity":
-                # Card format = `"<name> (<kind>): <fact>"` or `"<name>: <fact>"`.
-                # The body after the last `: ` must carry real prose.
                 if ": " in content:
                     fact_part = content.rsplit(": ", 1)[1]
                     assert fact_part.strip(), (
                         f"entity card carries whitespace-only fact: {r!r}"
                     )
-        # Sanity: at least the FTS event still surfaces.
         assert any("Zara helped" in (r.get("content") or "")
                    for r in results), f"no FTS event in {results!r}"
     finally:
