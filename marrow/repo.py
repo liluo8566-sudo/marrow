@@ -196,36 +196,56 @@ def list_recent_sessions(
         conn.close()
 
 
-def add_alert(severity: str, atype: str, message: str,
-              source: str | None = None, *, db: str | None = None) -> int:
+def add_alert(severity: str, atype: str, fingerprint: str,
+              source: str | None = None, *,
+              message: str | None = None,
+              db: str | None = None) -> int:
     # on_alert sink for LLMClient: self-contained connection so it works
     # from any context (pipeline, hook, daemon). Mirrors to audit_log.
-    # Idempotent: if an unresolved alert with the same (severity, type,
-    # message, source) already exists, return its id without inserting —
-    # stops legacy full-render etc. from breeding hundreds of dupes.
+    #
+    # Dedup key: (type, fingerprint, resolved=0). Callers pass a STABLE
+    # fingerprint that excludes high-cardinality fields (sid, hash, exception
+    # text, counters). Repeats bump hit_count + updated_at on the existing
+    # row instead of inserting a new one.
+    #
+    # Back-compat: third positional was previously `message` (free-form
+    # human text). Existing callers still work — the free text becomes both
+    # fingerprint and message; dedup quality is the caller's responsibility
+    # until they migrate to a stable fingerprint and pass `message=` for the
+    # human detail.
+    detail = message if message is not None else fingerprint
     conn = storage.connect(db)
     try:
         existing = conn.execute(
             "SELECT id FROM alerts"
-            " WHERE severity=? AND type=? AND message=?"
-            " AND COALESCE(source,'')=COALESCE(?,'') AND resolved=0"
+            " WHERE type=? AND fingerprint=? AND resolved=0"
             " LIMIT 1",
-            (severity, atype, message, source),
+            (atype, fingerprint),
         ).fetchone()
         if existing is not None:
-            return existing["id"]
+            aid = existing["id"]
+            with conn:
+                conn.execute(
+                    "UPDATE alerts SET hit_count=hit_count+1,"
+                    " updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'),"
+                    " message=?, severity=?, source=?"
+                    " WHERE id=?",
+                    (detail, severity, source, aid),
+                )
+            return aid
         with conn:
             cur = conn.execute(
-                "INSERT INTO alerts (severity, type, message, source) "
-                "VALUES (?, ?, ?, ?)",
-                (severity, atype, message, source),
+                "INSERT INTO alerts"
+                " (severity, type, fingerprint, message, source)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (severity, atype, fingerprint, detail, source),
             )
             aid = cur.lastrowid
             conn.execute(
                 "INSERT INTO audit_log "
                 "(target_table, target_id, action, summary) "
                 "VALUES ('alerts', ?, 'insert', ?)",
-                (str(aid), f"{severity}/{atype}: {message[:120]}"),
+                (str(aid), f"{severity}/{atype}: {detail[:120]}"),
             )
         return aid
     finally:

@@ -61,10 +61,11 @@ def _disable_hooks_popen_detach(monkeypatch, request):
     try:
         from marrow import hooks
         monkeypatch.setattr(hooks, "popen_detach", lambda *a, **kw: None)
+        monkeypatch.setattr(hooks, "popen_detach_lazy", lambda *a, **kw: None)
     except ImportError:
         pass
     try:
         from marrow import sessionstart_catchup
-        monkeypatch.setattr(sessionstart_catchup, "popen_detach", lambda *a, **kw: None)
+        monkeypatch.setattr(sessionstart_catchup, "popen_detach_lazy", lambda *a, **kw: None)
     except ImportError:
         pass

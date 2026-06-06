@@ -13,7 +13,7 @@ import sqlite_vec
 
 from . import config
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 # Phase 1 first-class tables + Phase 2 affect/entities (DECISIONS Phase 2).
 # The retired emotions/people/preferences/dir placeholders stay absent.
@@ -114,10 +114,13 @@ CREATE TABLE IF NOT EXISTS alerts (
   id INTEGER PRIMARY KEY,
   severity TEXT NOT NULL,
   type TEXT NOT NULL,
+  fingerprint TEXT,
   message TEXT NOT NULL,
   source TEXT,
+  hit_count INTEGER NOT NULL DEFAULT 1,
   resolved INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
   resolved_at TEXT
 );
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -468,6 +471,7 @@ def init_db(path: str | None = None) -> sqlite3.Connection:
         _migrate_to_v12(conn)
         _migrate_to_v13(conn)
         _migrate_to_v14(conn)
+        _migrate_to_v15(conn)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     return conn
 
@@ -715,6 +719,45 @@ def _migrate_to_v12(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_atlas_stale ON atlas(stale)"
+    )
+
+
+def _migrate_to_v15(conn: sqlite3.Connection) -> None:
+    """v15: alerts dedup hardening — add fingerprint + hit_count + updated_at.
+
+    The legacy dedup key (severity, type, message, source) failed whenever a
+    callsite embedded high-cardinality fields (sid, hash, exception text) into
+    `message`, producing one row per call (760 silent_death rows in one hour
+    on 2026-06-05). The new key (type, fingerprint) lets callers separate the
+    stable dedup identity from human-readable detail; repeats bump hit_count
+    instead of inserting a duplicate row. Idempotent ALTER (duplicate-column
+    OperationalError is swallowed).
+    """
+    v = conn.execute("PRAGMA user_version").fetchone()[0]
+    if v >= 15:
+        return
+    for col, decl in (
+        ("fingerprint", "TEXT"),
+        ("hit_count", "INTEGER NOT NULL DEFAULT 1"),
+        ("updated_at", "TEXT"),
+    ):
+        try:
+            conn.execute(f"ALTER TABLE alerts ADD COLUMN {col} {decl}")
+        except sqlite3.OperationalError:
+            pass
+    # Backfill fingerprint = message for legacy rows so unresolved-state dedup
+    # keeps behaving the same until callsites are migrated.
+    conn.execute(
+        "UPDATE alerts SET fingerprint = message "
+        "WHERE fingerprint IS NULL"
+    )
+    conn.execute(
+        "UPDATE alerts SET updated_at = created_at "
+        "WHERE updated_at IS NULL"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_alerts_dedup "
+        "ON alerts(type, fingerprint, resolved)"
     )
 
 

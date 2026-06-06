@@ -169,6 +169,27 @@ def _has_prior_lifecycle_start(conn: sqlite3.Connection, sid: str) -> bool:
     return row is not None
 
 
+def _was_worktree_session_at_start(conn: sqlite3.Connection, sid: str) -> bool:
+    """True iff this sid's SessionStart wrote a worktree=1 marker.
+
+    Trust SessionStart's judgement over a live re-check at SessionEnd time:
+    cc reports inp.cwd as the launch cwd, which may have been a worktree
+    that has since been torn down (or `cd`'d out of) — re-running
+    _is_worktree_session against that stale cwd falsely returns False and
+    drops the session into the main archive path, where empty rows silently
+    suppresses lifecycle:end. Pin the verdict at start instead.
+    """
+    if not sid:
+        return False
+    row = conn.execute(
+        "SELECT summary FROM audit_log"
+        " WHERE action='session_lifecycle:start' AND target_id=?"
+        " ORDER BY id DESC LIMIT 1",
+        (sid,),
+    ).fetchone()
+    return bool(row and "worktree=1" in (row["summary"] or ""))
+
+
 def _primary_worktree(cwd: str) -> str | None:
     """Return realpath of the primary worktree of the repo containing *cwd*,
     or None if cwd is not in a git repo.
@@ -561,38 +582,42 @@ def session_end() -> int:
     if transcript.is_headless(tpath):
         return 0  # spawned claude -p fires SessionEnd too; not our session
 
-    # Worktree-session gate: cc instances launched inside a NON-primary git
-    # worktree are task-isolated runs; their dialogue must not enter marrow.
-    # Skip archive_events + LLM spawn entirely. Still write lifecycle:end so
-    # catchup doesn't tag this sid as silent_death.
     cwd = inp.get("cwd") or ""
-    if _is_worktree_session(cwd):
-        sid = inp.get("session_id") or ""
-        if sid:
-            try:
-                _conn = storage.connect(config.db_path())
-                try:
-                    with _conn:
-                        _conn.execute(
-                            "INSERT INTO audit_log"
-                            " (target_table, target_id, action, summary)"
-                            " VALUES ('events', ?, 'session_lifecycle:end', 'worktree=1')",
-                            (sid,),
-                        )
-                finally:
-                    _conn.close()
-            except Exception:  # noqa: BLE001 — never block session_end
-                pass
-        return 0
-
+    early_sid = (inp.get("session_id") or "").strip()
     db = config.db_path()
     conn = storage.connect(db)
     try:
+        # Worktree-session gate: cc instances launched inside a NON-primary git
+        # worktree are task-isolated runs; their dialogue must not enter marrow.
+        # Skip archive_events + LLM spawn entirely. Still write lifecycle:end so
+        # catchup doesn't tag this sid as silent_death.
+        #
+        # Pin verdict on SessionStart marker first: cwd at SessionEnd time can
+        # be stale (worktree torn down, cd'd out) which would silently drop the
+        # session into the main path. Live cwd check kept as a fallback for
+        # sessions whose SessionStart hook never ran.
+        is_worktree = (
+            _was_worktree_session_at_start(conn, early_sid)
+            or _is_worktree_session(cwd)
+        )
+        if is_worktree:
+            if early_sid:
+                try:
+                    with conn:
+                        conn.execute(
+                            "INSERT INTO audit_log"
+                            " (target_table, target_id, action, summary)"
+                            " VALUES ('events', ?, 'session_lifecycle:end', 'worktree=1')",
+                            (early_sid,),
+                        )
+                except Exception:  # noqa: BLE001 — never block session_end
+                    pass
+            return 0
+
         # mm- block gate: if Lumi typed mm- at any point during this session,
         # _handle_mm_prefix wrote a session_block=archive flag. Skip the entire
         # archive path so events table receives ZERO rows for this sid. Still
         # write lifecycle:end so catchup doesn't flag this as silent_death.
-        early_sid = (inp.get("session_id") or "").strip()
         if early_sid and _is_session_blocked(conn, early_sid):
             try:
                 with conn:
@@ -617,7 +642,17 @@ def session_end() -> int:
         # killed mid-run, which used to also kill the lifecycle:end INSERT
         # and the popen spawn -> sids stuck with no terminal marker. Keep
         # this block tight and ahead of every slow side-effect.
-        sid = rows[0]["session_id"] if rows else None
+        #
+        # sid fallback: cc always sends session_id in the hook payload, but
+        # rows can be empty (transcript not yet flushed, all messages
+        # filtered out, etc). Don't rely on rows[0] — that path silently
+        # dropped lifecycle:end for thousands of sessions and bred 760
+        # silent_death alerts in one hour on 2026-06-05.
+        sid = (
+            (rows[0]["session_id"] if rows else None)
+            or early_sid
+            or None
+        )
         if sid:
             try:
                 with conn:

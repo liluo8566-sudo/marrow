@@ -98,8 +98,8 @@ def test_atlas_depth_default_0(conn):
 
 
 def test_schema_version_current(conn):
-    # Bumped to 14 with the sessions table addition (B1 synapse-wx).
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 14
+    # Bumped to 15 with alerts fingerprint/hit_count dedup hardening.
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 15
 
 
 # ---------------------------------------------------------------------------

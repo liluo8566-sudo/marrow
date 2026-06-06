@@ -198,7 +198,7 @@ def test_catchup_retries_sid_when_events_grew_past_skip(db_env, monkeypatch):
     _insert_events(db, sid, count=20, role="user", recent=True)
 
     spawned: list[list[str]] = []
-    with patch("marrow.sessionstart_catchup.popen_detach",
+    with patch("marrow.sessionstart_catchup.popen_detach_lazy",
                side_effect=lambda a, log_path: spawned.append(list(a))):
         from marrow import sessionstart_catchup
         sessionstart_catchup.main()
@@ -216,7 +216,7 @@ def test_catchup_keeps_skipping_genuinely_done_sids(db_env, monkeypatch):
     _insert_events(db, sid, count=20, role="user", recent=True)
 
     spawned: list[list[str]] = []
-    with patch("marrow.sessionstart_catchup.popen_detach",
+    with patch("marrow.sessionstart_catchup.popen_detach_lazy",
                side_effect=lambda a, log_path: spawned.append(list(a))):
         from marrow import sessionstart_catchup
         sessionstart_catchup.main()
@@ -313,7 +313,7 @@ def test_catchup_picks_pending_sids(db_env, monkeypatch):
     def fake_popen(args, log_path):  # noqa: ARG001
         spawned.append(list(args))
 
-    with patch("marrow.sessionstart_catchup.popen_detach", side_effect=fake_popen):
+    with patch("marrow.sessionstart_catchup.popen_detach_lazy", side_effect=fake_popen):
         from marrow import sessionstart_catchup
         rc = sessionstart_catchup.main()
 
@@ -335,7 +335,7 @@ def test_catchup_cap_caps_at_max_fire(db_env, monkeypatch):
     monkeypatch.setattr("marrow.sessionstart_catchup.MAX_FIRE", 2)
 
     spawned: list[list[str]] = []
-    with patch("marrow.sessionstart_catchup.popen_detach",
+    with patch("marrow.sessionstart_catchup.popen_detach_lazy",
                side_effect=lambda a, log_path: spawned.append(list(a))):
         from marrow import sessionstart_catchup
         sessionstart_catchup.main()
@@ -378,7 +378,7 @@ def test_sessionend_hook_fires_async_popen(db_env, monkeypatch, tmp_path):
     monkeypatch.setattr(config, "sub_pages_state_path",
                         lambda: str(tmp_path / "db_state"))
 
-    with patch("marrow.hooks.popen_detach", side_effect=fake_popen):
+    with patch("marrow.hooks.popen_detach_lazy", side_effect=fake_popen):
         from marrow import hooks
         rc = hooks.session_end()
 
@@ -1135,7 +1135,7 @@ def test_session_end_hook_no_longer_calls_dashboard(db_env, monkeypatch,
     def track_dash(*a, **kw):
         dash_calls.append(1)
 
-    with patch("marrow.hooks.popen_detach", return_value=None), \
+    with patch("marrow.hooks.popen_detach_lazy", return_value=None), \
          patch("marrow.dashboard.write_dashboard", side_effect=track_dash):
         from marrow import hooks
         rc = hooks.session_end()
@@ -1178,7 +1178,7 @@ def test_session_end_hook_no_longer_calls_embed_pending(db_env, monkeypatch,
     def track_embed(*a, **kw):
         embed_calls.append(1)
 
-    with patch("marrow.hooks.popen_detach", return_value=None), \
+    with patch("marrow.hooks.popen_detach_lazy", return_value=None), \
          patch("marrow.recall.embed_pending", side_effect=track_embed):
         from marrow import hooks
         rc = hooks.session_end()

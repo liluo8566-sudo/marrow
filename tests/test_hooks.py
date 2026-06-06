@@ -481,7 +481,7 @@ def test_session_end_writes_lifecycle_end_marker(env, monkeypatch, tmp_path):
         "message": {"role": "user", "content": "hello"},
     }))
     _stdin(monkeypatch, {"session_id": "lc-end-sid", "transcript_path": str(jl)})
-    with patch("marrow.hooks.popen_detach"):
+    with patch("marrow.hooks.popen_detach_lazy"):
         rc = hooks.main(["session_end"])
     assert rc == 0
     conn = storage.connect(db)
@@ -522,7 +522,7 @@ def test_session_end_skips_popen_when_already_covered(env, monkeypatch, tmp_path
     conn.close()
     _stdin(monkeypatch, {"session_id": "idem-sid", "transcript_path": str(jl)})
     popen_calls: list = []
-    with patch("marrow.hooks.popen_detach",
+    with patch("marrow.hooks.popen_detach_lazy",
                side_effect=lambda a, log_path: popen_calls.append(a)):
         rc = hooks.main(["session_end"])
     assert rc == 0
@@ -556,7 +556,7 @@ def test_session_end_fires_popen_when_events_grew(env, monkeypatch, tmp_path):
     conn.close()
     _stdin(monkeypatch, {"session_id": "grew-sid", "transcript_path": str(jl)})
     popen_calls: list = []
-    with patch("marrow.hooks.popen_detach",
+    with patch("marrow.hooks.popen_detach_lazy",
                side_effect=lambda a, log_path: popen_calls.append(a)):
         rc = hooks.main(["session_end"])
     assert rc == 0

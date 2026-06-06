@@ -178,7 +178,7 @@ def test_silent_death_alert_written(db_env):
                       "ppid=88888,source=cc,started_at=1000", occurred_at=old_ts)
     _insert_user_events(db, sid, 5)
 
-    with patch("marrow.sessionstart_catchup.popen_detach"):
+    with patch("marrow.sessionstart_catchup.popen_detach_lazy"):
         from marrow import sessionstart_catchup
         sessionstart_catchup.main()
 
@@ -204,7 +204,7 @@ def test_alert_idempotent(db_env):
                       "ppid=77777,source=cc,started_at=1000", occurred_at=old_ts)
     _insert_user_events(db, sid, 5)
 
-    with patch("marrow.sessionstart_catchup.popen_detach"):
+    with patch("marrow.sessionstart_catchup.popen_detach_lazy"):
         from marrow import sessionstart_catchup
         sessionstart_catchup.main()
         sessionstart_catchup.main()
@@ -233,7 +233,7 @@ def test_silent_death_writes_to_alerts_table(db_env):
                       "ppid=66666,source=cc,started_at=1000", occurred_at=old_ts)
     _insert_user_events(db, sid, 5)
 
-    with patch("marrow.sessionstart_catchup.popen_detach"):
+    with patch("marrow.sessionstart_catchup.popen_detach_lazy"):
         from marrow import sessionstart_catchup
         sessionstart_catchup.main()
 

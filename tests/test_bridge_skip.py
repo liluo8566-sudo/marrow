@@ -89,7 +89,7 @@ def test_session_end_with_bridge_env_skips_popen(env, monkeypatch, tmp_path):
          patch.object(hooks.repo, "archive_events") as march, \
          patch.object(hooks.transcript, "is_headless", return_value=False), \
          patch.object(hooks, "_is_worktree_session", return_value=False), \
-         patch.object(hooks, "popen_detach") as mpop:
+         patch.object(hooks, "popen_detach_lazy") as mpop:
         rc = session_end()
 
     assert rc == 0
@@ -124,7 +124,7 @@ def test_session_end_without_env_spawns_popen(env, monkeypatch, tmp_path):
          patch.object(hooks.repo, "archive_events"), \
          patch.object(hooks.transcript, "is_headless", return_value=False), \
          patch.object(hooks, "_is_worktree_session", return_value=False), \
-         patch.object(hooks, "popen_detach") as mpop:
+         patch.object(hooks, "popen_detach_lazy") as mpop:
         rc = session_end()
 
     assert rc == 0

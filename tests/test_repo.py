@@ -136,6 +136,93 @@ def test_add_alert_writes_alerts_and_audit(tmp_path):
         conn.close()
 
 
+def test_add_alert_dedup_by_fingerprint_bumps_hit_count(tmp_path):
+    # Regression for the 2026-06-05 760 silent_death flood: pre-v15 dedup keyed
+    # on the full message string, so any high-cardinality field embedded in the
+    # message (sid, hash, exception text) bypassed dedup. Now the third
+    # positional is a stable fingerprint; same fingerprint -> hit_count bump,
+    # not a new row.
+    p = str(tmp_path / "dedup.db")
+    storage.init_db(p).close()
+    a1 = repo.add_alert("warn", "silent_death", "silent_death", "src", message="m1", db=p)
+    a2 = repo.add_alert("warn", "silent_death", "silent_death", "src", message="m2", db=p)
+    a3 = repo.add_alert("warn", "silent_death", "silent_death", "src", message="m3", db=p)
+    assert a1 == a2 == a3
+    conn = storage.connect(p)
+    try:
+        rows = conn.execute(
+            "SELECT id, fingerprint, hit_count, message FROM alerts"
+            " WHERE type='silent_death'"
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["hit_count"] == 3
+        # Latest detail wins on the deduped row so the dashboard sees the
+        # freshest context.
+        assert rows[0]["message"] == "m3"
+    finally:
+        conn.close()
+
+
+def test_add_alert_distinct_fingerprint_creates_new_row(tmp_path):
+    p = str(tmp_path / "split.db")
+    storage.init_db(p).close()
+    a1 = repo.add_alert("warn", "drift", "fp_a", "src", db=p)
+    a2 = repo.add_alert("warn", "drift", "fp_b", "src", db=p)
+    assert a1 != a2
+    conn = storage.connect(p)
+    try:
+        n = conn.execute(
+            "SELECT COUNT(*) FROM alerts WHERE type='drift'"
+        ).fetchone()[0]
+        assert n == 2
+    finally:
+        conn.close()
+
+
+def test_add_alert_resolved_row_does_not_block_new_alert(tmp_path):
+    # Dedup is scoped to unresolved rows: a resolved alert of the same
+    # fingerprint must not prevent a fresh insert.
+    p = str(tmp_path / "resolved.db")
+    storage.init_db(p).close()
+    a1 = repo.add_alert("warn", "kind", "fp", "src", db=p)
+    conn = storage.connect(p)
+    try:
+        with conn:
+            conn.execute("UPDATE alerts SET resolved=1, resolved_at='2026-06-06T00:00:00Z' WHERE id=?", (a1,))
+    finally:
+        conn.close()
+    a2 = repo.add_alert("warn", "kind", "fp", "src", db=p)
+    assert a2 != a1
+    conn = storage.connect(p)
+    try:
+        n = conn.execute("SELECT COUNT(*) FROM alerts WHERE type='kind'").fetchone()[0]
+        assert n == 2
+    finally:
+        conn.close()
+
+
+def test_add_alert_legacy_positional_still_works(tmp_path):
+    # Back-compat for callsites that haven't migrated: third positional was
+    # historically the free-form message. It now becomes the fingerprint, but
+    # the row still lands and dedup still functions on identical text.
+    p = str(tmp_path / "legacy.db")
+    storage.init_db(p).close()
+    a1 = repo.add_alert("warn", "legacy", "free text", "src", db=p)
+    a2 = repo.add_alert("warn", "legacy", "free text", "src", db=p)
+    assert a1 == a2
+    conn = storage.connect(p)
+    try:
+        row = conn.execute(
+            "SELECT fingerprint, message, hit_count FROM alerts WHERE id=?",
+            (a1,),
+        ).fetchone()
+        assert row["fingerprint"] == "free text"
+        assert row["message"] == "free text"
+        assert row["hit_count"] == 2
+    finally:
+        conn.close()
+
+
 # ── archive_events ────────────────────────────────────────────────────────────
 
 def test_archive_events_inserts_n(db):

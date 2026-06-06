@@ -306,12 +306,12 @@ def main(argv: list[str] | None = None) -> int:  # noqa: ARG001
                 pending.append(sid)
 
         # Alert on silent deaths: start >= 30min ago, ppid dead, no lifecycle:end.
-        # TEMP gate (2026-06-06): bled 760 rows in one hour because add_alert
-        # dedup key embeds sid -> no dedup across sids. Default OFF until
-        # sessionend_async (aff48a8) bug is fixed and dedup is reworked.
-        # Opt-in for debug: MARROW_SILENT_DEATH=1.
-        silent_death_enabled = os.environ.get("MARROW_SILENT_DEATH") == "1"
-        for sid in candidates if silent_death_enabled else ():
+        # Dedup: fingerprint embeds only sid[:8] (one row per truly silent
+        # session, idempotent across catchup re-runs). The 2026-06-05 flood of
+        # 760 rows was caused by hooks.py lifecycle:end gaps (worktree gate
+        # falling through with empty rows) + legacy message-string dedup,
+        # both fixed in this change.
+        for sid in candidates:
             start_rows = conn.execute(
                 "SELECT summary, occurred_at FROM audit_log"
                 " WHERE action='session_lifecycle:start' AND target_id=?"
@@ -333,7 +333,8 @@ def main(argv: list[str] | None = None) -> int:  # noqa: ARG001
             ).fetchone()
             if end_exists:
                 continue
-            # Idempotency: one alert row per sid per catchup pass.
+            # Idempotency: one audit_log marker per sid (cheap LIKE check so
+            # repeated catchup passes don't double-stamp the same sid).
             already_alerted = conn.execute(
                 "SELECT 1 FROM audit_log"
                 " WHERE action='alert' AND target_id=?"
@@ -351,15 +352,18 @@ def main(argv: list[str] | None = None) -> int:  # noqa: ARG001
                     )
             except Exception:  # noqa: BLE001
                 pass
-            # Surface to dashboard via alerts table. add_alert is idempotent on
-            # (severity, type, message, source) for unresolved rows — re-runs
-            # won't dupe. Best-effort: never block catchup on alert write.
+            # Surface to dashboard via alerts table. fingerprint is stable per
+            # sid -> repeated catchup passes bump hit_count instead of spawning
+            # duplicate rows; message carries the full human detail.
             try:
                 repo.add_alert(
                     "warn", "silent_death",
-                    f"sid={sid[:8]} no lifecycle:end "
-                    f"(>= {_SILENT_DEATH_MIN}min, ppid dead)",
+                    f"silent_death:sid={sid[:8]}",
                     source="sessionstart_catchup.py", db=db,
+                    message=(
+                        f"sid={sid[:8]} no lifecycle:end "
+                        f"(>= {_SILENT_DEATH_MIN}min, ppid dead)"
+                    ),
                 )
             except Exception:  # noqa: BLE001
                 pass

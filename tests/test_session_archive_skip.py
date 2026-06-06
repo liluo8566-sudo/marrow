@@ -138,7 +138,7 @@ def test_mm_plus_reruns_sid(env, monkeypatch, tmp_path):
         spawned.append(list(args))
 
     _stdin(monkeypatch, {"prompt": f"mm+ {sid}", "session_id": "current-sid"})
-    with patch("marrow.hooks.popen_detach", side_effect=fake_popen):
+    with patch("marrow.hooks.popen_detach_lazy", side_effect=fake_popen):
         rc = hooks.main(["user_prompt_submit"])
     assert rc == 0
 
@@ -192,7 +192,7 @@ def test_resume_clears_skip(env, monkeypatch, tmp_path):
 
     # Simulate session_start (resume) for same sid.
     _stdin(monkeypatch, {"session_id": sid})
-    with patch("marrow.hooks.popen_detach"):
+    with patch("marrow.hooks.popen_detach_lazy"):
         rc = hooks.main(["session_start"])
     assert rc == 0
 
@@ -280,7 +280,7 @@ def test_mm_minus_blocks_session_end_archive(env, monkeypatch, tmp_path):
          patch.object(hooks, "_is_worktree_session", return_value=False), \
          patch.object(hooks.transcript, "clean") as mclean, \
          patch.object(hooks.repo, "archive_events") as march, \
-         patch.object(hooks, "popen_detach") as mpop:
+         patch.object(hooks, "popen_detach_lazy") as mpop:
         rc = hooks.session_end()
     assert rc == 0
 
@@ -323,7 +323,7 @@ def test_mm_plus_clears_prior_mm_minus_block(env, monkeypatch, tmp_path):
 
     # Step 2: mm+ on the same sid (popen mocked, no real subprocess).
     _stdin(monkeypatch, {"prompt": "mm+", "session_id": sid})
-    with patch("marrow.hooks.popen_detach"):
+    with patch("marrow.hooks.popen_detach_lazy"):
         assert hooks.main(["user_prompt_submit"]) == 0
 
     # Both gates now cleared (latest row wins).

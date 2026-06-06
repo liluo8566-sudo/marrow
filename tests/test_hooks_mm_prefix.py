@@ -74,7 +74,7 @@ def test_mm_plus_empty_spawns_current_sid(env, monkeypatch, capsys):
     (tmp_path / "logs").mkdir(exist_ok=True)
     _stdin(monkeypatch, {"prompt": "mm+", "session_id": "cur-sid-001"})
     popen_calls = []
-    with patch("marrow.hooks.popen_detach",
+    with patch("marrow.hooks.popen_detach_lazy",
                side_effect=lambda a, log_path: popen_calls.append(a)):
         rc = hooks.main(["user_prompt_submit"])
     assert rc == 0
@@ -102,7 +102,7 @@ def test_mm_plus_uuid_spawns_named_sid(env, monkeypatch, capsys):
     named_sid = "7f1473ca-a8ab-4207-a8a8-57418d3a2c5b"
     _stdin(monkeypatch, {"prompt": f"mm+ {named_sid}", "session_id": "other-sid"})
     popen_calls = []
-    with patch("marrow.hooks.popen_detach",
+    with patch("marrow.hooks.popen_detach_lazy",
                side_effect=lambda a, log_path: popen_calls.append(a)):
         rc = hooks.main(["user_prompt_submit"])
     assert rc == 0
@@ -131,7 +131,7 @@ def test_mm_plus_natural_language_injects_context(env, monkeypatch, capsys):
     clue = "我来试试看～嘿嘿嘿（亲一口）\n都commit了么宝宝"
     _stdin(monkeypatch, {"prompt": f"mm+\n{clue}", "session_id": "s-cur"})
     popen_calls = []
-    with patch("marrow.hooks.popen_detach",
+    with patch("marrow.hooks.popen_detach_lazy",
                side_effect=lambda a, log_path: popen_calls.append(a)):
         rc = hooks.main(["user_prompt_submit"])
     assert rc == 0
@@ -166,7 +166,7 @@ def test_mm_minus_natural_language_injects_context(env, monkeypatch, capsys):
     clue = "之前那个session好像漏了"
     _stdin(monkeypatch, {"prompt": f"mm- {clue}", "session_id": "s-cur"})
     popen_calls = []
-    with patch("marrow.hooks.popen_detach",
+    with patch("marrow.hooks.popen_detach_lazy",
                side_effect=lambda a, log_path: popen_calls.append(a)):
         rc = hooks.main(["user_prompt_submit"])
     assert rc == 0
@@ -263,7 +263,7 @@ def test_mm_plus_active_session_archives_events_before_spawn(env, monkeypatch, c
         "transcript_path": str(jl),
     })
     popen_calls = []
-    with patch("marrow.hooks.popen_detach",
+    with patch("marrow.hooks.popen_detach_lazy",
                side_effect=lambda a, log_path: popen_calls.append(a)):
         rc = hooks.main(["user_prompt_submit"])
     assert rc == 0
@@ -308,7 +308,7 @@ def test_mm_plus_named_sid_skips_archive(env, monkeypatch, capsys):
         clean_calls.append(path)
         return orig_clean(path)
 
-    with patch("marrow.hooks.popen_detach",
+    with patch("marrow.hooks.popen_detach_lazy",
                side_effect=lambda a, log_path: popen_calls.append(a)):
         with patch("marrow.transcript.clean", side_effect=_spy_clean):
             rc = hooks.main(["user_prompt_submit"])
@@ -345,7 +345,7 @@ def test_mm_plus_jsonl_missing_still_spawns(env, monkeypatch, capsys):
         "transcript_path": nonexistent,
     })
     popen_calls = []
-    with patch("marrow.hooks.popen_detach",
+    with patch("marrow.hooks.popen_detach_lazy",
                side_effect=lambda a, log_path: popen_calls.append(a)):
         rc = hooks.main(["user_prompt_submit"])
     assert rc == 0
