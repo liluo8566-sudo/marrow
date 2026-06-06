@@ -83,6 +83,22 @@ def _rotate_recall_log() -> None:
         pass
 
 
+def _sweep_empty_async_logs() -> None:
+    """Drop 0-byte sessionend_async_*.log left behind when cc SIGKILLs the
+    detached child before its atexit cleanup runs. Only matches the exact
+    prefix + .log suffix so recall.md / .prev / unrelated files stay safe."""
+    log_dir = config.DATA_DIR / "logs"
+    try:
+        for p in log_dir.glob("sessionend_async_*.log"):
+            try:
+                if p.stat().st_size == 0:
+                    p.unlink()
+            except (FileNotFoundError, OSError):
+                pass
+    except Exception:  # noqa: BLE001 — never block session_start
+        pass
+
+
 # ── manual skip helpers ───────────────────────────────────────────────────────
 
 _MANUAL_SKIP_ACTION = "manual_skip"
@@ -451,6 +467,8 @@ def session_start() -> int:
     # Recall housekeeping — rotate side log + wipe per-session dedup state so
     # every fresh window starts with a clean recall slate.
     _rotate_recall_log()
+    # Sweep 0-byte sessionend_async_*.log residues (SIGKILL fallback).
+    _sweep_empty_async_logs()
     inp = _read_input()
     db = config.db_path()
     conn = storage.connect(db)

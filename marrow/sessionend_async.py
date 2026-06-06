@@ -365,62 +365,69 @@ def main(argv: list[str] | None = None) -> int:
         else:
             i += 1
 
-    if log_path:
-        _atexit.register(_cleanup_empty_log, _Path(log_path))
+    log_obj = _Path(log_path) if log_path else None
+    if log_obj:
+        _atexit.register(_cleanup_empty_log, log_obj)  # SIGKILL backstop
 
-    if not sid:
-        print("usage: python -m marrow.sessionend_async --sid <session_id>"
-              " [--cwd <path>] [--log-path <path>]", file=sys.stderr)
-        return 2
-
-    cfg = config.load()
-    threshold = cfg.get("sessionend", {}).get("skip_turn_threshold", 3)
-    db = config.db_path()
-    conn = storage.connect(db)
     try:
-        if _already_done(conn, sid):
-            return 0
-        # Manual skip: mm- prefix wrote a manual_skip/skip row; latest row wins.
-        if _is_manual_skip(conn, sid):
-            _write_final_audit(conn, sid, "skip:manual")
-            return 0
-        # Silent-death root cause: cc fires session_end mid-flush while only
-        # a partial slice of events is on disk. The original skip:short_session
-        # row then blocked every later re-run. _drop_stale_skip clears the row
-        # only when event count grew past threshold since the skip was written.
-        _drop_stale_skip(conn, sid, threshold)
+        if not sid:
+            print("usage: python -m marrow.sessionend_async --sid <session_id>"
+                  " [--cwd <path>] [--log-path <path>]", file=sys.stderr)
+            return 2
 
-        # Stamp "start" the moment we own the work. Any silent death below
-        # leaves this row behind so catchup counts it as one failed attempt.
+        cfg = config.load()
+        threshold = cfg.get("sessionend", {}).get("skip_turn_threshold", 3)
+        db = config.db_path()
+        conn = storage.connect(db)
         try:
-            with conn:
-                conn.execute(
-                    "INSERT INTO audit_log (target_table, target_id, action, summary)"
-                    " VALUES ('events', ?, 'sessionend_extract', ?)",
-                    (sid, _SUMMARY_START),
-                )
-        except Exception:  # noqa: BLE001 — never block extraction on audit
-            pass
+            if _already_done(conn, sid):
+                return 0
+            # Manual skip: mm- prefix wrote a manual_skip/skip row; latest row wins.
+            if _is_manual_skip(conn, sid):
+                _write_final_audit(conn, sid, "skip:manual")
+                return 0
+            # Silent-death root cause: cc fires session_end mid-flush while only
+            # a partial slice of events is on disk. The original skip:short_session
+            # row then blocked every later re-run. _drop_stale_skip clears the row
+            # only when event count grew past threshold since the skip was written.
+            _drop_stale_skip(conn, sid, threshold)
 
-        count = _user_event_count(conn, sid)
-        if count <= threshold and not _has_mm_plus_reset(conn, sid):
-            _write_final_audit(conn, sid, f"{_SUMMARY_SKIP},user_count={count}")
-            return 0
+            # Stamp "start" the moment we own the work. Any silent death below
+            # leaves this row behind so catchup counts it as one failed attempt.
+            try:
+                with conn:
+                    conn.execute(
+                        "INSERT INTO audit_log (target_table, target_id, action, summary)"
+                        " VALUES ('events', ?, 'sessionend_extract', ?)",
+                        (sid, _SUMMARY_START),
+                    )
+            except Exception:  # noqa: BLE001 — never block extraction on audit
+                pass
 
-        events_text, date = _session_events_text(conn, sid)
-        if not events_text:
-            _write_final_audit(conn, sid, "fail:no_events")
+            count = _user_event_count(conn, sid)
+            if count <= threshold and not _has_mm_plus_reset(conn, sid):
+                _write_final_audit(conn, sid, f"{_SUMMARY_SKIP},user_count={count}")
+                return 0
+
+            events_text, date = _session_events_text(conn, sid)
+            if not events_text:
+                _write_final_audit(conn, sid, "fail:no_events")
+                return 1
+
+            return _run_extraction(conn, sid, date, events_text, cfg, count, cwd)
+        except Exception as e:  # noqa: BLE001
+            try:
+                _write_final_audit(conn, sid, f"fail:{type(e).__name__}")
+            except Exception:
+                pass
             return 1
-
-        return _run_extraction(conn, sid, date, events_text, cfg, count, cwd)
-    except Exception as e:  # noqa: BLE001
-        try:
-            _write_final_audit(conn, sid, f"fail:{type(e).__name__}")
-        except Exception:
-            pass
-        return 1
+        finally:
+            conn.close()
     finally:
-        conn.close()
+        # Active cleanup — atexit doesn't fire under SIGKILL, but this finally
+        # always runs on normal return paths (already_done / skip:* / fail:*).
+        if log_obj is not None:
+            _cleanup_empty_log(log_obj)
 
 
 def _run_writer(conn, sid: str, name: str, writer) -> bool:
