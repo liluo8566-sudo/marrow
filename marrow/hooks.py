@@ -475,7 +475,11 @@ def session_start() -> int:
         # Write lifecycle:start marker so catchup can detect live vs dead sessions.
         sid = inp.get("session_id") if isinstance(inp, dict) else None
         cwd = inp.get("cwd") if isinstance(inp, dict) else None
+        tpath = inp.get("transcript_path") if isinstance(inp, dict) else None
         is_worktree = _is_worktree_session(cwd or "")
+        # Subagent (Task tool dispatch) — task-isolated like worktree;
+        # no personal memory / no /resume tracking.
+        is_subagent = bool(tpath and "/tasks/" in tpath)
         if sid:
             # Fresh window or resume — drop prior recall dedup state either way
             # (cheap; resume re-shows seen rows once, acceptable).
@@ -503,8 +507,9 @@ def session_start() -> int:
             # B1 cli half: every cc session (cli or bridge-spawned) lands a row in
             # `sessions` so /resume's recent-picker sees all channels. Channel
             # hint from MARROW_CHANNEL env (bridge sets =wx; default cli).
-            # No-op for worktree sessions to keep /resume focused on real work.
-            if not is_worktree:
+            # No-op for worktree / subagent sessions to keep /resume focused
+            # on real work.
+            if not is_worktree and not is_subagent:
                 try:
                     channel = os.environ.get("MARROW_CHANNEL") or "cli"
                     # cli: peek ppid argv for --model claude-opus-X[1m] so the
@@ -517,8 +522,9 @@ def session_start() -> int:
                 except Exception:  # noqa: BLE001 — never block session_start
                     pass
 
-        if is_worktree:
-            # Worktree session: task-isolated work, no personal memory needed.
+        if is_worktree or is_subagent:
+            # Task-isolated (git worktree or Task-tool subagent): no
+            # personal memory injection.
             ctx = ""
         else:
             parts: list[str] = []
@@ -857,12 +863,14 @@ def user_prompt_submit() -> int:
     if isinstance(inp, dict) and _handle_mm_prefix(inp):
         return 0  # no additionalContext injection for control prompts
 
-    # Worktree-session gate: cc instances in a NON-primary git worktree are
+    # Worktree / subagent gate: cc instances in a NON-primary git worktree
+    # OR dispatched via Task tool (transcript_path under /tasks/) are
     # task-isolated runs. They take direction from the user prompt + main
-    # session only; no personal recall context, no token spend on hits the
-    # worktree session can't act on anyway.
+    # session only; no personal recall context.
     cwd = inp.get("cwd") if isinstance(inp, dict) else None
-    if _is_worktree_session(cwd or ""):
+    tpath = inp.get("transcript_path") if isinstance(inp, dict) else None
+    is_subagent = bool(tpath and "/tasks/" in tpath)
+    if _is_worktree_session(cwd or "") or is_subagent:
         return 0
 
     # cwd exclude gate — opt-out per-dir via config.toml [recall].exclude_cwds.
