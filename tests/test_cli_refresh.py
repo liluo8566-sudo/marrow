@@ -64,31 +64,6 @@ def test_refresh_all_prints_subpages_marker(db, capsys):
 
 # ── wt-md-f: scan-then-render semantic ──────────────────────────────────────
 
-def test_refresh_scans_handover_md_into_md_index(db, tmp_path):
-    """mw refresh ingests hand-added blocks in handover.md into md_index so a
-    later auto-write sees the baseline and preserves them."""
-    p, _, _ = db
-    handover = tmp_path / "handover.md"
-    handover.write_text(
-        "# notes\n"
-        "<!-- id:handover.manual.block -->\n"
-        "- hand-added line\n",
-        encoding="utf-8",
-    )
-    rc = cli.main(["refresh", "--db", p])
-    assert rc == 0
-
-    conn = storage.connect(p)
-    row = conn.execute(
-        "SELECT content_hash, tombstone_at FROM md_index"
-        " WHERE path=? AND block_id=?",
-        (str(handover), "handover.manual.block"),
-    ).fetchone()
-    conn.close()
-    assert row is not None, "scan did not record handover hand-edit baseline"
-    assert row["tombstone_at"] is None
-
-
 def test_refresh_records_dashboard_block_baselines(db):
     """mw refresh scans dashboard.md so each canonical block has a baseline
     row in md_index — subsequent sessionend writes can detect hand-edits."""
@@ -132,22 +107,3 @@ def test_refresh_all_scans_subpage_md_into_md_index(db, tmp_path):
     assert row is not None, "scan phase did not pick up subpage hand-edit"
 
 
-# ── mw handover --sid ───────────────────────────────────────────────────────
-
-def test_handover_cli_fires_async_popen(db, capsys, monkeypatch):
-    """mw handover --sid <sid> spawns sessionend_async detached + prints log path."""
-    p, _, _ = db
-    spawned: list[list[str]] = []
-
-    def fake_popen(args, log_path):  # noqa: ARG001
-        spawned.append(list(args))
-
-    monkeypatch.setattr("marrow.popen_detach.popen_detach", fake_popen)
-    rc = cli.main(["handover", "--db", p, "--sid", "test-sid-99"])
-    assert rc == 0
-    assert len(spawned) == 1
-    assert "sessionend_async" in " ".join(spawned[0])
-    assert "test-sid-99" in spawned[0]
-    out = capsys.readouterr().out
-    assert "test-sid-99" in out
-    assert "sessionend_async_test-sid-99.log" in out

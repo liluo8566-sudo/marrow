@@ -92,22 +92,6 @@ def test_open_alerts_severity_order(db):
     assert severities.index("warn") < severities.index("info")
 
 
-# ── handoff ───────────────────────────────────────────────────────────────────
-
-def test_handoff_keys(db):
-    h = repo.handoff(db)
-    assert set(h.keys()) == {"tasks", "alerts"}
-
-
-def test_handoff_reflects_open(db):
-    db.execute("INSERT INTO tasks(category,title,status) VALUES('work','T','active')")
-    db.execute("INSERT INTO alerts(severity,type,message) VALUES('warn','x','A')")
-    db.commit()
-    h = repo.handoff(db)
-    assert len(h["tasks"]) == 1
-    assert len(h["alerts"]) == 1
-
-
 # ── add_alert ─────────────────────────────────────────────────────────────────
 
 def test_add_alert_returns_id(tmp_path):

@@ -127,7 +127,7 @@ class TestSessionStartWorktreeGate:
         assert rc == 0
         out = json.loads(capsys.readouterr().out)
         ctx = out["hookSpecificOutput"]["additionalContext"]
-        # No affect/handoff injection for worktree sessions.
+        # No affect injection for worktree sessions.
         assert ctx == ""
         # Lifecycle row carries worktree=1 marker for forensics.
         summary = _audit_summary(db, sid, "session_lifecycle:start")
@@ -148,10 +148,10 @@ class TestSessionStartWorktreeGate:
         summary = _audit_summary(db, sid, "session_lifecycle:start")
         assert summary is not None
         assert "worktree=1" not in summary
-        # additionalContext still flows (handoff at minimum).
+        # additionalContext still flows for primary sessions.
         out = json.loads(capsys.readouterr().out)
         ctx = out["hookSpecificOutput"]["additionalContext"]
-        assert "Marrow handoff" in ctx
+        assert ctx is not None
 
 
 # ── session_end ───────────────────────────────────────────────────────────────

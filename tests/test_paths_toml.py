@@ -14,7 +14,6 @@ def test_load_default(tmp_path):
     p = load_paths(toml_path=tmp_path / "nonexistent.toml")
     assert p.marrow_db == Path(_DEFAULTS["marrow_db"]).expanduser()
     assert p.dashboard_md == Path(_DEFAULTS["dashboard_md"]).expanduser()
-    assert p.handover_md == Path(_DEFAULTS["handover_md"]).expanduser()
     assert p.logs_dir == Path(_DEFAULTS["logs_dir"]).expanduser()
     assert p.state_dir == Path(_DEFAULTS["state_dir"]).expanduser()
     assert p.ny_root == Path(_DEFAULTS["ny_root"]).expanduser()
@@ -39,7 +38,7 @@ def test_load_custom(tmp_path, monkeypatch):
     assert p.ny_root == tmp_path
     assert p.dashboard_md == tmp_path / "dash.md"
     # Keys not in the custom toml fall back to defaults
-    assert p.handover_md == Path(_DEFAULTS["handover_md"]).expanduser()
+    assert p.logs_dir == Path(_DEFAULTS["logs_dir"]).expanduser()
 
 
 def test_load_custom_via_arg(tmp_path):
@@ -62,7 +61,6 @@ def test_no_regression_paths_import(tmp_path, monkeypatch):
     assert hasattr(mp, "paths")
     assert hasattr(mp.paths, "marrow_db")
     assert hasattr(mp.paths, "dashboard_md")
-    assert hasattr(mp.paths, "handover_md")
     assert hasattr(mp.paths, "logs_dir")
     assert hasattr(mp.paths, "state_dir")
     assert hasattr(mp.paths, "ny_root")
@@ -80,17 +78,6 @@ def test_no_regression_config_load(tmp_path, monkeypatch):
     assert Path(result["paths"]["db"]).is_absolute()
     # dashboard should be an absolute path string
     assert Path(result["paths"]["dashboard"]).is_absolute()
-
-
-def test_no_regression_handover_render_path(tmp_path, monkeypatch):
-    """handover_render._RENDERED_PATH is derived from config.DATA_DIR (test-redirect safe)."""
-    from marrow import config
-    import marrow.handover_render as hr
-    # DATA_DIR is already redirected to tmp by conftest autouse fixture
-    # The module-level _RENDERED_PATH is set at import time, so we just verify
-    # the module loads cleanly and has the attribute.
-    assert hasattr(hr, "_RENDERED_PATH")
-    assert isinstance(hr._RENDERED_PATH, Path)
 
 
 def test_no_regression_hooks_import(monkeypatch):

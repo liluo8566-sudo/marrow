@@ -225,8 +225,8 @@ def test_catchup_keeps_skipping_genuinely_done_sids(db_env, monkeypatch):
 
 
 def test_sessionend_async_writes_fail_audit_on_exception(db_env):
-    """Both sonnet calls raise → final summary='fail:state=...,narrative=...',
-    rc=1. Plan H: STATE + NARRATIVE both blown means full fail."""
+    """Both LLM calls raise → final summary='fail:task_affect=...,digest=...',
+    rc=1. Both calls blown means full fail."""
     db, _ = db_env
     _insert_events(db, "test-fail", count=10, role="user")
 
@@ -239,7 +239,7 @@ def test_sessionend_async_writes_fail_audit_on_exception(db_env):
     rows = _audit_rows(db, "test-fail")
     assert rows[0]["summary"] == "start"
     assert rows[-1]["summary"] == (
-        "fail:state=RuntimeError,narrative=RuntimeError")
+        "fail:task_affect=RuntimeError,digest=RuntimeError")
 
 
 # ── Unit 3: sessionstart_catchup ─────────────────────────────────────────────
@@ -637,6 +637,47 @@ def test_seg_task_cand_tick_unknown_id_noop(db_env):
         conn.close()
 
 
+# ── Digest log prune ─────────────────────────────────────────────────────────
+
+def test_prune_digest_logs_keeps_newest_three(tmp_path, monkeypatch):
+    """Write 5 fake dated digest log files; prune keeps newest 3."""
+    import datetime as _dt
+    from marrow import sessionend_writers, config as _config
+
+    monkeypatch.setattr(_config, "DATA_DIR", tmp_path)
+
+    log_dir = tmp_path / "logs" / "digest"
+    log_dir.mkdir(parents=True)
+
+    now = _dt.datetime.now(_dt.timezone.utc)
+
+    # Create 5 files with mtimes spread over 5 days (oldest first).
+    files = []
+    for days_ago in range(4, -1, -1):  # 4,3,2,1,0 days ago
+        day = (now - _dt.timedelta(days=days_ago)).strftime("%Y-%m-%d")
+        f = log_dir / f"digest-{day}.log"
+        f.write_text(f"entry for {day}", encoding="utf-8")
+        # Set mtime to match the date.
+        mtime = (now - _dt.timedelta(days=days_ago)).timestamp()
+        import os
+        os.utime(f, (mtime, mtime))
+        files.append((days_ago, f))
+
+    # Call prune directly.
+    sessionend_writers._prune_digest_logs()
+
+    surviving = sorted(log_dir.glob("digest-*.log"))
+    # Should keep the 3 newest (days_ago 0, 1, 2); delete days_ago 3 and 4.
+    assert len(surviving) == 3, (
+        f"expected 3 files, got {[f.name for f in surviving]}")
+    # The two oldest must be gone.
+    assert not files[0][1].exists(), "oldest (4d ago) should be pruned"
+    assert not files[1][1].exists(), "second-oldest (3d ago) should be pruned"
+    # Today and yesterday always kept.
+    assert files[4][1].exists(), "today must survive"
+    assert files[3][1].exists(), "yesterday must survive"
+
+
 # ── Manual: live isolation test ───────────────────────────────────────────────
 
 @pytest.mark.manual
@@ -667,33 +708,19 @@ def test_pingpong_live_isolation_in_hook_context(db_env):
     assert rows and rows[-1]["summary"].startswith("ok,user_count=")
 
 
-# ── handover segment (Plan H — STATE + NARRATIVE split) ─────────────────────
+# ── two-call flow (TASK_AFFECT + DIGEST) ────────────────────────────────────
 
-def test_sessionend_two_calls_routes_to_four_writers(db_env, tmp_path,
-                                                      monkeypatch):
-    """STATE + NARRATIVE → 4 segment writers + per-segment audit + final 'ok'.
-    v2: client.call invoked twice; handover applies the DOING_DIFF; PROGRESS is
-    frozen (not appended)."""
+def test_sessionend_two_calls_routes_to_three_writers(db_env):
+    """TASK_AFFECT + DIGEST → 3 segment writers + per-segment audit + final 'ok'.
+    client.call invoked twice; writers: task_cand + affect from call1, digest from call2."""
     db, _ = db_env
     _insert_events(db, "test-combined", count=10, role="user")
 
-    h = tmp_path / "handover.md"
-
-    state_raw = (
+    task_affect_raw = (
         "===TASK===\n"
         "[{\"title\": \"refactor sessionend\", \"category\": \"Project\","
         " \"status\": \"active\", \"due\": null, \"note\": \"\"}]\n"
         "===END===\n"
-        "===DOING_DIFF===\n"
-        "ADD:\n"
-        "[Marrow] - shipped 2-call refactor\n"
-        "  - Current: 2-call flow live\n"
-        "  - Next: verify pytest + plist reload\n"
-        "  - Reference: marrow/sessionend_async.py:80\n"
-        "===END===\n"
-        "===NOTE_DONE===\nN/A\n===END===\n"
-    )
-    narrative_raw = (
         "===AFFECT===\n"
         "[{\"ep\": 1, \"valence\": 0.8, \"arousal\": 0.5,"
         " \"importance\": 3, \"label\": \"愉悦\","
@@ -701,12 +728,11 @@ def test_sessionend_two_calls_routes_to_four_writers(db_env, tmp_path,
         " \"event_hint\": \"\", \"unresolved\": 0,"
         " \"reconcile_prev\": \"N/A\"}]\n"
         "===END===\n"
-        "===DIGEST===\nRefactored sessionend to 2 calls.\n===END===\n"
     )
+    digest_raw = "===DIGEST===\nRefactored sessionend to 2 calls.\n===END===\n"
 
-    with patch("marrow.sessionend_async.LLMClient") as MockClient, \
-         patch("marrow.handover_render._RENDERED_PATH", h):
-        MockClient.return_value.call.side_effect = [state_raw, narrative_raw]
+    with patch("marrow.sessionend_async.LLMClient") as MockClient:
+        MockClient.return_value.call.side_effect = [task_affect_raw, digest_raw]
         from marrow import sessionend_async
         rc = sessionend_async.main(["--sid", "test-combined"])
 
@@ -730,46 +756,27 @@ def test_sessionend_two_calls_routes_to_four_writers(db_env, tmp_path,
         summaries = [r["summary"] for r in seg_rows]
         assert summaries[0] == "start"
         assert summaries[-1].startswith("ok,user_count=")
-        # 4 segment audit rows logged 'ok' (handover/task_cand from STATE,
-        # affect/digest from NARRATIVE). No 'progress' writer (frozen).
+        # 3 segment audit rows logged 'ok' (task_cand + affect from call1,
+        # digest from call2).
         seg_oks = [r for r in seg_rows
                    if r["action"].startswith("sessionend_extract_")
                    and r["summary"] == "ok"]
-        assert len(seg_oks) == 4
-        assert not any(r["action"].endswith("_progress") for r in seg_rows)
+        assert len(seg_oks) == 3
     finally:
         conn.close()
-    body = h.read_text(encoding="utf-8")
-    assert "shipped 2-call refactor" in body
-    assert "verify pytest + plist reload" in body
-    assert "handover: ready sid:test-combined" in body
-    assert "## Done" in body and "## Doing" in body
-    assert "## Lumi's Note" in body
 
 
-def test_sessionend_state_fail_narrative_ok_partial(db_env, tmp_path,
-                                                      monkeypatch):
-    """STATE raises, NARRATIVE succeeds → narrative writers run, state ones
-    skipped → final summary='partial:...'. Plan H independence."""
+def test_sessionend_task_affect_fail_digest_ok_partial(db_env):
+    """TASK_AFFECT raises, DIGEST succeeds → digest writer runs, task_cand/affect
+    skipped → final summary='partial:...'. Call independence."""
     db, _ = db_env
     _insert_events(db, "test-partial", count=10, role="user")
-    h = tmp_path / "handover.md"
 
-    narrative_raw = (
-        "===AFFECT===\n"
-        "[{\"ep\": 1, \"valence\": 0.6, \"arousal\": 0.4,"
-        " \"importance\": 2, \"label\": \"平静\","
-        " \"description\": \"测试通过\", \"entities\": [],"
-        " \"event_hint\": \"\", \"unresolved\": 0,"
-        " \"reconcile_prev\": \"N/A\"}]\n"
-        "===END===\n"
-        "===DIGEST===\nshort digest\n===END===\n"
-    )
-    state_err = RuntimeError("state-blew-up")
+    digest_raw = "===DIGEST===\nshort digest\n===END===\n"
+    task_affect_err = RuntimeError("task-affect-blew-up")
 
-    with patch("marrow.sessionend_async.LLMClient") as MockClient, \
-         patch("marrow.handover_render._RENDERED_PATH", h):
-        MockClient.return_value.call.side_effect = [state_err, narrative_raw]
+    with patch("marrow.sessionend_async.LLMClient") as MockClient:
+        MockClient.return_value.call.side_effect = [task_affect_err, digest_raw]
         from marrow import sessionend_async
         rc = sessionend_async.main(["--sid", "test-partial"])
 
@@ -777,7 +784,7 @@ def test_sessionend_state_fail_narrative_ok_partial(db_env, tmp_path,
     rows = _audit_rows(db, "test-partial")
     final = rows[-1]["summary"]
     assert final.startswith("partial:")
-    assert "task_cand" in final and "handover" in final
+    assert "task_cand" in final and "affect" in final
 
 
 def test_session_events_text_prefixes_local_hhmm(db_env):
@@ -794,53 +801,6 @@ def test_session_events_text_prefixes_local_hhmm(db_env):
     import re
     # 00:30 UTC → Melbourne (UTC+10) = 10:30; assert the [HH:MM] [念念] shape.
     assert re.match(r"\[\d{2}:\d{2}\] \[念念\] hi", text), text
-
-
-def test_load_doing_for_sonnet_extracts_threads_with_ids(tmp_path, monkeypatch):
-    """v2: doing loader pulls `## Doing` threads prefixed with [#id]."""
-    from marrow import sessionend_async, handover_render
-    h = tmp_path / "handover.md"
-    h.write_text(
-        "# title\n\n"
-        "## Done\n- old <!-- done:1700000000 -->\n\n"
-        "## Doing\n"
-        "1. [Marrow] - thread A\n"
-        "  - Current: a-state\n"
-        "  - Next: a-next\n"
-        "  - Reference: N/A\n"
-        "<!-- id:3 -->\n\n"
-        "## Lumi's Note\n- buy hand cream\n\n"
-        "<!-- handover: ready sid:x ts:1700000000 -->\n", encoding="utf-8")
-    monkeypatch.setattr(handover_render, "_RENDERED_PATH", h)
-    out = sessionend_async._load_doing_for_sonnet()
-    assert "[#3] [Marrow] - thread A" in out
-    assert "Current: a-state" in out
-    # Note / Done content not in the doing block.
-    assert "buy hand cream" not in out
-
-
-def test_load_doing_returns_placeholder_when_missing(tmp_path, monkeypatch):
-    from marrow import sessionend_async, handover_render
-    monkeypatch.setattr(handover_render, "_RENDERED_PATH", tmp_path / "nope.md")
-    assert sessionend_async._load_doing_for_sonnet() == "(no prior handover)"
-
-
-def test_load_note_returns_verbatim_body(tmp_path, monkeypatch):
-    from marrow import sessionend_async, handover_render
-    h = tmp_path / "handover.md"
-    h.write_text(
-        "## Doing\n- N/A\n\n"
-        "## Lumi's Note\n- buy hand cream\n- recharge SIM\n\n",
-        encoding="utf-8")
-    monkeypatch.setattr(handover_render, "_RENDERED_PATH", h)
-    out = sessionend_async._load_note()
-    assert "buy hand cream" in out and "recharge SIM" in out
-
-
-def test_load_note_na_when_missing(tmp_path, monkeypatch):
-    from marrow import sessionend_async, handover_render
-    monkeypatch.setattr(handover_render, "_RENDERED_PATH", tmp_path / "nope.md")
-    assert sessionend_async._load_note() == "N/A"
 
 
 def test_load_active_tasks_includes_id(db_env):
@@ -873,95 +833,6 @@ def test_parse_task_rows_empty_on_garbage():
     from marrow.sessionend_prompts import parse_task_rows
     assert parse_task_rows("no marker") == []
     assert parse_task_rows("===TASK===\nnot json\n===END===\n") == []
-
-
-def test_parse_doing_diff_all_verbs():
-    from marrow.sessionend_prompts import parse_doing_diff
-    raw = (
-        "===DOING_DIFF===\n"
-        "CLOSE: 1, 2\n"
-        "KEEP: 3\n"
-        "UPDATE:\n"
-        "#4 [Marrow] - thread D\n"
-        "  - Current: new\n"
-        "  - Next: x\n"
-        "  - Reference: N/A\n"
-        "ADD:\n"
-        "[Study] - thread E\n"
-        "  - Current: e\n"
-        "  - Next: y\n"
-        "  - Reference: N/A\n"
-        "===END===\n")
-    d = parse_doing_diff(raw)
-    assert d["close"] == [1, 2]
-    assert d["keep"] == [3]
-    assert len(d["update"]) == 1 and d["update"][0]["id"] == 4
-    assert "thread D" in d["update"][0]["block"]
-    assert len(d["add"]) == 1 and "thread E" in d["add"][0]
-
-
-def test_parse_doing_diff_missing_subblocks_degrade():
-    from marrow.sessionend_prompts import parse_doing_diff
-    # No marker at all.
-    assert parse_doing_diff("nothing") == {
-        "close": [], "keep": [], "update": [], "add": []}
-    # Only CLOSE present; bad id token skipped, not crashing.
-    d = parse_doing_diff("===DOING_DIFF===\nCLOSE: 1, foo, 3\n===END===\n")
-    assert d["close"] == [1, 3]
-    assert d["keep"] == [] and d["update"] == [] and d["add"] == []
-
-
-def test_parse_note_done_drops_na():
-    from marrow.sessionend_prompts import parse_note_done
-    assert parse_note_done("===NOTE_DONE===\nN/A\n===END===\n") == []
-    out = parse_note_done(
-        "===NOTE_DONE===\n- buy hand cream\n- recharge SIM\n===END===\n")
-    assert out == ["- buy hand cream", "- recharge SIM"]
-
-
-def test_seg_handover_applies_diff(db_env, tmp_path, monkeypatch):
-    """seg_handover applies the DOING_DIFF (ADD) to the single file."""
-    db, _ = db_env
-    h = tmp_path / "handover.md"
-    monkeypatch.setattr("marrow.handover_render._RENDERED_PATH", h)
-    raw = (
-        "===DOING_DIFF===\n"
-        "ADD:\n"
-        "[Marrow] - shipped phase 3 handover\n"
-        "  - Current: diff-apply done\n"
-        "  - Next: launchctl + commit\n"
-        "  - Reference: N/A\n"
-        "===END===\n"
-        "===NOTE_DONE===\nN/A\n===END===\n")
-    conn = storage.connect(db)
-    try:
-        from marrow.sessionend_writers import seg_handover
-        n = seg_handover(conn, raw, "S1")
-    finally:
-        conn.close()
-    assert n == 1
-    body = h.read_text(encoding="utf-8")
-    assert "shipped phase 3 handover" in body
-    assert "diff-apply done" in body
-    assert "handover: ready sid:S1" in body
-    assert "<!-- id:1 -->" in body
-    assert "## Done" in body and "## Doing" in body
-
-
-def test_seg_handover_noop_on_no_diff_marker(db_env, tmp_path, monkeypatch):
-    """No DOING_DIFF marker → leave file untouched."""
-    db, _ = db_env
-    h = tmp_path / "handover.md"
-    h.write_text("PRE-EXISTING", encoding="utf-8")
-    monkeypatch.setattr("marrow.handover_render._RENDERED_PATH", h)
-    conn = storage.connect(db)
-    try:
-        from marrow.sessionend_writers import seg_handover
-        n = seg_handover(conn, "no markers here", "S1")
-    finally:
-        conn.close()
-    assert n == 0
-    assert h.read_text(encoding="utf-8") == "PRE-EXISTING"
 
 
 # ── _already_done new semantics ───────────────────────────────────────────────
@@ -1020,13 +891,11 @@ def test_already_done_skips_when_events_at_or_below_baseline(db_env):
     assert result is True
 
 
-def test_write_final_audit_records_user_count(db_env, tmp_path, monkeypatch):
+def test_write_final_audit_records_user_count(db_env):
     """Full main loop -> final ok row matches ok,user_count=<N> pattern."""
     db, _ = db_env
     sid = "uc-test-sid"
     _insert_events(db, sid, count=8, role="user")
-    h = tmp_path / "handover.md"
-    monkeypatch.setattr("marrow.handover_render._RENDERED_PATH", h)
     with patch("marrow.sessionend_async.LLMClient") as MockClient:
         MockClient.return_value.call.return_value = "echo done"
         from marrow import sessionend_async
@@ -1046,8 +915,6 @@ def test_sessionend_async_writes_dashboard_at_tail(db_env, tmp_path,
     db, _ = db_env
     sid = "dash-tail-sid"
     _insert_events(db, sid, count=10, role="user")
-    h = tmp_path / "handover.md"
-    monkeypatch.setattr("marrow.handover_render._RENDERED_PATH", h)
     monkeypatch.setattr(config, "dashboard_path",
                         lambda: str(tmp_path / "dashboard.md"))
 
@@ -1075,8 +942,6 @@ def test_sessionend_async_continues_when_dashboard_fails(db_env, tmp_path,
     db, _ = db_env
     sid = "dash-fail-sid"
     _insert_events(db, sid, count=10, role="user")
-    h = tmp_path / "handover.md"
-    monkeypatch.setattr("marrow.handover_render._RENDERED_PATH", h)
     monkeypatch.setattr(config, "dashboard_path",
                         lambda: str(tmp_path / "dashboard.md"))
 
@@ -1188,38 +1053,20 @@ def test_session_end_hook_no_longer_calls_embed_pending(db_env, monkeypatch,
         f"session_end hook must not call embed_pending; got {len(embed_calls)} call(s)")
 
 
-def test_sessionend_writer_operationalerror_partial_not_fail(db_env, tmp_path,
-                                                              monkeypatch):
-    """Outcome 2: a single writer raising sqlite3.OperationalError (or any
-    Exception outside the legacy ValueError/RuntimeError/TypeError/KeyError
-    tuple) must mark that writer as fail in its audit row and the session
-    overall as partial — other writers still run.
-
-    Today's regression would have let OperationalError escape _run_writer,
-    bubble to _run_extraction's outer try, and stamp the whole session as
-    fail:OperationalError, losing the work of every other writer.
-    """
+def test_sessionend_writer_operationalerror_partial_not_fail(db_env):
+    """A single writer raising sqlite3.OperationalError must mark that writer
+    as fail in its audit row and the session overall as partial — other writers
+    still run."""
     import sqlite3 as _sqlite3
     db, _ = db_env
     sid = "test-op-error"
     _insert_events(db, sid, count=10, role="user")
-    h = tmp_path / "handover.md"
 
-    state_raw = (
+    task_affect_raw = (
         "===TASK===\n"
         "[{\"title\": \"unrelated task\", \"category\": \"Daily\","
         " \"status\": \"active\", \"due\": null, \"note\": \"\"}]\n"
         "===END===\n"
-        "===DOING_DIFF===\n"
-        "ADD:\n"
-        "[Marrow] - did stuff\n"
-        "  - Current: stuff done\n"
-        "  - Next: next\n"
-        "  - Reference: N/A\n"
-        "===END===\n"
-        "===NOTE_DONE===\nN/A\n===END===\n"
-    )
-    narrative_raw = (
         "===AFFECT===\n"
         "[{\"ep\": 1, \"valence\": 0.5, \"arousal\": 0.4,"
         " \"importance\": 2, \"label\": \"平静\","
@@ -1227,19 +1074,18 @@ def test_sessionend_writer_operationalerror_partial_not_fail(db_env, tmp_path,
         " \"event_hint\": \"\", \"unresolved\": 0,"
         " \"reconcile_prev\": \"N/A\"}]\n"
         "===END===\n"
-        "===DIGEST===\nshort digest\n===END===\n"
     )
+    digest_raw = "===DIGEST===\nshort digest\n===END===\n"
 
-    # Make seg_handover raise OperationalError; leave the others alone.
+    # Make seg_task_cand raise OperationalError; leave the others alone.
     from marrow import sessionend_async
 
     def _boom(*_a, **_kw):
         raise _sqlite3.OperationalError("simulated db lock")
 
     with patch("marrow.sessionend_async.LLMClient") as MockClient, \
-         patch("marrow.handover_render._RENDERED_PATH", h), \
-         patch("marrow.sessionend_async.seg_handover", _boom):
-        MockClient.return_value.call.side_effect = [state_raw, narrative_raw]
+         patch("marrow.sessionend_async.seg_task_cand", _boom):
+        MockClient.return_value.call.side_effect = [task_affect_raw, digest_raw]
         rc = sessionend_async.main(["--sid", sid])
 
     # rc == 0 because partial is recoverable, not fatal.
@@ -1252,7 +1098,7 @@ def test_sessionend_writer_operationalerror_partial_not_fail(db_env, tmp_path,
     assert final.startswith("partial:"), (
         f"expected partial:..., got {final!r}; full audit: {summaries!r}"
     )
-    assert "handover" in final
+    assert "task_cand" in final
 
     # Per-segment rows live under sessionend_extract_<seg>; fetch separately.
     conn = storage.connect(db)
@@ -1266,26 +1112,19 @@ def test_sessionend_writer_operationalerror_partial_not_fail(db_env, tmp_path,
         conn.close()
     seg_map = {r["action"]: r["summary"] for r in seg_rows}
 
-    # The failing writer's segment row was logged with the writer name and a
-    # specific exception type, not the generic outer-catch placeholder.
-    h_summary = seg_map.get("sessionend_extract_handover", "")
-    assert h_summary.startswith("fail:"), (
-        f"expected fail: row for handover writer, got seg_map={seg_map!r}"
+    # The failing writer's segment row was logged with OperationalError.
+    tc_summary = seg_map.get("sessionend_extract_task_cand", "")
+    assert tc_summary.startswith("fail:"), (
+        f"expected fail: row for task_cand writer, got seg_map={seg_map!r}"
     )
-    assert "OperationalError" in h_summary, (
-        f"expected OperationalError name in summary, got {h_summary!r}"
-    )
-    # Other writers in the same call ran to completion.
-    assert seg_map.get("sessionend_extract_task_cand") == "ok"
+    assert "OperationalError" in tc_summary
+    # Other writers ran to completion.
     assert seg_map.get("sessionend_extract_affect") == "ok"
     assert seg_map.get("sessionend_extract_digest") == "ok"
 
-    # And the persisted side-effects of the surviving writers landed.
+    # Persisted side-effects of the surviving writers landed.
     conn = storage.connect(db)
     try:
-        n_task = conn.execute(
-            "SELECT COUNT(*) c FROM tasks WHERE title='unrelated task'"
-        ).fetchone()["c"]
         n_aff = conn.execute(
             "SELECT COUNT(*) c FROM affect WHERE source='sessionend_async'"
         ).fetchone()["c"]
@@ -1294,6 +1133,5 @@ def test_sessionend_writer_operationalerror_partial_not_fail(db_env, tmp_path,
         ).fetchone()["c"]
     finally:
         conn.close()
-    assert n_task == 1
     assert n_aff == 1
     assert n_dig == 1

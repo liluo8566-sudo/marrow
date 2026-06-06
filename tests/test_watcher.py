@@ -126,8 +126,6 @@ def test_watcher_boot_reconcile_syncs(tmp_path, monkeypatch):
     (db_pages / "x.md").write_text("- a <!-- id:1 -->\n")
     dashboard = tmp_path / "dashboard.md"
     dashboard.write_text("- d <!-- id:9 -->\n")
-    (tmp_path / "handover.md").write_text("- h <!-- id:7 -->\n")
-
     def fake_load():
         return {"paths": {"db": str(db), "dashboard": str(dashboard),
                           "db_pages": str(db_pages)},
@@ -136,10 +134,10 @@ def test_watcher_boot_reconcile_syncs(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "load", fake_load)
     w = Watcher()
     w._reconcile_boot()
-    # 3 blocks inserted across 3 paths.
+    # 2 blocks inserted across 2 paths (dashboard + db-pages).
     rows = w.conn.execute("SELECT path, block_id FROM md_index").fetchall()
     bids = sorted(r[1] for r in rows)
-    assert bids == ["1", "7", "9"]
+    assert bids == ["1", "9"]
     w.conn.close()
 
 
@@ -152,7 +150,6 @@ def test_watcher_live_modify_triggers_sync(tmp_path, monkeypatch):
     db_pages.mkdir()
     dashboard = tmp_path / "dashboard.md"
     dashboard.write_text("")
-    (tmp_path / "handover.md").write_text("")
 
     def fake_load():
         return {"paths": {"db": str(db), "dashboard": str(dashboard),
@@ -244,7 +241,6 @@ def test_watchdog_roundtrip_delete_restore_add(tmp_path, monkeypatch):
     db_pages.mkdir()
     dashboard = tmp_path / "dashboard.md"
     dashboard.write_text("")
-    (tmp_path / "handover.md").write_text("")
 
     def fake_load():
         return {"paths": {"db": str(db), "dashboard": str(dashboard),
