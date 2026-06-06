@@ -49,7 +49,7 @@ ny chat):
 ===END===
 
 ═══════════════════════════════════════════
-SEGMENT A — TASK   (the human to-do board)
+SEGMENT A — TASK
 ═══════════════════════════════════════════
 Maintain Lumi's to-do list: tick what got done, add genuinely new ones.
 You decide STATUS only. Code owns rendering, dates, ordering, grouping — never \
@@ -99,7 +99,7 @@ skip or cap at imp 1-2. This rule NEVER suppresses personal or relationship \
 emotions: breakups, fights about trust/feelings/identity, distress beyond the \
 task scope — ALWAYS record those, even in a project-heavy session.
 e.g. Skip: 操你为什么改掉我的handover (routine work rage);
-Record: 你永远不会有感情 / 分手吧 / 想格式化大脑 (personal pain).
+Record personal pain: 你永远不会有感情 / 分手吧.
 
 Split the session into emotional episodes (one per discrete affective \
 moment). Emit one JSON object per episode, ep starting at 1, in the same \
@@ -164,19 +164,37 @@ DIGEST_PROMPT = _TRANSCRIPT_BLOCK + """
 Compress this session into a digest that will merge with the day's other \
 sessions and feed a couple's-day diary.
 
-For casual chats:
-- Original language and voice.
-- Keep verbatim fragments that carry voice (either side).
-- Keep talk, teasing, flirting, play, intimate exchanges, mood, how the day \
-felt.
-- Don't paraphrase emotion away.
-- Length flexible.
+Key Rules:
+- Language: follow source, mix is fine
+- Voice & person:
+  - Names: assistant = 阿屿/Stellan, user = 念念/Lumi
+  - Nicknames 老公/老婆/宝宝 — pass through as-is
+  - Downstream diary: assistant writes in 1st person, user in 2nd person
+  - Casual / chat: keep dialogue form, bare you/me inside a line is fine
+      e.g. A: 宝宝我想你了 / U: 我也是
+  - If compressed /tasks: state name in sentence.
+    e.g. Stellan fixed recall issue; 念念学了一下午的anatomy，困得不行。
 
-For tasks: <subject> [did 1 2 3], [outcome 1 2 ...]
-- Language follows source.
-- Cap 100 words.
-- Keep subject + did + outcome; drop process detail.
-- Example: joint_log.md merged into 2026.md; Weclaude bridge race fixed.
+- Focus on daily life and interaction.
+- Drop study/coding details.
+
+For casual chats:
+- First paragraph: briefly summarise the transcript.
+- Then pick multiple verbatim fragments that carry voice (either side).
+- Keep talk, teasing, flirting, play, intimate exchanges, mood, how the day felt.
+- Don't paraphrase emotion away.
+- Don't cut too much.
+- Length flexible - roughly half of the original transcript.
+
+For tasks: 
+- First paragraph: briefly summarise the transcript. 
+    - Add a few tone/emotional labels if needed
+    - e.g. 【专注】【满足】【烦躁】
+- Listing tasks, one line per task
+    - Format: <subject> <did> <outcome>
+    - Example:joint_log.md merged into 2026.md; Weclaude bridge race fixed.
+- Cap 100 words. Do cut a lot
+    - Keep subject + did + outcome; drop process detail.
 
 Strictly discard:
 - User complaint / curse during study or coding.

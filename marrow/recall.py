@@ -1285,7 +1285,7 @@ def recall_fusion(
     out: list[dict] = []
     used = 0
     for _, row in picks[:limit]:
-        content = row["content"] or ""
+        content = _re.sub(r"^\[time:[^\]]+\]\s*", "", row["content"] or "")
         if budget_chars is not None and used + len(content) > budget_chars:
             break
         out.append({**row, "content": content})

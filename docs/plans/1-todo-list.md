@@ -8,19 +8,7 @@
 - 已 commit 7012124 stop-bleed(silent_death): gate alert loop behind MARROW_SILENT_DEATH。明天 debug 想看就 MARROW_SILENT_DEATH=1 opt-in 跑。
 
 ### wx - 不触发sessionend
-bug测试中 - 见 wx log
-(记得修完以后删除probe)
-grep PROBE- ~/Library/Logs/marrow-sessionend-probe.log    # marrow 这条稳拿
-launchctl list | grep synapse                              # 拿 wx label
-plutil -p ~/Library/LaunchAgents/<wx-label>.plist | grep -i err   # 找 wx stderr 路径
-grep PROBE- <wx_stderr_path>                               # 看前两条
-
-Bug A（最像）：wx 那两处 Popen 没传 env={**os.environ, "MARROW_BRIDGE": "1"}——子进程继承的 env 里没这个变量，marrow.sessionend_async 跑成 cli 模式，bridge 分支全错。
-→ probe 3 显示 MARROW_BRIDGE=None 就证实。
-Bug B：wx 调用的 argv 跟 marrow 期望的不对——marrow 要 --sid <X> 但 wx 那个 sessionend_command 模板可能只塞了裸 sid，于是 if not sid 早 return。stderr=DEVNULL 吞了 usage 报错，所以一直没人发现。
-→ probe 1/2 有但 probe 3 显示 argv=['xxx'] 而不是 ['--sid', 'xxx'] 就证实。
-Bug C：wx 的 /clear 根本没调到 _fire_sessionend，或者 idle 的 _spawn 被 idle_close hook 抢先干掉了 cc 进程的 jsonl mtime，导致 idle 阈值判断算错永远不 fire。
-→ probe 1（/clear）或 probe 2（idle）整条没出现就证实。
+- Monitor 6h idle是否正常
 
 ## Phases — affect recall redesign (brainstorm 2026-05-31)
 补录两个问题
@@ -147,7 +135,7 @@ Bug C：wx 的 /clear 根本没调到 _fire_sessionend，或者 idle 的 _spawn 
 
 ## Recall — remaining backlog
 
-06/05 遗留问题
+06/06 凌晨 遗留问题
 - embed pipeline根因没补：你删events时 events_vec_meta 不会跟着清，下次再大批删event又会孤儿堆积让pipeline以为"都embed过了"。要在delete event path里同步delete对应meta entry——明天我做这个
   - 之前大量embed pending无记录
 - canary里测出的瑕疵：pinned milestone在query vec信号强时仍可能擦闸门进top-5（noise比例从60%降到~15%，没归零）。下一轮要给pinned加vec_score≥0.55的预过滤
