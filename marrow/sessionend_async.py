@@ -255,8 +255,9 @@ def _write_final_audit(conn, sid: str, summary: str) -> None:
             sev = "critical" if summary.startswith("fail:") else "warn"
             repo.add_alert(
                 sev, "sessionend_async",
-                f"sid={sid[:8]} {summary} (catchup retry also failed)",
+                f"sessionend_async_retry_failed:sid={sid[:8]}",
                 source="sessionend_async.py", db=config.db_path(),
+                message=f"sid={sid[:8]} {summary} (catchup retry also failed)",
             )
         except Exception:  # noqa: BLE001 — alert is best-effort
             pass
@@ -521,8 +522,9 @@ def _run_extraction(conn, sid: str, date: str,
     except Exception as e:  # noqa: BLE001
         try:
             repo.add_alert("warn", "dashboard",
-                           f"sessionend_async dashboard write failed: {e}",
-                           source="sessionend_async.py", db=db)
+                           "sessionend_async_dashboard_failed",
+                           source="sessionend_async.py", db=db,
+                           message=f"sessionend_async dashboard write failed: {e}")
         except Exception:  # noqa: BLE001
             pass
 
@@ -531,8 +533,9 @@ def _run_extraction(conn, sid: str, date: str,
     except Exception as e:  # noqa: BLE001
         try:
             repo.add_alert("warn", "embed",
-                           f"sessionend_async embed_pending failed: {e}",
-                           source="sessionend_async.py", db=db)
+                           "sessionend_async_embed_failed",
+                           source="sessionend_async.py", db=db,
+                           message=f"sessionend_async embed_pending failed: {e}")
         except Exception:  # noqa: BLE001
             pass
 

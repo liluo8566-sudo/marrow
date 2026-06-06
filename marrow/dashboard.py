@@ -150,32 +150,36 @@ def write_dashboard(path: str, conn, *, state_dir: str,
         except Exception as e:
             repo.add_alert(
                 "warn", "dashboard",
-                f"candidate reconcile failed: {e}; falling through to render",
+                "dashboard_reconcile:milestone_candidates",
                 source="dashboard.py", db=db,
+                message=f"candidate reconcile failed: {e}; falling through to render",
             )
         try:
             reconcile_tasks(conn, Path(path))
         except Exception as e:
             repo.add_alert(
                 "warn", "dashboard",
-                f"task reconcile failed: {e}; falling through to render",
+                "dashboard_reconcile:tasks",
                 source="dashboard.py", db=db,
+                message=f"task reconcile failed: {e}; falling through to render",
             )
         try:
             reconcile_affect(conn, Path(path))
         except Exception as e:
             repo.add_alert(
                 "warn", "dashboard",
-                f"affect reconcile failed: {e}; falling through to render",
+                "dashboard_reconcile:affect",
                 source="dashboard.py", db=db,
+                message=f"affect reconcile failed: {e}; falling through to render",
             )
         try:
             reconcile_alerts(conn, Path(path))
         except Exception as e:
             repo.add_alert(
                 "warn", "dashboard",
-                f"alerts reconcile failed: {e}; falling through to render",
+                "dashboard_reconcile:alerts",
                 source="dashboard.py", db=db,
+                message=f"alerts reconcile failed: {e}; falling through to render",
             )
     Path(state_dir).mkdir(parents=True, exist_ok=True)
 

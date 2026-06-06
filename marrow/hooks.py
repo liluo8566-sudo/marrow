@@ -481,8 +481,9 @@ def session_start() -> int:
     except Exception as e:
         try:
             repo.add_alert("warn", "catchup",
-                           f"session_start catchup spawn failed: {e}",
-                           source="hooks.py", db=config.db_path())
+                           "catchup_spawn_failed:hooks",
+                           source="hooks.py", db=config.db_path(),
+                           message=f"session_start catchup spawn failed: {e}")
         except Exception:
             pass
     # Recall housekeeping — rotate side log + wipe per-session dedup state so

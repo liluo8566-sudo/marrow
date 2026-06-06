@@ -575,7 +575,7 @@ def test_handle_move_safe_auto_applies(drift_env, monkeypatch):
     alerts: list[tuple] = []
     monkeypatch.setattr(
         "marrow.drift_sweep._emit_alert",
-        lambda message, source="drift_sweep", severity="warn":
+        lambda message, source="drift_sweep", severity="warn", **kw:
             alerts.append((severity, message)),
     )
 
@@ -610,7 +610,7 @@ def test_handle_move_unsafe_keeps_pending(drift_env, monkeypatch):
     alerts: list[tuple] = []
     monkeypatch.setattr(
         "marrow.drift_sweep._emit_alert",
-        lambda message, source="drift_sweep", severity="warn":
+        lambda message, source="drift_sweep", severity="warn", **kw:
             alerts.append((severity, message)),
     )
 
@@ -636,7 +636,7 @@ def test_handle_move_no_refs_silent(drift_env, monkeypatch):
     alerts: list[tuple] = []
     monkeypatch.setattr(
         "marrow.drift_sweep._emit_alert",
-        lambda message, source="drift_sweep", severity="warn":
+        lambda message, source="drift_sweep", severity="warn", **kw:
             alerts.append((severity, message)),
     )
     from marrow.drift_sweep import handle_move

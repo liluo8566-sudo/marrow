@@ -165,8 +165,9 @@ def _extract_candidates(conn, llm: LLMClient, date: str,
         )
     except LLMError as e:
         repo.add_alert("warn", "routine",
-                       f"daily {date} candidate extraction failed: {e}",
-                       source="daily.py", db=db)
+                       f"daily_cand_failed:{date}",
+                       source="daily.py", db=db,
+                       message=f"daily {date} candidate extraction failed: {e}")
         return counts
     for name, writer in (
         ("entity_cand", lambda r: candidates.write_entity_cand(conn, r)),
@@ -226,8 +227,9 @@ def run_day(conn, date: str, llm: LLMClient, *, db: str | None = None,
                              tier="mid")
     except LLMError as e:
         repo.add_alert("critical", "routine",
-                       f"daily {date} sonnet call failed: {e}",
-                       source="daily.py", db=db)
+                       f"daily_sonnet_failed:{date}",
+                       source="daily.py", db=db,
+                       message=f"daily {date} sonnet call failed: {e}")
         return False
     narrative = (narrative or "").strip() or "—"
 
@@ -257,11 +259,12 @@ def run(conn, llm: LLMClient, *, db: str | None = None,
         if len(miss) > daily_catchup.CATCHUP_MAX:
             repo.add_alert(
                 "warn", "routine",
-                f"daily catchup: {len(miss)} days missing in last "
-                f"{daily_catchup.CATCHUP_WINDOW_DAYS}d, capped at "
-                f"{daily_catchup.CATCHUP_MAX}; "
-                f"{len(miss) - daily_catchup.CATCHUP_MAX} still pending",
+                "daily_catchup_overflow",
                 source="daily.py", db=db,
+                message=(f"daily catchup: {len(miss)} days missing in last "
+                         f"{daily_catchup.CATCHUP_WINDOW_DAYS}d, capped at "
+                         f"{daily_catchup.CATCHUP_MAX}; "
+                         f"{len(miss) - daily_catchup.CATCHUP_MAX} still pending"),
             )
         days = miss[:daily_catchup.CATCHUP_MAX]
     else:
@@ -300,8 +303,9 @@ def main(argv: list[str] | None = None) -> int:
             except Exception as e:
                 repo.add_alert(
                     "warn", "sub_pages",
-                    f"daily {mode} skipped sub-pages write: {e}",
+                    f"daily_subpages_failed:{mode}",
                     source="daily.py", db=db,
+                    message=f"daily {mode} skipped sub-pages write: {e}",
                 )
             # Post-condition: each day daily.run claimed to write must still
             # be in the diary table after subpages render. Catches the
@@ -314,10 +318,11 @@ def main(argv: list[str] | None = None) -> int:
             if silent:
                 repo.add_alert(
                     "critical", "routine",
-                    f"daily {mode} silent-delete: wrote {silent} but row "
-                    f"absent post-refresh — rerun `mw daily --day <date> "
-                    f"--force` after diagnosis",
+                    f"daily_silent_delete:{mode}",
                     source="daily.py", db=db,
+                    message=(f"daily {mode} silent-delete: wrote {silent} but row "
+                             f"absent post-refresh — rerun `mw daily --day <date> "
+                             f"--force` after diagnosis"),
                 )
         if catchup:
             try:
@@ -328,16 +333,18 @@ def main(argv: list[str] | None = None) -> int:
             except Exception as e:
                 repo.add_alert(
                     "warn", "goose_bites",
-                    f"daily catchup skipped goose-bites: {e}",
+                    "daily_goose_bites_failed",
                     source="daily.py", db=db,
+                    message=f"daily catchup skipped goose-bites: {e}",
                 )
         print(f"[{ts}] daily {mode} ok: wrote={wrote or '[]'}", flush=True)
         return 0
     except Exception as e:
         print(f"[{ts}] daily {mode} FAILED: {e}", flush=True)
         repo.add_alert("critical", "routine",
-                       f"daily {mode} failed: {e}",
-                       source="daily.py", db=db)
+                       f"daily_failed:{mode}",
+                       source="daily.py", db=db,
+                       message=f"daily {mode} failed: {e}")
         return 1
     finally:
         conn.close()

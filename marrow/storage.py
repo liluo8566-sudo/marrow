@@ -412,14 +412,24 @@ def init_db(path: str | None = None) -> sqlite3.Connection:
             if n == 0:
                 conn.execute("DROP TABLE events_vec")
             else:
-                conn.execute(
-                    "INSERT INTO alerts (severity, type, message, source)"
-                    " VALUES (?, ?, ?, ?)",
-                    ("warn", "embedding_dim_mismatch",
-                     f"events_vec dim={cur_dim} != config {dim}; "
-                     f"{n} rows preserved, manual re-embed required",
-                     "storage.py:init_db"),
-                )
+                _fp = "embedding_dim_mismatch:events_vec"
+                _msg = (f"events_vec dim={cur_dim} != config {dim}; "
+                        f"{n} rows preserved, manual re-embed required")
+                _existing = conn.execute(
+                    "SELECT id FROM alerts"
+                    " WHERE type='embedding_dim_mismatch'"
+                    " AND fingerprint=? AND resolved=0 LIMIT 1", (_fp,)
+                ).fetchone()
+                if _existing:
+                    conn.execute(
+                        "UPDATE alerts SET hit_count=hit_count+1,"
+                        " message=?, updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')"
+                        " WHERE id=?", (_msg, _existing["id"]))
+                else:
+                    conn.execute(
+                        "INSERT INTO alerts (severity, type, fingerprint, message, source)"
+                        " VALUES ('warn','embedding_dim_mismatch',?,?,'storage.py:init_db')",
+                        (_fp, _msg))
         conn.execute(_vec_table(dim))
         # Cross-table vec lanes (memes/entities/milestones). Same dim as
         # events_vec; mismatch handling mirrors above (empty -> drop+rebuild,
@@ -431,14 +441,24 @@ def init_db(path: str | None = None) -> sqlite3.Connection:
                 if n == 0:
                     conn.execute(f"DROP TABLE {lane}")
                 else:
-                    conn.execute(
-                        "INSERT INTO alerts (severity, type, message, source)"
-                        " VALUES (?, ?, ?, ?)",
-                        ("warn", "embedding_dim_mismatch",
-                         f"{lane} dim={cur_lane_dim} != config {dim}; "
-                         f"{n} rows preserved, manual re-embed required",
-                         "storage.py:init_db"),
-                    )
+                    _fp = f"embedding_dim_mismatch:{lane}"
+                    _msg = (f"{lane} dim={cur_lane_dim} != config {dim}; "
+                            f"{n} rows preserved, manual re-embed required")
+                    _existing = conn.execute(
+                        "SELECT id FROM alerts"
+                        " WHERE type='embedding_dim_mismatch'"
+                        " AND fingerprint=? AND resolved=0 LIMIT 1", (_fp,)
+                    ).fetchone()
+                    if _existing:
+                        conn.execute(
+                            "UPDATE alerts SET hit_count=hit_count+1,"
+                            " message=?, updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')"
+                            " WHERE id=?", (_msg, _existing["id"]))
+                    else:
+                        conn.execute(
+                            "INSERT INTO alerts (severity, type, fingerprint, message, source)"
+                            " VALUES ('warn','embedding_dim_mismatch',?,?,'storage.py:init_db')",
+                            (_fp, _msg))
             conn.execute(_vec_table(dim, lane))
         # Schema-evolution backfill: a column added after a db already
         # exists is not applied by CREATE IF NOT EXISTS. Idempotent —

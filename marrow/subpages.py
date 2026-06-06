@@ -125,8 +125,9 @@ def write_subpage(cfg: SubPageConfig, conn: sqlite3.Connection,
         except Exception as e:
             repo.add_alert(
                 "warn", "db_pages",
-                f"{key} reconcile failed: {e}; falling through to render",
+                f"subpage_reconcile_failed:{key}",
                 source="subpages.py", db=db,
+                message=f"{key} reconcile failed: {e}; falling through to render",
             )
 
     if cfg.inserter is not None:
@@ -136,15 +137,17 @@ def write_subpage(cfg: SubPageConfig, conn: sqlite3.Connection,
         except Exception as e:
             repo.add_alert(
                 "warn", "db_pages",
-                f"{key} inserter failed: {e}",
+                f"subpage_inserter_failed:{key}",
                 source="subpages.py", db=db,
+                message=f"{key} inserter failed: {e}",
             )
     else:
         if not cfg.read_only:
             repo.add_alert(
                 "warn", "db_pages",
-                f"{key} missing inserter — legacy full-render path bypasses SoT",
+                f"subpage_missing_inserter:{key}",
                 source="subpages.py", db=db,
+                message=f"{key} missing inserter — legacy full-render path bypasses SoT",
             )
         block = cfg.render(conn)
         existing = (Path(path).read_text(encoding="utf-8")
@@ -298,8 +301,9 @@ def _build_atlas_config(conn: sqlite3.Connection,
     try:
         atlas_sweep_fs(conn)
     except Exception as e:
-        repo.add_alert("warn", "atlas", f"sweep failed: {e}",
-                       source="subpages.py")
+        repo.add_alert("warn", "atlas", "atlas_sweep_failed",
+                       source="subpages.py",
+                       message=f"sweep failed: {e}")
 
     return SubPageConfig(
         key="atlas",
@@ -391,9 +395,10 @@ def build_all_configs(conn: sqlite3.Connection, *,
             if builder is None:
                 repo.add_alert(
                     "warn", "db_pages",
-                    f"unknown subpage key '{key}' in [subpages].{section}"
-                    " — skipped (registry: " + ", ".join(sorted(_REGISTRY)) + ")",
+                    f"subpage_unknown_key:{key}",
                     source="subpages.py", db=db,
+                    message=(f"unknown subpage key '{key}' in [subpages].{section}"
+                             " — skipped (registry: " + ", ".join(sorted(_REGISTRY)) + ")"),
                 )
                 continue
             try:
@@ -401,8 +406,9 @@ def build_all_configs(conn: sqlite3.Connection, *,
             except Exception as e:
                 repo.add_alert(
                     "warn", "db_pages",
-                    f"subpage '{key}' build failed: {e}",
+                    f"subpage_build_failed:{key}",
                     source="subpages.py", db=db,
+                    message=f"subpage '{key}' build failed: {e}",
                 )
     return out
 

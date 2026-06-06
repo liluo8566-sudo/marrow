@@ -497,3 +497,95 @@ def test_daemon_recall_returns_list(tmp_path, monkeypatch):
     monkeypatch.setattr(daemon, "_DB", p)
     result = daemon.recall("anything")
     assert isinstance(result, list)
+
+
+# ── fingerprint dedup regression tests ───────────────────────────────────────
+# Covers the callsite migrations from 2026-06-06: each callsite now passes a
+# stable fingerprint so repeated failures produce 1 row + hit_count bump,
+# not N rows.
+
+def test_drift_sweep_dedup(tmp_path):
+    """Repeated drift review for the same file pair dedups to 1 row."""
+    p = str(tmp_path / "drift.db")
+    storage.init_db(p).close()
+    fp = "drift_review:foo.md:bar.md"
+    a1 = repo.add_alert("warn", "drift_sweep", fp, "drift_sweep.py",
+                        message="drift review: foo.md -> bar.md · 0 safe · 1 unsafe",
+                        db=p)
+    a2 = repo.add_alert("warn", "drift_sweep", fp, "drift_sweep.py",
+                        message="drift review: foo.md -> bar.md · 0 safe · 2 unsafe",
+                        db=p)
+    assert a1 == a2, "same file pair must dedup to same alert row"
+    conn = storage.connect(p)
+    try:
+        rows = conn.execute(
+            "SELECT hit_count, message FROM alerts WHERE type='drift_sweep'"
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["hit_count"] == 2
+    finally:
+        conn.close()
+
+
+def test_catchup_spawn_failed_dedup(tmp_path):
+    """Repeated catchup spawn failures dedup to 1 row; sid list updates."""
+    p = str(tmp_path / "catchup.db")
+    storage.init_db(p).close()
+    fp = "catchup_spawn_failed"
+    a1 = repo.add_alert("warn", "catchup", fp, "sessionstart_catchup.py",
+                        message="catchup spawn failed: abc12345:OSError",
+                        db=p)
+    a2 = repo.add_alert("warn", "catchup", fp, "sessionstart_catchup.py",
+                        message="catchup spawn failed: def67890:OSError",
+                        db=p)
+    a3 = repo.add_alert("warn", "catchup", fp, "sessionstart_catchup.py",
+                        message="catchup spawn failed: fff00000:OSError",
+                        db=p)
+    assert a1 == a2 == a3, "all catchup spawn failures must share one row"
+    conn = storage.connect(p)
+    try:
+        rows = conn.execute(
+            "SELECT hit_count, message FROM alerts WHERE type='catchup'"
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["hit_count"] == 3
+        assert "fff00000" in rows[0]["message"]
+    finally:
+        conn.close()
+
+
+def test_embedding_dim_mismatch_dedup(tmp_path):
+    """Repeated dim-mismatch alerts per lane dedup correctly."""
+    p = str(tmp_path / "embed.db")
+    storage.init_db(p).close()
+    # events_vec lane
+    fp_events = "embedding_dim_mismatch:events_vec"
+    a1 = repo.add_alert("warn", "embedding_dim_mismatch", fp_events,
+                        "storage.py:init_db",
+                        message="events_vec dim=384 != config 1024; 50 rows preserved",
+                        db=p)
+    a2 = repo.add_alert("warn", "embedding_dim_mismatch", fp_events,
+                        "storage.py:init_db",
+                        message="events_vec dim=384 != config 1024; 50 rows preserved",
+                        db=p)
+    assert a1 == a2
+    # different lane gets its own row
+    fp_memes = "embedding_dim_mismatch:memes_vec"
+    a3 = repo.add_alert("warn", "embedding_dim_mismatch", fp_memes,
+                        "storage.py:init_db",
+                        message="memes_vec dim=384 != config 1024; 10 rows preserved",
+                        db=p)
+    assert a3 != a1, "different lane must create a separate alert row"
+    conn = storage.connect(p)
+    try:
+        rows = conn.execute(
+            "SELECT fingerprint, hit_count FROM alerts"
+            " WHERE type='embedding_dim_mismatch' ORDER BY id"
+        ).fetchall()
+        assert len(rows) == 2
+        assert rows[0]["fingerprint"] == fp_events
+        assert rows[0]["hit_count"] == 2
+        assert rows[1]["fingerprint"] == fp_memes
+        assert rows[1]["hit_count"] == 1
+    finally:
+        conn.close()

@@ -445,11 +445,16 @@ def delete_pending(pid: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _emit_alert(message: str, source: str = "drift_sweep",
-                severity: str = "warn") -> None:
-    """Write to alerts table via repo.add_alert. Tolerate missing DB."""
+                severity: str = "warn", fingerprint: str | None = None) -> None:
+    """Write to alerts table via repo.add_alert. Tolerate missing DB.
+
+    fingerprint — stable dedup key; defaults to message (back-compat) but
+    callers should pass an explicit stable key to avoid per-event flood.
+    """
     try:
         from marrow import repo
-        repo.add_alert(severity, "drift_sweep", message, source)
+        fp = fingerprint if fingerprint is not None else message
+        repo.add_alert(severity, "drift_sweep", fp, source, message=message)
     except Exception:
         pass  # standalone / test context without DB — silently skip
 
@@ -659,6 +664,7 @@ def _scan_and_queue(src: str, dest: str, roots: list[Path] | None = None) -> str
             f"({_fmt_files(unsafe_files)}) · "
             f"mw drift apply {pid} | reject {pid}",
             severity="warn",
+            fingerprint=f"drift_review:{old_name}:{new_name}",
         )
         refresh_dir_tree(roots)
         return pid
@@ -671,6 +677,7 @@ def _scan_and_queue(src: str, dest: str, roots: list[Path] | None = None) -> str
         f"drift applied: {old_name} → {new_name} in "
         f"{len(safe_files)} files ({_fmt_files(safe_files)})",
         severity="info",
+        fingerprint=f"drift_applied:{old_name}:{new_name}",
     )
     return pid
 
@@ -693,6 +700,7 @@ def handle_dangling_delete(src: str, roots: list[Path] | None = None) -> str | N
         f"drift dangling: {old_name} deleted "
         f"[{len(refs)} refs in {n_files} files] — manual review needed",
         severity="warn",
+        fingerprint=f"drift_dangling:{old_name}",
     )
     return pid
 

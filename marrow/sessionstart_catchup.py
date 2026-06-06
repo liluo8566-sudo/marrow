@@ -388,8 +388,9 @@ def main(argv: list[str] | None = None) -> int:  # noqa: ARG001
             try:
                 repo.add_alert(
                     "warn", "catchup",
-                    f"catchup spawn failed: {', '.join(failures)}",
+                    "catchup_spawn_failed",
                     source="sessionstart_catchup.py", db=db,
+                    message=f"catchup spawn failed: {', '.join(failures)}",
                 )
             except Exception:  # noqa: BLE001
                 pass
