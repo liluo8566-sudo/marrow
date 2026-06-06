@@ -80,6 +80,10 @@ event_max_chars = 120
 # Event hits ship with N adjacent same-session turns (prev_N + next_N) so a
 # stale answer carries its correction. 0 = disabled.
 event_context_window = 1
+# Stopword list (empty by default). Tokens whose lowercased form matches any
+# entry are stripped from the query before FTS + vec. Populate after reviewing
+# data collection results from the parallel stopword agent.
+stopwords = []
 
 [recall.buckets]
 # cwd -> recall bucket (substring match, case-insensitive). same-bucket
@@ -90,8 +94,8 @@ event_context_window = 1
 project = ["/cc-lab"]
 daily   = ["/desktop/ny"]
 study   = ["/study"]
-same_boost   = 0.00
-diff_penalty = 0.05
+same_boost   = 0.05
+diff_penalty = 0.00
 
 [sessionend]
 # Sessions with ≤ this many user turns skip async LLM extraction (§2.7).

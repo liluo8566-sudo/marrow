@@ -563,15 +563,45 @@ def _entities_vec_hits(conn: sqlite3.Connection, qblob: bytes, k: int) -> list[d
 # 3-char windows that align with the trigram tokenizer. Shorter fragments
 # are dropped — trigram MATCH silently returns 0 hits on <3-char queries.
 _FTS_TERM_RE = re.compile(r"[A-Za-z0-9]+|[一-鿿]+")
-# Milestone / memes pinned-row boost — anchor identity stays ahead on ties.
-_MILESTONE_PINNED_BOOST = 0.10
-# Anchor bias: small additive lift for milestone + memes rows so identity /
-# stake / lore anchors stay ahead of similarly-scored events on borderline
-# queries.
-_ANCHOR_BIAS = 0.10
-# Entity card bonus: keeps the identity sheet ahead of bare event hits when
-# the entity is genuinely topical (FTS bm25 already gates topicality).
-_ENTITY_CARD_BIAS = 0.05
+# Vec pre-gate for anchor lanes (milestone / memes / entity): rows whose vec
+# similarity is below this floor are dropped BEFORE scoring — they cannot ride
+# bias up past min_score with no real topical match.
+_ANCHOR_VEC_FLOOR = _VEC_ONLY_FLOOR  # 0.55
+
+# Tokenizer for stopword filtering: ASCII runs and CJK runs (same as FTS_TERM_RE).
+_SW_TOKEN_RE = re.compile(r"[A-Za-z0-9]+|[一-鿿]+")
+
+
+def _apply_stopwords(q: str, stopwords: list[str]) -> str:
+    """Remove stopword tokens from query q.
+
+    For ASCII tokens: drop if token.lower() in stopwords_set.
+    For CJK runs: drop the whole run if its lowercase form is a stopword;
+    also slide a window over the run to drop any embedded stopword substrings.
+    Returns space-joined remaining tokens. Empty result returns "".
+    """
+    if not stopwords or not q:
+        return q
+    sw_set = {s.lower() for s in stopwords if s}
+    tokens = _SW_TOKEN_RE.findall(q)
+    kept: list[str] = []
+    for tok in tokens:
+        lower = tok.lower()
+        # Is the whole token a stopword?
+        if lower in sw_set:
+            continue
+        # For CJK runs: slide window and strip any embedded stopword.
+        if re.match(r"^[一-鿿]+$", tok):
+            filtered = tok
+            for sw in sw_set:
+                if re.match(r"^[一-鿿]+$", sw):
+                    filtered = filtered.replace(sw, "")
+            if not filtered:
+                continue
+            kept.append(filtered)
+        else:
+            kept.append(tok)
+    return " ".join(kept)
 
 # cwd → recall bucket mapping. Same-bucket events get +same_boost, known
 # cross-bucket events take -diff_penalty (soft cut, still possible to win
@@ -830,6 +860,7 @@ def recall_fusion(
     w_tasks_vec: float = 0.55,
     min_score: float = 0.35,
     current_cwd: str | None = None,
+    exclude_kinds: tuple[str, ...] = (),
 ) -> list[dict]:
     """Single weighted scalar fusion: vec + bm25 + recency + affect.
 
@@ -837,10 +868,23 @@ def recall_fusion(
     Applies FLOOR tiers to final score.
     FTS keyword hit on dormant row clears dormant flag before scoring.
     Returns rows sorted by score desc, truncated by budget_chars.
+    `exclude_kinds`: lane kinds to skip entirely (e.g. ("diary", "task")).
     """
     q = query.strip()
     if not q:
         return []
+
+    # Stopword filter: strip config-driven tokens before FTS + vec.
+    # List is empty by default; populated by Lumi after reviewing candidates.
+    try:
+        from . import config as _cfg
+        _sw = _cfg.load().get("recall", {}).get("stopwords", []) or []
+    except Exception:
+        _sw = []
+    if _sw:
+        q = _apply_stopwords(q, _sw)
+        if not q:
+            return []
 
     emb = _ensure_embedder()
     vec_available = emb is not None
@@ -1159,48 +1203,46 @@ def recall_fusion(
             scored.append((final, {**c, "score": final}))
 
     # ── milestone scoring (recency/affect dropped — evergreen anchor —
-    # bm25 + vec drive rank; no min_score gate so long queries don't dilute
-    # the match into oblivion). Anchor bias adds a small static lift so
-    # identity / lore stays ahead of similarly-scored events.
+    # bm25 + vec drive rank). Vec pre-gate: rows with vec present but below
+    # _ANCHOR_VEC_FLOOR are dropped before scoring (cannot ride noise past
+    # min_score). bm25 uses w_milestones_vec weight (tuned for anchor tables,
+    # higher than w_bm25) so a strong FTS hit clears min_score on its own.
     for mc in milestone_cands:
-        raw = (
-            w_bm25 * mc["bm25"]
-            + w_milestones_vec * mc.get("vec", 0.0)
-            + _ANCHOR_BIAS
-        )
-        if mc["pinned"]:
-            raw += _MILESTONE_PINNED_BOOST
+        vec_val = mc.get("vec", 0.0)
+        if vec_val > 0.0 and vec_val < _ANCHOR_VEC_FLOOR:
+            continue  # vec present but below floor — drop
+        raw = w_milestones_vec * (mc["bm25"] + vec_val)
         scored.append((raw, {**mc, "score": raw}))
 
-    # ── memes scoring (mirror milestone: bm25 + vec + anchor bias + pinned) ─
+    # ── memes scoring (mirror milestone) ─────────────────────────────────────
     for vc in memes_cands:
-        raw = (
-            w_bm25 * vc["bm25"]
-            + w_memes_vec * vc.get("vec", 0.0)
-            + _ANCHOR_BIAS
-        )
-        if vc["pinned"]:
-            raw += _MILESTONE_PINNED_BOOST
+        vec_val = vc.get("vec", 0.0)
+        if vec_val > 0.0 and vec_val < _ANCHOR_VEC_FLOOR:
+            continue
+        raw = w_memes_vec * (vc["bm25"] + vec_val)
         scored.append((raw, {**vc, "score": raw}))
 
     # ── diary scoring (vec only — evergreen long-form prose) ─────────────────
-    for dc in diary_cands:
-        raw = w_diary_vec * dc.get("vec", 0.0)
-        scored.append((raw, {**dc, "score": raw}))
+    if "diary" not in exclude_kinds:
+        for dc in diary_cands:
+            raw = w_diary_vec * dc.get("vec", 0.0)
+            scored.append((raw, {**dc, "score": raw}))
 
     # ── tasks scoring (vec only — evergreen study + project surface) ────────
-    for tc in tasks_cands:
-        raw = w_tasks_vec * tc.get("vec", 0.0)
-        scored.append((raw, {**tc, "score": raw}))
+    if "task" not in exclude_kinds:
+        for tc in tasks_cands:
+            raw = w_tasks_vec * tc.get("vec", 0.0)
+            scored.append((raw, {**tc, "score": raw}))
 
-    # ── entity scoring (FTS + vec + identity card bias + mention boost) ─────
-    # Symmetric with milestone / memes. FTS bm25 gates topicality so a stray
-    # high-mc entity does not get force-included on every query.
+    # ── entity scoring (FTS + vec + mention boost, vec pre-gate) ───────────
+    # bm25 uses w_entities_vec weight (anchor-tuned) so FTS-only hits clear
+    # min_score. mention_count boost kept (proportional, not static).
     for ec in entity_cands:
+        vec_val = ec.get("vec", 0.0)
+        if vec_val > 0.0 and vec_val < _ANCHOR_VEC_FLOOR:
+            continue
         raw = (
-            w_bm25 * ec["bm25"]
-            + w_entities_vec * ec.get("vec", 0.0)
-            + _ENTITY_CARD_BIAS
+            w_entities_vec * (ec["bm25"] + vec_val)
             + min(0.05, 0.02 * math.log1p(ec.get("mention_count", 0)))
         )
         scored.append((raw, {**ec, "score": raw}))
@@ -1257,6 +1299,7 @@ def recall_with_config(
     limit: int | None = None,
     budget_chars: int | None = None,
     current_cwd: str | None = None,
+    exclude_kinds: tuple[str, ...] = ("diary", "task"),
 ) -> list[dict]:
     """Run recall_fusion with weights + thresholds from [recall] config.
 
@@ -1264,6 +1307,8 @@ def recall_with_config(
     same shape for the same query. Caller may override limit/budget per call.
     `current_cwd` enables per-event same-bucket boost / cross-bucket penalty
     (CC-Lab=project, Desktop/NY=daily, Study=study).
+    `exclude_kinds`: kinds to suppress. Hook default = ("diary", "task");
+    MCP callers pass () to include all kinds.
     """
     from . import config as _config
     rcfg = _config.load().get("recall", {})
@@ -1272,13 +1317,19 @@ def recall_with_config(
         "w_memes_vec", "w_entities_vec", "w_milestones_vec",
         "w_diary_vec", "w_tasks_vec", "min_score",
     }
+    # Strip WX time-anchor prefix before query reaches FTS + vec.
+    # Format: "[time: <...> | gap: <...>] <actual query>"
+    # Strip once at entry; downstream sees the clean query only.
+    import re as _re
+    q = _re.sub(r"^\[time:[^\]]+\]\s*", "", query.strip())
     # budget_chars is hook-side post-shaping (per-kind rules). Fusion stays
     # passthrough — callers that want a hard char cap pass it explicitly.
     return recall_fusion(
-        conn, query,
+        conn, q,
         limit=int(limit if limit is not None else rcfg.get("limit", 6)),
         budget_chars=budget_chars,
         current_cwd=current_cwd,
+        exclude_kinds=exclude_kinds,
         **{k: float(rcfg[k]) for k in _weight_keys if k in rcfg},
     )
 
