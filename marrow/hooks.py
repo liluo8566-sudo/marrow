@@ -42,6 +42,14 @@ SESSION_START_HARD_CAP = 6000
 
 _TABLE_KINDS = {"milestone", "memes", "entity", "diary", "task"}
 
+# Strip WX-injected `[time: ... | gap: ...]` prefix from event content.
+# recall.py strips it for the main-hit content; mirror here for neighbors + log.
+_WX_TIME_PREFIX_RE = _re.compile(r"^\[time:[^\]]+\]\s*")
+
+
+def _strip_wx_time_prefix(s: str) -> str:
+    return _WX_TIME_PREFIX_RE.sub("", s or "")
+
 
 def _recall_seen_path(sid: str) -> Path:
     return config.DATA_DIR / "state" / "recall_seen" / f"{sid}.json"
@@ -1003,7 +1011,9 @@ def user_prompt_submit() -> int:
                     if per_ctx <= 0:
                         break
                     cts = utc_iso_to_local_datetime(c.get("timestamp") or "")
-                    csnip = (c.get("content") or "").replace("\n", " ")[:per_ctx]
+                    csnip = _strip_wx_time_prefix(
+                        (c.get("content") or "").replace("\n", " ")
+                    )[:per_ctx]
                     if not csnip:
                         continue
                     arrow = "↑" if c.get("rel") == "prev" else "↓"
@@ -1069,14 +1079,14 @@ def _append_recall_log(sid: str, prompt_text: str, hits: list[dict]) -> None:
         kind = h.get("kind") or "event"
         hid = h.get("id", "?")
         score = h.get("score", 0.0)
-        content = (h.get("content") or "").replace("\n", " ")
+        content = _strip_wx_time_prefix((h.get("content") or "").replace("\n", " "))
         # Mirror injection-side shaping: anchor tables ship full content
         # (rows are short + dense); only event hits get the 120-char cap.
         snip = content if kind in _TABLE_KINDS else content[:120]
         parts.append(f"- `{kind}#{hid}` score={score:.2f} — {snip}")
         for c in h.get("_context", []) or []:
             arrow = "↑prev" if c.get("rel") == "prev" else "↓next"
-            cs = (c.get("content") or "").replace("\n", " ")[:80]
+            cs = _strip_wx_time_prefix((c.get("content") or "").replace("\n", " "))[:80]
             parts.append(f"    - {arrow} ({c.get('role')}) {cs}")
     with log_path.open("a", encoding="utf-8") as f:
         f.write("\n".join(parts) + "\n")
