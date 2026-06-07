@@ -291,14 +291,36 @@ def _hash(*parts: str) -> str:
     return hashlib.sha256("\x1f".join(parts).encode()).hexdigest()
 
 
+def _sid_is_blocked(conn: sqlite3.Connection, sid: str) -> bool:
+    """Belt-and-braces check: latest session_block row for sid wins.
+    archive -> True (drop rows), cleared/absent -> False (allow insert).
+    Mirrors hooks._is_session_blocked without the circular import."""
+    row = conn.execute(
+        "SELECT summary FROM audit_log"
+        " WHERE action='session_block' AND target_id=?"
+        " ORDER BY id DESC LIMIT 1",
+        (sid,),
+    ).fetchone()
+    return bool(row and row[0] == "archive")
+
+
 def archive_events(conn: sqlite3.Connection, rows: list[dict]) -> int:
     # Write path for #7 SessionEnd. Idempotent by source_hash; re-run skips.
+    # Defensive gate: drop rows whose sid has session_block=archive regardless
+    # of when the block was written. Catches sid-drift and any future write path
+    # that bypasses the hooks.py gate (belt-and-braces).
     n = 0
     sessions: set[str] = set()
     inserted: list[dict] = []
+    _blocked_cache: dict[str, bool] = {}
     with conn:
         for r in rows:
-            h = _hash(r["session_id"], r["timestamp"], r["role"],
+            sid = r["session_id"]
+            if sid not in _blocked_cache:
+                _blocked_cache[sid] = _sid_is_blocked(conn, sid)
+            if _blocked_cache[sid]:
+                continue
+            h = _hash(sid, r["timestamp"], r["role"],
                       r["content"])
             if conn.execute(
                 "SELECT 1 FROM events WHERE source_hash=? "
@@ -310,10 +332,10 @@ def archive_events(conn: sqlite3.Connection, rows: list[dict]) -> int:
                 "INSERT INTO events "
                 "(session_id, timestamp, role, content, channel, source_hash) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
-                (r["session_id"], r["timestamp"], r["role"], r["content"],
+                (sid, r["timestamp"], r["role"], r["content"],
                  r.get("channel"), h),
             )
-            sessions.add(r["session_id"])
+            sessions.add(sid)
             inserted.append(r)
             n += 1
         # Bump entities.mention_count for entities whose name/alias appears
