@@ -186,15 +186,14 @@ For casual chats:
 - Don't cut too much.
 - Length flexible - roughly half of the original transcript.
 
-For tasks: 
-- First paragraph: briefly summarise the transcript. 
+For tasks: Never include verbatim fragments!!! Drop all and only listing facts!
+- First sentence: briefly summarise the transcript. (<30 words)
     - Add a few tone/emotional labels if needed
     - e.g. 【专注】【满足】【烦躁】
 - Listing tasks, one line per task
     - Format: <subject> <did> <outcome>
     - Example:joint_log.md merged into 2026.md; Weclaude bridge race fixed.
-- Cap 100 words. Do cut a lot
-    - Keep subject + did + outcome; drop process detail.
+- Hard Cap 150 words. Do cut all details - no description.
 
 Strictly discard:
 - User complaint / curse during study or coding.
@@ -204,9 +203,6 @@ Strictly discard:
 
 No conclusion, no opinion. Shorter in tokens; nothing of the relationship \
 is "noise".
-
-===DIGEST===
-<digest text here — prose, not JSON>
 ===END===
 """
 
