@@ -959,54 +959,68 @@ def user_prompt_submit() -> int:
         return 0
 
     # ── per-session dedup: drop hits already injected this session ────────────
+    # Only `seen` ids that survive the budget_chars cut — silently-truncated
+    # hits stay eligible so they can surface in a later turn instead of being
+    # permanently shadowed by the first query that pulled them.
     seen = _load_recall_seen(sid)
-    visible: list[dict] = []
+    candidates: list[dict] = []
     for h in hits:
         hid = int(h.get("id") or 0)
         kind = h.get("kind") or "event"
         if hid and (kind, hid) in seen:
             continue  # already shown — skip slot, no backfill
-        visible.append(h)
-        if hid:
-            seen.add((kind, hid))
-    if not visible:
+        candidates.append(h)
+    if not candidates:
         return 0
-    _save_recall_seen(sid, seen)
 
-    lines = [
+    header_lines = [
         "## Recall (auto) — passive context, do not answer",
-        "> 命中可能不全；相关或缺失 → mcp__marrow__recall",
+        "> Hits may be incomplete. If the user references past time/scene cues or memory signals (age, year, date, last time, before, remember, you mentioned) and no relevant hit above → MUST call mcp__marrow__recall before replying.",
         "",
     ]
-    for h in visible:
+    lines = list(header_lines)
+    # +1 per line for the join newline; matches "\n".join(...) length exactly.
+    used = sum(len(line) + 1 for line in header_lines)
+    visible: list[dict] = []
+    for h in candidates:
+        block: list[str] = []
         ts = utc_iso_to_local_date(h.get("timestamp") or "")
         kind = h.get("kind") or "event"
         content_full = (h.get("content") or "").replace("\n", " ")
         if kind in _TABLE_KINDS:
             # Anchor rows ship full content — they're already short and dense.
-            lines.append(f"- [{ts}] {content_full}")
-            continue
-        # Event: main + ↑prev + ↓next combined ≤ event_max chars (content only).
-        ctxs = h.get("_context") or []
-        main_cap = max(40, event_max - 60) if ctxs else event_max
-        main = content_full[:main_cap]
-        lines.append(f"- [{ts}] {main}")
-        remaining = max(0, event_max - len(main))
-        if ctxs and remaining > 0:
-            per_ctx = max(0, remaining // len(ctxs))
-            for c in ctxs:
-                if per_ctx <= 0:
-                    break
-                cts = utc_iso_to_local_datetime(c.get("timestamp") or "")
-                csnip = (c.get("content") or "").replace("\n", " ")[:per_ctx]
-                if not csnip:
-                    continue
-                arrow = "↑" if c.get("rel") == "prev" else "↓"
-                lines.append(f"    {arrow} [{cts}] ({c.get('role')}) {csnip}")
+            block.append(f"- [{ts}] {content_full}")
+        else:
+            # Event: main + ↑prev + ↓next combined ≤ event_max chars (content only).
+            ctxs = h.get("_context") or []
+            main_cap = max(40, event_max - 60) if ctxs else event_max
+            main = content_full[:main_cap]
+            block.append(f"- [{ts}] {main}")
+            remaining = max(0, event_max - len(main))
+            if ctxs and remaining > 0:
+                per_ctx = max(0, remaining // len(ctxs))
+                for c in ctxs:
+                    if per_ctx <= 0:
+                        break
+                    cts = utc_iso_to_local_datetime(c.get("timestamp") or "")
+                    csnip = (c.get("content") or "").replace("\n", " ")[:per_ctx]
+                    if not csnip:
+                        continue
+                    arrow = "↑" if c.get("rel") == "prev" else "↓"
+                    block.append(f"    {arrow} [{cts}] ({c.get('role')}) {csnip}")
+        block_len = sum(len(line) + 1 for line in block)
+        if visible and used + block_len > budget_chars:
+            break  # drop this hit — and skip seen-write so it can surface later
+        lines.extend(block)
+        used += block_len
+        visible.append(h)
+        hid = int(h.get("id") or 0)
+        if hid:
+            seen.add((kind, hid))
+    if not visible:
+        return 0
+    _save_recall_seen(sid, seen)
     ctx = "\n".join(lines)
-    # Final backstop: cap injected block at budget_chars (kind-blind tail trim).
-    if len(ctx) > budget_chars:
-        ctx = ctx[:budget_chars]
 
     # Side log — markdown append so VSCode preview / tail both readable.
     # Mirror what actually got injected: dedup-filtered `visible`, not raw hits.
