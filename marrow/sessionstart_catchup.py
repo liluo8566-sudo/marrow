@@ -305,12 +305,13 @@ def main(argv: list[str] | None = None) -> int:  # noqa: ARG001
             if _classify(conn, sid, live_ppids) == "spawn":
                 pending.append(sid)
 
-        # Alert on silent deaths: start >= 30min ago, ppid dead, no lifecycle:end.
-        # Dedup: fingerprint embeds only sid[:8] (one row per truly silent
-        # session, idempotent across catchup re-runs). The 2026-06-05 flood of
-        # 760 rows was caused by hooks.py lifecycle:end gaps (worktree gate
-        # falling through with empty rows) + legacy message-string dedup,
-        # both fixed in this change.
+        # Alert on silent deaths: start >= 30min ago, ppid dead, no lifecycle:end,
+        # AND no sessionend_extract row (extract row = sessionend_async actually
+        # ran; lifecycle:end marker may have been racekilled by cc SIGKILL but
+        # the session is NOT silently dead). Fingerprint is type-level so the
+        # whole class collapses to a single dashboard row regardless of how
+        # many sids qualify in a given window.
+        silent_sids: list[str] = []
         for sid in candidates:
             start_rows = conn.execute(
                 "SELECT summary, occurred_at FROM audit_log"
@@ -333,8 +334,18 @@ def main(argv: list[str] | None = None) -> int:  # noqa: ARG001
             ).fetchone()
             if end_exists:
                 continue
-            # Idempotency: one audit_log marker per sid (cheap LIKE check so
-            # repeated catchup passes don't double-stamp the same sid).
+            # sessionend_async wrote an extract row -> session finished work,
+            # only the lifecycle:end marker is missing. Not a silent death.
+            extract_done = conn.execute(
+                "SELECT 1 FROM audit_log"
+                " WHERE action='sessionend_extract' AND target_id=? LIMIT 1",
+                (sid,),
+            ).fetchone()
+            if extract_done:
+                continue
+            # Per-sid audit_log marker prevents the same sid being counted in
+            # every catchup pass; the aggregated alert fires only on the
+            # first-seen batch.
             already_alerted = conn.execute(
                 "SELECT 1 FROM audit_log"
                 " WHERE action='alert' AND target_id=?"
@@ -352,17 +363,19 @@ def main(argv: list[str] | None = None) -> int:  # noqa: ARG001
                     )
             except Exception:  # noqa: BLE001
                 pass
-            # Surface to dashboard via alerts table. fingerprint is stable per
-            # sid -> repeated catchup passes bump hit_count instead of spawning
-            # duplicate rows; message carries the full human detail.
+            silent_sids.append(sid)
+
+        if silent_sids:
+            sample = ", ".join(s[:8] for s in silent_sids[:5])
+            extra = f" (+{len(silent_sids) - 5} more)" if len(silent_sids) > 5 else ""
             try:
                 repo.add_alert(
                     "warn", "silent_death",
-                    f"silent_death:sid={sid[:8]}",
+                    "silent_death",
                     source="sessionstart_catchup.py", db=db,
                     message=(
-                        f"sid={sid[:8]} no lifecycle:end "
-                        f"(>= {_SILENT_DEATH_MIN}min, ppid dead)"
+                        f"{len(silent_sids)} sid(s) no lifecycle:end + no extract "
+                        f"(>= {_SILENT_DEATH_MIN}min, ppid dead): {sample}{extra}"
                     ),
                 )
             except Exception:  # noqa: BLE001

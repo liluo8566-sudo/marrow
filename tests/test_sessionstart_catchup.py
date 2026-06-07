@@ -240,15 +240,72 @@ def test_silent_death_writes_to_alerts_table(db_env):
     conn = storage.connect(db)
     try:
         row = conn.execute(
-            "SELECT severity, type, message FROM alerts"
+            "SELECT severity, type, message, fingerprint FROM alerts"
             " WHERE type='silent_death' AND resolved=0"
-            " AND message LIKE ? LIMIT 1",
-            (f"sid={sid[:8]}%",),
+            " AND fingerprint='silent_death' LIMIT 1",
         ).fetchone()
     finally:
         conn.close()
     assert row is not None, "silent_death must surface in alerts table"
     assert row["severity"] == "warn"
+    assert sid[:8] in row["message"], "aggregated message must list the offending sid prefix"
+
+
+def test_silent_death_extract_row_exempts_alert(db_env):
+    """Regression: cc SIGKILL on the hook process group can land between the
+    lifecycle:end INSERT and the popen_detach in hooks.session_end, so the
+    end marker never gets written even though sessionend_async survived and
+    wrote its extract row. The session is NOT silently dead. Catchup must
+    not alert when any sessionend_extract row exists for the sid."""
+    db, _ = db_env
+    sid = "extract-exempts-sid"
+    old_ts = _ago_ts(31 * 60)
+    _insert_lifecycle(db, sid, "session_lifecycle:start",
+                      "ppid=55555,source=cc,started_at=1000", occurred_at=old_ts)
+    _insert_user_events(db, sid, 5)
+    _insert_extract(db, sid, "skip:short_session,user_count=0")
+
+    with patch("marrow.sessionstart_catchup.popen_detach_lazy"):
+        from marrow import sessionstart_catchup
+        sessionstart_catchup.main()
+
+    conn = storage.connect(db)
+    try:
+        row = conn.execute(
+            "SELECT id FROM alerts WHERE type='silent_death' AND resolved=0 LIMIT 1"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is None, "extract row must exempt sid from silent_death alert"
+
+
+def test_silent_death_fingerprint_collapses_multiple_sids(db_env):
+    """Regression: fingerprint used to embed sid[:8] so every dead sid spawned
+    its own row, flooding the dashboard. Now fingerprint is type-level so N
+    silent sids in one window produce exactly 1 alert row that lists them."""
+    db, _ = db_env
+    old_ts = _ago_ts(31 * 60)
+    sids = ["multi-fp-a-aaa", "multi-fp-b-bbb", "multi-fp-c-ccc"]
+    for sid in sids:
+        _insert_lifecycle(db, sid, "session_lifecycle:start",
+                          "ppid=44444,source=cc,started_at=1000", occurred_at=old_ts)
+        _insert_user_events(db, sid, 5)
+
+    with patch("marrow.sessionstart_catchup.popen_detach_lazy"):
+        from marrow import sessionstart_catchup
+        sessionstart_catchup.main()
+
+    conn = storage.connect(db)
+    try:
+        rows = conn.execute(
+            "SELECT message FROM alerts WHERE type='silent_death' AND resolved=0"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert len(rows) == 1, f"expected 1 aggregated alert row, got {len(rows)}"
+    msg = rows[0]["message"]
+    for sid in sids:
+        assert sid[:8] in msg, f"sid {sid[:8]} missing from aggregated message"
 
 
 def test_classify_legacy_ok_without_lifecycle_end_skips(db_env):
