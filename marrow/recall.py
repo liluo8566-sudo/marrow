@@ -566,7 +566,13 @@ _FTS_TERM_RE = re.compile(r"[A-Za-z0-9]+|[一-鿿]+")
 # Vec pre-gate for anchor lanes (milestone / memes / entity): rows whose vec
 # similarity is below this floor are dropped BEFORE scoring — they cannot ride
 # bias up past min_score with no real topical match.
-_ANCHOR_VEC_FLOOR = _VEC_ONLY_FLOOR  # 0.55
+_ANCHOR_VEC_FLOOR = 0.50  # was _VEC_ONLY_FLOOR (0.55); dropped for zh↔en paraphrase tolerance
+# Anchor scoring bias: events get recency+affect (≈+0.25 ceiling) on top of
+# vec+bm25; anchor lanes only have vec+bm25. This +0.10 bias rebalances so a
+# vec-floor-cleared (or strong-hit) anchor can compete with high-recency events.
+# Only applies to rows that already passed the vec floor or were strong-hit —
+# unrelated anchors are still filtered out before this bias is added.
+_ANCHOR_BIAS = 0.10
 
 # Tokenizer for stopword filtering: ASCII runs and CJK runs (same as FTS_TERM_RE).
 _SW_TOKEN_RE = re.compile(r"[A-Za-z0-9]+|[一-鿿]+")
@@ -1379,6 +1385,9 @@ def recall_fusion(
         if not strong and vec_val < _ANCHOR_VEC_FLOOR:
             continue
         raw = w_bm25 * mc["bm25"] + w_milestones_vec * vec_val
+        raw += _ANCHOR_BIAS  # see _ANCHOR_BIAS
+        if strong:
+            raw = max(raw, min_score)
         scored.append((raw, {**mc, "score": raw}))
 
     # ── memes scoring (mirror milestone) ─────────────────────────────────────
@@ -1388,6 +1397,9 @@ def recall_fusion(
         if not strong and vec_val < _ANCHOR_VEC_FLOOR:
             continue
         raw = w_bm25 * vc["bm25"] + w_memes_vec * vec_val
+        raw += _ANCHOR_BIAS  # see _ANCHOR_BIAS
+        if strong:
+            raw = max(raw, min_score)
         scored.append((raw, {**vc, "score": raw}))
 
     # ── diary scoring (vec only — evergreen long-form prose) ─────────────────
@@ -1415,6 +1427,9 @@ def recall_fusion(
             w_bm25 * ec["bm25"] + w_entities_vec * vec_val
             + min(0.05, 0.02 * math.log1p(ec.get("mention_count", 0)))
         )
+        raw += _ANCHOR_BIAS  # see _ANCHOR_BIAS
+        if strong:
+            raw = max(raw, min_score)
         scored.append((raw, {**ec, "score": raw}))
 
     # ── unified min_score gate ──────────────────────────────────────────────

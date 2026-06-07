@@ -503,10 +503,12 @@ def test_milestone_content_renders_title_and_desc(db):
 
 
 def test_milestone_short_cjk_query_returns_nothing(db):
-    """Trigram tokenizer needs ≥3 chars to match — short CJK queries (2 chars
-    or less) return no anchor hits. This is the deliberate noise-floor that
-    replaces the old substring-on-everything path. Matches OT alias fix."""
-    _make_milestone(db, title="鸭子", description="鸭子的故事")
+    """Short CJK queries (≤2 chars) cannot match milestone body via FTS5
+    trigram (needs ≥3 chars). Strong-hit only fires when the query token
+    actually appears in the milestone body — so an UNRELATED short CJK
+    query stays at zero. This is the noise-floor against uninformative
+    short queries on rows they don't literally mention."""
+    _make_milestone(db, title="工作记录", description="一些事情")
     with patch.object(rm, "_ensure_embedder", return_value=None):
         results = rm.recall_fusion(db, "鸭子", min_score=0.1)
     hits = [r for r in results if r.get("kind") == "milestone"]
