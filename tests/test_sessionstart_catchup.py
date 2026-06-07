@@ -279,6 +279,36 @@ def test_silent_death_extract_row_exempts_alert(db_env):
     assert row is None, "extract row must exempt sid from silent_death alert"
 
 
+def test_silent_death_session_block_exempts_alert(db_env):
+    """Regression: a session that Lumi (or the bridge) explicitly archived via
+    session_block / manual_skip has no sessionend_extract by design — these
+    are not silent deaths. Catchup must not alert."""
+    db, _ = db_env
+    old_ts = _ago_ts(31 * 60)
+    for sid, action, summary in (
+        ("blocked-archive-sid", "session_block", "archive"),
+        ("blocked-manual-sid", "manual_skip", "skip"),
+        ("blocked-bridge-sid", "manual_skip", "bridge_owns"),
+    ):
+        _insert_lifecycle(db, sid, "session_lifecycle:start",
+                          "ppid=33333,source=cc,started_at=1000", occurred_at=old_ts)
+        _insert_lifecycle(db, sid, action, summary)
+        _insert_user_events(db, sid, 5)
+
+    with patch("marrow.sessionstart_catchup.popen_detach_lazy"):
+        from marrow import sessionstart_catchup
+        sessionstart_catchup.main()
+
+    conn = storage.connect(db)
+    try:
+        row = conn.execute(
+            "SELECT id FROM alerts WHERE type='silent_death' AND resolved=0 LIMIT 1"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is None, "user-archived sids must not trigger silent_death alert"
+
+
 def test_silent_death_fingerprint_collapses_multiple_sids(db_env):
     """Regression: fingerprint used to embed sid[:8] so every dead sid spawned
     its own row, flooding the dashboard. Now fingerprint is type-level so N

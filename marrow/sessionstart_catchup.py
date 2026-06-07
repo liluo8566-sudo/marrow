@@ -343,6 +343,16 @@ def main(argv: list[str] | None = None) -> int:  # noqa: ARG001
             ).fetchone()
             if extract_done:
                 continue
+            # Lumi (or the bridge) explicitly archived/skipped the session ->
+            # there is no extract by design, not a silent death.
+            user_archived = conn.execute(
+                "SELECT 1 FROM audit_log"
+                " WHERE target_id=? AND action IN ('session_block','manual_skip')"
+                " LIMIT 1",
+                (sid,),
+            ).fetchone()
+            if user_archived:
+                continue
             # Per-sid audit_log marker prevents the same sid being counted in
             # every catchup pass; the aggregated alert fires only on the
             # first-seen batch.
