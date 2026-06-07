@@ -1285,7 +1285,7 @@ def recall_fusion(
     out: list[dict] = []
     used = 0
     for _, row in picks[:limit]:
-        content = _re.sub(r"^\[time:[^\]]+\]\s*", "", row["content"] or "")
+        content = re.sub(r"^\[time:[^\]]+\]\s*", "", row["content"] or "")
         if budget_chars is not None and used + len(content) > budget_chars:
             break
         out.append({**row, "content": content})
@@ -1324,8 +1324,7 @@ def recall_with_config(
     # Strip WX time-anchor prefix before query reaches FTS + vec.
     # Format: "[time: <...> | gap: <...>] <actual query>"
     # Strip once at entry; downstream sees the clean query only.
-    import re as _re
-    q = _re.sub(r"^\[time:[^\]]+\]\s*", "", query.strip())
+    q = re.sub(r"^\[time:[^\]]+\]\s*", "", query.strip())
     # budget_chars is hook-side post-shaping (per-kind rules). Fusion stays
     # passthrough — callers that want a hard char cap pass it explicitly.
     return recall_fusion(
