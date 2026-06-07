@@ -90,14 +90,17 @@ def db(tmp_path):
 # ── 1. anchor vec pre-gate ────────────────────────────────────────────────────
 
 def test_anchor_pregate_low_vec_milestone_dropped(db):
-    """Milestone with vec=0.45 (below 0.55 floor) and a FTS hit must NOT surface."""
+    """Milestone with vec=0.45 (below 0.55 floor) must NOT surface when the
+    query does not substring-match the anchor title/description (no strong-hit).
+    Strong-hit bypasses the floor only when the query literally contains the anchor.
+    """
     db.execute(
         "INSERT INTO milestones(scope, date, title, description, pinned) "
-        "VALUES('test', '2026-01-01', 'test anchor pregate milestone', 'desc', 0)"
+        "VALUES('test', '2026-01-01', 'zxqpregate unique title', 'zxquniquedesc', 0)"
     )
     db.execute("INSERT INTO milestones_fts(milestones_fts) VALUES('rebuild')")
     db.commit()
-    mid = db.execute("SELECT id FROM milestones WHERE title LIKE 'test anchor%'").fetchone()["id"]
+    mid = db.execute("SELECT id FROM milestones WHERE title LIKE 'zxqpregate%'").fetchone()["id"]
 
     # Build a query vec and a milestone vec that will give ~0.45 similarity.
     q_vec = _fake_vec(1)
@@ -116,13 +119,14 @@ def test_anchor_pregate_low_vec_milestone_dropped(db):
     mock_emb = MagicMock()
     mock_emb.embed.return_value = [q_vec]
     with patch.object(rm, "_ensure_embedder", return_value=mock_emb):
+        # Query does NOT contain "zxqpregate" or "zxquniquedesc" — no strong-hit.
         results = rm.recall_fusion(
-            db, "test anchor pregate milestone", min_score=0.01
+            db, "some unrelated semantic query about nothing", min_score=0.01
         )
 
     milestone_hits = [r for r in results if r.get("kind") == "milestone"]
     assert milestone_hits == [], (
-        f"Expected milestone with vec<0.55 to be dropped, got: {milestone_hits}"
+        f"Expected milestone with vec<0.55 and no strong-hit to be dropped, got: {milestone_hits}"
     )
 
 
@@ -159,13 +163,15 @@ def test_anchor_pregate_high_vec_milestone_kept(db):
 
 
 def test_anchor_pregate_memes_low_vec_dropped(db):
-    """Memes row with vec<0.55 (FTS hit) must be dropped by pre-gate."""
+    """Memes row with vec<0.55 must be dropped when query does not substring-match
+    the anchor key/value (no strong-hit). Strong-hit only fires on literal match.
+    """
     db.execute(
         "INSERT INTO memes(type, key, value, context, use_count, status) "
-        "VALUES('phrase', 'lowvec phrase', 'some value', 'ctx', 1, 'active')"
+        "VALUES('phrase', 'zxqlowvec phrase', 'zxqsome unique value', 'ctx', 1, 'active')"
     )
     db.commit()
-    mid = db.execute("SELECT id FROM memes WHERE key='lowvec phrase'").fetchone()["id"]
+    mid = db.execute("SELECT id FROM memes WHERE key='zxqlowvec phrase'").fetchone()["id"]
 
     q_vec = _fake_vec(3)
     orth = _fake_vec(97)
@@ -181,21 +187,24 @@ def test_anchor_pregate_memes_low_vec_dropped(db):
     mock_emb = MagicMock()
     mock_emb.embed.return_value = [q_vec]
     with patch.object(rm, "_ensure_embedder", return_value=mock_emb):
-        results = rm.recall_fusion(db, "lowvec phrase", min_score=0.01)
+        # Query does not contain "zxqlowvec" or "zxqsome" — no strong-hit fires.
+        results = rm.recall_fusion(db, "some unrelated semantic query about nothing", min_score=0.01)
 
     memes_hits = [r for r in results if r.get("kind") == "memes"]
-    assert memes_hits == [], f"Expected memes with vec<0.55 dropped, got: {memes_hits}"
+    assert memes_hits == [], f"Expected memes with vec<0.55 and no strong-hit dropped, got: {memes_hits}"
 
 
 def test_anchor_pregate_entity_low_vec_dropped(db):
-    """Entity with vec<0.55 (FTS hit) must be dropped by pre-gate."""
+    """Entity with vec<0.55 must be dropped when query does not substring-match
+    the anchor name/fact/aliases (no strong-hit).
+    """
     db.execute(
         "INSERT INTO entities(kind, name, fact, mention_count, source) "
-        "VALUES('person', 'LowVecPerson', 'some fact about them', 1, 'test')"
+        "VALUES('person', 'ZxqLowVecPerson', 'zxqfact zzzkjhbody aaabbb', 1, 'test')"
     )
     db.execute("INSERT INTO entities_fts(entities_fts) VALUES('rebuild')")
     db.commit()
-    eid = db.execute("SELECT id FROM entities WHERE name='LowVecPerson'").fetchone()["id"]
+    eid = db.execute("SELECT id FROM entities WHERE name='ZxqLowVecPerson'").fetchone()["id"]
 
     q_vec = _fake_vec(4)
     orth = _fake_vec(96)
@@ -210,10 +219,11 @@ def test_anchor_pregate_entity_low_vec_dropped(db):
     mock_emb = MagicMock()
     mock_emb.embed.return_value = [q_vec]
     with patch.object(rm, "_ensure_embedder", return_value=mock_emb):
-        results = rm.recall_fusion(db, "LowVecPerson", min_score=0.01)
+        # Query shares no tokens with anchor body — no strong-hit fires.
+        results = rm.recall_fusion(db, "pqrxyz bbbccc dddyyy", min_score=0.01)
 
     entity_hits = [r for r in results if r.get("kind") == "entity"]
-    assert entity_hits == [], f"Expected entity with vec<0.55 dropped, got: {entity_hits}"
+    assert entity_hits == [], f"Expected entity with vec<0.55 and no strong-hit dropped, got: {entity_hits}"
 
 
 # ── 2. no anchor bias ─────────────────────────────────────────────────────────
@@ -334,18 +344,21 @@ def test_anchor_formula_vec055_bm25_half():
 
 
 def test_anchor_formula_fts_only_dropped(db):
-    """Milestone with vec=0 (FTS-only hit) is dropped by the pre-gate."""
+    """Milestone with vec=0 (FTS-only hit) is dropped by the pre-gate when query
+    does not substring-match the anchor body (no strong-hit bypass).
+    """
     db.execute(
         "INSERT INTO milestones(scope, date, title, description, pinned) "
-        "VALUES('test', '2026-01-01', 'ftsonly anchor test', 'desc', 0)"
+        "VALUES('test', '2026-01-01', 'zxqftsonly unique anchor', 'zxqdesc', 0)"
     )
     db.execute("INSERT INTO milestones_fts(milestones_fts) VALUES('rebuild')")
     db.commit()
-    # No vec inserted — vec=0.0, below _ANCHOR_VEC_FLOOR=0.55 → must be dropped.
+    # No vec inserted — vec=0.0, below _ANCHOR_VEC_FLOOR=0.55.
+    # Query does not contain "zxqftsonly" or "zxqdesc" → no strong-hit → must be dropped.
     with patch.object(rm, "_ensure_embedder", return_value=None):
-        results = rm.recall_fusion(db, "ftsonly anchor test", min_score=0.01)
+        results = rm.recall_fusion(db, "some unrelated semantic query about nothing", min_score=0.01)
     hits = [r for r in results if r.get("kind") == "milestone"]
-    assert hits == [], f"FTS-only milestone must be dropped by pre-gate, got: {hits}"
+    assert hits == [], f"FTS-only milestone with no strong-hit must be dropped by pre-gate, got: {hits}"
 
 
 # ── 4. cwd boost ──────────────────────────────────────────────────────────────

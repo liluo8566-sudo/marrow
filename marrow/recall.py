@@ -566,7 +566,13 @@ _FTS_TERM_RE = re.compile(r"[A-Za-z0-9]+|[一-鿿]+")
 # Vec pre-gate for anchor lanes (milestone / memes / entity): rows whose vec
 # similarity is below this floor are dropped BEFORE scoring — they cannot ride
 # bias up past min_score with no real topical match.
-_ANCHOR_VEC_FLOOR = _VEC_ONLY_FLOOR  # 0.55
+_ANCHOR_VEC_FLOOR = 0.50  # was _VEC_ONLY_FLOOR (0.55); dropped for zh↔en paraphrase tolerance
+# Anchor scoring bias: events get recency+affect (≈+0.25 ceiling) on top of
+# vec+bm25; anchor lanes only have vec+bm25. This +0.10 bias rebalances so a
+# vec-floor-cleared (or strong-hit) anchor can compete with high-recency events.
+# Only applies to rows that already passed the vec floor or were strong-hit —
+# unrelated anchors are still filtered out before this bias is added.
+_ANCHOR_BIAS = 0.10
 
 # Tokenizer for stopword filtering: ASCII runs and CJK runs (same as FTS_TERM_RE).
 _SW_TOKEN_RE = re.compile(r"[A-Za-z0-9]+|[一-鿿]+")
@@ -703,6 +709,97 @@ def _fts_query(terms: list[str]) -> str:
     if not terms:
         return ""
     return " OR ".join('"' + t.replace('"', '""') + '"' for t in terms)
+
+
+# ── anchor strong-hit (substring scan, bypass vec floor) ──────────────────────
+# Direction: anchor row body → query. For each anchor row, expand a needle set
+# from its full body (entity name+fact+aliases / memes key+value /
+# milestone title+description). If any needle appears as a substring of the
+# lowercased query, the row is a strong-hit and gets:
+#   - vec floor bypass (vec_val < _ANCHOR_VEC_FLOOR no longer drops it)
+#   - strong-hit only bypasses vec floor; natural bm25+vec score determines rank — no forced score floor.
+# Catches dims that trigram FTS5 misses (2-char CJK names like 妈妈) or that
+# vec ranks low (long query vs short anchor body collapses CLS-pool cosine).
+_NEEDLE_SPLIT_RE = re.compile(r'[^\w一-鿿]+')
+_CJK_RUN_RE = re.compile(r'[一-鿿]+')
+
+
+def _expand_needles(text: str, cjk_min: int = 2, cjk_max: int = 4,
+                    ascii_min: int = 2) -> set[str]:
+    """Build substring needles from an anchor body.
+
+    Tokenize by non-word/non-CJK chars; then:
+    - Pure ASCII alnum tokens ≥ ascii_min: keep whole (保住 max/xhs/SSU/5x/bbb)
+    - CJK runs inside tokens: sliding cjk_min..cjk_max windows (让 (在一起)
+      能从 (我们在...正式在一起了) 里挖出)
+    Returns lowercased dedup set.
+    """
+    if not text:
+        return set()
+    out: set[str] = set()
+    for tok in _NEEDLE_SPLIT_RE.split(text.lower()):
+        if not tok:
+            continue
+        if tok.isascii() and len(tok) >= ascii_min:
+            out.add(tok)
+        for run in _CJK_RUN_RE.findall(tok):
+            n_max = min(cjk_max, len(run))
+            for n in range(cjk_min, n_max + 1):
+                for i in range(len(run) - n + 1):
+                    out.add(run[i:i + n])
+    return out
+
+
+def _entity_strong_hits(conn: sqlite3.Connection, query_lower: str) -> list[sqlite3.Row]:
+    """Scan all live entities; return ones whose body needles substring-match the query."""
+    rows = conn.execute(
+        "SELECT id, kind, name, fact, aliases, mention_count, created_at "
+        "FROM entities WHERE superseded_by IS NULL"
+    ).fetchall()
+    hits: list[sqlite3.Row] = []
+    for r in rows:
+        parts = [r["name"] or "", r["fact"] or ""]
+        aliases_raw = r["aliases"]
+        if aliases_raw and aliases_raw not in ("", "[]"):
+            try:
+                al = json.loads(aliases_raw)
+                if isinstance(al, list):
+                    parts.extend(str(a) for a in al if a)
+            except Exception:
+                pass
+        needles = _expand_needles(" ".join(parts))
+        if any(n in query_lower for n in needles):
+            hits.append(r)
+    return hits
+
+
+def _memes_strong_hits(conn: sqlite3.Connection, query_lower: str) -> list[sqlite3.Row]:
+    """Scan active memes; substring needles from key+value+context."""
+    rows = conn.execute(
+        "SELECT id, type, key, value, context, pinned, use_count "
+        "FROM memes WHERE status='active'"
+    ).fetchall()
+    hits: list[sqlite3.Row] = []
+    for r in rows:
+        body = f"{r['key'] or ''} {r['value'] or ''}"
+        needles = _expand_needles(body)
+        if any(n in query_lower for n in needles):
+            hits.append(r)
+    return hits
+
+
+def _milestone_strong_hits(conn: sqlite3.Connection, query_lower: str) -> list[sqlite3.Row]:
+    """Scan all milestones; substring needles from title+description."""
+    rows = conn.execute(
+        "SELECT id, scope, date, title, description, pinned FROM milestones"
+    ).fetchall()
+    hits: list[sqlite3.Row] = []
+    for r in rows:
+        body = f"{r['title'] or ''} {r['description'] or ''}"
+        needles = _expand_needles(body)
+        if any(n in query_lower for n in needles):
+            hits.append(r)
+    return hits
 
 
 def _fts_lane_hits(
@@ -1016,6 +1113,32 @@ def recall_fusion(
                 "type": r["type"],
                 "use_count": int(r["use_count"] or 0),
             }
+
+    # Strong-hit merge: substring-scan all active memes; mark strong=True for
+    # rows whose body needles substring-match the query. Bypasses vec floor.
+    q_lower = q.lower()
+    for r in _memes_strong_hits(conn, q_lower):
+        mid = r["id"]
+        if mid in memes_by_id:
+            memes_by_id[mid]["strong"] = True
+            continue
+        key = r["key"] or ""
+        value = r["value"] or ""
+        ctx = r["context"] or ""
+        content = f"{key}: {value}" if value else key
+        if ctx:
+            content = f"{content} ({ctx})"
+        memes_by_id[mid] = {
+            "kind": "memes", "id": mid,
+            "session_id": None, "timestamp": "",
+            "role": "memes", "content": content,
+            "channel": None, "compressed": 0,
+            "bm25": 0.0, "vec": 0.0, "fts_hit": False,
+            "pinned": int(r["pinned"] or 0),
+            "type": r["type"],
+            "use_count": int(r["use_count"] or 0),
+            "strong": True,
+        }
     memes_cands = list(memes_by_id.values())
 
     # Milestones: merge vec hits into the keyword pool by id.
@@ -1045,6 +1168,28 @@ def recall_fusion(
                 "pinned": int(r["pinned"] or 0),
                 "scope": r["scope"],
             }
+    # Strong-hit merge: substring-scan all milestones; mark strong=True for
+    # rows whose body needles substring-match the query. Bypasses vec floor.
+    for r in _milestone_strong_hits(conn, q_lower):
+        mid = r["id"]
+        if mid in ms_by_id:
+            ms_by_id[mid]["strong"] = True
+            continue
+        title = r["title"] or ""
+        desc = r["description"] or ""
+        date = r["date"] or ""
+        ts = date if "T" in date else (date + "T00:00:00Z" if date else "")
+        content = title if not desc else f"{title}: {desc}"
+        ms_by_id[mid] = {
+            "kind": "milestone", "id": mid,
+            "session_id": None, "timestamp": ts,
+            "role": "milestone", "content": content,
+            "channel": None, "compressed": 0,
+            "bm25": 0.0, "vec": 0.0, "fts_hit": False,
+            "pinned": int(r["pinned"] or 0),
+            "scope": r["scope"],
+            "strong": True,
+        }
     milestone_cands = list(ms_by_id.values())
 
     # Diary: vec-only lane (no kw scan for long-form prose). Build candidates
@@ -1116,6 +1261,30 @@ def recall_fusion(
                 "mention_count": int(card["mention_count"] or 0),
                 "entity_kind": ekind,
             }
+    # Strong-hit merge: substring-scan all live entities; mark strong=True for
+    # rows whose body needles substring-match the query. Bypasses vec floor.
+    for r in _entity_strong_hits(conn, q_lower):
+        eid = r["id"]
+        if eid in ent_by_id:
+            ent_by_id[eid]["strong"] = True
+            continue
+        fact = r["fact"] or ""
+        if not fact.strip():
+            continue
+        name = r["name"] or ""
+        ekind = r["kind"] or ""
+        content = f"{name} ({ekind}): {fact}" if ekind else f"{name}: {fact}"
+        ent_by_id[eid] = {
+            "kind": "entity", "id": eid,
+            "session_id": None,
+            "timestamp": r["created_at"] or "",
+            "role": "entity", "content": content,
+            "channel": None, "compressed": 0,
+            "bm25": 0.0, "vec": 0.0, "fts_hit": False,
+            "mention_count": int(r["mention_count"] or 0),
+            "entity_kind": ekind,
+            "strong": True,
+        }
     entity_cands = list(ent_by_id.values())
 
     # ── dormant revive + scoring ──────────────────────────────────────────────
@@ -1208,22 +1377,29 @@ def recall_fusion(
             scored.append((final, {**c, "score": final}))
 
     # ── milestone scoring (recency/affect dropped — evergreen anchor —
-    # vec dominates; bm25 adds keyword signal). Vec pre-gate: ALL rows with
-    # vec < _ANCHOR_VEC_FLOOR are dropped (including vec=0 FTS-only hits —
-    # those are CJK trigram noise on anchor lanes).
+    # vec dominates; bm25 adds keyword signal). Vec pre-gate: rows with
+    # vec < _ANCHOR_VEC_FLOOR are dropped unless strong-hit bypasses it.
     for mc in milestone_cands:
         vec_val = mc.get("vec", 0.0)
-        if vec_val < _ANCHOR_VEC_FLOOR:
+        strong = mc.get("strong", False)
+        if not strong and vec_val < _ANCHOR_VEC_FLOOR:
             continue
         raw = w_bm25 * mc["bm25"] + w_milestones_vec * vec_val
+        raw += _ANCHOR_BIAS  # see _ANCHOR_BIAS
+        if strong:
+            raw = max(raw, min_score)
         scored.append((raw, {**mc, "score": raw}))
 
     # ── memes scoring (mirror milestone) ─────────────────────────────────────
     for vc in memes_cands:
         vec_val = vc.get("vec", 0.0)
-        if vec_val < _ANCHOR_VEC_FLOOR:
+        strong = vc.get("strong", False)
+        if not strong and vec_val < _ANCHOR_VEC_FLOOR:
             continue
         raw = w_bm25 * vc["bm25"] + w_memes_vec * vec_val
+        raw += _ANCHOR_BIAS  # see _ANCHOR_BIAS
+        if strong:
+            raw = max(raw, min_score)
         scored.append((raw, {**vc, "score": raw}))
 
     # ── diary scoring (vec only — evergreen long-form prose) ─────────────────
@@ -1241,14 +1417,19 @@ def recall_fusion(
     # ── entity scoring (FTS + vec + mention boost, vec pre-gate) ───────────
     # vec dominates; bm25 adds keyword signal. FTS-only (vec=0) dropped same
     # as milestone/memes — CJK trigram noise. mention_count boost kept.
+    # strong-hit bypasses vec floor.
     for ec in entity_cands:
         vec_val = ec.get("vec", 0.0)
-        if vec_val < _ANCHOR_VEC_FLOOR:
+        strong = ec.get("strong", False)
+        if not strong and vec_val < _ANCHOR_VEC_FLOOR:
             continue
         raw = (
             w_bm25 * ec["bm25"] + w_entities_vec * vec_val
             + min(0.05, 0.02 * math.log1p(ec.get("mention_count", 0)))
         )
+        raw += _ANCHOR_BIAS  # see _ANCHOR_BIAS
+        if strong:
+            raw = max(raw, min_score)
         scored.append((raw, {**ec, "score": raw}))
 
     # ── unified min_score gate ──────────────────────────────────────────────
