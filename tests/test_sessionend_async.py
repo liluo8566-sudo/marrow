@@ -242,6 +242,98 @@ def test_sessionend_async_writes_fail_audit_on_exception(db_env):
         "fail:task_affect=RuntimeError,digest=RuntimeError")
 
 
+def _write_extract_row(db: str, sid: str, summary: str) -> None:
+    conn = storage.connect(db)
+    with conn:
+        conn.execute(
+            "INSERT INTO audit_log (target_table, target_id, action, summary)"
+            " VALUES ('events', ?, 'sessionend_extract', ?)",
+            (sid, summary),
+        )
+    conn.close()
+
+
+def test_retry_failed_alert_silent_on_first_fail(db_env):
+    """Contract: a one-off fail (prior_fails=0) MUST NOT alert. Only the
+    SECOND failure (catchup retry also blew up) crosses the threshold.
+    Prevents single-shot noise — matches Lumi's spec."""
+    db, _ = db_env
+    from marrow import sessionend_async
+    sid = "first-fail-only"
+    _write_extract_row(db, sid, "start")
+    conn = storage.connect(db)
+    sessionend_async._write_final_audit(conn, sid, "fail:RuntimeError")
+    conn.close()
+
+    conn = storage.connect(db)
+    try:
+        alert = conn.execute(
+            "SELECT id FROM alerts WHERE type='sessionend_async' LIMIT 1"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert alert is None, "first fail must stay silent"
+
+
+def test_retry_failed_alert_fires_on_second_fail(db_env):
+    """Second fail with prior_fails>=1 → critical alert, type-level
+    fingerprint 'sessionend_async_retry_failed'."""
+    db, _ = db_env
+    from marrow import sessionend_async
+    sid = "second-fail-fires"
+    # Seed prior failure history.
+    _write_extract_row(db, sid, "start")
+    _write_extract_row(db, sid, "fail:RuntimeError")
+    _write_extract_row(db, sid, "start")
+    conn = storage.connect(db)
+    sessionend_async._write_final_audit(conn, sid, "fail:OperationalError")
+    conn.close()
+
+    conn = storage.connect(db)
+    try:
+        row = conn.execute(
+            "SELECT severity, fingerprint, message FROM alerts"
+            " WHERE type='sessionend_async' AND resolved=0"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None, "second fail must alert"
+    assert row["severity"] == "critical"
+    assert row["fingerprint"] == "sessionend_async_retry_failed"
+    assert sid[:8] in row["message"]
+    assert "catchup retry also failed" in row["message"]
+
+
+def test_retry_failed_alert_collapses_multi_sid_to_one_row(db_env):
+    """Type-level fingerprint dedup: N distinct sids that each cross threshold
+    must produce exactly 1 alert row (hit_count bumps), not N rows. Prevents
+    the dashboard flood Lumi saw with per-sid fingerprints."""
+    db, _ = db_env
+    from marrow import sessionend_async
+    sids = ["multi-a-aaaa", "multi-b-bbbb", "multi-c-cccc"]
+    for sid in sids:
+        _write_extract_row(db, sid, "start")
+        _write_extract_row(db, sid, "fail:Boom")
+        _write_extract_row(db, sid, "start")
+        conn = storage.connect(db)
+        sessionend_async._write_final_audit(conn, sid, "fail:Boom2")
+        conn.close()
+
+    conn = storage.connect(db)
+    try:
+        rows = conn.execute(
+            "SELECT message, hit_count FROM alerts"
+            " WHERE type='sessionend_async' AND resolved=0"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert len(rows) == 1, f"expected 1 collapsed row, got {len(rows)}"
+    assert rows[0]["hit_count"] >= len(sids), \
+        f"hit_count must reflect each sid's failure, got {rows[0]['hit_count']}"
+    # Latest message wins → must reference one of the sids.
+    assert any(s[:8] in rows[0]["message"] for s in sids)
+
+
 # ── Unit 3: sessionstart_catchup ─────────────────────────────────────────────
 
 def _write_real_jsonl(path: Path, sid: str) -> None:

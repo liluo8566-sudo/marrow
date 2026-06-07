@@ -250,11 +250,18 @@ def _write_final_audit(conn, sid: str, summary: str) -> None:
     if summary.startswith(("fail:", "partial:")) and prior_fails >= 1:
         try:
             sev = "critical" if summary.startswith("fail:") else "warn"
+            # Type-level fingerprint: all sids whose retry also failed collapse
+            # into a single dashboard row; repo.add_alert bumps hit_count and
+            # refreshes the message to the most-recent sid+summary so the row
+            # always shows the latest failure rather than flooding.
             repo.add_alert(
                 sev, "sessionend_async",
-                f"sessionend_async_retry_failed:sid={sid[:8]}",
+                "sessionend_async_retry_failed",
                 source="sessionend_async.py", db=config.db_path(),
-                message=f"sid={sid[:8]} {summary} (catchup retry also failed)",
+                message=(
+                    f"latest sid={sid[:8]} {summary} "
+                    f"(catchup retry also failed; prior_fails={prior_fails})"
+                ),
             )
         except Exception:  # noqa: BLE001 — alert is best-effort
             pass

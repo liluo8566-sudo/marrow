@@ -6,7 +6,15 @@ Decision source = audit_log lifecycle markers + events table (last 24h).
 No jsonl mtime scanning — mtime was always an unreliable signal (idle
 thinking / context switch silences the file without killing the session).
 
-For each candidate sid, _classify returns spawn|skip per a 7-state table:
+For each candidate sid, _classify returns spawn|skip per these preconditions
+followed by a 7-state table:
+
+  P1. bridge owns sessionend timing  -> skip
+  P2. session_block latest = archive -> skip (Lumi archived; cleared = run)
+  P3. manual_skip latest = skip      -> skip (manual_skip; skip_cleared = run)
+  P4. end_row.summary in {worktree=1, mm_minus_blocked} -> skip (alt close path)
+  P5. sessionend_extract:start row newer than end_row -> skip (in-flight)
+
   1. ppid live (start marker ppid in live_cc_ppids) -> skip (active session)
   2. lifecycle:end + ok,user_count=N + events.user_count > N -> spawn (resumed, grew)
   3. lifecycle:end + ok,user_count=N + events.user_count <= N -> skip (done)
@@ -15,7 +23,8 @@ For each candidate sid, _classify returns spawn|skip per a 7-state table:
   6. no lifecycle:end + start ppid dead -> spawn (endhook didn't fire)
   7. no marker rows at all + sid in 24h events -> spawn (cc died before hooks)
 
-Alert: lifecycle:start >= 30min ago, ppid dead, no lifecycle:end -> silent_death alert.
+Alert path: catchup_spawn_failed when popen_detach_lazy raises. No predicate-
+based silent_death alerts — catchup signals only on operational failure.
 """
 from __future__ import annotations
 
@@ -38,7 +47,6 @@ RETRY_LIMIT = 2
 
 _WINDOW_HOURS = 24
 _END_GRACE_SECONDS = 300   # 5min grace after lifecycle:end before spawning
-_SILENT_DEATH_MIN = 30     # alert if start >= 30min ago, ppid dead, no end
 
 
 def _parse_ppid_started_at(summary: str) -> tuple[int | None, int | None]:
@@ -191,20 +199,30 @@ def _classify(conn, sid: str, live_ppids: set[int]) -> Literal["spawn", "skip"]:
     # Next step: weclaude bridge writes lifecycle:start/end markers into marrow.db
     # on rotate_session / idle_fire_loop. See Task 5 in wt-lifecycle plan.
     """
-    # Precondition: bridge owns sessionend timing for this sid.
+    # P1: bridge owns sessionend timing for this sid.
     if _bridge_owns_active(conn, sid):
         return "skip"
 
-    # Precondition: Lumi (or the bridge) explicitly archived this sid via
-    # session_block / manual_skip. There is nothing to catch up by design —
-    # the session was closed on purpose, not silently dropped.
-    user_archived = conn.execute(
-        "SELECT 1 FROM audit_log"
-        " WHERE target_id=? AND action IN ('session_block','manual_skip')"
-        " LIMIT 1",
+    # P2-P3: latest-row semantics mirror hooks._is_session_blocked /
+    # _is_manual_skip. A `cleared` / `skip_cleared` row means mm+ has unblocked
+    # the sid and it should be processed normally — so we cannot treat the
+    # mere existence of these actions as terminal.
+    block_latest = conn.execute(
+        "SELECT summary FROM audit_log"
+        " WHERE action='session_block' AND target_id=?"
+        " ORDER BY id DESC LIMIT 1",
         (sid,),
     ).fetchone()
-    if user_archived:
+    if block_latest and block_latest["summary"] == "archive":
+        return "skip"
+
+    msk_latest = conn.execute(
+        "SELECT summary FROM audit_log"
+        " WHERE action='manual_skip' AND target_id=?"
+        " ORDER BY id DESC LIMIT 1",
+        (sid,),
+    ).fetchone()
+    if msk_latest and msk_latest["summary"] in ("skip", "bridge_owns"):
         return "skip"
 
     now = time.time()
@@ -217,13 +235,32 @@ def _classify(conn, sid: str, live_ppids: set[int]) -> Literal["spawn", "skip"]:
         (sid,),
     ).fetchall()
 
-    # Fetch end marker for this sid.
+    # Fetch end marker for this sid — keep summary + id for P4/P5 below.
     end_row = conn.execute(
-        "SELECT occurred_at FROM audit_log"
+        "SELECT id, summary, occurred_at FROM audit_log"
         " WHERE action='session_lifecycle:end' AND target_id=?"
         " ORDER BY id DESC LIMIT 1",
         (sid,),
     ).fetchone()
+
+    # P4: alternate close paths leave a typed end-marker summary. There is
+    # nothing left to catch up for worktree / mm_minus sessions.
+    if end_row and (end_row["summary"] or "") in ("worktree=1", "mm_minus_blocked"):
+        return "skip"
+
+    # P5: a sessionend_extract:start row newer than the end_row means
+    # sessionend_async is currently running — give it time, don't double-spawn.
+    if end_row:
+        inflight = conn.execute(
+            "SELECT 1 FROM audit_log"
+            " WHERE action='sessionend_extract' AND target_id=?"
+            " AND summary='start' AND id > ?"
+            " LIMIT 1",
+            (sid, end_row["id"]),
+        ).fetchone()
+        if inflight:
+            return "skip"
+
     # Fetch most recent terminal row for this sid. `skip:short_session[,user_count=N]`
     # counts as terminal: short sessions need no LLM digest, and the embedded
     # user_count lets State 2 detect resume-and-grow without an extra DB hit.

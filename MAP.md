@@ -341,7 +341,7 @@ Total: 7 plists; watcher is the only persistent process, the other 6 are schedul
 - hook main · warn · top-level hook crash · hooks.py:704
 - hook spawn · warn · catchup or sessionend_async popen failed · hooks.py:211,333 + sessionstart_catchup.py:330
 - catchup retry · critical/warn · sessionend_async catchup respawn outcome · sessionend_async.py:233
-- catchup silent death · critical · sessionstart_catchup found a session vanished mid-flight · sessionstart_catchup.py:273
+- sessionend retry failed · critical/warn · sessionend_async wrote fail:/partial: AND prior_fails ≥ 1; single type-level row, hit_count++ per new sid · sessionend_async.py:250
 - embed lane · warn · embed_pending raised (alert #169 site) · sessionend_async.py:496
 - unanchored task · warn · task line in md with no DB id · reconcile.py:794
 - drift sweep · info/warn/critical · move/rename apply paths (dynamic via _emit_alert) · drift_sweep.py:452
@@ -358,7 +358,7 @@ Total: 7 plists; watcher is the only persistent process, the other 6 are schedul
 ## 9. Catchup & self-heal
 
 - sessionstart_catchup: fires at every SessionStart; checks all sids seen in last 24h; max 2 spawns per run · marrow/sessionstart_catchup.py:9
-  silent_death alert: if start marker is ≥30 min old, ppid is dead, and no lifecycle:end row exists, log a critical alert before classifying · marrow/sessionstart_catchup.py:273
+  only catchup_spawn_failed; no predicate-based silent_death · marrow/sessionstart_catchup.py:330. Real-death alerting in sessionend_async.py:250.
   Seven classifier states:
   1. ppid live → skip (active session still running)
   2. lifecycle:end + ok,user_count=N + events.user_count > N → spawn (session resumed and grew)

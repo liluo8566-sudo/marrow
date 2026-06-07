@@ -219,6 +219,78 @@ def test_classify_user_archived_skips(db_env):
             f"user-archived sid {sid} must classify as skip"
 
 
+def test_classify_session_block_cleared_runs(db_env):
+    """Latest-row semantics: session_block:archive followed by session_block:cleared
+    means mm+ unblocked the sid. Catchup must NOT skip — fall through normally
+    (here: dead-ppid + no end -> spawn)."""
+    db, _ = db_env
+    sid = "block-cleared-sid"
+    old_ts = _ago_ts(31 * 60)
+    _insert_lifecycle(db, sid, "session_lifecycle:start",
+                      "ppid=99001,source=cc,started_at=1000", occurred_at=old_ts)
+    _insert_lifecycle(db, sid, "session_block", "archive")
+    _insert_lifecycle(db, sid, "session_block", "cleared")
+    _insert_user_events(db, sid, 5)
+    assert _classify(db, sid, set()) == "spawn"
+
+
+def test_classify_manual_skip_cleared_runs(db_env):
+    """Same latest-row semantics for manual_skip:skip_cleared."""
+    db, _ = db_env
+    sid = "msk-cleared-sid"
+    old_ts = _ago_ts(31 * 60)
+    _insert_lifecycle(db, sid, "session_lifecycle:start",
+                      "ppid=99002,source=cc,started_at=1000", occurred_at=old_ts)
+    _insert_lifecycle(db, sid, "manual_skip", "skip")
+    _insert_lifecycle(db, sid, "manual_skip", "skip_cleared")
+    _insert_user_events(db, sid, 5)
+    assert _classify(db, sid, set()) == "spawn"
+
+
+def test_classify_worktree_end_marker_skips(db_env):
+    """Worktree session_end writes lifecycle:end summary='worktree=1'. This
+    is a completed close path with no extract by design. Catchup must skip."""
+    db, _ = db_env
+    sid = "wt-end-sid"
+    old_ts = _ago_ts(60 * 60)
+    _insert_lifecycle(db, sid, "session_lifecycle:start",
+                      "ppid=99003,source=cc,started_at=1000", occurred_at=old_ts)
+    _insert_lifecycle(db, sid, "session_lifecycle:end", "worktree=1",
+                      occurred_at=_ago_ts(30 * 60))
+    _insert_user_events(db, sid, 5)
+    assert _classify(db, sid, set()) == "skip"
+
+
+def test_classify_mm_minus_blocked_end_marker_skips(db_env):
+    """mm- close path writes lifecycle:end summary='mm_minus_blocked'. Same
+    contract as worktree=1 — completed close, no extract expected."""
+    db, _ = db_env
+    sid = "mm-end-sid"
+    old_ts = _ago_ts(60 * 60)
+    _insert_lifecycle(db, sid, "session_lifecycle:start",
+                      "ppid=99004,source=cc,started_at=1000", occurred_at=old_ts)
+    _insert_lifecycle(db, sid, "session_lifecycle:end", "mm_minus_blocked",
+                      occurred_at=_ago_ts(30 * 60))
+    _insert_user_events(db, sid, 5)
+    assert _classify(db, sid, set()) == "skip"
+
+
+def test_classify_inflight_extract_start_skips(db_env):
+    """sessionend_extract:start row newer than end_row means sessionend_async
+    is currently running (LLM tail can exceed 5min grace). Catchup must NOT
+    double-spawn — let the in-flight async finish."""
+    db, _ = db_env
+    sid = "inflight-sid"
+    old_ts = _ago_ts(60 * 60)
+    _insert_lifecycle(db, sid, "session_lifecycle:start",
+                      "ppid=99005,source=cc,started_at=1000", occurred_at=old_ts)
+    _insert_lifecycle(db, sid, "session_lifecycle:end", "",
+                      occurred_at=_ago_ts(20 * 60))
+    _insert_extract(db, sid, "start")
+    _insert_user_events(db, sid, 5)
+    assert _classify(db, sid, set()) == "skip"
+
+
 def test_catchup_spawn_failed_alert(db_env):
     """Operational alert: popen_detach_lazy raising during spawn produces a
     single type-level catchup_spawn_failed alert listing the failing sids."""
