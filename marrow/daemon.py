@@ -44,6 +44,17 @@ def recall(query: str, limit: int = 10, context: bool = False) -> list[dict]:
                         )
     finally:
         conn.close()
+    # Best-effort: bump recall_count for injected event-kind rows.
+    try:
+        event_ids = [
+            int(r["id"])
+            for r in rows
+            if r.get("id") and (r.get("kind") or "event") == "event"
+        ]
+        if event_ids:
+            _recall_mod.bump_recall_counts(event_ids, db=_DB)
+    except Exception:
+        pass
     # Convert UTC timestamps to Melbourne local time at the read boundary.
     # `when` is computed from the raw UTC string before conversion.
     for row in rows:

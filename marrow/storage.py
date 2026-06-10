@@ -13,7 +13,7 @@ import sqlite_vec
 
 from . import config
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 # Phase 1 first-class tables + Phase 2 affect/entities (DECISIONS Phase 2).
 # The retired emotions/people/preferences/dir placeholders stay absent.
@@ -492,6 +492,7 @@ def init_db(path: str | None = None) -> sqlite3.Connection:
         _migrate_to_v13(conn)
         _migrate_to_v14(conn)
         _migrate_to_v15(conn)
+        _migrate_to_v16(conn)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     return conn
 
@@ -778,6 +779,29 @@ def _migrate_to_v15(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_alerts_dedup "
         "ON alerts(type, fingerprint, resolved)"
+    )
+
+
+def _migrate_to_v16(conn: sqlite3.Connection) -> None:
+    """v16: events.recall_count + events.last_recalled_at — best-effort stats
+    updated on recall hits. recall_count feeds vec eviction exemption (aging)
+    and future recall-hit boost. last_recalled_at is UTC ISO string.
+    Idempotent — duplicate ALTER is swallowed; user_version short-circuits.
+    """
+    v = conn.execute("PRAGMA user_version").fetchone()[0]
+    if v >= 16:
+        return
+    for col, decl in (
+        ("recall_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("last_recalled_at", "TEXT"),
+    ):
+        try:
+            conn.execute(f"ALTER TABLE events ADD COLUMN {col} {decl}")
+        except sqlite3.OperationalError:
+            pass
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_events_recall_count"
+        " ON events(recall_count) WHERE recall_count > 0"
     )
 
 

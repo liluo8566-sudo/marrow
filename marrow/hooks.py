@@ -1068,6 +1068,18 @@ def user_prompt_submit() -> int:
     if not visible:
         return 0
     _save_recall_seen(sid, seen)
+    # Best-effort: bump recall_count for injected event-kind hits only.
+    _injected_event_ids = [
+        int(h.get("id") or 0)
+        for h in visible
+        if (h.get("kind") or "event") == "event" and h.get("id")
+    ]
+    if _injected_event_ids:
+        try:
+            from . import recall as recall_mod
+            recall_mod.bump_recall_counts(_injected_event_ids)
+        except Exception:
+            pass
     ctx = "\n".join(lines)
 
     # Side log — markdown append so VSCode preview / tail both readable.

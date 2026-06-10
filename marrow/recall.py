@@ -416,6 +416,39 @@ def embed_pending(
     return total
 
 
+# ── recall-count bump ────────────────────────────────────────────────────────
+
+def bump_recall_counts(event_ids: list[int], db: str | None = None) -> None:
+    """Best-effort: increment recall_count + set last_recalled_at for event rows.
+
+    Called after recall hits are confirmed injected (passive hook) or returned
+    (MCP daemon). Failure MUST NEVER propagate — wrapped in try/except throughout.
+    Uses a separate short-lived connection to avoid disturbing the caller's txn.
+    """
+    if not event_ids:
+        return
+    try:
+        from . import storage as _storage, config as _config
+        db = db or _config.db_path()
+        conn = _storage.connect(db)
+        try:
+            ts = __import__("datetime").datetime.now(
+                __import__("datetime").timezone.utc
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+            with conn:
+                conn.executemany(
+                    "UPDATE events SET"
+                    " recall_count = recall_count + 1,"
+                    " last_recalled_at = ?"
+                    " WHERE id = ?",
+                    [(ts, eid) for eid in event_ids],
+                )
+        finally:
+            conn.close()
+    except Exception:
+        pass  # stats write must never block or fail recall
+
+
 # ── decay helpers ─────────────────────────────────────────────────────────────
 
 def _recency_score(timestamp_iso: str) -> float:
