@@ -32,6 +32,7 @@
   - Time-cue regex ((昨天/今早/上周三/N天前)...) → Melbourne-local date range → UTC → SQL window on events/digests, optional FTS keyword inside window. Deterministic, no embedding.
   - mcp recall gains since/until params for active queries.
   - Canonical case: (你还记得我上周说过灭绝师太说了xxx) → active recall("灭绝师太", since/until=last week) → window-first then FTS/vec. Without window, recency 0.15 can't outrank older high-score hits of a recurring term.
+- Display side: recall hits render relative time beside absolute — ([06-08 Mon · 2d ago]). Deterministic render-time formatting, shared by passive hook + mcp recall. Complements query-side since/until.
 - Exit C — visualization (cyberboss-style day/week/month page): last priority, dashboard subpage.
 - Division: A = recent days always present; B = precise time lookup; vec recall = timeless semantic association.
 
