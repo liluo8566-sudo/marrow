@@ -125,6 +125,7 @@
 
 - **SessionStart injects**: affect heartbeat warning (gap day in last 7d with events but no affect), affect backdrop (top_sections mood band).
 - **UserPromptSubmit injects**: top-K recall fusion hits (vec + bm25 + recency + affect) as additionalContext labelled "Recall (auto) — passive context, do not answer"; also handles mm-/mm+ control prefixes.
+- **Render shaping** (hook side): per-rank char caps `rank_caps=[300,120,120,40,40]` — only rank-1 event hit gets ±1 context turns; anchor cards truncate at rank cap, never context. Rows < top1 × `rel_cutoff` (0.6) dropped pre-injection; block budget 800 chars. Hits timestamped `[06-08 Mon · 2d ago]` via `timeutil.format_recall_ts` (shared with mcp recall `when` field; mcp recall also accepts `context: bool` to attach ±1 turns to rows).
 - **entity force-include**: Bypasses FTS5 via reverse-substring match (name.lower() in query.lower()) so 2-char CN names that fall below the trigram tokenizer's 3-char floor (e.g. 南南) are still surfaced; for names ≥3 chars FTS5 is tried first, LIKE-scan as fallback.
 - **Where**: marrow/hooks.py:205 · marrow/hooks.py:482 · marrow/entity_recall.py:73 · marrow/recall.py:1027
 
@@ -167,7 +168,7 @@ Schema version: 13. Migrations: idempotent numbered functions (_migrate_to_v2…
 - FTS5 (BM25-normalised) ∪ vec (cosine) candidates merge by event id → weighted sum: **vec 0.55 · bm25 0.30 · recency 0.15 · affect 0.10**.
 - Milestones / memes / diary / tasks lanes contribute vec-only or substring candidates with reserved slot caps (anchor rows can't be starved by events flood).
 - Entity force-include: any entity name found in the query prepends its entity-card + linked events, bypassing FTS5 (handles 2-char CJK names that fall below the trigram tokenizer's 3-char floor).
-- **Thresholds**: `min_score=0.35` for events (milestones / memes / entities skip this gate) · vec-only floor `0.40` (cross-table) · dormant rule: importance ≤ 3 AND age > 90d excluded unless FTS keyword hit revives
+- **Thresholds**: `min_score=0.35` for events (milestones / memes / entities skip this gate) · vec-only floor `0.40` (cross-table) · relative gate `rel_cutoff=0.6` × top1 score (hook render layer, hooks.py `_apply_rel_cutoff`) · dormant rule: importance ≤ 3 AND age > 90d excluded unless FTS keyword hit revives
 - **Where**: marrow/recall.py:693 · marrow/recall.py:433 · marrow/recall.py:444 · marrow/recall.py:455 · marrow/entity_recall.py:73
 
 ### 4.4 Anchor lane tokenizer
@@ -428,7 +429,7 @@ config.toml catalog:
 - [llm]: provider chain + per-provider sub-tables [llm.claude_cli] / [llm.ollama]
 - [tiers]: intent-to-model mapping (cheap/mid/top)
 - [embedding]: bge-m3 model id, dim=1024, provenance tag
-- [recall]: vector flag, fusion weights (w_vec/w_bm25/w_recency/w_affect + per-lane), min_score
+- [recall]: vector flag, fusion weights (w_vec/w_bm25/w_recency/w_affect + per-lane), min_score, rank_caps, rel_cutoff, budget_chars
 - [sessionend]: skip_turn_threshold
 - [memes_dedup] / [tasks_dedup] / [milestones_dedup] / [entities_dedup]: cosine_threshold + fast_skip_count per table
 - [subpages]: top/bottom/hidden render order lists
