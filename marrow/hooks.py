@@ -31,7 +31,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 from . import config, repo, storage, top_sections, transcript
 from .popen_detach import popen_detach, popen_detach_lazy
-from .timeutil import utc_iso_to_local_date, utc_iso_to_local_datetime
+from .timeutil import utc_iso_to_local_date, utc_iso_to_local_datetime, format_recall_ts
 
 _RECALL_TZ = ZoneInfo("Australia/Melbourne")
 _RECALL_CUTOFF_H = 6  # 6AM local day boundary (matches digest)
@@ -897,6 +897,53 @@ def _handle_mm_prefix(inp: dict) -> bool:
     return True
 
 
+# ── pure recall-render helpers (extracted for testability) ───────────────────
+
+def _apply_rel_cutoff(hits: list[dict], rel_cutoff: float) -> list[dict]:
+    """Drop hits whose score < top_score * rel_cutoff. Returns filtered list."""
+    if not hits:
+        return []
+    top_score = hits[0].get("score", 0.0)
+    cutoff = top_score * rel_cutoff
+    return [h for h in hits if (h.get("score") or 0.0) >= cutoff]
+
+
+def _render_hit_block(rank: int, h: dict, rank_caps: list[int]) -> list[str]:
+    """Return the markdown lines for one recall hit at the given rank.
+
+    rank_caps[rank] (falling back to rank_caps[-1]) controls max content chars.
+    Context turns (h['_context']) are only rendered for rank-0 event hits.
+    Pure function — no I/O, no DB access.
+    """
+    cap = rank_caps[rank] if rank < len(rank_caps) else rank_caps[-1]
+    block: list[str] = []
+    ts = format_recall_ts(h.get("timestamp") or "")
+    kind = h.get("kind") or "event"
+    content_full = (h.get("content") or "").replace("\n", " ")
+    if kind in _TABLE_KINDS:
+        block.append(f"- {ts} {content_full[:cap]}")
+    else:
+        ctxs = h.get("_context") or [] if rank == 0 else []
+        main_cap = max(40, cap - 60) if ctxs else cap
+        main = content_full[:main_cap]
+        block.append(f"- {ts} {main}")
+        remaining = max(0, cap - len(main))
+        if ctxs and remaining > 0:
+            per_ctx = max(0, remaining // len(ctxs))
+            for c in ctxs:
+                if per_ctx <= 0:
+                    break
+                cts = utc_iso_to_local_datetime(c.get("timestamp") or "")
+                csnip = _strip_wx_time_prefix(
+                    (c.get("content") or "").replace("\n", " ")
+                )[:per_ctx]
+                if not csnip:
+                    continue
+                arrow = "↑" if c.get("rel") == "prev" else "↓"
+                block.append(f"    {arrow} [{cts}] ({c.get('role')}) {csnip}")
+    return block
+
+
 def user_prompt_submit() -> int:
     """Inject top-K recall hits as UserPromptSubmit additionalContext.
 
@@ -944,25 +991,25 @@ def user_prompt_submit() -> int:
 
     rcfg = cfg.get("recall", {})
     ctx_n = int(rcfg.get("event_context_window", 1))
-    event_max = int(rcfg.get("event_max_chars", 150))
     budget_chars = int(rcfg.get("budget_chars", 800))
+    _default_rank_caps = [300, 120, 120, 40, 40]
+    rank_caps: list[int] = rcfg.get("rank_caps", _default_rank_caps) or _default_rank_caps
+    rel_cutoff: float = float(rcfg.get("rel_cutoff", 0.6))
     try:
         from . import recall as recall_mod
         conn = storage.connect(config.db_path())
         try:
             hits = recall_mod.recall_with_config(conn, prompt_text, current_cwd=cwd)
-            # Attach ±N adjacent same-session turns to each event hit.
-            if ctx_n > 0:
-                for h in hits:
-                    if h.get("kind") in (None, "event") and h.get("session_id") and h.get("id"):
-                        h["_context"] = recall_mod.fetch_event_context(
-                            conn, h["session_id"], int(h["id"]), n=ctx_n
-                        )
         finally:
             conn.close()
     except Exception:
         return 0  # fail-soft: never break the user turn
 
+    if not hits:
+        return 0
+
+    # ── relative score cutoff ─────────────────────────────────────────────────
+    hits = _apply_rel_cutoff(hits, rel_cutoff)
     if not hits:
         return 0
 
@@ -981,6 +1028,22 @@ def user_prompt_submit() -> int:
     if not candidates:
         return 0
 
+    # ── fetch context only for rank-1 hit (event, not anchor) ────────────────
+    if ctx_n > 0 and candidates:
+        top = candidates[0]
+        if top.get("kind") in (None, "event") and top.get("session_id") and top.get("id"):
+            try:
+                from . import recall as recall_mod
+                conn = storage.connect(config.db_path())
+                try:
+                    top["_context"] = recall_mod.fetch_event_context(
+                        conn, top["session_id"], int(top["id"]), n=ctx_n
+                    )
+                finally:
+                    conn.close()
+            except Exception:
+                pass
+
     header_lines = [
         "## Recall (auto) — passive context, do not answer",
         "> If the user references past time/scene cues or memory signals and no relevant hit above → MUST call mcp__marrow__recall.",
@@ -990,34 +1053,9 @@ def user_prompt_submit() -> int:
     # +1 per line for the join newline; matches "\n".join(...) length exactly.
     used = sum(len(line) + 1 for line in header_lines)
     visible: list[dict] = []
-    for h in candidates:
-        block: list[str] = []
-        ts = utc_iso_to_local_date(h.get("timestamp") or "")
+    for rank, h in enumerate(candidates):
+        block = _render_hit_block(rank, h, rank_caps)
         kind = h.get("kind") or "event"
-        content_full = (h.get("content") or "").replace("\n", " ")
-        if kind in _TABLE_KINDS:
-            # Anchor rows ship full content — they're already short and dense.
-            block.append(f"- [{ts}] {content_full}")
-        else:
-            # Event: main + ↑prev + ↓next combined ≤ event_max chars (content only).
-            ctxs = h.get("_context") or []
-            main_cap = max(40, event_max - 60) if ctxs else event_max
-            main = content_full[:main_cap]
-            block.append(f"- [{ts}] {main}")
-            remaining = max(0, event_max - len(main))
-            if ctxs and remaining > 0:
-                per_ctx = max(0, remaining // len(ctxs))
-                for c in ctxs:
-                    if per_ctx <= 0:
-                        break
-                    cts = utc_iso_to_local_datetime(c.get("timestamp") or "")
-                    csnip = _strip_wx_time_prefix(
-                        (c.get("content") or "").replace("\n", " ")
-                    )[:per_ctx]
-                    if not csnip:
-                        continue
-                    arrow = "↑" if c.get("rel") == "prev" else "↓"
-                    block.append(f"    {arrow} [{cts}] ({c.get('role')}) {csnip}")
         block_len = sum(len(line) + 1 for line in block)
         if visible and used + block_len > budget_chars:
             break  # drop this hit — and skip seen-write so it can surface later

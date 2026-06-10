@@ -72,11 +72,14 @@ min_score = 0.40
 # Passive-recall hard limit (2026-06-02: 15 → 10 → 6 → 5). dedup'd anchor tables
 # skip slots without backfill, so 5 is the upper bound, not the floor.
 limit = 5
-# Final injected-block char cap (hook backstop). Tables ship full content;
-# event main+context combined capped at event_max_chars per hit (hook side).
-budget_chars = 600
-# Per-event content budget at hook side: main snippet + ↑prev + ↓next combined.
-event_max_chars = 120
+# Final injected-block char cap (hook backstop).
+budget_chars = 800
+# Per-rank content caps [rank1, rank2, rank3, rank4, rank5].
+# rank1 gets ±1 context turns; ranks 2-3 snippet only; ranks 4-5 label only.
+# Anchor rows (milestones/memes/entities) also truncated at their rank cap.
+rank_caps = [300, 120, 120, 40, 40]
+# Relative score cutoff: drop hits scoring < top1_score * rel_cutoff before injection.
+rel_cutoff = 0.6
 # Event hits ship with N adjacent same-session turns (prev_N + next_N) so a
 # stale answer carries its correction. 0 = disabled.
 event_context_window = 1
