@@ -55,6 +55,12 @@ dim = 1024
 [recall]
 # FTS5 always on. Vector path active when embedding model files are present.
 vector = true
+# Rolling window for vec index (days). Events older than this lose their
+# events_vec row (FTS still works); new embeds stay. 0 = no eviction.
+# Bench (scripts/bench_vec_knn.py, 2026-06-11, 1024-dim float32, k=5):
+#   10k/18d → 4.9ms  25k/45d → 12.3ms  50k/91d → 26.4ms  100k/182d → 51.4ms
+# All buckets under 100ms; 90d (≈50k) chosen as safe conservative default.
+vec_window_days = 90
 # Fusion weights (DECISIONS B3). Tunable post-audit.
 w_vec = 0.55
 w_bm25 = 0.30
