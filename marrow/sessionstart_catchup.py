@@ -222,7 +222,10 @@ def _classify(conn, sid: str, live_ppids: set[int]) -> Literal["spawn", "skip"]:
         " ORDER BY id DESC LIMIT 1",
         (sid,),
     ).fetchone()
-    if msk_latest and msk_latest["summary"] in ("skip", "bridge_owns"):
+    # bridge_owns is NOT terminal here: P1 already decided it with TTL +
+    # superseded checks; a latest bridge_owns row that failed P1 must fall
+    # through to the state machine.
+    if msk_latest and msk_latest["summary"] == "skip":
         return "skip"
 
     now = time.time()
