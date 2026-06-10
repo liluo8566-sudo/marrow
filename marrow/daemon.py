@@ -21,23 +21,41 @@ llm = LLMClient(
 
 
 @mcp.tool()
-def recall(query: str, limit: int = 10) -> list[dict]:
+def recall(query: str, limit: int = 10, context: bool = False) -> list[dict]:
     """Recall past session turns matching a query. Uses vector + FTS5 +
     recency + affect fusion when bge-m3 is loaded; FTS5-only fallback.
-    Call when the user references the past."""
+    Call when the user references the past.
+    Set context=True to attach ±1 adjacent same-session turns to each event row."""
     conn = storage.connect(_DB)
     try:
         # MCP manual recall: include all kinds (diary + task explicitly wanted).
         rows = _recall_mod.recall_with_config(
             conn, query, limit=limit, exclude_kinds=()
         )
+        if context:
+            for row in rows:
+                kind = row.get("kind") or "event"
+                if kind not in ("entity", "milestone", "memes", "diary", "task"):
+                    sid = row.get("session_id")
+                    eid = row.get("id")
+                    if sid and eid:
+                        row["_context"] = _recall_mod.fetch_event_context(
+                            conn, sid, int(eid), n=1
+                        )
     finally:
         conn.close()
     # Convert UTC timestamps to Melbourne local time at the read boundary.
+    # `when` is computed from the raw UTC string before conversion.
     for row in rows:
         ts = row.get("timestamp")
         if ts:
+            row["when"] = format_recall_ts(ts)
             row["timestamp"] = utc_iso_to_local_datetime(ts)
+        if "_context" in row:
+            for c in row["_context"]:
+                cts = c.get("timestamp")
+                if cts:
+                    c["timestamp"] = utc_iso_to_local_datetime(cts)
     return rows
 
 
