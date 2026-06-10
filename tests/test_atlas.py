@@ -99,7 +99,7 @@ def test_atlas_depth_default_0(conn):
 
 def test_schema_version_current(conn):
     # Bumped to 15 with alerts fingerprint/hit_count dedup hardening.
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 15
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 16
 
 
 # ---------------------------------------------------------------------------

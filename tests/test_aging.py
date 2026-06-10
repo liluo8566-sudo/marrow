@@ -212,7 +212,7 @@ def test_main_runs_clean_on_empty_db(db, monkeypatch, capsys, tmp_path):
     db.close()
     _route_init_db(monkeypatch, p)
     monkeypatch.setattr(aging, "_GOOSE_DIR", tmp_path / "fake_goose")
-    aging.main()
+    aging.main([])
     cap = capsys.readouterr()
     assert "retired=0" in cap.err
     assert "archived=0" in cap.err
@@ -223,7 +223,7 @@ def test_main_writes_audit_log(db, monkeypatch, tmp_path):
     db.close()
     _route_init_db(monkeypatch, p)
     monkeypatch.setattr(aging, "_GOOSE_DIR", tmp_path / "fake_goose")
-    aging.main()
+    aging.main([])
     fresh = sqlite3.connect(p)
     fresh.row_factory = sqlite3.Row
     try:
@@ -399,7 +399,7 @@ def test_main_audit_includes_tombs_count(db, monkeypatch, tmp_path):
     db.close()
     _route_init_db(monkeypatch, p)
     monkeypatch.setattr(aging, "_GOOSE_DIR", tmp_path / "fake_goose")
-    aging.main()
+    aging.main([])
     fresh = sqlite3.connect(p)
     fresh.row_factory = sqlite3.Row
     try:
@@ -484,7 +484,7 @@ def test_main_audit_includes_wtshells_count(db, monkeypatch, tmp_path):
         aging, "prune_projects_worktrees",
         lambda projects_dir=None: real(projects_dir or projects),
     )
-    aging.main()
+    aging.main([])
     fresh = sqlite3.connect(p)
     fresh.row_factory = sqlite3.Row
     try:

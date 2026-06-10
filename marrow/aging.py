@@ -217,6 +217,8 @@ def prune_projects_worktrees(projects_dir: Path | None = None) -> int:
 
 
 _VEC_EVICT_CAP_PCT = 0.25   # abort if eviction > 25% of vec rows
+_VEC_EVICT_CAP_MIN = 100    # pct cap inert below this count — small/new DBs
+                            # would trip 25% on a handful of rows
 _VEC_EVICT_CAP_ABS = 10000  # abort if eviction > 10000 rows
 _BACKUP_STALE_DAYS = 7
 _BACKUP_NAME_RE = re.compile(r"^marrow-\d{4}-\d{2}-\d{2}\.db$")
@@ -320,7 +322,9 @@ def evict_vec_window(
     total_vec = conn.execute(
         "SELECT COUNT(*) FROM events_vec_meta"
     ).fetchone()[0]
-    if total_vec > 0 and evict_count > total_vec * _VEC_EVICT_CAP_PCT:
+    if (evict_count > _VEC_EVICT_CAP_MIN
+            and total_vec > 0
+            and evict_count > total_vec * _VEC_EVICT_CAP_PCT):
         repo.add_alert(
             "critical", "aging", "vec_evict_cap_pct",
             source="aging.py",
@@ -383,6 +387,9 @@ def main(argv: list[str] | None = None) -> None:
     window_days = int(cfg.get("recall", {}).get("vec_window_days", 90))
 
     conn = storage.init_db()
+    # Alerts must land in the same DB main() operates on (init_db may be
+    # routed elsewhere in tests), not whatever config.db_path() resolves to.
+    db_file = conn.execute("PRAGMA database_list").fetchone()[2]
     try:
         with conn:
             retired = retire_memes(conn)
@@ -396,6 +403,7 @@ def main(argv: list[str] | None = None) -> None:
                 window_days=window_days,
                 backup_dir=backup_dir,
                 dry_run=dry_run,
+                alert_db=db_file,
             )
             conn.execute(
                 "INSERT INTO audit_log "
