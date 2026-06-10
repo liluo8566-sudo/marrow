@@ -67,8 +67,9 @@
 - Active: mcp recall gains since/until (Melbourne natural-day strings, converted internally).
 - Canonical case: (你还记得我上周说过灭绝师太说了xxx) → recall("灭绝师太", since/until=last week) → window-first then FTS/vec. Without window, recency 0.15 can't outrank older high-score hits of a recurring term.
 
-### 4C. Visualization (cyberboss-style day/week/month page)
-- Last priority, dashboard subpage, deterministic render. Not in current batches.
+### 4C. Visualization + edit (cyberboss-style day/week/month page)
+- Dashboard subpage, deterministic render. Design alongside Batch 3 build (Lumi 06/11): tl_line display AND edit path — correcting/rewording a session or day line from the dashboard writes back to session_digests.tl_line / diary.tl_line.
+- Build can trail Batch 3 A/B, but schema + edit flow decided together so columns don't need rework.
 
 ## Later — §5 Retrieval quality backlog
 - Needle extraction for passive events FTS (whole-query phrase-quoting near-always misses conversational queries; reuse _expand_needles idea, 2-4 low-freq terms).
