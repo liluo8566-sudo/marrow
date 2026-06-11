@@ -905,6 +905,7 @@ def _insert_unanchored_tasks(conn: sqlite3.Connection,
 #   - [ ] <desc> <!-- id:affect.N -->                                       (Pending — per-row anchor)
 _AFFECT_ID_RE = re.compile(r"<!-- id:affect\.(?P<id>\d+) -->")
 _AFFECT_TRAIL_RE = re.compile(r"<!--\s*aff:(?P<ids>[0-9,\s]*?)\s*-->")
+_AFFECT_RENDERED_RE = re.compile(r"<!--\s*aff-rendered:(?P<ids>[0-9,\s]*?)\s*-->")
 # Segment parser: `eph<N> <label> | <desc>` or `epl<N> <label> | <desc>`.
 _AFFECT_EP_SEG_RE = re.compile(
     r"^ep[hl]\d+\s+(?P<label>.+?)\s*\|\s*(?P<desc>.+?)\s*$"
@@ -1093,6 +1094,7 @@ def reconcile_affect(conn: sqlite3.Connection,
     # per-row `<!-- id:affect.N -->` identifies Pending rows.
     ep_segs: dict[int, tuple[str | None, str | None]] = {}
     pending_lines: dict[int, str] = {}
+    rendered_ids: set[int] = set()
     in_pending = False
     for raw in block.splitlines():
         s = raw.rstrip()
@@ -1111,6 +1113,13 @@ def reconcile_affect(conn: sqlite3.Connection,
                 except ValueError:
                     continue
                 pending_lines[aid] = s
+            continue
+        m_rendered = _AFFECT_RENDERED_RE.search(stripped)
+        if m_rendered:
+            for tok in m_rendered.group("ids").split(","):
+                tok = tok.strip()
+                if tok.isdigit():
+                    rendered_ids.add(int(tok))
             continue
         # Today / This Week bullet — inline anchor at end-of-line.
         if not stripped.startswith("- 【"):
@@ -1183,7 +1192,7 @@ def reconcile_affect(conn: sqlite3.Connection,
             if row["id"] not in pending_lines:
                 deleted_resolved.add(row["id"])
 
-    if not all_ids and not deleted_resolved:
+    if not all_ids and not deleted_resolved and not rendered_ids:
         return rpt
 
     with conn:
@@ -1229,24 +1238,28 @@ def reconcile_affect(conn: sqlite3.Connection,
             )
             rpt.updated += 1
 
-        # aff:ids deletion fix: ep-bullet rows whose anchor id was EXPLICITLY
-        # present in the current md's ep_segs but is now absent after an edit
-        # that removed the whole bullet → mark superseded.
-        # Safety: only act on ids that were in ep_segs on a PREVIOUS render
-        # (i.e., the id is in `all_ids` but NOT in the current `ep_segs` AND
-        # NOT in `pending_lines` AND predates the md snapshot).
-        # `all_ids` = ep_segs | pending_lines — any id found via anchor scan.
-        # An id in `all_ids - ep_segs - pending_lines` means: it was in some
-        # anchor in the block but we could not parse a segment for it (e.g.
-        # the bullet was deleted but its anchor still appeared on another line).
-        # That case doesn't arise in practice; the correct supersede trigger is
-        # tracked via a separate stored set.  For now, we implement the safe
-        # sub-case: ids that were in the rendered anchor trail of the PREVIOUS
-        # write are tracked in `_prev_ep_anchor_ids` below (read from
-        # md_index extra metadata when available, else skip).
-        # NOTE: full implementation deferred to alert-redesign Batch B; the
-        # existing pending-row deletion (deleted_resolved above) already covers
-        # the `unresolved=1` case which is the primary user gesture.
+        # aff-anchor deletion: id was in last render's <!-- aff-rendered:... -->
+        # but user removed it from the md (deleted ep bullet or edited anchor).
+        anchor_deleted: set[int] = set()
+        if rendered_ids and md_mtime_iso:
+            anchor_deleted = rendered_ids - set(ep_segs) - set(pending_lines)
+            for aid in list(anchor_deleted):
+                row = conn.execute(
+                    "SELECT id FROM affect WHERE id=? "
+                    "AND superseded_by IS NULL AND created_at<=?",
+                    (aid, md_mtime_iso),
+                ).fetchone()
+                if not row:
+                    anchor_deleted.discard(aid)
+        for aid in anchor_deleted:
+            conn.execute(
+                "UPDATE affect SET superseded_by=id WHERE id=? "
+                "AND superseded_by IS NULL",
+                (aid,),
+            )
+            _affect_audit(conn, aid, "superseded",
+                          "md-reconcile: anchor-deleted")
+            rpt.updated += 1
 
     return rpt
 

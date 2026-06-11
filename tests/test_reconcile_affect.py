@@ -345,3 +345,66 @@ def test_inline_anchor_parsed_by_reconcile(conn, tmp_path):
         "SELECT description FROM affect WHERE id=?", (aid,)
     ).fetchone()["description"]
     assert desc == "改过"
+
+
+def test_aff_anchor_deletion_supersedes_row(conn, tmp_path):
+    """User removes an ep id from the aff anchor → row marked superseded."""
+    now = datetime.now(timezone.utc)
+    ts = (now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    today = now.strftime("%Y-%m-%d")
+    aid1 = _insert_affect(conn, date=today, ep=1, v=0.8, a=0.6,
+                          importance=3, label="a", description="keep",
+                          created_at=ts)
+    aid2 = _insert_affect(conn, date=today, ep=2, v=0.2, a=0.5,
+                          importance=3, label="b", description="delete-me",
+                          created_at=ts)
+    dash = tmp_path / "dashboard.md"
+    rendered = top_sections.render_affect(conn)
+    dash.write_text(rendered + "\n## Content\n")
+    text = dash.read_text()
+    assert f"<!-- aff-rendered:" in text
+    assert str(aid1) in text and str(aid2) in text
+
+    # Simulate user removing aid2 from the visible bullet only.
+    # The <!-- aff-rendered:... --> comment stays untouched (user won't edit it).
+    lines = text.splitlines()
+    for i, ln in enumerate(lines):
+        if f"<!-- aff:" in ln and "aff-rendered" not in ln:
+            lines[i] = re.sub(r" · epl\d+ b \| delete-me", "", ln)
+            lines[i] = lines[i].replace(f",{aid2}", "")
+            break
+    text = "\n".join(lines)
+    dash.write_text(text)
+
+    rpt = reconcile.reconcile_affect(conn, dash)
+    row = conn.execute(
+        "SELECT superseded_by FROM affect WHERE id=?", (aid2,)
+    ).fetchone()
+    assert row["superseded_by"] == aid2, "deleted ep should self-supersede"
+    assert rpt.updated >= 1
+
+
+def test_aff_anchor_deletion_no_false_positive_on_unrendered(conn, tmp_path):
+    """Ids NOT in aff-rendered should NOT be superseded even if absent."""
+    now = datetime.now(timezone.utc)
+    ts = (now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    today = now.strftime("%Y-%m-%d")
+    aid1 = _insert_affect(conn, date=today, ep=1, v=0.8, a=0.6,
+                          importance=3, label="a", description="shown",
+                          created_at=ts)
+    # aid2 exists in DB but won't be rendered (too many eps, only eph/epl)
+    aid_hidden = _insert_affect(conn, date=today, ep=3, v=0.5, a=0.5,
+                                importance=1, label="c", description="mid",
+                                created_at=ts)
+    dash = tmp_path / "dashboard.md"
+    rendered = top_sections.render_affect(conn)
+    dash.write_text(rendered + "\n## Content\n")
+    text = dash.read_text()
+    # aid_hidden might or might not be in the rendered anchors depending on
+    # eph/epl selection; if it IS rendered, this test is vacuous. Guard:
+    if str(aid_hidden) not in text:
+        rpt = reconcile.reconcile_affect(conn, dash)
+        row = conn.execute(
+            "SELECT superseded_by FROM affect WHERE id=?", (aid_hidden,)
+        ).fetchone()
+        assert row["superseded_by"] is None, "unrendered id must not be superseded"

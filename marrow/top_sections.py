@@ -266,6 +266,7 @@ def render_affect(conn: sqlite3.Connection) -> str:
 
     line1_ids: set[int] = set()
     line2_ids: set[int] = set()
+    _rendered_ids: set[int] = set()
 
     # Line 1 — last sessionend batch (event-anchored). Single-ep batch uses
     # eph/epl based on valence sign, not a forced 'h'.
@@ -292,6 +293,7 @@ def render_affect(conn: sqlite3.Connection) -> str:
             f"- 【{last_tone}】 · {body} [{ago}] {_affect_anchor_inline(ids)}"
         )
         line1_ids.update(ids)
+        _rendered_ids.update(ids)
 
     # Line 2 — rolling 24h aggregate, deduped against line 1.
     today_pool = [r for r in today_rows if r["id"] not in line1_ids]
@@ -315,6 +317,7 @@ def render_affect(conn: sqlite3.Connection) -> str:
             f"- 【{tone}】 · {body} [24h] {_affect_anchor_inline(ids)}"
         )
         line2_ids.update(ids)
+        _rendered_ids.update(ids)
     elif not last_batch:
         out.append("_none_")
 
@@ -362,6 +365,7 @@ def render_affect(conn: sqlite3.Connection) -> str:
             f"- 【{tone_label}】 · " + " · ".join(segs) + " [7d] "
             f"{_affect_anchor_inline(ids)}"
         )
+        _rendered_ids.update(ids)
     else:
         out.append("_none_")
 
@@ -379,6 +383,10 @@ def render_affect(conn: sqlite3.Connection) -> str:
             text = r["description"] or r["label"] or "(ep)"
             box = "x" if r["resolved_at"] else " "
             out.append(f"- [{box}] {text} {_affect_pending_anchor(dict(r))}")
+
+    _rendered_ids.update(r["id"] for r in pending_rows)
+    if _rendered_ids:
+        out.append(f"<!-- aff-rendered:{','.join(str(i) for i in sorted(_rendered_ids))} -->")
     return "\n".join(out)
 
 
