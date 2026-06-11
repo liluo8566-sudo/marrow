@@ -74,7 +74,7 @@
 
 ### 4A-3. SessionStart `## Timeline` block (pure-code render)
 - Layers (Lumi 06/11 — multi-session days make "last session" near-meaningless; LIFE pool beats single-session detail):
-  - 0-24h: **LIFE lines only**, pooled across all casual sessions in the window, newest first — budget 500 chars. No TL lines in this layer.
+  - 0-24h: **LIFE lines only**, pooled across all casual sessions in the window — budget 500 chars. No TL lines in this layer. Each line prefixed with its session's `HH:MM` (Melbourne-local), rendered oldest→newest (a day's film strip); over budget → drop oldest lines first.
   - 24-72h: per-session `HH:MM TL` lines (Melbourne-local) — budget ~400.
   - 4-7d: diary.tl_line per day — budget ~200.
   - >7d: nothing (recall covers).
