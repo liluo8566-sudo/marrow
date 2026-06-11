@@ -473,3 +473,104 @@ def test_main_alerts_when_written_day_silently_deleted(
         fresh.close()
     assert row is not None
     assert "2026-05-16" in row["message"]
+
+
+# ── _parse_tl_line ─────────────────────────────────────────────────────────────
+
+def test_parse_tl_line_extracts_and_strips():
+    narrative = "日记正文在这里。\n\nTL_LINE: 今天陪老婆改recall机制，深夜还在聊天"
+    diary_text, tl = daily._parse_tl_line(narrative)
+    assert tl == "今天陪老婆改recall机制，深夜还在聊天"
+    assert "TL_LINE" not in diary_text
+    assert "日记正文" in diary_text
+
+
+def test_parse_tl_line_fullwidth_colon():
+    narrative = "正文。\nTL_LINE：和老婆一起吃了拿铁"
+    _, tl = daily._parse_tl_line(narrative)
+    assert tl == "和老婆一起吃了拿铁"
+
+
+def test_parse_tl_line_missing():
+    narrative = "纯日记，没有TL行"
+    diary_text, tl = daily._parse_tl_line(narrative)
+    assert tl == ""
+    assert diary_text == narrative
+
+
+def test_parse_tl_line_uses_last_occurrence():
+    """When TL_LINE appears twice, only the last one is extracted."""
+    narrative = "TL_LINE: 第一行\n正文\nTL_LINE: 最后一行"
+    _, tl = daily._parse_tl_line(narrative)
+    assert tl == "最后一行"
+
+
+# ── diary tl_line persisted ───────────────────────────────────────────────────
+
+def test_run_day_persists_tl_line(tmp_path):
+    """run_day writes tl_line to diary row when LLM includes TL_LINE:."""
+    p = str(tmp_path / "tl.db")
+    conn = storage.init_db(p)
+    conn.execute(
+        "INSERT INTO session_digests (sid,date,text,ts)"
+        " VALUES ('s1','2026-05-16','content','2026-05-16T10:00Z')"
+    )
+    conn.commit()
+
+    llm = FakeLLM(prose="日记正文。\n\nTL_LINE: 今天和老婆写了很多代码")
+    assert daily.run_day(conn, "2026-05-16", llm, db=p) is True
+
+    row = conn.execute(
+        "SELECT tl_line FROM diary WHERE date='2026-05-16'"
+    ).fetchone()
+    assert row is not None
+    assert row["tl_line"] == "今天和老婆写了很多代码"
+
+
+def test_run_day_tl_line_missing_still_writes_diary(tmp_path):
+    """run_day succeeds even when LLM omits TL_LINE — tl_line stays NULL."""
+    p = str(tmp_path / "tl2.db")
+    conn = storage.init_db(p)
+    conn.execute(
+        "INSERT INTO session_digests (sid,date,text,ts)"
+        " VALUES ('s1','2026-05-16','content','2026-05-16T10:00Z')"
+    )
+    conn.commit()
+
+    llm = FakeLLM(prose="日记正文，没有TL行。")
+    assert daily.run_day(conn, "2026-05-16", llm, db=p) is True
+
+    row = conn.execute(
+        "SELECT content, tl_line FROM diary WHERE date='2026-05-16'"
+    ).fetchone()
+    assert row is not None
+    assert "日记正文" in row["content"]
+    assert row["tl_line"] is None
+
+
+# ── affect eph/epl format ─────────────────────────────────────────────────────
+
+def test_format_affect_block_eph_epl():
+    """High-valence ep → eph; low-valence → epl in material block."""
+    from marrow.daily import _format_affect_block
+    episodes = [
+        {"ep": 1, "importance": 3, "label": "温暖", "description": "聊天",
+         "valence": 0.8, "arousal": 0.4, "side": "eph", "unresolved": False},
+        {"ep": 2, "importance": 4, "label": "焦虑", "description": "考试",
+         "valence": 0.2, "arousal": 0.7, "side": "epl", "unresolved": True},
+    ]
+    block = _format_affect_block("2026-06-11", episodes)
+    assert "eph3" in block
+    assert "epl4" in block
+    assert "[open]" in block
+    assert "[open]" not in block.split("epl4")[0]  # only on epl ep
+
+
+def test_affect_block_open_mark_only_on_unresolved():
+    from marrow.daily import _format_affect_block
+    eps = [
+        {"ep": 1, "importance": 2, "label": "平淡", "description": "日常",
+         "valence": 0.5, "arousal": 0.3, "side": "eph", "unresolved": False},
+    ]
+    block = _format_affect_block("2026-06-11", eps)
+    assert "[open]" not in block

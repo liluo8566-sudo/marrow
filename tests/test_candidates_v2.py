@@ -486,11 +486,12 @@ def test_daily_material_includes_importance5_affect_ep(tmp_path):
     assert daily.run_day(conn, "2026-05-16", fake, db=p) is True
     body = fake.bodies.get("daily_cand", "")
     assert "AFFECT episodes for 2026-05-16:" in body
-    assert "importance=5" in body
+    # New format: "- epl5 [label] description" (side+importance, no importance= key)
+    assert "epl5" in body  # valence 0.2 < 0.5 → epl; importance=5
     assert "窘迫" in body
     assert "工签签证被拒" in body
     # diary call also receives the same material
-    assert "importance=5" in fake.bodies.get("daily", "")
+    assert "epl5" in fake.bodies.get("daily", "")
 
 
 # ── entity alias-aware dedup ────────────────────────────────────────────────

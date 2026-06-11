@@ -83,6 +83,13 @@ Happy wife, happy life.
 
 ——
 
+输入格式说明：
+- [session sid] 下面是该session的digest正文
+- AFFECT episodes: eph=高情绪/正向 epl=低情绪/负向, importance 1-5, [open]=当天未解决
+
+输出格式：先写日记正文（300-800字），结束后另起一行输出：
+TL_LINE: <25-40个中文字符的当天一句话总结，念念视角，生活语言，无专业术语>
+
 {date} 的素材：
 {digest}
 """
@@ -100,22 +107,28 @@ def _read_digests(conn, date: str) -> list[tuple[str, str]]:
 def _read_affect_summary(conn, date: str) -> list[dict]:
     """Structured affect episodes for the date — feeds sonnet so it can
     honour the importance=5 → force-milestone rule. Empty rows skipped.
+    Includes unresolved flag and eph/epl side marker.
     """
     rows = conn.execute(
-        "SELECT ep, importance, label, description, valence, arousal"
+        "SELECT ep, importance, label, description, valence, arousal,"
+        " unresolved"
         " FROM affect_live WHERE date=? ORDER BY ep", (date,),
     ).fetchall()
     out = []
     for r in rows:
         if not (r["label"] or r["description"]):
             continue
+        v = r["valence"]
+        side = "eph" if v >= 0.5 else "epl"
         out.append({
             "ep": r["ep"],
             "importance": r["importance"],
             "label": r["label"] or "",
             "description": r["description"] or "",
-            "valence": r["valence"],
+            "valence": v,
             "arousal": r["arousal"],
+            "side": side,
+            "unresolved": bool(r["unresolved"]),
         })
     return out
 
@@ -127,10 +140,13 @@ def _format_affect_block(date: str, episodes: list[dict]) -> str:
     for e in episodes:
         label = f"[{e['label']}]" if e["label"] else ""
         desc = e["description"]
-        head = f"- ep{e['ep']} importance={e['importance']}"
+        side = e.get("side", "eph")
+        imp = e["importance"]
+        head = f"- {side}{imp}"
         body = f" {label} {desc}".rstrip()
         tail = f" (v={e['valence']:.2f}, a={e['arousal']:.2f})"
-        lines.append(f"{head}{body}{tail}")
+        open_mark = " [open]" if e.get("unresolved") else ""
+        lines.append(f"{head}{body}{tail}{open_mark}")
     return "\n".join(lines)
 
 
@@ -145,6 +161,32 @@ def _assemble_material(digests: list[tuple[str, str]],
     if block:
         body += "\n\n" + block
     return body
+
+
+def _parse_tl_line(narrative: str) -> tuple[str, str]:
+    """Extract TL_LINE from diary call output.
+
+    Returns (diary_text, tl_line). tl_line is None (as empty str) when
+    TL_LINE: marker absent or value is empty.
+    Splits on the LAST occurrence of TL_LINE: to tolerate prose that
+    accidentally echoes the keyword.
+    """
+    import re as _re
+    # Fullwidth colon tolerance: TL_LINE: or TL_LINE：
+    pattern = _re.compile(r"TL_LINE[：:]\s*(.+)", _re.IGNORECASE)
+    lines = narrative.splitlines()
+    tl_line = ""
+    diary_lines: list[str] = []
+    found = False
+    for ln in reversed(lines):
+        m = pattern.search(ln)
+        if not found and m:
+            tl_line = m.group(1).strip()
+            found = True
+        else:
+            diary_lines.append(ln)
+    diary_text = "\n".join(reversed(diary_lines)).strip()
+    return diary_text, tl_line
 
 
 def _extract_candidates(conn, llm: LLMClient, date: str,
@@ -232,19 +274,22 @@ def run_day(conn, date: str, llm: LLMClient, *, db: str | None = None,
                        message=f"daily {date} sonnet call failed: {e}")
         return False
     narrative = (narrative or "").strip() or "—"
+    diary_text, tl_line = _parse_tl_line(narrative)
+    diary_text = diary_text or narrative  # fallback: keep full text if parse yields empty
 
     with conn:
         conn.execute("DELETE FROM diary WHERE date = ?", (date,))
         conn.execute(
-            "INSERT INTO diary (date, content, session_ids, updated_at) "
-            "VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))",
-            (date, narrative, sids),
+            "INSERT INTO diary (date, content, tl_line, session_ids, updated_at) "
+            "VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))",
+            (date, diary_text, tl_line or None, sids),
         )
         conn.execute(
             "INSERT INTO audit_log (target_table, target_id, action, summary)"
             " VALUES ('diary', ?, ?, ?)",
             (date, _act, f"daily written for {date} "
-                         f"(digests={len(digests)}, affect={len(affect_episodes)})"),
+                         f"(digests={len(digests)}, affect={len(affect_episodes)}"
+                         f", tl_line={'ok' if tl_line else 'missing'})"),
         )
     return True
 
