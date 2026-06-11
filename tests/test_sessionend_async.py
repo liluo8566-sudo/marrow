@@ -1262,3 +1262,284 @@ def test_sessionend_writer_operationalerror_partial_not_fail(db_env):
         conn.close()
     assert n_aff == 1
     assert n_dig == 1
+
+
+# ── A-1: catchup P5 deadlock fix ─────────────────────────────────────────────
+
+def _insert_extract_row(db: str, sid: str, summary: str,
+                        occurred_at: str | None = None) -> int:
+    """Insert a sessionend_extract audit row; return its rowid."""
+    conn = storage.connect(db)
+    with conn:
+        conn.execute(
+            "INSERT INTO audit_log"
+            " (target_table, target_id, action, summary, occurred_at)"
+            " VALUES ('events', ?, 'sessionend_extract', ?,"
+            "  COALESCE(?, strftime('%Y-%m-%dT%H:%M:%SZ','now')))",
+            (sid, summary, occurred_at),
+        )
+        rowid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.close()
+    return rowid
+
+
+def _insert_lifecycle_end_old(db: str, sid: str, minutes_ago: int = 30) -> None:
+    """Insert a lifecycle:end row with occurred_at in the past."""
+    import datetime as _dt
+    ts = (_dt.datetime.now(_dt.timezone.utc)
+          - _dt.timedelta(minutes=minutes_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    conn = storage.connect(db)
+    with conn:
+        conn.execute(
+            "INSERT INTO audit_log"
+            " (target_table, target_id, action, summary, occurred_at)"
+            " VALUES ('events', ?, 'session_lifecycle:end', '', ?)",
+            (sid, ts),
+        )
+    conn.close()
+
+
+def test_p5_partial_terminal_spawns(db_env, monkeypatch):
+    """end_row + start + terminal partial:digest → fall through → spawn."""
+    import datetime as _dt
+    from marrow import sessionstart_catchup
+    db, _ = db_env
+    sid = "p5-partial-spawn"
+    _insert_lifecycle_marker(db, sid, "session_lifecycle:start",
+                             summary="ppid=99999,source=cc,started_at=1")
+    # End row must be old enough to pass state-4 grace (>5 min).
+    _insert_lifecycle_end_old(db, sid, minutes_ago=30)
+    _insert_extract_row(db, sid, "start")
+    _insert_extract_row(db, sid, "partial:digest")
+
+    monkeypatch.setattr(sessionstart_catchup, "MAX_FIRE", 5)
+    spawned = []
+    with patch("marrow.sessionstart_catchup.popen_detach_lazy",
+               side_effect=lambda a, log_path: spawned.append(a)):
+        sessionstart_catchup.main()
+    fired = {a[a.index("--sid") + 1] for a in spawned}
+    assert sid in fired, "partial:digest sid must re-spawn"
+
+
+def test_p5_inflight_within_grace_skips(db_env, monkeypatch):
+    """start within grace period, no terminal → in-flight → skip."""
+    import datetime as _dt
+    from marrow import sessionstart_catchup
+    db, _ = db_env
+    sid = "p5-inflight-skip"
+    recent_ts = (_dt.datetime.now(_dt.timezone.utc)
+                 - _dt.timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _insert_lifecycle_marker(db, sid, "session_lifecycle:start",
+                             summary="ppid=99999,source=cc,started_at=1")
+    # Old end_row so state-4 grace is not the reason for skip — P5 must be.
+    _insert_lifecycle_end_old(db, sid, minutes_ago=30)
+    _insert_extract_row(db, sid, "start", occurred_at=recent_ts)
+
+    monkeypatch.setattr(sessionstart_catchup, "MAX_FIRE", 5)
+    spawned = []
+    with patch("marrow.sessionstart_catchup.popen_detach_lazy",
+               side_effect=lambda a, log_path: spawned.append(a)):
+        sessionstart_catchup.main()
+    fired = {a[a.index("--sid") + 1] for a in spawned}
+    assert sid not in fired, "genuinely in-flight sid must skip"
+
+
+def test_p5_stale_start_no_terminal_spawns(db_env, monkeypatch):
+    """start older than 15 min, no terminal → died mid-run → spawn."""
+    import datetime as _dt
+    from marrow import sessionstart_catchup
+    db, _ = db_env
+    sid = "p5-stale-spawn"
+    stale_ts = (_dt.datetime.now(_dt.timezone.utc)
+                - _dt.timedelta(minutes=20)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _insert_lifecycle_marker(db, sid, "session_lifecycle:start",
+                             summary="ppid=99999,source=cc,started_at=1")
+    # End row must be old enough to pass state-4 grace (>5 min).
+    _insert_lifecycle_end_old(db, sid, minutes_ago=30)
+    _insert_extract_row(db, sid, "start", occurred_at=stale_ts)
+
+    monkeypatch.setattr(sessionstart_catchup, "MAX_FIRE", 5)
+    spawned = []
+    with patch("marrow.sessionstart_catchup.popen_detach_lazy",
+               side_effect=lambda a, log_path: spawned.append(a)):
+        sessionstart_catchup.main()
+    fired = {a[a.index("--sid") + 1] for a in spawned}
+    assert sid in fired, "stale-start (no terminal) must spawn"
+
+
+def test_p5_ok_terminal_skips(db_env, monkeypatch):
+    """start + ok terminal → session completed normally → skip (state 3)."""
+    import datetime as _dt
+    from marrow import sessionstart_catchup
+    db, _ = db_env
+    sid = "p5-ok-skip"
+    recent_ts = (_dt.datetime.now(_dt.timezone.utc)
+                 - _dt.timedelta(minutes=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _insert_lifecycle_marker(db, sid, "session_lifecycle:start",
+                             summary="ppid=99999,source=cc,started_at=1")
+    _insert_lifecycle_end_old(db, sid, minutes_ago=30)
+    _insert_extract_row(db, sid, "start", occurred_at=recent_ts)
+    # ok,user_count=5 terminal; no events inserted → count=0 ≤ 5 → state 3 skip.
+    _insert_extract_row(db, sid, "ok,user_count=5")
+
+    monkeypatch.setattr(sessionstart_catchup, "MAX_FIRE", 5)
+    spawned = []
+    with patch("marrow.sessionstart_catchup.popen_detach_lazy",
+               side_effect=lambda a, log_path: spawned.append(a)):
+        sessionstart_catchup.main()
+    fired = {a[a.index("--sid") + 1] for a in spawned}
+    assert sid not in fired, "completed (ok terminal) sid must skip"
+
+
+# ── A-2: strike-two chain + digest zero-write ─────────────────────────────────
+
+def test_strike_two_chain_second_fail_alerts(db_env):
+    """Write a prior fail row, then call _write_final_audit with second fail →
+    alert row exists with fingerprint sessionend_async_retry_failed."""
+    from marrow import sessionend_async
+    db, _ = db_env
+    sid = "strike-two-chain"
+    _write_extract_row(db, sid, "start")
+    _write_extract_row(db, sid, "fail:LLMError")
+    _write_extract_row(db, sid, "start")
+    conn = storage.connect(db)
+    sessionend_async._write_final_audit(conn, sid, "fail:LLMError")
+    conn.close()
+
+    conn = storage.connect(db)
+    try:
+        row = conn.execute(
+            "SELECT fingerprint FROM alerts"
+            " WHERE type='sessionend_async' AND resolved=0"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None, "second fail must produce alert"
+    assert row["fingerprint"] == "sessionend_async_retry_failed"
+
+
+def test_strike_two_first_fail_no_alert(db_env):
+    """Single first failure must stay silent — no alert row."""
+    from marrow import sessionend_async
+    db, _ = db_env
+    sid = "strike-one-silent"
+    _write_extract_row(db, sid, "start")
+    conn = storage.connect(db)
+    sessionend_async._write_final_audit(conn, sid, "fail:LLMError")
+    conn.close()
+
+    conn = storage.connect(db)
+    try:
+        row = conn.execute(
+            "SELECT id FROM alerts WHERE type='sessionend_async'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is None, "first fail must be silent"
+
+
+def test_digest_zero_rows_becomes_partial_no_immediate_alert(db_env):
+    """_run_writer with zero_is_fail=True: digest writer returns 0 →
+    segment audit is fail:zero_rows → final audit is partial containing
+    'digest'; NO digest_zero_write alert row exists."""
+    from marrow import sessionend_async
+    db, _ = db_env
+    sid = "digest-zero-partial"
+
+    conn = storage.connect(db)
+    # Simulate: task_cand ok, affect ok, digest returns 0.
+    sessionend_async._write_segment_audit(conn, sid, "task_cand", "ok")
+    sessionend_async._write_segment_audit(conn, sid, "affect", "ok")
+    sessionend_async._run_writer(
+        conn, sid, "digest", lambda: 0, zero_is_fail=True)
+    sessionend_async._write_final_audit(conn, sid,
+        "partial:digest")  # as the pipeline would compute
+
+    conn.close()
+
+    conn = storage.connect(db)
+    try:
+        # No immediate digest_zero_write alert.
+        alert = conn.execute(
+            "SELECT id FROM alerts WHERE fingerprint='digest_zero_write'"
+        ).fetchone()
+        # Segment row says fail:zero_rows.
+        seg = conn.execute(
+            "SELECT summary FROM audit_log"
+            " WHERE target_id=? AND action='sessionend_extract_digest'",
+            (sid,),
+        ).fetchone()
+        final = conn.execute(
+            "SELECT summary FROM audit_log"
+            " WHERE target_id=? AND action='sessionend_extract'"
+            " ORDER BY id DESC LIMIT 1",
+            (sid,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert alert is None, "no digest_zero_write alert must exist"
+    assert seg is not None and seg["summary"] == "fail:zero_rows"
+    assert final is not None and "digest" in final["summary"]
+
+
+# ── A-3: add_alert fallback sink ──────────────────────────────────────────────
+
+def test_add_alert_fallback_on_db_failure(tmp_path, monkeypatch):
+    """Force DB write to fail → line lands in alerts-fallback.jsonl,
+    no exception propagates, return value is -1."""
+    import json as _json
+    from marrow import repo, config as _cfg
+    monkeypatch.setattr(_cfg, "DATA_DIR", tmp_path)
+    # Point storage.connect at an unwritable path so the INSERT raises.
+    monkeypatch.setattr(
+        "marrow.repo.storage.connect",
+        lambda db=None: (_ for _ in ()).throw(
+            Exception("forced DB failure")),
+    )
+    result = repo.add_alert("warn", "test_type", "test_fp",
+                            source="test", message="boom")
+    assert result == -1
+    sink = tmp_path / "alerts-fallback.jsonl"
+    assert sink.exists()
+    line = _json.loads(sink.read_text().strip())
+    assert line["fingerprint"] == "test_fp"
+    assert line["severity"] == "warn"
+
+
+def test_fallback_drain_replays_and_truncates(tmp_path, monkeypatch):
+    """Write a valid line to alerts-fallback.jsonl; run drain logic →
+    alert row lands in DB and the file is truncated."""
+    import json as _json
+    from datetime import datetime, timezone
+    from marrow import sessionstart_catchup, config as _cfg, storage
+    db = str(tmp_path / "drain.db")
+    conn = storage.init_db(db)
+    conn.close()
+    monkeypatch.setattr(_cfg, "db_path", lambda: db)
+    monkeypatch.setattr(_cfg, "DATA_DIR", tmp_path)
+
+    sink = tmp_path / "alerts-fallback.jsonl"
+    rec = _json.dumps({
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "severity": "warn",
+        "type": "drain_test",
+        "fingerprint": "drain_fp",
+        "source": "test",
+        "message": "drained",
+    })
+    sink.write_text(rec + "\n", encoding="utf-8")
+
+    sessionstart_catchup._drain_fallback_sink(db)
+
+    # File should be truncated (empty).
+    assert sink.read_text() == ""
+    # Alert row must be in DB.
+    fresh = storage.connect(db)
+    try:
+        row = fresh.execute(
+            "SELECT fingerprint FROM alerts WHERE fingerprint='drain_fp'"
+        ).fetchone()
+    finally:
+        fresh.close()
+    assert row is not None, "drained alert must land in DB"

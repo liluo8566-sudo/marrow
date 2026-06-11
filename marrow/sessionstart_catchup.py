@@ -28,6 +28,7 @@ based silent_death alerts — catchup signals only on operational failure.
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -160,6 +161,14 @@ def _ts_to_epoch(ts: str) -> float:
 
 
 _BRIDGE_OWNS_TTL_SECONDS = 12 * 3600
+_INFLIGHT_GRACE_SECONDS = 15 * 60  # 15 min: stale start row treated as died
+
+# Terminal summaries written by _write_final_audit (sessionend_async.py).
+_TERMINAL_PREFIXES = ("ok", "skip:", "fail:", "partial:")
+
+
+def _is_terminal_summary(summary: str) -> bool:
+    return any(summary.startswith(p) for p in _TERMINAL_PREFIXES)
 
 
 def _bridge_owns_active(conn, sid: str) -> bool:
@@ -251,18 +260,36 @@ def _classify(conn, sid: str, live_ppids: set[int]) -> Literal["spawn", "skip"]:
     if end_row and (end_row["summary"] or "") in ("worktree=1", "mm_minus_blocked"):
         return "skip"
 
-    # P5: a sessionend_extract:start row newer than the end_row means
-    # sessionend_async is currently running — give it time, don't double-spawn.
+    # P5: in-flight guard — skip ONLY when all three hold:
+    #   (a) a start row (sessionend_extract, summary='start') with id > end_row
+    #   (b) NO terminal row after that start row
+    #   (c) the start row is younger than _INFLIGHT_GRACE_SECONDS
+    # If a terminal row exists after the start → the run finished (possibly
+    # fail/partial); fall through so states 2-5 can re-spawn it.
+    # If the start is stale (> grace) with no terminal → died mid-run; fall
+    # through so state 5 spawns a retry.
     if end_row:
-        inflight = conn.execute(
-            "SELECT 1 FROM audit_log"
+        start_inflight = conn.execute(
+            "SELECT id, occurred_at FROM audit_log"
             " WHERE action='sessionend_extract' AND target_id=?"
             " AND summary='start' AND id > ?"
-            " LIMIT 1",
+            " ORDER BY id DESC LIMIT 1",
             (sid, end_row["id"]),
         ).fetchone()
-        if inflight:
-            return "skip"
+        if start_inflight:
+            start_epoch = _ts_to_epoch(start_inflight["occurred_at"])
+            start_age = now - start_epoch
+            if start_age < _INFLIGHT_GRACE_SECONDS:
+                # Check for a terminal row after this start.
+                terminal = conn.execute(
+                    "SELECT summary FROM audit_log"
+                    " WHERE action='sessionend_extract' AND target_id=?"
+                    " AND id > ?"
+                    " ORDER BY id DESC LIMIT 1",
+                    (sid, start_inflight["id"]),
+                ).fetchone()
+                if terminal is None or not _is_terminal_summary(terminal["summary"]):
+                    return "skip"  # genuinely in-flight
 
     # Fetch most recent terminal row for this sid. `skip:short_session[,user_count=N]`
     # counts as terminal: short sessions need no LLM digest, and the embedded
@@ -343,8 +370,41 @@ def _classify(conn, sid: str, live_ppids: set[int]) -> Literal["spawn", "skip"]:
     return "spawn"
 
 
+def _drain_fallback_sink(db: str) -> None:
+    """Replay any lines queued in alerts-fallback.jsonl into the alerts table.
+
+    Truncates the file first so a replay that itself fails re-appends via the
+    fallback sink, keeping the file bounded.  Malformed lines are dropped with
+    a stderr note.
+    """
+    sink = config.DATA_DIR / "alerts-fallback.jsonl"
+    if not sink.exists() or sink.stat().st_size == 0:
+        return
+    try:
+        raw = sink.read_text(encoding="utf-8")
+        sink.write_text("", encoding="utf-8")  # truncate before replay
+    except OSError as e:
+        sys.stderr.write(f"[catchup] fallback drain read error: {e}\n")
+        return
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+            repo.add_alert(
+                rec["severity"], rec["type"], rec["fingerprint"],
+                source=rec.get("source"),
+                message=rec.get("message"),
+                db=db,
+            )
+        except Exception as e:  # noqa: BLE001
+            sys.stderr.write(f"[catchup] fallback drain dropped malformed line: {e}\n")
+
+
 def main(argv: list[str] | None = None) -> int:  # noqa: ARG001
     db = config.db_path()
+    _drain_fallback_sink(db)
     conn = storage.connect(db)
     now = time.time()
 
