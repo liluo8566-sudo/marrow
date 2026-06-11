@@ -24,12 +24,15 @@ All DB timestamps are UTC; Melbourne on render via timeutil.
 from __future__ import annotations
 
 import datetime as _dt
+import re as _re
 import sqlite3
 from zoneinfo import ZoneInfo
 
 from .top_sections import _tone, _vband, _aband, _wmean
 
 _TZ = ZoneInfo("Australia/Melbourne")
+# Matches leading HH:MM in a LIFE line (e.g. "21:40 买了b5精华")
+_LIFE_TS_RE = _re.compile(r"^(\d{2}:\d{2})\s+(.*)", _re.DOTALL)
 _CUTOFF_H = 6          # 6AM local day boundary
 _BUDGET = 1100         # soft char budget
 _24H_CAP = 15          # max film-strip lines
@@ -166,6 +169,45 @@ def _tl_anchor_date(date: str) -> str:
     return f"<!-- tl:d:{date} -->"
 
 
+def _life_line_hhmm(item: str, session_hhmm: str) -> tuple[str, str]:
+    """Return (hhmm, text) for a LIFE line item.
+
+    If the item starts with HH:MM (new format), use it as the display time.
+    Otherwise fall back to session_hhmm (legacy rows without prefix).
+    Returns (hhmm, display_text).
+    """
+    m = _LIFE_TS_RE.match(item)
+    if m:
+        return m.group(1), m.group(2).strip()
+    return session_hhmm, item
+
+
+def _life_line_local_date(item: str, session_date: _dt.date,
+                          session_hhmm: str) -> _dt.date:
+    """Resolve local diary date for a LIFE line.
+
+    Lines with their own HH:MM: build a full datetime using that time on
+    the session's local date, then apply 6AM cutoff (in case line is 00-05).
+    Prefix-less lines inherit the session date directly.
+    """
+    m = _LIFE_TS_RE.match(item)
+    if not m:
+        return session_date
+    hhmm = m.group(1)
+    try:
+        h, mi = int(hhmm[:2]), int(hhmm[3:5])
+    except ValueError:
+        return session_date
+    # Build candidate datetime on the session's calendar date
+    candidate = _dt.datetime(
+        session_date.year, session_date.month, session_date.day,
+        h, mi, 0, tzinfo=_TZ)
+    # Apply 6AM cutoff: 00-05 belongs to previous diary day
+    if h < _CUTOFF_H:
+        return (candidate - _dt.timedelta(days=1)).date()
+    return candidate.date()
+
+
 # ── DB queries ───────────────────────────────────────────────────────────────
 
 def _query_open_episodes(conn: sqlite3.Connection,
@@ -256,53 +298,67 @@ def _render_open_episodes(episodes: list[dict]) -> list[str]:
 def _render_24h(digests: list[dict],
                 current_sid: str | None) -> list[str]:
     """Flat film-strip newest→oldest, cap 15.
-    Each session: first line = 【tone】HH:MM + first content,
-    subsequent LIFE lines or TL line.
+
+    Casual sessions: each LIFE line is stamped with its own HH:MM (parsed
+    from the leading HH:MM prefix written by the model); prefix-less lines
+    (legacy rows) fall back to session start time.  TL line uses session
+    start time.  Task sessions: single TL line at session start time.
+
+    Sort key and day-divider attribution use the per-line time where
+    available so lines spanning 08:00-20:00 land at their own hours.
     Day crossings get --- MM-DD --- divider.
     """
-    # Build session lines in oldest→newest order, then reverse
-    entries: list[tuple[_dt.date, str, list[str]]] = []
+    # Each flat_entry: (sort_key_str, disp_date, rendered_line, is_first_of_session)
+    # sort_key is a string we can compare lexicographically (UTC ISO for session,
+    # or a synthetic local-HH:MM key for per-line times within the session)
+    flat_entries: list[tuple[str, _dt.date, str, bool]] = []
+
     for sd in digests:
         if sd["sid"] == current_sid:
             continue
         ts = sd.get("ts") or ""
-        disp_date = _local_date_from_utc(ts)
-        hhmm = _hhmm_melb(ts)
+        sess_date = _local_date_from_utc(ts)
+        sess_hhmm = _hhmm_melb(ts)
         kind = (sd.get("kind") or "casual").lower()
         tl = _tl_or_fallback(sd)
         life_raw = sd.get("life_lines") or ""
         life_items = [x.strip() for x in life_raw.splitlines() if x.strip()]
-
-        session_lines: list[str] = []
         anchor = _tl_anchor_sid(sd["sid"])
-        if kind == "casual":
-            # First item carries the anchor; rest are plain
-            first_content = life_items[0] if life_items else tl
-            session_lines.append(f"{hhmm} {first_content} {anchor}")
-            for item in life_items[1:]:
-                session_lines.append(f"  {item}")
-        else:
-            session_lines.append(f"{hhmm} {tl} {anchor}")
 
-        entries.append((disp_date, ts, session_lines))
+        if kind == "task" or not life_items:
+            # Single line: TL at session start time
+            rendered = f"{sess_hhmm} {tl} {anchor}"
+            flat_entries.append((ts, sess_date, rendered, True))
+        else:
+            # Casual with LIFE items — one rendered line per item
+            for idx, item in enumerate(life_items):
+                line_hhmm, text = _life_line_hhmm(item, sess_hhmm)
+                line_date = _life_line_local_date(item, sess_date, sess_hhmm)
+                # Sort key: use ts for first item so session ordering is stable;
+                # subsequent items inherit the session ts with HH:MM appended
+                # to maintain relative ordering within the same session.
+                sort_key = ts if idx == 0 else f"{ts[:10]}T{line_hhmm}:00Z"
+                if idx == 0:
+                    rendered = f"{line_hhmm} {text} {anchor}"
+                else:
+                    rendered = f"{line_hhmm} {text}"
+                flat_entries.append((sort_key, line_date, rendered, idx == 0))
 
     # Newest first
-    entries.sort(key=lambda e: e[1], reverse=True)
+    flat_entries.sort(key=lambda e: e[0], reverse=True)
 
-    # Interleave day dividers and flatten; cap 15
+    # Interleave day dividers and flatten; cap _24H_CAP
     lines: list[str] = []
     prev_date: _dt.date | None = None
-    for disp_date, _ts, sess_lines in entries:
+    for _sort_key, disp_date, rendered_line, _is_first in flat_entries:
         if len(lines) >= _24H_CAP:
             break
         if prev_date is not None and disp_date != prev_date:
-            # Only insert divider when the date is EARLIER (we go newest→oldest)
             lines.append(f"--- {disp_date.strftime('%m-%d')} ---")
         prev_date = disp_date
-        for ln in sess_lines:
-            lines.append(ln)
-            if len(lines) >= _24H_CAP:
-                break
+        lines.append(rendered_line)
+        if len(lines) >= _24H_CAP:
+            break
 
     return lines
 
