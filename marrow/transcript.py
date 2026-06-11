@@ -44,6 +44,42 @@ _SPAWN_HEADS = (
 # diary as if 铁锅 were a speaker.
 _BUDDY = re.compile(r"\s*<!--\s*buddy\s*:.*?-->", re.S | re.I)
 
+# ── synapse-wx bridge boilerplate strip ──────────────────────────────────────
+# Three patterns injected by the bridge that must not enter recall queries or
+# event bodies.
+#
+# 1. Media Read instruction — appended as "\n\n<instruction>" by
+#    synapse_wx/media/inbound.py build_read_tool_instruction.
+#    Starts with "Use the Read tool to view:" and spans to end of string
+#    (the instruction block is always the last content in the prompt).
+_WX_READ_INSTR_RE = re.compile(
+    r"\n*<instruction>\s*Use the Read tool to view:.*",
+    re.S | re.I,
+)
+# 2. Merge note — prepended as the first line by synapse_wx/loop.py.
+#    Defensive: match any full line of the form "[bridge: ...]".
+_WX_MERGE_NOTE_RE = re.compile(r"^\[bridge:[^\]]*\]\n?", re.M)
+# 3. Lone "." sentinel — a pure-media bubble arrives as body "." + instruction.
+#    After patterns 1 & 2 are stripped this may leave a bare dot line.
+_WX_DOT_SENTINEL_RE = re.compile(r"^\.\s*$", re.M)
+
+
+def strip_wx_boilerplate(text: str) -> str:
+    """Strip synapse-wx bridge boilerplate from a prompt or event body.
+
+    Removes (in order):
+      1. Media Read instruction block (``<instruction>Use the Read tool...``)
+      2. Bridge merge-note lines (``[bridge: ...]``)
+      3. Bare dot-sentinel lines left by pure-media bubbles
+
+    Returns the cleaned text stripped of leading/trailing whitespace.
+    Safe to call on non-wx text — patterns are specific enough to be no-ops.
+    """
+    text = _WX_READ_INSTR_RE.sub("", text)
+    text = _WX_MERGE_NOTE_RE.sub("", text)
+    text = _WX_DOT_SENTINEL_RE.sub("", text)
+    return text.strip()
+
 
 def worker_models() -> list[str]:
     try:
@@ -108,7 +144,8 @@ def _text(content) -> str:
         )
     else:
         return ""
-    return _BUDDY.sub("", s).strip()
+    s = _BUDDY.sub("", s).strip()
+    return strip_wx_boilerplate(s)
 
 
 def _active_chain_uuids(records: list[dict]) -> set[str]:
