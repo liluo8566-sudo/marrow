@@ -15,9 +15,8 @@ Not a shit mountain. Real src = marrow core 25.9k + synapse-wx 7.5k ≈ 33.5k li
    - Fix: P5 in-flight only if (start newer than end) AND (no terminal row after that start) AND (start age < grace, e.g. 15 min).
    - Verified: confirmed (no deleting path for start rows anywhere; mm+ reset doesn't clear them either).
 
-2. **First failure is always silent** · sessionend_async.py `_write_final_audit`
-   - Alert gate `prior_fails >= 1` means fail:no_events, fail:Exception, partial:digest, partial:affect,task_cand all write audit_log only on first occurrence. Combined with P5 there is no second occurrence.
-   - Fix direction in docs/plans/0611-alert-redesign.md (first-failure-visible + dedup).
+2. **Strike two is unreachable** · sessionend_async.py `_write_final_audit`
+   - The `prior_fails >= 1` gate (silent first failure, alert on retry-failure) is Lumi's intended two-strike design, NOT a bug. The bug is that P5 (#1) kills the retry, so the second strike never happens and the gate never opens. Fix #1 and the gate works as designed. Exception: digest "ok:0" counts as ok → never enters the retry chain at all (plan A-2 folds it into partial).
 
 3. **reconcile_ref resolves the wrong episode** · sessionend_writers.py `seg_affect` reconcile lookup
    - `SELECT id FROM affect_live WHERE unresolved=1 ... ORDER BY created_at DESC LIMIT 1` — no sid/date/text filter. Any truthy reconcile_prev from one session can resolve an unrelated session's episode.

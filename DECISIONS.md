@@ -19,4 +19,4 @@
 - **Refusal sentinel**: policy-refusal caught as failure → 3-stage fallback. Never into diary.
 - **LLM subprocess isolation**: all spawns go through `LLMClient` with `--setting-sources "" --strict-mcp-config`. Strips user hooks / MCP from the child.
 - **SQLite journal mode = DELETE, never WAL** (verified): WAL's `.db-shm` mmap triggers a reproducible macOS APFS SIGBUS with 3+ threaded connections (2026-05-28 crash, docs/archives/PROGRESS.md:368-373). Contention handled by busy_timeout=30s + no-second-conn-inside-txn rule. Do not "optimise" back to WAL.
-- **Alert contract** (reasoned, plan docs/plans/0611-alert-redesign.md): first failure alerts immediately; fingerprint = stable token (exception text in message); add_alert never raises (file fallback); skips are terminal, never alerted.
+- **Alert contract — two-strike** (Lumi-set, plan docs/plans/0611-alert-redesign.md): every failure recorded in audit_log; first failure silent, alert only when the catchup retry also fails. Fingerprint = stable token (exception text in message), one deduped row per cause. add_alert never raises (file fallback). Skips are terminal, never alerted.
