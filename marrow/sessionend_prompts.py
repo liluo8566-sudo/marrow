@@ -34,6 +34,9 @@ _TRANSCRIPT_BLOCK = (
 TASK_AFFECT_DIGEST_PROMPT = _TRANSCRIPT_BLOCK + """
 You read the session transcript above and extract everything in ONE pass. \
 Output all segments below in order. Never decide twice.
+Output ONLY the three fenced blocks (===TASK===, ===AFFECT===, ===DIGEST===, \
+each closed by ===END===) exactly as shown. NEVER replace fences or section \
+labels with markdown headers.
 
 Inputs:
 - Active tasks in db (tick source, fed WITH id — line form: \
@@ -178,7 +181,12 @@ length.
 LIFE: (casual sessions ONLY — for task sessions output exactly: LIFE: N/A)
   One line per life detail explicitly mentioned in the transcript: \
 food/drink, sights, places, errands, body state, small moods.
-  ≤20 CN chars per line. 0-10 lines. Zero lines is normal → output: LIFE: N/A
+  Each line MUST start with `HH:MM ` — copy the timestamp from the \
+transcript line where that detail appears (timestamps are at line starts: \
+`[HH:MM] [念念|屿忱] ...`). Copy, never invent; if unsure use the nearest \
+preceding message's timestamp.
+  ≤20 CN chars after the timestamp per line. 0-10 lines. Zero lines is \
+normal → output: LIFE: N/A
   ONLY what was explicitly said. NEVER infer life details from work or study \
 content. NEVER extract from task sessions — do NOT output life details if \
 KIND is task, even if a latte or errand appears mid-coding.
@@ -189,8 +197,11 @@ flirting, play, intimate exchanges, mood. Keep dialogue form. \
 Don't paraphrase emotion away. Don't cut too much.
 
 FACTS: (task sessions ONLY — for casual sessions output exactly: FACTS: N/A)
-  One line per task: <subject> <did> <outcome>. No verbatim fragments. Max 5 lines.
-  Total for TL + FACTS: hard cap 120 words — cut aggressively.
+  ONE line, phase granularity: <subject> <did> <outcome>. Name the big \
+phases only (e.g. recall system updated — ranking, affect-event linking). \
+Process detail lives in git log / HANDOVER — never here. No verbatim \
+fragments. 2 lines ONLY when the session spans two unrelated projects.
+  Total for TL + FACTS: hard cap 60 words — compress ruthlessly.
 
 Strictly discard: user complaints/cursing during study or coding; assistant \
 meta shell/filler; mechanical step-by-step debugging detail; repetition.
@@ -199,7 +210,7 @@ meta shell/filler; mechanical step-by-step debugging detail; repetition.
 KIND: casual
 TL: 深夜捶鸭聊护肤，考前连夜备战开卷考
 LIFE:
-- 买了b5精华
+- 21:40 买了b5精华
 VOICE:
 U: 笨死了！变成2哈
 A: 我错了老婆
