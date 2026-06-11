@@ -396,6 +396,9 @@ def main(argv: list[str] | None = None) -> None:
     # Alerts must land in the same DB main() operates on (init_db may be
     # routed elsewhere in tests), not whatever config.db_path() resolves to.
     db_file = conn.execute("PRAGMA database_list").fetchone()[2]
+    # Initialise before try so finally can always flush, even on early raise.
+    pending_alerts: list[dict] = []
+    vec: dict = {}
     try:
         with conn:
             retired = retire_memes(conn)
@@ -411,6 +414,7 @@ def main(argv: list[str] | None = None) -> None:
                 dry_run=dry_run,
                 alert_db=db_file,
             )
+            pending_alerts = vec.get("pending_alerts", [])
             conn.execute(
                 "INSERT INTO audit_log "
                 "(target_table, target_id, action, summary) "
@@ -429,14 +433,6 @@ def main(argv: list[str] | None = None) -> None:
                  f"skipped={vec['skipped']} aborted={vec['aborted']} "
                  f"window_days={window_days} dry_run={dry_run}",),
             )
-        # Flush deferred alerts now that the transaction is closed.
-        for a in vec.get("pending_alerts", []):
-            repo.add_alert(
-                a["severity"], a["atype"], a["fingerprint"],
-                source=a.get("source"),
-                message=a.get("message"),
-                db=db_file,
-            )
         sys.stderr.write(
             f"[aging] retired={retired} archived={archived} "
             f"confirmed={confirmed} pruned={pruned} "
@@ -446,6 +442,14 @@ def main(argv: list[str] | None = None) -> None:
             f"{' (dry-run)' if dry_run else ''}\n"
         )
     finally:
+        # Flush deferred vec alerts even when the audit INSERT raised.
+        for a in pending_alerts:
+            repo.add_alert(
+                a["severity"], a["atype"], a["fingerprint"],
+                source=a.get("source"),
+                message=a.get("message"),
+                db=db_file,
+            )
         conn.close()
 
 

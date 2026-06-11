@@ -447,6 +447,78 @@ def test_prune_worktrees_removes_only_worktree_slugs(tmp_path):
     ]
 
 
+# ── A-4: aging pending_alerts flushed in finally ──────────────────────────────
+
+def test_aging_alerts_flushed_when_audit_insert_raises(tmp_path, monkeypatch):
+    """evict_vec_window returns pending alerts; audit INSERT raises →
+    alerts still land in the alerts table (finally block fires)."""
+    p = str(tmp_path / "aging_a4.db")
+    conn = storage.init_db(p)
+    conn.close()
+
+    fake_pending = [
+        {"severity": "warn", "atype": "vec_evict", "fingerprint": "vec_evict_fp",
+         "source": "aging.py", "message": "test eviction alert"},
+    ]
+    fake_vec = {
+        "evicted": 1, "exempted": 0, "skipped": 0, "aborted": 0,
+        "pending_alerts": fake_pending,
+    }
+
+    def fake_evict_vec(*a, **kw):
+        return fake_vec
+
+    # Make conn.execute raise on the audit INSERT (action='weekly') but allow
+    # all other queries through so the rest of main() runs normally.
+    real_init = storage.init_db
+
+    class _PatchedConn:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def execute(self, sql, params=()):
+            if "VALUES ('aging'" in sql and "'weekly'" in sql:
+                raise RuntimeError("forced audit insert failure")
+            return self._inner.execute(sql, params)
+
+        def __enter__(self):
+            self._inner.__enter__()
+            return self
+
+        def __exit__(self, *a):
+            return self._inner.__exit__(*a)
+
+        def close(self):
+            return self._inner.close()
+
+        # Delegate attribute lookups (row_factory etc.) to inner conn.
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    monkeypatch.setattr(
+        aging.storage, "init_db",
+        lambda path=None: _PatchedConn(real_init(p)),
+    )
+    monkeypatch.setattr(aging, "evict_vec_window", fake_evict_vec)
+    monkeypatch.setattr(aging, "_GOOSE_DIR", tmp_path / "fake_goose")
+    monkeypatch.setattr(aging, "prune_projects_worktrees",
+                        lambda root=None: 0)
+
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError, match="forced audit insert failure"):
+        aging.main(["--apply"])
+
+    fresh = sqlite3.connect(p)
+    fresh.row_factory = sqlite3.Row
+    try:
+        row = fresh.execute(
+            "SELECT fingerprint FROM alerts WHERE fingerprint='vec_evict_fp'"
+        ).fetchone()
+    finally:
+        fresh.close()
+    assert row is not None, "pending alerts must land even when audit INSERT raises"
+
+
 def test_prune_worktrees_missing_dir_noop(tmp_path):
     assert aging.prune_projects_worktrees(tmp_path / "nope") == 0
 

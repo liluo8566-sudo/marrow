@@ -386,9 +386,12 @@ def main(argv: list[str] | None = None) -> int:
             _cleanup_empty_log(log_obj)
 
 
-def _run_writer(conn, sid: str, name: str, writer):
+def _run_writer(conn, sid: str, name: str, writer, *, zero_is_fail: bool = False):
     """Run one writer; log audit row. Returns the writer's row count on
     success (audited ok, or ok:0 on zero rows), None on exception.
+
+    When zero_is_fail=True, a zero-row result is audited as fail:zero_rows
+    instead of ok:0 so it joins the failures list for retry/two-strike logic.
 
     Catches every Exception (including sqlite3.OperationalError and OSError)
     so one writer failing never escapes to the outer session-level try and
@@ -398,8 +401,10 @@ def _run_writer(conn, sid: str, name: str, writer):
     """
     try:
         n = writer()
-        _write_segment_audit(conn, sid, name,
-                             "ok:0" if n == 0 else "ok")
+        if n == 0 and zero_is_fail:
+            _write_segment_audit(conn, sid, name, "fail:zero_rows")
+        else:
+            _write_segment_audit(conn, sid, name, "ok:0" if n == 0 else "ok")
         return n
     except Exception as e:  # noqa: BLE001
         try:
@@ -445,16 +450,9 @@ def _run_extraction(conn, sid: str, date: str,
                 lambda: seg_task_cand(conn, raw))
     _run_writer(conn, sid, "affect",
                 lambda: seg_affect(conn, raw, sid, date))
-    n = _run_writer(conn, sid, "digest",
-                    lambda: seg_digest(conn, raw, sid, date, raw_llm=raw))
-    if n == 0:
-        try:
-            repo.add_alert(
-                "warn", "sessionend", "digest_zero_write",
-                source="sessionend_async.py", db=config.db_path(),
-                message=f"digest writer wrote 0 rows for sid={sid}")
-        except Exception:  # noqa: BLE001
-            pass
+    _run_writer(conn, sid, "digest",
+                lambda: seg_digest(conn, raw, sid, date, raw_llm=raw),
+                zero_is_fail=True)
 
     # ── tail: slow side-effects (fail-soft; cc can't kill us here) ───────────
     db = config.db_path()

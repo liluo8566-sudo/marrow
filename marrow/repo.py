@@ -4,6 +4,7 @@ here; schema/connection stay in storage.py. Deterministic, no LLM.
 from __future__ import annotations
 
 import hashlib
+import json
 import shutil
 import sqlite3
 import sys
@@ -248,43 +249,67 @@ def add_alert(severity: str, atype: str, fingerprint: str,
     # fingerprint and message; dedup quality is the caller's responsibility
     # until they migrate to a stable fingerprint and pass `message=` for the
     # human detail.
-    detail = message if message is not None else fingerprint
-    conn = storage.connect(db)
+    #
+    # Never raises: on any DB exception the record is appended to
+    # alerts-fallback.jsonl (drained by sessionstart_catchup on next boot).
     try:
-        existing = conn.execute(
-            "SELECT id FROM alerts"
-            " WHERE type=? AND fingerprint=? AND resolved=0"
-            " LIMIT 1",
-            (atype, fingerprint),
-        ).fetchone()
-        if existing is not None:
-            aid = existing["id"]
+        detail = message if message is not None else fingerprint
+        conn = storage.connect(db)
+        try:
+            existing = conn.execute(
+                "SELECT id FROM alerts"
+                " WHERE type=? AND fingerprint=? AND resolved=0"
+                " LIMIT 1",
+                (atype, fingerprint),
+            ).fetchone()
+            if existing is not None:
+                aid = existing["id"]
+                with conn:
+                    conn.execute(
+                        "UPDATE alerts SET hit_count=hit_count+1,"
+                        " updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'),"
+                        " message=?, severity=?, source=?"
+                        " WHERE id=?",
+                        (detail, severity, source, aid),
+                    )
+                return aid
             with conn:
+                cur = conn.execute(
+                    "INSERT INTO alerts"
+                    " (severity, type, fingerprint, message, source)"
+                    " VALUES (?, ?, ?, ?, ?)",
+                    (severity, atype, fingerprint, detail, source),
+                )
+                aid = cur.lastrowid
                 conn.execute(
-                    "UPDATE alerts SET hit_count=hit_count+1,"
-                    " updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'),"
-                    " message=?, severity=?, source=?"
-                    " WHERE id=?",
-                    (detail, severity, source, aid),
+                    "INSERT INTO audit_log "
+                    "(target_table, target_id, action, summary) "
+                    "VALUES ('alerts', ?, 'insert', ?)",
+                    (str(aid), f"{severity}/{atype}: {detail[:120]}"),
                 )
             return aid
-        with conn:
-            cur = conn.execute(
-                "INSERT INTO alerts"
-                " (severity, type, fingerprint, message, source)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (severity, atype, fingerprint, detail, source),
-            )
-            aid = cur.lastrowid
-            conn.execute(
-                "INSERT INTO audit_log "
-                "(target_table, target_id, action, summary) "
-                "VALUES ('alerts', ?, 'insert', ?)",
-                (str(aid), f"{severity}/{atype}: {detail[:120]}"),
-            )
-        return aid
-    finally:
-        conn.close()
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001
+        try:
+            sink = config.DATA_DIR / "alerts-fallback.jsonl"
+            sink.parent.mkdir(parents=True, exist_ok=True)
+            rec = json.dumps({
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "severity": severity,
+                "type": atype,
+                "fingerprint": fingerprint,
+                "source": source,
+                "message": message if message is not None else fingerprint,
+            })
+            with sink.open("a", encoding="utf-8") as fh:
+                fh.write(rec + "\n")
+        except Exception:  # noqa: BLE001
+            pass
+        sys.stderr.write(
+            f"[repo.add_alert] DB write failed ({exc!r}); queued to fallback sink\n"
+        )
+        return -1
 
 
 def _hash(*parts: str) -> str:
