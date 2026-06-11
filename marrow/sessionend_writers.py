@@ -2,6 +2,10 @@
 
 Each writer takes the raw LLM output for its segment and persists rows.
 Lifted out of sessionend_async to keep that module under 300 LOC.
+
+seg_digest parses the new structured DIGEST block (KIND/TL/LIFE/VOICE/FACTS)
+from the merged sonnet call and writes kind/tl_line/life_lines columns.
+VOICE/FACTS remain in the body text. Parse failure → columns NULL + alert.
 """
 from __future__ import annotations
 
@@ -11,6 +15,8 @@ import os
 import sys
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+import re as _re
 
 from . import candidates
 from .sessionend_prompts import parse_task_rows
@@ -120,9 +126,11 @@ def seg_affect(conn, raw: str, sid: str, date: str) -> int:
         ents = it.get("entities")
         entities = (json.dumps(ents, ensure_ascii=False)
                     if isinstance(ents, list) and ents else None)
-        unresolved_raw = it.get("unresolved", 0)
+        # "open" is the merged-prompt field name; "unresolved" is the legacy name.
+        # Either is accepted; open takes precedence when present.
+        open_raw = it.get("open", it.get("unresolved", 0))
         try:
-            unresolved = 1 if int(unresolved_raw) else 0
+            unresolved = 1 if int(open_raw) else 0
         except (TypeError, ValueError):
             unresolved = 0
         reconcile_prev = it.get("reconcile_prev")
@@ -284,6 +292,94 @@ def seg_task_cand(conn, raw: str) -> int:
     return n
 
 
+# Fullwidth colon tolerance: "KIND：" and "KIND:" both match.
+_DIGEST_LABEL_RE = _re.compile(
+    r"^(?P<label>KIND|TL|LIFE|VOICE|FACTS)[：:][ \t]*(?P<value>.*)$",
+    _re.IGNORECASE,
+)
+_VALID_KINDS = frozenset(("casual", "task"))
+
+
+def _parse_digest_block(raw: str) -> dict:
+    """Parse KIND/TL/LIFE lines from the ===DIGEST===/===END=== block.
+
+    Returns dict with keys: kind (str|None), tl_line (str|None),
+    life_lines (str|None — newline-joined, None when N/A or task).
+
+    Fullwidth-colon tolerant (TL： == TL:).
+    VOICE/FACTS content is left in the returned 'body' key for body storage.
+    """
+    # Slice the DIGEST block; fall back to whole raw if fences absent.
+    i = raw.find("===DIGEST===")
+    if i >= 0:
+        tail = raw[i + len("===DIGEST==="):]
+        j = tail.find("===END===")
+        block = tail[:j].strip() if j >= 0 else tail.strip()
+    else:
+        block = raw.strip()
+
+    kind: str | None = None
+    tl_line: str | None = None
+    life_parts: list[str] = []
+    life_section = False
+    voice_section = False
+    facts_section = False
+    body_lines: list[str] = []
+
+    for line in block.splitlines():
+        m = _DIGEST_LABEL_RE.match(line)
+        if m:
+            label = m.group("label").upper()
+            value = m.group("value").strip()
+            life_section = voice_section = facts_section = False
+            if label == "KIND":
+                cand = value.lower()
+                kind = cand if cand in _VALID_KINDS else None
+            elif label == "TL":
+                tl_line = value if value else None
+            elif label == "LIFE":
+                life_section = True
+                # Inline value on the same line (e.g. "LIFE: N/A")
+                if value.upper() == "N/A" or not value:
+                    life_parts = []
+                else:
+                    # Rare: first life item on the label line
+                    item = value.lstrip("-").strip()
+                    if item:
+                        life_parts.append(item)
+                body_lines.append(line)
+            elif label == "VOICE":
+                voice_section = True
+                body_lines.append(line)
+            elif label == "FACTS":
+                facts_section = True
+                body_lines.append(line)
+        else:
+            stripped = line.strip()
+            if life_section:
+                if stripped and stripped.upper() != "N/A":
+                    item = stripped.lstrip("-").strip()
+                    if item:
+                        life_parts.append(item)
+                body_lines.append(line)
+            elif voice_section or facts_section:
+                body_lines.append(line)
+            elif stripped:
+                body_lines.append(line)
+
+    life_lines: str | None = None
+    if life_parts:
+        life_lines = "\n".join(life_parts)
+
+    body = "\n".join(body_lines).strip()
+    return {
+        "kind": kind,
+        "tl_line": tl_line,
+        "life_lines": life_lines,
+        "body": body,
+    }
+
+
 def _digest_log_dir() -> Path:
     """~/.config/marrow/logs/digest/ — created on first use."""
     from . import config
@@ -337,24 +433,46 @@ def seg_digest(conn, raw: str, sid: str, date: str,
                raw_llm: str | None = None) -> int:
     """Persist DIGEST text into session_digests. INSERT OR REPLACE on sid.
 
-    raw_llm: the full haiku LLM output (for digest quality monitoring log).
-    When provided, appends to ~/.config/marrow/logs/digest/digest-YYYY-MM-DD.log
-    and prunes files older than 2.5 days.
+    Parses KIND/TL/LIFE from the structured DIGEST block and writes the new
+    kind/tl_line/life_lines columns. VOICE/FACTS remain in the body text.
+    Parse failure → columns NULL + alert; body always kept.
+
+    raw_llm: full LLM output for quality monitoring log.
     """
-    body = _extract_text_block(raw, "DIGEST")
+    parsed = _parse_digest_block(raw)
+    body = parsed["body"]
     if not body:
-        # DIGEST is a dedicated call: the whole reply is the digest.
-        # Fence-less output (prompt does not mandate ===DIGEST===) lands here.
+        # Last-resort: strip fences and use whole raw as body.
         body = raw.replace("===DIGEST===", "").replace("===END===", "").strip()
     if not body:
         return 0
-    ts_now = _dt.datetime.now(_dt.timezone.utc).strftime(
-        "%Y-%m-%dT%H:%M:%SZ")
+
+    kind = parsed["kind"]
+    tl_line = parsed["tl_line"]
+    life_lines = parsed["life_lines"]
+
+    # Alert on parse failures for kind/tl_line (critical structure).
+    if kind is None or tl_line is None:
+        try:
+            from . import config, repo
+            repo.add_alert(
+                "warn", "sessionend", "digest_parse_partial",
+                source="sessionend_writers.py", db=config.db_path(),
+                message=(
+                    f"digest parse: kind={kind!r} tl_line={tl_line!r}"
+                    f" for sid={sid[:8]} — columns set NULL, body kept"
+                ),
+            )
+        except Exception:  # noqa: BLE001 — alert is best-effort
+            pass
+
+    ts_now = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     with conn:
         conn.execute(
-            "INSERT OR REPLACE INTO session_digests (sid, date, text, ts)"
-            " VALUES (?, ?, ?, ?)",
-            (sid, date, body, ts_now),
+            "INSERT OR REPLACE INTO session_digests"
+            " (sid, date, text, ts, kind, tl_line, life_lines)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (sid, date, body, ts_now, kind, tl_line, life_lines),
         )
     if raw_llm is not None:
         try:

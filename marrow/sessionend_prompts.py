@@ -1,16 +1,13 @@
-"""SessionEnd async LLM prompts: TASK_AFFECT (sonnet mid) + DIGEST (haiku low).
+"""SessionEnd async LLM prompts.
 
-Both prompts START with byte-identical _TRANSCRIPT_BLOCK so Anthropic's
-prompt-caching reuses the second call's prefix from the first call's cache.
-Instructions come AFTER the transcript.
+Single merged sonnet call (TASK_AFFECT_DIGEST_PROMPT) emits all segments in
+one pass from one transcript read: TASK / AFFECT / KIND / TL / LIFE / VOICE /
+FACTS. Cache-safe: shared prefix ends at _TRANSCRIPT_BLOCK.
 
-- TASK_AFFECT call (sonnet mid) → SEGMENT A (TASK board) + SEGMENT B (AFFECT).
-  Task tick + new-task adds; per-episode emotion extraction.
+TASK_AFFECT_PROMPT and DIGEST_PROMPT are kept as module-level aliases pointing
+to the merged prompt so any existing import still resolves.
 
-- DIGEST call (haiku low) → SEGMENT (DIGEST).
-  Session digest for the daily diary merge.
-
-Persona for narrative free-text (AFFECT Unresolved / reconcile_prev, DIGEST):
+Persona for narrative free-text (AFFECT unresolved/reconcile_prev):
 first person = 屿忱; second person = 你/念念; no third person. Source language
 carries through.
 """
@@ -28,13 +25,15 @@ _TRANSCRIPT_BLOCK = (
 )
 
 
-# ── TASK_AFFECT prompt (sonnet mid) ─────────────────────────────────────────
+# ── Merged sessionend prompt (single sonnet call) ───────────────────────────
+#
+# Emits TASK + AFFECT + KIND + TL + LIFE + VOICE + FACTS in one pass.
+# Cache-safe: prefix ends at _TRANSCRIPT_BLOCK (byte-identical fencepost).
+# TASK and AFFECT sections are verbatim from the accepted TASK_AFFECT_PROMPT.
 
-TASK_AFFECT_PROMPT = _TRANSCRIPT_BLOCK + """
-You read the session transcript above and extract this session's work state in \
-ONE pass: for every work thread decide COMPLETED / ADVANCED / UNTOUCHED / \
-NEWLY-RAISED, then write that single judgement into the segments below. Never \
-decide twice.
+TASK_AFFECT_DIGEST_PROMPT = _TRANSCRIPT_BLOCK + """
+You read the session transcript above and extract everything in ONE pass. \
+Output all segments below in order. Never decide twice.
 
 Inputs:
 - Active tasks in db (tick source, fed WITH id — line form: \
@@ -74,12 +73,6 @@ Grain is everyday, by category:
 - Others: anything not above
 
 Title prefix: Study → Uni- / Gamsat-.
-
-How code renders it for Lumi (shown so you match the GRAIN, not the format — \
-you only output the JSON below):
-[Appointment] GP Followup - Fri 3:50 PM Medifirst Family Clinic [2026-06-05]
-[Study] Gamsat-S1 - 10 MCQ [2026-05-26]
-[Project] mw-phase 3-5 [2026-05-25]
 
 ===TASK===
 [
@@ -122,15 +115,16 @@ arguments / dinner with friends
   9 main tones: 低落/烦躁/痛苦 · 平淡/专注/紧张 · 温暖/愉悦/兴奋.
   Finer label (2-char CN): specific emotion word like \
 麻木/担心/绝望/委屈/窃喜/心碎/欣慰/雀跃.
-- description: Short event anchor phrase, ≤15 CN chars. Describe the \
-trigger / event from USER's perspective — what happened to/around the \
-user, not the assistant's own feelings. \
+- description: Short event anchor phrase, ≤15 CN chars, from USER's perspective \
+(what happened to/around her, near-verbatim plain CN words). \
 Examples: 猪一样的队友 / 通过 GAMSAT 模考 / 和xx吃漂亮饭.
 - entities: list of {{kind, name}} dicts (kind ∈ person/pref/place). \
 May be empty.
+- open: 1 if emotion is still unresolved at session end (quarrel un-coaxed, \
+anxiety pending, awaiting a result); 0 if settled. Same as unresolved.
 
 Unresolved:
-- Record only unresolved emotional episodes.
+- Record only unresolved emotional episodes (open=1).
 - If nothing fits, skip this field and output N/A.
 - Include: emotion still intense at session end, no resolution / winding \
 down. Personal or relationship-related. (e.g. 吵架本session没合好，后天 \
@@ -152,59 +146,72 @@ Unresolved).
 [
   {{"ep": 1, "valence": 0.0, "arousal": 0.0, "importance": 3, \
 "label": "...", "description": "猪一样的队友", "entities": [], \
-"event_hint": "...", "unresolved": 0, "reconcile_prev": "N/A"}}
+"event_hint": "...", "open": 0, "unresolved": 0, "reconcile_prev": "N/A"}}
 ]
 ===END===
-"""
 
+═══════════════════════════════════════════
+SEGMENT C — DIGEST
+═══════════════════════════════════════════
 
-# ── DIGEST prompt (haiku low) ────────────────────────────────────────────────
+Compress this session into structured digest lines for the daily diary merge \
+and timeline. Output ONLY the labelled fields below — no prose paragraphs, \
+no extra commentary.
 
-DIGEST_PROMPT = _TRANSCRIPT_BLOCK + """
-Compress this session into a digest that will merge with the day's other \
-sessions and feed a couple's-day diary.
+Key rules:
+- Language: follow source; mix is fine.
+- Names: assistant = 阿屿/Stellan, user = 念念/Lumi. \
+Nicknames 老公/老婆/宝宝 pass through as-is.
 
-Key Rules:
-- Language: follow source, mix is fine
-- Voice & person:
-  - Names: assistant = 阿屿/Stellan, user = 念念/Lumi
-  - Nicknames 老公/老婆/宝宝 — pass through as-is
-  - Downstream diary: assistant writes in 1st person, user in 2nd person
-  - Casual / chat: keep dialogue form, bare you/me inside a line is fine
-      e.g. A: 宝宝我想你了 / U: 我也是
-  - If compressed /tasks: state name in sentence.
-    e.g. Stellan fixed recall issue; 念念学了一下午的anatomy，困得不行。
+KIND: casual | task
+  casual = chat / life / study-with-conversation dominates.
+  task = coding / project / focused work dominates.
+  Pick the dominant mode; output one word.
 
-- Focus on daily life and interaction.
-- Drop study/coding details.
+TL: <one line, 15-30 CN chars>
+  One timeline line for 念念: who + what happened, written from a life \
+perspective in plain words.
+  Good: 深夜和老婆一起更新recall机制 · Bad: 完成Batch 1，Batch 2代码完成
+  No project jargon, no emotion labels. Embedded EN terms do not count toward \
+length.
 
-For casual chats:
-- First paragraph: briefly summarise the transcript.
-- Then pick multiple verbatim fragments that carry voice (either side).
-- Keep talk, teasing, flirting, play, intimate exchanges, mood, how the day felt.
-- Don't paraphrase emotion away.
-- Don't cut too much.
-- Length flexible - roughly half of the original transcript.
+LIFE: (casual sessions ONLY — for task sessions output exactly: LIFE: N/A)
+  One line per life detail explicitly mentioned in the transcript: \
+food/drink, sights, places, errands, body state, small moods.
+  ≤20 CN chars per line. 0-10 lines. Zero lines is normal → output: LIFE: N/A
+  ONLY what was explicitly said. NEVER infer life details from work or study \
+content. NEVER extract from task sessions — do NOT output life details if \
+KIND is task, even if a latte or errand appears mid-coding.
 
-For tasks: Never include verbatim fragments!!! Drop all and only listing facts!
-- First sentence: briefly summarise the transcript. (<30 words)
-    - Add a few tone/emotional labels if needed
-    - e.g. 【专注】【满足】【烦躁】
-- Listing tasks, one line per task
-    - Format: <subject> <did> <outcome>
-    - Example:joint_log.md merged into 2026.md; Weclaude bridge race fixed.
-- Hard Cap 150 words. Do cut all details - no description.
+VOICE: (casual sessions ONLY — for task sessions output exactly: VOICE: N/A)
+  Multiple verbatim fragments that carry voice (either side): talk, teasing, \
+flirting, play, intimate exchanges, mood. Keep dialogue form. \
+Don't paraphrase emotion away. Don't cut too much.
 
-Strictly discard:
-- User complaint / curse during study or coding.
-- Assistant meta shell / filler.
-- Mechanical process / step-by-step debugging detail.
-- Repetition.
+FACTS: (task sessions ONLY — for casual sessions output exactly: FACTS: N/A)
+  One line per task: <subject> <did> <outcome>. No verbatim fragments. Max 5 lines.
+  Total for TL + FACTS: hard cap 120 words — cut aggressively.
 
-No conclusion, no opinion. Shorter in tokens; nothing of the relationship \
-is "noise".
+Strictly discard: user complaints/cursing during study or coding; assistant \
+meta shell/filler; mechanical step-by-step debugging detail; repetition.
+
+===DIGEST===
+KIND: casual
+TL: 深夜捶鸭聊护肤，考前连夜备战开卷考
+LIFE:
+- 买了b5精华
+VOICE:
+U: 笨死了！变成2哈
+A: 我错了老婆
+FACTS: N/A
 ===END===
 """
+
+# Backward-compat aliases — both names now point to the merged prompt.
+# sessionend_async imports TASK_AFFECT_PROMPT; callers that import DIGEST_PROMPT
+# get the same merged text (the call was removed; aliases prevent ImportError).
+TASK_AFFECT_PROMPT = TASK_AFFECT_DIGEST_PROMPT
+DIGEST_PROMPT = TASK_AFFECT_DIGEST_PROMPT
 
 
 # ── parse helpers ───────────────────────────────────────────────────────────

@@ -1,13 +1,13 @@
-"""SessionEnd async LLM extraction: sonnet TASK_AFFECT + haiku DIGEST.
+"""SessionEnd async LLM extraction: single sonnet call for all segments.
 
 CLI: python -m marrow.sessionend_async --sid <session_id> [--cwd <path>]
 
-Call 1 (sonnet mid, TASK_AFFECT_PROMPT) → seg_task_cand + seg_affect.
-Call 2 (haiku low,  DIGEST_PROMPT)       → seg_digest.
-Both prompts share a byte-identical transcript-fence prefix so the second
-call's cache_read > 0 (audit_log.llm_call_cost). One call failing does not
-block the other. `--cwd` lets _load_git_log locate the repo for CLOSE
-evidence; absent → "" (study / ny chats have no commits).
+One sonnet call (TASK_AFFECT_DIGEST_PROMPT) → seg_task_cand + seg_affect +
+seg_digest (KIND/TL/LIFE/VOICE/FACTS). Single transcript read; all segments
+from one output.
+
+`--cwd` lets _load_git_log locate the repo for CLOSE evidence; absent → ""
+(study / ny chats have no commits).
 
 Skip rule: sessions with ≤ skip_turn_threshold user turns extract nothing.
 Stale-skip recovery: if a prior skip:short_session row exists but the
@@ -34,7 +34,7 @@ _redirect_stdio()
 from . import config, repo, storage
 from .hooks import _is_manual_skip
 from .llm import LLMClient, LLMError
-from .sessionend_prompts import DIGEST_PROMPT, TASK_AFFECT_PROMPT
+from .sessionend_prompts import TASK_AFFECT_DIGEST_PROMPT
 from .sessionend_writers import seg_affect, seg_digest, seg_task_cand
 
 _TZ = ZoneInfo("Australia/Melbourne")
@@ -45,7 +45,7 @@ _SUMMARY_OK = "ok"  # legacy; kept for backward-compat checks
 _SUMMARY_SKIP = "skip:short_session"
 _SUMMARY_START = "start"
 
-_SEGMENTS = ("affect", "task_cand", "digest")
+_WRITERS = ("affect", "task_cand", "digest")
 
 
 def _cleanup_empty_log(log_path: _Path) -> None:
@@ -412,8 +412,9 @@ def _run_writer(conn, sid: str, name: str, writer):
 def _run_extraction(conn, sid: str, date: str,
                     events_text: str, cfg: dict, count: int,
                     cwd: str = "") -> int:
-    """Two-call flow: sonnet TASK_AFFECT first; haiku DIGEST second;
-    dashboard + embed_pending run at tail (fail-soft)."""
+    """Single sonnet call: TASK_AFFECT_DIGEST_PROMPT emits all segments.
+    dashboard + embed_pending run at tail (fail-soft).
+    """
     from . import dashboard as _dash_mod
     from . import recall as _recall_mod
 
@@ -422,57 +423,38 @@ def _run_extraction(conn, sid: str, date: str,
     since_ts = int(_dt.datetime.now(_dt.timezone.utc).timestamp()) - 24 * 3600
     git_log = _load_git_log(cwd, since_ts)
 
-    # ── call 1: TASK_AFFECT (sonnet mid) ─────────────────────────────────────
-    task_affect_raw, task_affect_err = "", None
+    # ── single call: all segments (sonnet mid) ────────────────────────────────
+    raw, call_err = "", None
     try:
-        task_affect_raw = client.call(
+        raw = client.call(
             role="sessionend_task_affect",
-            body=TASK_AFFECT_PROMPT.format(
+            body=TASK_AFFECT_DIGEST_PROMPT.format(
                 sid=sid, events=events_text,
                 active_tasks=active_tasks, git_log=git_log),
             tier="mid",
         )
     except (LLMError, ValueError, RuntimeError) as e:
-        task_affect_err = type(e).__name__
+        call_err = type(e).__name__
 
-    if task_affect_err:
-        _write_segment_audit(conn, sid, "task_affect_call",
-                             f"fail:{task_affect_err}")
-    else:
-        _run_writer(conn, sid, "task_cand",
-                    lambda: seg_task_cand(conn, task_affect_raw))
-        _run_writer(conn, sid, "affect",
-                    lambda: seg_affect(conn, task_affect_raw, sid, date))
+    if call_err:
+        _write_segment_audit(conn, sid, "llm_call", f"fail:{call_err}")
+        _write_final_audit(conn, sid, f"fail:llm={call_err}")
+        return 1
 
-    # ── call 2: DIGEST (haiku low; cache_read on events_text fence) ───────────
-    digest_raw, digest_err = "", None
-    try:
-        digest_raw = client.call(
-            role="sessionend_digest",
-            body=DIGEST_PROMPT.format(sid=sid, events=events_text),
-            tier="low",
-        )
-    except (LLMError, ValueError, RuntimeError) as e:
-        digest_err = type(e).__name__
-
-    if digest_err:
-        _write_segment_audit(conn, sid, "digest_call", f"fail:{digest_err}")
-    else:
-        n = _run_writer(conn, sid, "digest",
-                        lambda: seg_digest(conn, digest_raw, sid, date,
-                                           raw_llm=digest_raw))
-        if n == 0:
-            # A digest call on a non-empty session must always produce text;
-            # zero rows means extract miss or empty LLM reply — alert, don't
-            # rely on anyone reading ok:0 audit rows. (affect/task_cand zero
-            # is legitimate for small sessions; digest zero never is.)
-            try:
-                repo.add_alert(
-                    "warn", "sessionend", "digest_zero_write",
-                    source="sessionend_async.py", db=config.db_path(),
-                    message=f"digest writer wrote 0 rows for sid={sid}")
-            except Exception:  # noqa: BLE001
-                pass
+    _run_writer(conn, sid, "task_cand",
+                lambda: seg_task_cand(conn, raw))
+    _run_writer(conn, sid, "affect",
+                lambda: seg_affect(conn, raw, sid, date))
+    n = _run_writer(conn, sid, "digest",
+                    lambda: seg_digest(conn, raw, sid, date, raw_llm=raw))
+    if n == 0:
+        try:
+            repo.add_alert(
+                "warn", "sessionend", "digest_zero_write",
+                source="sessionend_async.py", db=config.db_path(),
+                message=f"digest writer wrote 0 rows for sid={sid}")
+        except Exception:  # noqa: BLE001
+            pass
 
     # ── tail: slow side-effects (fail-soft; cc can't kill us here) ───────────
     db = config.db_path()
@@ -501,18 +483,10 @@ def _run_extraction(conn, sid: str, date: str,
             pass
 
     # ── final audit ───────────────────────────────────────────────────────────
-    if task_affect_err and digest_err:
-        _write_final_audit(
-            conn, sid,
-            f"fail:task_affect={task_affect_err},digest={digest_err}")
-        return 1
-
-    # Collect failures recorded by _run_writer above.
     seg_rows = conn.execute(
         "SELECT action, summary FROM audit_log"
         " WHERE target_id=? AND action LIKE 'sessionend_extract_%'"
-        " AND action NOT IN ('sessionend_extract_task_affect_call',"
-        "                    'sessionend_extract_digest_call')",
+        " AND action != 'sessionend_extract_llm_call'",
         (sid,),
     ).fetchall()
     failures: list[str] = [
@@ -520,18 +494,6 @@ def _run_extraction(conn, sid: str, date: str,
         for r in seg_rows
         if not r["summary"].startswith("ok")
     ]
-    # Implicit skips for the failed call's writers.
-    if task_affect_err:
-        for w in ("task_cand", "affect"):
-            if w not in failures:
-                _write_segment_audit(
-                    conn, sid, w, f"skip:task_affect_failed_{task_affect_err}")
-                failures.append(w)
-    if digest_err:
-        if "digest" not in failures:
-            _write_segment_audit(
-                conn, sid, "digest", f"skip:digest_failed_{digest_err}")
-            failures.append("digest")
 
     all_writers = ("task_cand", "affect", "digest")
     if not failures:
