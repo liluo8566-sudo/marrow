@@ -127,10 +127,10 @@ def test_cap_pct_aborts_with_critical_alert(db, fresh_backup, monkeypatch):
     )
     assert res["aborted"] and res["evicted"] == 0
     assert len(_vec_ids(conn)) == 4
-    sev = conn.execute(
-        "SELECT severity FROM alerts WHERE fingerprint='vec_evict_cap_pct'"
-    ).fetchone()
-    assert sev and sev[0] == "critical"
+    alerts = res["pending_alerts"]
+    assert len(alerts) == 1
+    assert alerts[0]["fingerprint"] == "vec_evict_cap_pct"
+    assert alerts[0]["severity"] == "critical"
 
 
 def test_cap_abs_aborts(db, fresh_backup, monkeypatch):
@@ -147,9 +147,8 @@ def test_cap_abs_aborts(db, fresh_backup, monkeypatch):
         conn, window_days=90, backup_dir=fresh_backup, alert_db=p
     )
     assert res["aborted"] and len(_vec_ids(conn)) == 16
-    assert conn.execute(
-        "SELECT 1 FROM alerts WHERE fingerprint='vec_evict_cap_abs'"
-    ).fetchone()
+    alerts = res["pending_alerts"]
+    assert any(a["fingerprint"] == "vec_evict_cap_abs" for a in alerts)
 
 
 def test_stale_backup_skips_with_warn(db, tmp_path):
@@ -165,10 +164,10 @@ def test_stale_backup_skips_with_warn(db, tmp_path):
     )
     assert res["skipped"] and res["evicted"] == 0
     assert _vec_ids(conn) == {old}
-    sev = conn.execute(
-        "SELECT severity FROM alerts WHERE fingerprint='vec_evict_backup_stale'"
-    ).fetchone()
-    assert sev and sev[0] == "warn"
+    alerts = res["pending_alerts"]
+    assert len(alerts) == 1
+    assert alerts[0]["fingerprint"] == "vec_evict_backup_stale"
+    assert alerts[0]["severity"] == "warn"
 
 
 def test_missing_backup_skips(db, tmp_path):
@@ -203,5 +202,5 @@ def test_window_zero_disables(db, fresh_backup):
         conn, window_days=0, backup_dir=fresh_backup, alert_db=p
     )
     assert res == {"evicted": 0, "exempted": 0, "skipped": False,
-                   "aborted": False}
+                   "aborted": False, "pending_alerts": []}
     assert _vec_ids(conn) == {old}

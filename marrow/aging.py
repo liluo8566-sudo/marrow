@@ -250,11 +250,17 @@ def evict_vec_window(
 ) -> dict:
     """Delete out-of-window events_vec + events_vec_meta rows.
 
-    Returns dict with keys: evicted, exempted, skipped (bool), aborted (bool).
-    events rows are never touched — FTS stays intact; clearing meta lets
-    embed_pending re-embed the row on demand (reversible by design).
+    Returns dict with keys: evicted, exempted, skipped (bool), aborted (bool),
+    pending_alerts (list of dicts). Callers must flush pending_alerts via
+    repo.add_alert AFTER their transaction closes to avoid db-lock conflicts.
+    alert_db is accepted for back-compat but ignored here; pass it when
+    calling repo.add_alert on the returned pending_alerts.
     """
-    result = {"evicted": 0, "exempted": 0, "skipped": False, "aborted": False}
+    result: dict = {
+        "evicted": 0, "exempted": 0,
+        "skipped": False, "aborted": False,
+        "pending_alerts": [],
+    }
 
     if window_days == 0:
         return result
@@ -264,15 +270,15 @@ def evict_vec_window(
     today = date.today()
     if newest is None or (today - newest).days > _BACKUP_STALE_DAYS:
         age_str = str((today - newest).days) + "d" if newest else "missing"
-        repo.add_alert(
-            "warn", "aging", "vec_evict_backup_stale",
-            source="aging.py",
-            message=(
+        result["pending_alerts"].append({
+            "severity": "warn", "atype": "aging",
+            "fingerprint": "vec_evict_backup_stale",
+            "source": "aging.py",
+            "message": (
                 f"vec_evict skipped: backup {age_str} (need ≤{_BACKUP_STALE_DAYS}d). "
                 f"Run `python -m marrow.backup --apply` then retry."
             ),
-            db=alert_db,
-        )
+        })
         result["skipped"] = True
         return result
 
@@ -325,28 +331,28 @@ def evict_vec_window(
     if (evict_count > _VEC_EVICT_CAP_MIN
             and total_vec > 0
             and evict_count > total_vec * _VEC_EVICT_CAP_PCT):
-        repo.add_alert(
-            "critical", "aging", "vec_evict_cap_pct",
-            source="aging.py",
-            message=(
+        result["pending_alerts"].append({
+            "severity": "critical", "atype": "aging",
+            "fingerprint": "vec_evict_cap_pct",
+            "source": "aging.py",
+            "message": (
                 f"vec_evict aborted: would evict {evict_count}/{total_vec} rows "
                 f"({evict_count/total_vec:.0%} > {_VEC_EVICT_CAP_PCT:.0%} cap). "
                 "Manual investigation required."
             ),
-            db=alert_db,
-        )
+        })
         result["aborted"] = True
         return result
     if evict_count > _VEC_EVICT_CAP_ABS:
-        repo.add_alert(
-            "critical", "aging", "vec_evict_cap_abs",
-            source="aging.py",
-            message=(
+        result["pending_alerts"].append({
+            "severity": "critical", "atype": "aging",
+            "fingerprint": "vec_evict_cap_abs",
+            "source": "aging.py",
+            "message": (
                 f"vec_evict aborted: would evict {evict_count} rows "
                 f"(> {_VEC_EVICT_CAP_ABS} abs cap). Manual investigation required."
             ),
-            db=alert_db,
-        )
+        })
         result["aborted"] = True
         return result
 
@@ -422,6 +428,14 @@ def main(argv: list[str] | None = None) -> None:
                 (f"evicted={vec['evicted']} exempted={vec['exempted']} "
                  f"skipped={vec['skipped']} aborted={vec['aborted']} "
                  f"window_days={window_days} dry_run={dry_run}",),
+            )
+        # Flush deferred alerts now that the transaction is closed.
+        for a in vec.get("pending_alerts", []):
+            repo.add_alert(
+                a["severity"], a["atype"], a["fingerprint"],
+                source=a.get("source"),
+                message=a.get("message"),
+                db=db_file,
             )
         sys.stderr.write(
             f"[aging] retired={retired} archived={archived} "
