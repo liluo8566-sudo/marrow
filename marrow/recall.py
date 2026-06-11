@@ -755,6 +755,35 @@ def _fts_query(terms: list[str]) -> str:
 # vec ranks low (long query vs short anchor body collapses CLS-pool cosine).
 _NEEDLE_SPLIT_RE = re.compile(r'[^\w一-鿿]+')
 _CJK_RUN_RE = re.compile(r'[一-鿿]+')
+_ASCII_RUN_RE = re.compile(r'[a-z0-9]+')
+
+# Strong-hit tier floors (post-bias). A query hitting a row's name/key/title
+# is the highest-confidence signal we have — pin it well above the noise band.
+# Body hits (fact/value/description) rank above the min_score line but don't
+# get top billing.
+_STRONG_NAME_FLOOR = 0.55
+_STRONG_BODY_FLOOR = 0.45
+# 2-char CJK body windows present in >= this many rows of the same table are
+# generic chatter and dropped; rare ones (减肥) stay as anchors.
+_BODY_DF_MAX = 3
+# CJK function chars: a 2-char body window containing any of these is a
+# generic fragment (你说/可以/现在/我写), never a real anchor. Content-word
+# windows (减肥/马自/卡罗) contain none of them. DF can't catch these in
+# small tables (a generic bigram may appear in only 1-2 rows), so this is
+# the deterministic layer; DF handles table-specific repeats.
+_CJK_FUNC_CHARS = frozenset(
+    "的了是在我你他她它这那就都不很还又再也么呢吧吗啊哦嗯呀"
+    "什怎为之其与及或被把给跟和对可以有没要会能而但然因所于"
+)
+# Generic content bigrams the char filter can't catch (both chars are
+# content chars). Probed 2026-06-12: only a handful actually anchor in the
+# live tables; extend one word per line as leaks surface.
+_CJK_STOP_BIGRAMS = frozenset((
+    "如果", "时候", "问题", "觉得", "感觉", "东西", "事情", "开始",
+    "已经", "今天", "明天", "昨天", "现在", "什么", "怎么", "这样",
+    "那样", "一下", "一个", "有点", "比较", "真的", "直接", "或者",
+    "就是", "可能", "应该", "需要", "知道", "出现", "发现", "继续",
+))
 
 
 def _expand_needles(text: str, cjk_min: int = 2, cjk_max: int = 4,
@@ -775,6 +804,11 @@ def _expand_needles(text: str, cjk_min: int = 2, cjk_max: int = 4,
             continue
         if tok.isascii() and len(tok) >= ascii_min:
             out.add(tok)
+        elif not tok.isascii():
+            # mixed CJK/ascii token ((马自达suv)): pull ascii runs too
+            for arun in _ASCII_RUN_RE.findall(tok):
+                if len(arun) >= ascii_min:
+                    out.add(arun)
         for run in _CJK_RUN_RE.findall(tok):
             n_max = min(cjk_max, len(run))
             for n in range(cjk_min, n_max + 1):
@@ -799,18 +833,48 @@ def _needles_match(needles: set[str], query_lower: str) -> bool:
     return False
 
 
-def _entity_strong_hits(conn: sqlite3.Connection, query_lower: str) -> list[sqlite3.Row]:
-    """Scan all live entities; return ones whose needles match the query.
+def _body_needles(bodies: list[str]) -> list[set[str]]:
+    """Per-row body needles with table-level DF filtering on 2-char CJK.
 
-    Tiered needle sources: name/aliases keep 2-char CJK windows (the whole
-    point — short CN names below the trigram floor); fact body uses ≥3-char
-    windows only, so generic bigrams (你说/现在) can't anchor the row.
+    Frequency replaces length as the noise filter: a 2-char window appearing
+    in >= _BODY_DF_MAX rows is generic chatter and dropped, while rare ones
+    (减肥 in one meme) survive as real anchors. ASCII needles are never DF'd —
+    legit short tags repeat across rows (ED in 2 memes) and they already have
+    letter-boundary protection.
+    """
+    per_row = [_expand_needles(b) for b in bodies]
+    df: dict[str, int] = {}
+    for s in per_row:
+        for n in s:
+            if len(n) == 2 and not n.isascii():
+                df[n] = df.get(n, 0) + 1
+
+    def _keep(n: str) -> bool:
+        if n.isascii() or len(n) != 2:
+            return True
+        if n in _CJK_STOP_BIGRAMS:
+            return False
+        if any(ch in _CJK_FUNC_CHARS for ch in n):
+            return False
+        return df.get(n, 0) < _BODY_DF_MAX
+
+    return [{n for n in s if _keep(n)} for s in per_row]
+
+
+def _entity_strong_hits(
+    conn: sqlite3.Connection, query_lower: str
+) -> list[tuple[sqlite3.Row, str]]:
+    """Scan all live entities; return (row, tier) for needle matches.
+
+    Tier (name): name/aliases needles — full 2-4 CJK windows, the feature's
+    point (short CN names below the trigram floor). Tier (body): fact needles,
+    DF-filtered via _body_needles.
     """
     rows = conn.execute(
         "SELECT id, kind, name, fact, aliases, mention_count, created_at "
         "FROM entities WHERE superseded_by IS NULL"
     ).fetchall()
-    hits: list[sqlite3.Row] = []
+    name_sets: list[set[str]] = []
     for r in rows:
         name_parts = [r["name"] or ""]
         aliases_raw = r["aliases"]
@@ -821,39 +885,49 @@ def _entity_strong_hits(conn: sqlite3.Connection, query_lower: str) -> list[sqli
                     name_parts.extend(str(a) for a in al if a)
             except Exception:
                 pass
-        needles = _expand_needles(" ".join(name_parts))
-        needles |= _expand_needles(r["fact"] or "", cjk_min=3)
-        if _needles_match(needles, query_lower):
-            hits.append(r)
+        name_sets.append(_expand_needles(" ".join(name_parts)))
+    body_sets = _body_needles([r["fact"] or "" for r in rows])
+    hits: list[tuple[sqlite3.Row, str]] = []
+    for r, ns, bs in zip(rows, name_sets, body_sets):
+        if _needles_match(ns, query_lower):
+            hits.append((r, "name"))
+        elif _needles_match(bs, query_lower):
+            hits.append((r, "body"))
     return hits
 
 
-def _memes_strong_hits(conn: sqlite3.Connection, query_lower: str) -> list[sqlite3.Row]:
-    """Scan active memes; key keeps 2-char windows, value body needs ≥3."""
+def _memes_strong_hits(
+    conn: sqlite3.Connection, query_lower: str
+) -> list[tuple[sqlite3.Row, str]]:
+    """Scan active memes; key = name tier, value = DF-filtered body tier."""
     rows = conn.execute(
         "SELECT id, type, key, value, context, pinned, use_count "
         "FROM memes WHERE status='active'"
     ).fetchall()
-    hits: list[sqlite3.Row] = []
-    for r in rows:
-        needles = _expand_needles(r["key"] or "")
-        needles |= _expand_needles(r["value"] or "", cjk_min=3)
-        if _needles_match(needles, query_lower):
-            hits.append(r)
+    body_sets = _body_needles([r["value"] or "" for r in rows])
+    hits: list[tuple[sqlite3.Row, str]] = []
+    for r, bs in zip(rows, body_sets):
+        if _needles_match(_expand_needles(r["key"] or ""), query_lower):
+            hits.append((r, "name"))
+        elif _needles_match(bs, query_lower):
+            hits.append((r, "body"))
     return hits
 
 
-def _milestone_strong_hits(conn: sqlite3.Connection, query_lower: str) -> list[sqlite3.Row]:
-    """Scan all milestones; title keeps 2-char windows, description needs ≥3."""
+def _milestone_strong_hits(
+    conn: sqlite3.Connection, query_lower: str
+) -> list[tuple[sqlite3.Row, str]]:
+    """Scan all milestones; title = name tier, description = body tier."""
     rows = conn.execute(
         "SELECT id, scope, date, title, description, pinned FROM milestones"
     ).fetchall()
-    hits: list[sqlite3.Row] = []
-    for r in rows:
-        needles = _expand_needles(r["title"] or "")
-        needles |= _expand_needles(r["description"] or "", cjk_min=3)
-        if _needles_match(needles, query_lower):
-            hits.append(r)
+    body_sets = _body_needles([r["description"] or "" for r in rows])
+    hits: list[tuple[sqlite3.Row, str]] = []
+    for r, bs in zip(rows, body_sets):
+        if _needles_match(_expand_needles(r["title"] or ""), query_lower):
+            hits.append((r, "name"))
+        elif _needles_match(bs, query_lower):
+            hits.append((r, "body"))
     return hits
 
 
@@ -1193,13 +1267,13 @@ def recall_fusion(
                 "use_count": int(r["use_count"] or 0),
             }
 
-    # Strong-hit merge: substring-scan all active memes; mark strong=True for
-    # rows whose body needles substring-match the query. Bypasses vec floor.
+    # Strong-hit merge: substring-scan all active memes; mark strong tier
+    # ((name)/(body)) for needle matches. Bypasses vec floor.
     q_lower = q.lower()
-    for r in _memes_strong_hits(conn, q_lower):
+    for r, tier in _memes_strong_hits(conn, q_lower):
         mid = r["id"]
         if mid in memes_by_id:
-            memes_by_id[mid]["strong"] = True
+            memes_by_id[mid]["strong"] = tier
             continue
         key = r["key"] or ""
         value = r["value"] or ""
@@ -1216,7 +1290,7 @@ def recall_fusion(
             "pinned": int(r["pinned"] or 0),
             "type": r["type"],
             "use_count": int(r["use_count"] or 0),
-            "strong": True,
+            "strong": tier,
         }
     memes_cands = list(memes_by_id.values())
 
@@ -1247,12 +1321,12 @@ def recall_fusion(
                 "pinned": int(r["pinned"] or 0),
                 "scope": r["scope"],
             }
-    # Strong-hit merge: substring-scan all milestones; mark strong=True for
-    # rows whose body needles substring-match the query. Bypasses vec floor.
-    for r in _milestone_strong_hits(conn, q_lower):
+    # Strong-hit merge: substring-scan all milestones; mark strong tier
+    # ((name)/(body)) for needle matches. Bypasses vec floor.
+    for r, tier in _milestone_strong_hits(conn, q_lower):
         mid = r["id"]
         if mid in ms_by_id:
-            ms_by_id[mid]["strong"] = True
+            ms_by_id[mid]["strong"] = tier
             continue
         title = r["title"] or ""
         desc = r["description"] or ""
@@ -1267,7 +1341,7 @@ def recall_fusion(
             "bm25": 0.0, "vec": 0.0, "fts_hit": False,
             "pinned": int(r["pinned"] or 0),
             "scope": r["scope"],
-            "strong": True,
+            "strong": tier,
         }
     milestone_cands = list(ms_by_id.values())
 
@@ -1359,12 +1433,12 @@ def recall_fusion(
                 "mention_count": int(card["mention_count"] or 0),
                 "entity_kind": ekind,
             }
-    # Strong-hit merge: substring-scan all live entities; mark strong=True for
-    # rows whose body needles substring-match the query. Bypasses vec floor.
-    for r in _entity_strong_hits(conn, q_lower):
+    # Strong-hit merge: substring-scan all live entities; mark strong tier
+    # ((name)/(body)) for needle matches. Bypasses vec floor.
+    for r, tier in _entity_strong_hits(conn, q_lower):
         eid = r["id"]
         if eid in ent_by_id:
-            ent_by_id[eid]["strong"] = True
+            ent_by_id[eid]["strong"] = tier
             continue
         fact = r["fact"] or ""
         if not fact.strip():
@@ -1381,7 +1455,7 @@ def recall_fusion(
             "bm25": 0.0, "vec": 0.0, "fts_hit": False,
             "mention_count": int(r["mention_count"] or 0),
             "entity_kind": ekind,
-            "strong": True,
+            "strong": tier,
         }
     entity_cands = list(ent_by_id.values())
 
@@ -1485,7 +1559,8 @@ def recall_fusion(
         raw = w_bm25 * mc["bm25"] + w_milestones_vec * vec_val
         raw += _ANCHOR_BIAS  # see _ANCHOR_BIAS
         if strong:
-            raw = max(raw, min_score)
+            raw = max(raw, _STRONG_NAME_FLOOR if strong == "name"
+                      else _STRONG_BODY_FLOOR)
         scored.append((raw, {**mc, "score": raw}))
 
     # ── memes scoring (mirror milestone) ─────────────────────────────────────
@@ -1497,7 +1572,8 @@ def recall_fusion(
         raw = w_bm25 * vc["bm25"] + w_memes_vec * vec_val
         raw += _ANCHOR_BIAS  # see _ANCHOR_BIAS
         if strong:
-            raw = max(raw, min_score)
+            raw = max(raw, _STRONG_NAME_FLOOR if strong == "name"
+                      else _STRONG_BODY_FLOOR)
         scored.append((raw, {**vc, "score": raw}))
 
     # ── diary scoring (vec only — evergreen long-form prose) ─────────────────
@@ -1527,7 +1603,8 @@ def recall_fusion(
         )
         raw += _ANCHOR_BIAS  # see _ANCHOR_BIAS
         if strong:
-            raw = max(raw, min_score)
+            raw = max(raw, _STRONG_NAME_FLOOR if strong == "name"
+                      else _STRONG_BODY_FLOOR)
         scored.append((raw, {**ec, "score": raw}))
 
     # ── unified min_score gate ──────────────────────────────────────────────
