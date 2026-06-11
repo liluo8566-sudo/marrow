@@ -49,7 +49,8 @@
 
 ## Batch 3 — Timeline + digest reshape (test first, then A, then B)
 
-> Root principle (Lumi 06/11): every session must inherit memory, inherit emotion, perceive her current emotion. Life details ((拿铁拉花是一片叶子，散步看到小雏菊)) are first-class memory; study/code details are noise. Pipeline skeleton unchanged: events (code) + sonnet (task+affect) + haiku (digest) + 07:00 daily (diary+dims). No new calls, no new segments on sonnet.
+> Root principle (Lumi 06/11): every session must inherit memory, inherit emotion, perceive her current emotion. Life details ((拿铁拉花是一片叶子，散步看到小雏菊)) are first-class memory; study/code details are noise.
+> Pipeline SUPERSEDED (Lumi 06/11 evening): sessionend merges to ONE sonnet call — TASKS/AFFECT/KIND/TL/LIFE/VOICE/FACTS in one output, one transcript read (input tokens halved, outputs same-source). The earlier "no new segments on sonnet" rule is replaced by this merge; attention risk goes to gate v3 (3 old sessions, blind, Lumi judges; fail → revert to two calls).
 
 ### 0. Prerequisite test — mini-gate v2 (before A)
 - First gate run 06/11 ((docs/notes/0611-tl-gate-blind.md + key)): both models failed once each (haiku CN fluency on small session; sonnet zero-information jargon line on large session) → verdict: prompt was the problem, not the model. TL stays in the haiku DIGEST call.
@@ -66,6 +67,7 @@
   - `VOICE:` — casual only, verbatim fragments, current rules unchanged.
   - `FACTS:` — task only, `<subject> <did> <outcome>` lines, max 5; task-session total (TL + FACTS) hard cap 120 words — gate v2 showed sonnet writes essays when the original 150-word cap is omitted (the cap was the working part of the old prompt; keep it).
 - No tone/emotion labels anywhere in digest (Lumi 06/11): affect episodes already carry tone. daily.py instead injects the day's affect rows (with eph/epl marks) into the diary call input — deterministic code-side pass-through, no model re-extraction.
+- AFFECT segment (merged call, Lumi 06/11 evening): V/A + label + eph/epl unchanged in substance, plus per-episode `open` flag for unresolved emotion (quarrel un-coaxed, anxiety pending, awaiting result). Episode wording: her perspective, near-verbatim, plain words (Lumi dissatisfied with current sonnet episode summaries — gate v3 judges this too).
 - Model: DIGEST call moves haiku → sonnet (gate v2 verdict 06/11: haiku failed the study session — EN-jargon TL, missed LIFE, thin VOICE; study/chat quality is the core goal, task layer matters least). FACTS cap above guards sonnet's verbosity.
 - ANTI-CONFABULATION (Lumi decision 06/11, firm): task sessions keep the existing "drop ALL details" rule — NO LIFE extraction. >95% of task sessions contain no life details; forcing extraction makes the model dress code details up as life. Accepted loss: a latte mentioned mid-coding is dropped. Do not soften this with "N/A if none" prompt tricks.
 - Parse: new columns session_digests.kind, .tl_line, .life_lines (newline-joined, FTS-searchable); VOICE/FACTS stay in body. Parse fail → columns NULL + alert, body kept raw.
@@ -75,15 +77,20 @@
 - 07:00 daily keeps timing, role (the system's only prose layer: weaves the day's LIFE/VOICE/FACTS lines into narrative), dims cand. Input-format note in prompt only.
 - Adds diary.tl_line (25-40 chars day summary) as planned.
 
-### 4A-3. SessionStart `## Timeline` block (pure-code render)
-- Layers (Lumi 06/11 — multi-session days make "last session" near-meaningless; LIFE pool beats single-session detail):
-  - 0-24h: **LIFE lines only**, pooled across all casual sessions in the window — budget 500 chars. No TL lines in this layer. Each line prefixed with its session's `HH:MM` (Melbourne-local), rendered oldest→newest (a day's film strip); over budget → drop oldest lines first.
-  - 24-72h: per-session `HH:MM TL` lines (Melbourne-local) — budget ~400.
-  - 4-7d: diary.tl_line per day — budget ~200.
-  - >7d: nothing (recall covers).
+### 4A-3. `## Timeline` block — merged affect+events view, FINAL format (Lumi 06/11 evening; supersedes layer spec above)
+- Replaces BOTH the old timeline layers and the SessionStart `## Affect` block — one merged view, render-layer JOIN only (affect + session_digests + diary tables unchanged). One render fn, two outlets: SessionStart hook + dashboard block.
+- Top: `> 未解:` line(s) — episodes flagged open, until closed by a later AFFECT segment / Lumi deletes on dashboard / 7d expiry.
+- Last 24h: flat film-strip, newest→oldest, `HH:MM` lines (LIFE lines from casual + TL line per task session), session's first line carries its 【tone】; day crossings get a `--- MM-DD ---` divider; cap 15 lines, over → drop farthest.
+- 24-72h: per-day `**MM-DD Day 【tone】**` header + up to 3 period lines `AM`(6-12) `PM`(12-18) `ND`(18-next 06); ND 0-6 belongs to the PREVIOUS day. Period line = all sessions' TLs in that period (any kind) joined by time order, truncated; empty period hidden. Cap ~12 lines incl. headers.
+- Day 4-7: `Week 【tone ↗/↘/→】` trend line (this-week vs last-week V/A mean, code-side) + one line per day `MM-DD Day 【tone】 diary.tl_line`.
+- Tone labels: V/A mean per scope (session / period-day / day / week) via existing split-tone mapping. NO episodes in the injection (Lumi field test: episodes in SessionStart get ignored; recall is their outlet — affect recall lane parked in §5).
 - No line for the in-progress session.
-- Trim order when over budget: oldest day lines → task-session TL lines (kind column) → oldest casual TL lines → LIFE pool halved.
-- Budget math: timeline ~1100 + current SessionStart payload (tasks+alerts+affect, ~1500-2500) ≈ 2600-3600 — inside SESSION_START_HARD_CAP 6000, far from hook stdout cap ~10000. UserPromptSubmit recall (800) is a separate hook invocation, separate cap. HANDOVER is @import, not hook-bound.
+- Trim order: day lines → period lines (farthest day first) → Last-24h farthest lines.
+- Budget math: timeline ~1100 absorbs the retired Affect block (~300) — SessionStart total well inside HARD_CAP 6000.
+
+### 4A-4. Dashboard timeline block + edit-back (pulled forward from §4C)
+- Same render fn as injection. Editable: tl text via line anchors `<!-- tl:sid -->` / `<!-- tl:d:YYYY-MM-DD -->` → reconcile writes back session_digests.tl_line / diary.tl_line. Tone/label segments display-only. Deleted line = no-op (next render restores; timeline is a window view, no resolve semantics).
+- Fix existing affect gap (Lumi 06/11): reconcile diffs `<!-- aff:ids -->` id-set; id removed from anchor + its segment deleted → mark that affect row superseded (no physical delete). Currently text edits work but single-episode deletion is impossible.
 
 ### 4B. Recall time-lane — DONE 06-11 (timecue.py + window params; coarse path reads session_digests.text until Batch 3 lands tl_line)
 - Passive: time-cue regex ((昨天/今早/昨晚/前天/上周X/周X/N天前/X月X号)... enumerate + unit tests at impl) → Melbourne-local range → UTC → SQL window.

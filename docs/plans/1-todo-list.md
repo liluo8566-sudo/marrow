@@ -7,6 +7,10 @@
 ## Monitor
 - wx sessionend: bridge owns timing (P1 bridge_owns), alt-end paths skip OK (7ba1b5f). True 6h-idle timeout NOT implemented — keep watching if bridge close is enough.
 
+## daily_cand quality bug (Lumi 06/11 — handle later, with alert batch)
+- Symptom: cand output efficiency ≈ 0; "mentioned 3×/week before recording" rule NOT enforced in current pipeline.
+- Partial diagnosis (06/11 agent, died mid-verdict): daily_cand LLM calls DO run daily (audit_log; in=2 is cache accounting); raw LLM output is NOT logged anywhere → cannot autopsy past runs. Next: add raw-output capture first, then judge parser vs prompt.
+
 ## Affect recall redesign (brainstorm 2026-05-31)
 补录两个问题
 1. pending unresolved 要强浮现优先处理（不管 prompt 是什么，先 affect 后 task）
