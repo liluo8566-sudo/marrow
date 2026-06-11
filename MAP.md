@@ -98,7 +98,7 @@
 
 ### sessionend-extraction
 - Detached `sessionend_async` (spawned after lifecycle:end commits). Two sequential LLM calls on the archived transcript:
-  - **TASK_AFFECT** call (sonnet mid) → writers: `task_cand` · `affect`
+  - **TASK_AFFECT** call (sonnet mid) → writers: `task_cand` · `affect` (affect resolves `event_hint` via FTS phrase → LIKE fallback against same-session events; sets `event_id`; logs `event_link` to audit_log · marrow/sessionend_writers.py:56)
   - **DIGEST** call (haiku low) → writer: `digest`
 - Both calls open with the byte-identical `_TRANSCRIPT_BLOCK` fence → DIGEST's prompt-cache read hits TASK_AFFECT's prefix. Serial in one process, no async runtime.
 - **Failure isolation**: TASK_AFFECT failure does not block DIGEST. `partial:<failed_writers>` logged when 1–2 writers fail; `fail:task_affect=...,digest=...` only when both calls fail.
@@ -135,9 +135,9 @@
 
 ### 4.1 Schema + table catalog
 
-Schema version: 13. Migrations: idempotent numbered functions (_migrate_to_v2…v13) run in sequence on every init_db call, guarded by PRAGMA user_version; column ALTERs swallow duplicate-column errors silently.
+Schema version: 16. Migrations: idempotent numbered functions (_migrate_to_v2…v16) run in sequence on every init_db call, guarded by PRAGMA user_version; column ALTERs swallow duplicate-column errors silently.
 
-- events: per-turn transcript rows (role/content/session_id/channel) · primary recall surface · no aging · marrow/storage.py:21
+- events: per-turn transcript rows (role/content/session_id/channel) · primary recall surface · no aging · `recall_count INTEGER NOT NULL DEFAULT 0` + `last_recalled_at TEXT` added v16 (bumped on recall hits; `recall_count > 0` exempts from vec eviction) · marrow/storage.py:21
 - tasks: active work items (study + project) · status = active/done/archived · active with 0 mentions in 30d → archived · marrow/storage.py:32
 - milestones: identity/life anchors (scope/date/title) · pinned=1 exempts from aging · no expiry · marrow/storage.py:45
 - memes: concept glossary / lore entries · status = active/dormant · pinned=0 AND last_seen > 90d → DELETE (no dormant intermediate step) · marrow/storage.py:57
@@ -147,7 +147,7 @@ Schema version: 13. Migrations: idempotent numbered functions (_migrate_to_v2…
 - goose_bites: per-session distilled goose (铁锅) quotes · best=1 flags top picks · no aging · marrow/storage.py:97
 - alerts: cross-system signal rows · severity = info/warn/critical · resolved by manual flag or aging · marrow/storage.py:106
 - audit_log: action history (target_table/target_id/action/summary) · no aging · marrow/storage.py:116
-- affect: per-episode emotion (V/A/importance/label) · superseded_by=NULL = live; affect_live view filters · marrow/storage.py:124
+- affect: per-episode emotion (V/A/importance/label) · superseded_by=NULL = live; affect_live view filters · event_id INTEGER REFERENCES events(id) via _match_event_hint (FTS→LIKE; NULL if ambiguous) · marrow/storage.py:124
 - entities: named people/places/concepts with fact + aliases · kinds = person/preference/place/event/concept · superseded_by=NULL = live · marrow/storage.py:140
 - session_digests: one DIGEST text per sessionend run · keyed by session id · no aging · marrow/storage.py:382
 - md_index: per-block content hash per subpage file (path, block_id) · tombstone_at non-null = user deleted · marrow/storage.py:525
@@ -318,7 +318,7 @@ Both 2 and 3 call `write_dashboard` which runs reconcile (idempotent) then atomi
 - com.marrow.daily-routine: daily 07:00 · full candidate extraction + diary write for yesterday · deploy/mw-daily-routine.plist
 - com.marrow.daily-catchup: daily 19:00 · backfill last 7d event-days with no diary, cap 3/run · deploy/mw-daily-catchup.plist
 - com.marrow.db-backup: daily 03:00 · VACUUM INTO local + iCloud offsite, keep newest 14 · deploy/mw-db-backup.plist
-- com.marrow.aging: weekly Sun 12:00 · five-pass cleanup (memes/tasks/milestone alerts/goose blocks/md_index tombstones) · deploy/mw-aging.plist
+- com.marrow.aging: weekly Sun 12:00 · seven-pass cleanup (memes/tasks/milestone alerts/goose blocks/md_index tombstones/worktree shells/vec window eviction) · deploy/mw-aging.plist
 Total: 7 plists; watcher is the only persistent process, the other 6 are scheduled jobs. MCP daemon has no plist — CC launches it on-demand via .mcp.json. (CC's own jsonl-cleanup lives in ~/.claude/settings.json, separate from marrow.)
 
 ---
@@ -346,6 +346,9 @@ Total: 7 plists; watcher is the only persistent process, the other 6 are schedul
 - embed lane · warn · embed_pending raised (alert #169 site) · sessionend_async.py:496
 - unanchored task · warn · task line in md with no DB id · reconcile.py:794
 - drift sweep · info/warn/critical · move/rename apply paths (dynamic via _emit_alert) · drift_sweep.py:452
+- vec evict backup stale · warn · backup missing or >7d old, vec eviction skipped · aging.py `vec_evict_backup_stale`
+- vec evict cap pct · critical · would evict >25% of vec rows, pass aborted · aging.py `vec_evict_cap_pct`
+- vec evict cap abs · critical · would evict >10000 rows, pass aborted · aging.py `vec_evict_cap_abs`
 
 ### 8.2 Known gaps
 
@@ -377,7 +380,7 @@ Total: 7 plists; watcher is the only persistent process, the other 6 are schedul
 
 ## 10. Cleanup / aging
 
-All five passes run inside `com.marrow.aging` weekly Sun 12:00.
+All seven passes run inside `com.marrow.aging` weekly Sun 12:00.
 
 **Tables that age**:
 - **memes**: `pinned=0 AND last_seen < 90d` → **DELETE**. NULL last_seen or pinned=1 (paw / fact auto-pinned, plus any hand-pinned) never touched. · marrow/aging.py:48
@@ -385,6 +388,9 @@ All five passes run inside `com.marrow.aging` weekly Sun 12:00.
 - **milestone alerts** (type=milestone_added only): `resolved=0 AND age > 7d` → `resolved=1` (treated as auto-confirmed if Lumi didn't reject). · marrow/aging.py:99
 - **goose_log md blocks**: `### YYYY-MM-DD` blocks older than 7d deleted from the monthly md; empty monthly files removed. · marrow/aging.py:116
 - **md_index tombstones**: `tombstone_at IS NOT NULL AND age > 30d` → **DELETE**. · marrow/aging.py:162
+- **projects worktree shells**: `~/.claude/projects/<slug>/` dirs whose name contains "worktrees" → `shutil.rmtree`. cc's native 30d jsonl cleanup leaves the shells; purged unconditionally. · marrow/aging.py:190
+- **events_vec / events_vec_meta (vec window)**: rows whose `events.timestamp < now - vec_window_days` → **DELETE**, exempt if `recall_count > 0` OR `affect.importance >= 3` link exists. Config key `[recall] vec_window_days = 90` (0 = disabled). Safety caps abort: >25% of vec rows (inert below 100 rows) or >10000 rows. Backup gate: skip if newest `marrow-YYYY-MM-DD.db` is missing or >7d old → `warn` alert fingerprint `vec_evict_backup_stale`. Cap abort → `critical` alerts `vec_evict_cap_pct` / `vec_evict_cap_abs`. Alerts collected in `result["pending_alerts"]` and flushed by `main()` AFTER the txn closes to avoid db-lock conflict. · marrow/aging.py:243
+  - **Recovery**: evicted vec rows are recoverable — re-run `embed_pending()` re-embeds from intact `events` rows (events are never deleted by vec eviction; vectors are derived data).
 
 **Tables with NO automatic retirement**:
 - affect (rows stay indefinitely; `resolved_at` marks reconcile completion, not aging)
@@ -429,7 +435,7 @@ config.toml catalog:
 - [llm]: provider chain + per-provider sub-tables [llm.claude_cli] / [llm.ollama]
 - [tiers]: intent-to-model mapping (cheap/mid/top)
 - [embedding]: bge-m3 model id, dim=1024, provenance tag
-- [recall]: vector flag, fusion weights (w_vec/w_bm25/w_recency/w_affect + per-lane), min_score, rank_caps, rel_cutoff, budget_chars
+- [recall]: vector flag, fusion weights (w_vec/w_bm25/w_recency/w_affect + per-lane), min_score, rank_caps, rel_cutoff, budget_chars, vec_window_days (default 90; 0 = disabled)
 - [sessionend]: skip_turn_threshold
 - [memes_dedup] / [tasks_dedup] / [milestones_dedup] / [entities_dedup]: cosine_threshold + fast_skip_count per table
 - [subpages]: top/bottom/hidden render order lists
