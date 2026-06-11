@@ -186,6 +186,16 @@ def cmd_get_session_model(args) -> int:
     return 0
 
 
+def cmd_get_session_cwd(args) -> int:
+    """Print the persisted cwd for sid (empty when absent)."""
+    sid = (args.sid or "").strip()
+    if not sid:
+        return _fail("--sid required")
+    row = repo.get_session(sid, db=args.db)
+    print((row or {}).get("cwd") or "")
+    return 0
+
+
 def _split_csv(value: str | None) -> list[str]:
     if not value:
         return []
@@ -596,6 +606,11 @@ def build_parser() -> argparse.ArgumentParser:
                          help="print the persisted model for sid (or empty)")
     gsm.add_argument("--sid", required=True)
     gsm.set_defaults(fn=cmd_get_session_model)
+
+    gsc = sub.add_parser("get-session-cwd", parents=[common],
+                         help="print the persisted cwd for sid (or empty)")
+    gsc.add_argument("--sid", required=True)
+    gsc.set_defaults(fn=cmd_get_session_cwd)
 
     # B6 recent sessions — /resume picker.
     lrs = sub.add_parser("list-recent-sessions", parents=[common],

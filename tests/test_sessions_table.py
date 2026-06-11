@@ -107,6 +107,39 @@ def test_cli_list_recent_sessions_tab_separated(db, capsys) -> None:
                for line in out)
 
 
+def test_cli_get_session_cwd_prints_value(db, capsys) -> None:
+    repo.upsert_session("sid-cwd", "m", "wx", db=db)
+    # Directly write cwd via raw SQL (upsert_session doesn't expose cwd param in tests)
+    import sqlite3 as _sq
+    conn = _sq.connect(db)
+    try:
+        with conn:
+            conn.execute(
+                "UPDATE sessions SET cwd = ? WHERE sid = ?",
+                ("/Users/Gabrielle/Desktop/NY", "sid-cwd"),
+            )
+    finally:
+        conn.close()
+    rc = cli.main(["get-session-cwd", "--db", db, "--sid", "sid-cwd"])
+    assert rc == 0
+    out = capsys.readouterr().out.strip()
+    assert out == "/Users/Gabrielle/Desktop/NY"
+
+
+def test_cli_get_session_cwd_missing_prints_empty(db, capsys) -> None:
+    rc = cli.main(["get-session-cwd", "--db", db, "--sid", "no-such-sid"])
+    assert rc == 0
+    assert capsys.readouterr().out.strip() == ""
+
+
+def test_cli_get_session_cwd_no_cwd_field_prints_empty(db, capsys) -> None:
+    # Session exists but cwd column is NULL
+    repo.upsert_session("sid-nocwd", "m", "wx", db=db)
+    rc = cli.main(["get-session-cwd", "--db", db, "--sid", "sid-nocwd"])
+    assert rc == 0
+    assert capsys.readouterr().out.strip() == ""
+
+
 def test_sessions_schema_columns_present(db) -> None:
     conn = sqlite3.connect(db)
     try:
