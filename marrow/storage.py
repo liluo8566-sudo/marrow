@@ -13,7 +13,7 @@ import sqlite_vec
 
 from . import config
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 # Phase 1 first-class tables + Phase 2 affect/entities (DECISIONS Phase 2).
 # The retired emotions/people/preferences/dir placeholders stay absent.
@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS diary (
   content TEXT NOT NULL,
   mood TEXT,
   session_ids TEXT,
+  tl_line TEXT,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
@@ -292,6 +293,7 @@ CREATE TRIGGER IF NOT EXISTS entities_au AFTER UPDATE ON entities BEGIN
     TRIM(COALESCE(new.name,'') || ' ' || COALESCE(new.fact,'') || ' ' || COALESCE(new.aliases,''))
   );
 END;
+
 """
 
 
@@ -493,6 +495,7 @@ def init_db(path: str | None = None) -> sqlite3.Connection:
         _migrate_to_v14(conn)
         _migrate_to_v15(conn)
         _migrate_to_v16(conn)
+        _migrate_to_v17(conn)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     return conn
 
@@ -803,6 +806,63 @@ def _migrate_to_v16(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_events_recall_count"
         " ON events(recall_count) WHERE recall_count > 0"
     )
+
+
+def _migrate_to_v17(conn: sqlite3.Connection) -> None:
+    """v17: session_digests structured columns (kind/tl_line/life_lines) +
+    diary.tl_line + session_digests_fts FTS table.
+
+    kind: 'casual' or 'task' — model's explicit session classification.
+    tl_line: 15-30 CN char timeline line (life perspective, plain words).
+    life_lines: newline-joined life detail lines (casual only; NULL for task).
+    diary.tl_line: 25-40 char day summary written by daily.py diary call.
+    Idempotent — duplicate ALTER swallowed; user_version short-circuits.
+    """
+    v = conn.execute("PRAGMA user_version").fetchone()[0]
+    if v >= 17:
+        return
+    for tbl, col, decl in (
+        ("session_digests", "kind", "TEXT"),
+        ("session_digests", "tl_line", "TEXT"),
+        ("session_digests", "life_lines", "TEXT"),
+        ("diary", "tl_line", "TEXT"),
+    ):
+        try:
+            conn.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {decl}")
+        except sqlite3.OperationalError:
+            pass
+    # FTS5 over session_digests tl_line + life_lines. session_digests is
+    # created in v2; safe to add FTS here since v17 runs after v2.
+    # Standalone (no content=); triggers keep in sync.
+    conn.executescript("""
+CREATE VIRTUAL TABLE IF NOT EXISTS session_digests_fts USING fts5(
+  body, tokenize='trigram'
+);
+CREATE TRIGGER IF NOT EXISTS session_digests_ai AFTER INSERT ON session_digests BEGIN
+  INSERT INTO session_digests_fts(rowid, body) VALUES (new.rowid,
+    TRIM(COALESCE(new.tl_line,'') || ' ' || COALESCE(new.life_lines,''))
+  );
+END;
+CREATE TRIGGER IF NOT EXISTS session_digests_ad AFTER DELETE ON session_digests BEGIN
+  DELETE FROM session_digests_fts WHERE rowid = old.rowid;
+END;
+CREATE TRIGGER IF NOT EXISTS session_digests_au AFTER UPDATE ON session_digests BEGIN
+  DELETE FROM session_digests_fts WHERE rowid = old.rowid;
+  INSERT INTO session_digests_fts(rowid, body) VALUES (new.rowid,
+    TRIM(COALESCE(new.tl_line,'') || ' ' || COALESCE(new.life_lines,''))
+  );
+END;
+    """)
+    # Backfill FTS for existing rows that have tl_line/life_lines populated.
+    fts_n = conn.execute(
+        "SELECT count(*) FROM session_digests_fts").fetchone()[0]
+    if fts_n == 0:
+        conn.execute(
+            "INSERT INTO session_digests_fts(rowid, body) "
+            "SELECT rowid, TRIM(COALESCE(tl_line,'') || ' ' || COALESCE(life_lines,'')) "
+            "FROM session_digests "
+            "WHERE tl_line IS NOT NULL OR life_lines IS NOT NULL"
+        )
 
 
 def _migrate_to_v14(conn: sqlite3.Connection) -> None:
