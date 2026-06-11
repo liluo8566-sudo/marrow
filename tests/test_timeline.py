@@ -351,3 +351,125 @@ def test_empty_db_renders_none(conn):
     result = timeline.render_timeline(conn)
     assert "## Timeline" in result
     assert "_none_" in result
+
+
+# ── per-line LIFE HH:MM timestamps ───────────────────────────────────────────
+
+def test_life_lines_use_own_hhmm(conn):
+    """LIFE lines with HH:MM prefix render at their own time, not session start."""
+    # Session ts at 08:00 local Melbourne today
+    from zoneinfo import ZoneInfo
+    melb = ZoneInfo("Australia/Melbourne")
+    now_melb = _dt.datetime.now(melb)
+    # Anchor: session started at 08:00 local
+    sess_local = now_melb.replace(hour=8, minute=0, second=0, microsecond=0)
+    if sess_local > now_melb:
+        sess_local -= _dt.timedelta(days=1)
+    ts = sess_local.astimezone(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # LIFE lines carry their own timestamps: 09:15 and 20:30
+    life = "09:15 早餐吃了粥\n20:30 晚上散步了"
+    _digest(conn, "s-perline", ts, kind="casual", tl="聊天了", life=life)
+    result = timeline.render_timeline(conn)
+
+    # Both per-line times must appear, not just 08:00
+    assert "09:15" in result
+    assert "20:30" in result
+    # Content must also appear
+    assert "早餐吃了粥" in result
+    assert "晚上散步了" in result
+
+
+def test_life_lines_no_prefix_fallback_to_session_time(conn):
+    """LIFE lines without HH:MM prefix fall back to session start time."""
+    from zoneinfo import ZoneInfo
+    melb = ZoneInfo("Australia/Melbourne")
+    now_melb = _dt.datetime.now(melb)
+    sess_local = now_melb.replace(hour=14, minute=30, second=0, microsecond=0)
+    if sess_local > now_melb:
+        sess_local -= _dt.timedelta(days=1)
+    ts = sess_local.astimezone(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    sess_hhmm = "14:30"
+
+    # Legacy LIFE line: no HH:MM prefix
+    life = "买了b5精华"
+    _digest(conn, "s-legacy", ts, kind="casual", tl="聊天了", life=life)
+    result = timeline.render_timeline(conn)
+
+    assert "买了b5精华" in result
+    assert sess_hhmm in result
+
+
+def test_life_lines_midnight_crossing_divider(conn):
+    """LIFE lines at 00:30 (before 6AM) cross into previous diary day — divider expected."""
+    from zoneinfo import ZoneInfo
+    melb = ZoneInfo("Australia/Melbourne")
+    now_melb = _dt.datetime.now(melb)
+
+    # Session started at 23:00 yesterday local
+    sess_local = now_melb.replace(hour=23, minute=0, second=0, microsecond=0)
+    if sess_local >= now_melb:
+        sess_local -= _dt.timedelta(days=1)
+    ts = sess_local.astimezone(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Check both timestamps are within 24h
+    now_utc = _dt.datetime.now(_dt.timezone.utc)
+    ts_dt = _dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    if (now_utc - ts_dt).total_seconds() > 24 * 3600:
+        import pytest as _pt
+        _pt.skip("session outside 24h window at this time of day")
+
+    # One LIFE line at 23:30 (same diary day) and one at 00:30 (prev diary day)
+    life = "23:30 看了个电影\n00:30 睡前喝了热水"
+    _digest(conn, "s-midnight", ts, kind="casual", tl="夜聊", life=life)
+    result = timeline.render_timeline(conn)
+
+    # At least one date divider must appear due to the 00:30 crossing
+    assert "---" in result
+
+
+def test_life_line_hhmm_helper_parses_prefix():
+    """Unit test for _life_line_hhmm — prefix present vs absent."""
+    hhmm, text = timeline._life_line_hhmm("21:40 买了b5精华", "08:00")
+    assert hhmm == "21:40"
+    assert text == "买了b5精华"
+
+    # No prefix — fallback to session time
+    hhmm2, text2 = timeline._life_line_hhmm("买了b5精华", "08:00")
+    assert hhmm2 == "08:00"
+    assert text2 == "买了b5精华"
+
+
+def test_life_line_local_date_helper_cutoff():
+    """00:30 local time → previous diary day; 07:00 → same day."""
+    from zoneinfo import ZoneInfo
+    melb = ZoneInfo("Australia/Melbourne")
+    base_date = _dt.date(2026, 6, 10)
+
+    # 00:30 → before 6AM cutoff → previous day
+    d_early = timeline._life_line_local_date("00:30 热水", base_date, "23:00")
+    assert d_early == _dt.date(2026, 6, 9)
+
+    # 07:00 → after cutoff → same day
+    d_day = timeline._life_line_local_date("07:00 早餐", base_date, "08:00")
+    assert d_day == _dt.date(2026, 6, 10)
+
+    # No prefix → inherits session date
+    d_legacy = timeline._life_line_local_date("早餐", base_date, "08:00")
+    assert d_legacy == base_date
+
+
+# ── prompt content checks ─────────────────────────────────────────────────────
+
+def test_prompt_facts_60w_cap():
+    """TASK_AFFECT_DIGEST_PROMPT must reference 60-word cap for TL+FACTS."""
+    from marrow.sessionend_prompts import TASK_AFFECT_DIGEST_PROMPT
+    assert "60 words" in TASK_AFFECT_DIGEST_PROMPT
+
+
+def test_prompt_life_hhmm_rule():
+    """Prompt must instruct model to prefix LIFE lines with HH:MM timestamp."""
+    from marrow.sessionend_prompts import TASK_AFFECT_DIGEST_PROMPT
+    assert "HH:MM" in TASK_AFFECT_DIGEST_PROMPT
+    # Example in ===DIGEST=== block should show a timestamped LIFE line
+    assert "21:40 买了b5精华" in TASK_AFFECT_DIGEST_PROMPT
