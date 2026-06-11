@@ -992,9 +992,60 @@ def user_prompt_submit() -> int:
     rcfg = cfg.get("recall", {})
     ctx_n = int(rcfg.get("event_context_window", 1))
     budget_chars = int(rcfg.get("budget_chars", 800))
+    timelane_budget = int(rcfg.get("timelane_budget", 400))
     _default_rank_caps = [300, 120, 120, 40, 40]
     rank_caps: list[int] = rcfg.get("rank_caps", _default_rank_caps) or _default_rank_caps
     rel_cutoff: float = float(rcfg.get("rel_cutoff", 0.6))
+
+    # ── time-lane: detect cue, run windowed recall first ─────────────────────
+    windowed_hits: list[dict] = []
+    cue = None
+    try:
+        from .timecue import parse_time_cue
+        cue = parse_time_cue(prompt_text)
+    except Exception:
+        cue = None
+
+    seen = _load_recall_seen(sid)
+
+    if cue is not None:
+        try:
+            from . import recall as recall_mod
+            conn = storage.connect(config.db_path())
+            try:
+                _stripped = cue.stripped.strip()
+                # Check if stripped text has substantive content
+                _has_content = bool(
+                    len([c for c in _stripped if "一" <= c <= "鿿"]) >= 2
+                    or any(len(w) >= 3 for w in _re.sub(r"[^\w\s]", " ", _stripped).split()
+                           if w.isascii())
+                )
+                if _has_content:
+                    windowed_hits = recall_mod.recall_with_config(
+                        conn, _stripped, current_cwd=cwd,
+                        since=cue.since_utc, until=cue.until_utc,
+                    )
+                else:
+                    # No substantive keyword — return digest rows for the window
+                    windowed_hits = recall_mod.fetch_window_digests(
+                        conn, cue.since_utc, cue.until_utc,
+                    )
+            finally:
+                conn.close()
+        except Exception:
+            windowed_hits = []
+
+    # Dedup windowed hits against already-seen
+    wlane: list[dict] = []
+    for h in windowed_hits:
+        hid = int(h.get("id") or 0)
+        kind = h.get("kind") or "event"
+        if hid and (kind, hid) in seen:
+            continue
+        wlane.append(h)
+    # windowed hits skip rel_cutoff — they are time-pinned, not semantic ranked
+
+    # ── semantic recall with original prompt text ─────────────────────────────
     try:
         from . import recall as recall_mod
         conn = storage.connect(config.db_path())
@@ -1003,32 +1054,37 @@ def user_prompt_submit() -> int:
         finally:
             conn.close()
     except Exception:
-        return 0  # fail-soft: never break the user turn
+        hits = []
 
-    if not hits:
+    if not hits and not wlane:
         return 0
 
-    # ── relative score cutoff ─────────────────────────────────────────────────
+    # ── relative score cutoff (semantic pool only) ────────────────────────────
     hits = _apply_rel_cutoff(hits, rel_cutoff)
-    if not hits:
-        return 0
 
-    # ── per-session dedup: drop hits already injected this session ────────────
-    # Only `seen` ids that survive the budget_chars cut — silently-truncated
-    # hits stay eligible so they can surface in a later turn instead of being
-    # permanently shadowed by the first query that pulled them.
-    seen = _load_recall_seen(sid)
+    # ── per-session dedup for semantic hits ───────────────────────────────────
+    # Build windowed seen set first so semantic dedup excludes them too
+    wlane_seen: set[tuple[str, int]] = set()
+    for h in wlane:
+        hid = int(h.get("id") or 0)
+        kind = h.get("kind") or "event"
+        if hid:
+            wlane_seen.add((kind, hid))
+
     candidates: list[dict] = []
     for h in hits:
         hid = int(h.get("id") or 0)
         kind = h.get("kind") or "event"
         if hid and (kind, hid) in seen:
-            continue  # already shown — skip slot, no backfill
+            continue
+        if hid and (kind, hid) in wlane_seen:
+            continue  # already in windowed lane
         candidates.append(h)
-    if not candidates:
+
+    if not candidates and not wlane:
         return 0
 
-    # ── fetch context only for rank-1 hit (event, not anchor) ────────────────
+    # ── fetch context only for rank-1 semantic hit (event, not anchor) ──────
     if ctx_n > 0 and candidates:
         top = candidates[0]
         if top.get("kind") in (None, "event") and top.get("session_id") and top.get("id"):
@@ -1053,18 +1109,50 @@ def user_prompt_submit() -> int:
     # +1 per line for the join newline; matches "\n".join(...) length exactly.
     used = sum(len(line) + 1 for line in header_lines)
     visible: list[dict] = []
+    wlane_budget = min(timelane_budget, budget_chars // 2)
+    wlane_used = 0
+
+    # ── render windowed hits first (top slots) ────────────────────────────────
+    for rank, h in enumerate(wlane):
+        kind = h.get("kind") or "event"
+        if kind == "digest":
+            # Digest rows: prefix with date label
+            date = h.get("date") or ""
+            try:
+                from datetime import datetime as _dt
+                _d = _dt.fromisoformat(date)
+                label = _d.strftime("%m-%d %a")
+            except Exception:
+                label = date
+            content = (h.get("content") or "")[:rank_caps[0] if rank_caps else 300]
+            block = [f"- [{label} · digest] {content}"]
+        else:
+            block = _render_hit_block(rank, h, rank_caps)
+        block_len = sum(len(line) + 1 for line in block)
+        if wlane_used + block_len > wlane_budget:
+            break
+        lines.extend(block)
+        used += block_len
+        wlane_used += block_len
+        visible.append(h)
+        hid = int(h.get("id") or 0)
+        if hid:
+            seen.add((kind, hid))
+
+    # ── render semantic hits filling remaining budget ─────────────────────────
     for rank, h in enumerate(candidates):
         block = _render_hit_block(rank, h, rank_caps)
         kind = h.get("kind") or "event"
         block_len = sum(len(line) + 1 for line in block)
         if visible and used + block_len > budget_chars:
-            break  # drop this hit — and skip seen-write so it can surface later
+            break  # drop this hit — skip seen-write so it can surface later
         lines.extend(block)
         used += block_len
         visible.append(h)
         hid = int(h.get("id") or 0)
         if hid:
             seen.add((kind, hid))
+
     if not visible:
         return 0
     _save_recall_seen(sid, seen)

@@ -21,16 +21,37 @@ llm = LLMClient(
 
 
 @mcp.tool()
-def recall(query: str, limit: int = 10, context: bool = False) -> list[dict]:
+def recall(
+    query: str,
+    limit: int = 10,
+    context: bool = False,
+    since: str | None = None,
+    until: str | None = None,
+) -> list[dict]:
     """Recall past session turns matching a query. Uses vector + FTS5 +
     recency + affect fusion when bge-m3 is loaded; FTS5-only fallback.
     Call when the user references the past.
-    Set context=True to attach ±1 adjacent same-session turns to each event row."""
+    Set context=True to attach ±1 adjacent same-session turns to each event row.
+    since/until: Melbourne-local YYYY-MM-DD day strings for time-lane filtering."""
+    from .timecue import melb_day_range
+    since_utc: str | None = None
+    until_utc: str | None = None
+    if since:
+        since_utc, _ = melb_day_range(since)
+    if until:
+        _, until_utc = melb_day_range(until)
+
     conn = storage.connect(_DB)
     try:
+        # Empty/whitespace query with window → return digest rows for that window
+        if not query.strip() and since_utc and until_utc:
+            rows = _recall_mod.fetch_window_digests(conn, since_utc, until_utc, cap=limit)
+            return rows
+
         # MCP manual recall: include all kinds (diary + task explicitly wanted).
         rows = _recall_mod.recall_with_config(
-            conn, query, limit=limit, exclude_kinds=()
+            conn, query, limit=limit, exclude_kinds=(),
+            since=since_utc, until=until_utc,
         )
         if context:
             for row in rows:

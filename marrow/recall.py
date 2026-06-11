@@ -991,6 +991,8 @@ def recall_fusion(
     min_score: float = 0.35,
     current_cwd: str | None = None,
     exclude_kinds: tuple[str, ...] = (),
+    since: str | None = None,
+    until: str | None = None,
 ) -> list[dict]:
     """Single weighted scalar fusion: vec + bm25 + recency + affect.
 
@@ -999,6 +1001,8 @@ def recall_fusion(
     FTS keyword hit on dormant row clears dormant flag before scoring.
     Returns rows sorted by score desc, truncated by budget_chars.
     `exclude_kinds`: lane kinds to skip entirely (e.g. ("diary", "task")).
+    `since`/`until`: UTC ISO strings; when set, events and diary are filtered
+    to this window. Anchor lanes (memes/entities/milestones/tasks) unaffected.
     """
     q = query.strip()
     if not q:
@@ -1031,29 +1035,49 @@ def recall_fusion(
 
     # ── FTS candidates ────────────────────────────────────────────────────────
     fts_q = '"' + q.replace('"', '""') + '"'
-    fts_rows = conn.execute(
-        "SELECT e.id, e.session_id, e.timestamp, e.role, e.content, e.channel, "
-        "e.compressed, s.cwd AS session_cwd, rank AS fts_rank "
-        "FROM events_fts f JOIN events e ON e.id = f.rowid "
-        "LEFT JOIN sessions s ON s.sid = e.session_id "
-        "WHERE events_fts MATCH ? ORDER BY rank LIMIT ?",
-        (fts_q, limit * 3),
-    ).fetchall()
+    if since and until:
+        fts_rows = conn.execute(
+            "SELECT e.id, e.session_id, e.timestamp, e.role, e.content, e.channel, "
+            "e.compressed, s.cwd AS session_cwd, rank AS fts_rank "
+            "FROM events_fts f JOIN events e ON e.id = f.rowid "
+            "LEFT JOIN sessions s ON s.sid = e.session_id "
+            "WHERE events_fts MATCH ? AND e.timestamp >= ? AND e.timestamp < ? "
+            "ORDER BY rank LIMIT ?",
+            (fts_q, since, until, limit * 3),
+        ).fetchall()
+    else:
+        fts_rows = conn.execute(
+            "SELECT e.id, e.session_id, e.timestamp, e.role, e.content, e.channel, "
+            "e.compressed, s.cwd AS session_cwd, rank AS fts_rank "
+            "FROM events_fts f JOIN events e ON e.id = f.rowid "
+            "LEFT JOIN sessions s ON s.sid = e.session_id "
+            "WHERE events_fts MATCH ? ORDER BY rank LIMIT ?",
+            (fts_q, limit * 3),
+        ).fetchall()
 
     # ── vec candidates ────────────────────────────────────────────────────────
     vec_rows: list[sqlite3.Row] = []
     if vec_available:
         qvec = emb.embed([q])[0]
         qblob = _vec_to_blob(qvec)
-        vec_rows = conn.execute(
+        # When a time window is active, fetch a larger candidate set and filter
+        # in Python. sqlite-vec KNN (MATCH+k=) cannot reliably apply arbitrary
+        # WHERE predicates on the joined table inside the virtual-table scan.
+        vec_k = limit * 6 if (since and until) else limit * 3
+        all_vec_rows = conn.execute(
             "SELECT e.id, e.session_id, e.timestamp, e.role, e.content, e.channel, "
             "e.compressed, s.cwd AS session_cwd, v.distance "
             "FROM events_vec v JOIN events e ON e.id = v.rowid "
             "LEFT JOIN sessions s ON s.sid = e.session_id "
             "WHERE embedding MATCH ? AND k = ? "
             "ORDER BY v.distance",
-            (qblob, limit * 3),
+            (qblob, vec_k),
         ).fetchall()
+        if since and until:
+            vec_rows = [r for r in all_vec_rows
+                        if r["timestamp"] and r["timestamp"] >= since and r["timestamp"] < until]
+        else:
+            vec_rows = all_vec_rows
 
     # ── merge candidates by event_id ──────────────────────────────────────────
     candidates: dict[int, dict] = {}
@@ -1227,6 +1251,23 @@ def recall_fusion(
 
     # Diary: vec-only lane (no kw scan for long-form prose). Build candidates
     # gated by _VEC_ONLY_FLOOR; scored with w_diary_vec, no bm25/recency.
+    # When a time window is active, collect the Melbourne-local dates it spans
+    # and filter diary rows to those dates only.
+    _diary_dates: set[str] | None = None
+    if since and until:
+        from .timeutil import utc_iso_to_local_date as _u2d
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        try:
+            _s = _dt.fromisoformat(since.replace("Z", "+00:00"))
+            _e = _dt.fromisoformat(until.replace("Z", "+00:00"))
+            _diary_dates = set()
+            _cur = _s
+            while _cur < _e:
+                _diary_dates.add(_u2d(_cur.strftime("%Y-%m-%dT%H:%M:%SZ")))
+                _cur += _td(days=1)
+        except Exception:
+            _diary_dates = None
+
     diary_cands: list[dict] = []
     for card in diary_vec_cards:
         vs = card["vec_score"]
@@ -1235,6 +1276,8 @@ def recall_fusion(
         if not card["content"] or card["content"] == "—":
             continue
         date = card["date"]
+        if _diary_dates is not None and date not in _diary_dates:
+            continue
         ts = date if "T" in date else (date + "T00:00:00Z" if date else "")
         diary_cands.append({
             "kind": "diary", "id": card["id"],
@@ -1518,6 +1561,8 @@ def recall_with_config(
     budget_chars: int | None = None,
     current_cwd: str | None = None,
     exclude_kinds: tuple[str, ...] = ("diary", "task"),
+    since: str | None = None,
+    until: str | None = None,
 ) -> list[dict]:
     """Run recall_fusion with weights + thresholds from [recall] config.
 
@@ -1527,6 +1572,7 @@ def recall_with_config(
     (CC-Lab=project, Desktop/NY=daily, Study=study).
     `exclude_kinds`: kinds to suppress. Hook default = ("diary", "task");
     MCP callers pass () to include all kinds.
+    `since`/`until`: UTC ISO strings for time-lane filtering.
     """
     from . import config as _config
     rcfg = _config.load().get("recall", {})
@@ -1547,8 +1593,66 @@ def recall_with_config(
         budget_chars=budget_chars,
         current_cwd=current_cwd,
         exclude_kinds=exclude_kinds,
+        since=since,
+        until=until,
         **{k: float(rcfg[k]) for k in _weight_keys if k in rcfg},
     )
+
+
+def fetch_window_digests(
+    conn: sqlite3.Connection,
+    since_utc: str,
+    until_utc: str,
+    cap: int = 6,
+) -> list[dict]:
+    """Return session_digests rows whose ts falls in [since_utc, until_utc).
+
+    Falls back to matching the date column against Melbourne-local dates in
+    the window when ts is missing/malformed. Newest first.
+    Each row: {"kind": "digest", "id": sid, "date": ..., "content": text[:150]}.
+    """
+    from .timeutil import utc_iso_to_local_date as _u2d
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+
+    # Primary: ts-based filter
+    rows = conn.execute(
+        "SELECT sid, date, text, ts FROM session_digests "
+        "WHERE ts >= ? AND ts < ? "
+        "ORDER BY ts DESC LIMIT ?",
+        (since_utc, until_utc, cap),
+    ).fetchall()
+
+    if not rows:
+        # Fallback: match date column against Melbourne-local dates in window
+        try:
+            _s = _dt.fromisoformat(since_utc.replace("Z", "+00:00"))
+            _e = _dt.fromisoformat(until_utc.replace("Z", "+00:00"))
+            dates: list[str] = []
+            _cur = _s
+            while _cur < _e:
+                dates.append(_u2d(_cur.strftime("%Y-%m-%dT%H:%M:%SZ")))
+                _cur += _td(days=1)
+        except Exception:
+            dates = []
+        if dates:
+            placeholders = ",".join("?" * len(dates))
+            rows = conn.execute(
+                f"SELECT sid, date, text, ts FROM session_digests "
+                f"WHERE date IN ({placeholders}) "
+                f"ORDER BY ts DESC LIMIT ?",
+                (*dates, cap),
+            ).fetchall()
+
+    out: list[dict] = []
+    for r in rows:
+        out.append({
+            "kind": "digest",
+            "id": r["sid"],
+            "date": r["date"],
+            "content": (r["text"] or "")[:150],
+            "score": 0.0,
+        })
+    return out
 
 
 # ── event context window helper ──────────────────────────────────────────────
