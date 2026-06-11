@@ -783,54 +783,76 @@ def _expand_needles(text: str, cjk_min: int = 2, cjk_max: int = 4,
     return out
 
 
+def _needles_match(needles: set[str], query_lower: str) -> bool:
+    """True if any needle hits the query.
+
+    CJK needles: plain substring. ASCII needles: letter-boundary match —
+    (nd) must not hit inside (handover), but (gpt) still hits (gpt4画画)
+    since digits don't count as a boundary breaker.
+    """
+    for n in needles:
+        if n.isascii():
+            if re.search(rf"(?<![a-z]){re.escape(n)}(?![a-z])", query_lower):
+                return True
+        elif n in query_lower:
+            return True
+    return False
+
+
 def _entity_strong_hits(conn: sqlite3.Connection, query_lower: str) -> list[sqlite3.Row]:
-    """Scan all live entities; return ones whose body needles substring-match the query."""
+    """Scan all live entities; return ones whose needles match the query.
+
+    Tiered needle sources: name/aliases keep 2-char CJK windows (the whole
+    point — short CN names below the trigram floor); fact body uses ≥3-char
+    windows only, so generic bigrams (你说/现在) can't anchor the row.
+    """
     rows = conn.execute(
         "SELECT id, kind, name, fact, aliases, mention_count, created_at "
         "FROM entities WHERE superseded_by IS NULL"
     ).fetchall()
     hits: list[sqlite3.Row] = []
     for r in rows:
-        parts = [r["name"] or "", r["fact"] or ""]
+        name_parts = [r["name"] or ""]
         aliases_raw = r["aliases"]
         if aliases_raw and aliases_raw not in ("", "[]"):
             try:
                 al = json.loads(aliases_raw)
                 if isinstance(al, list):
-                    parts.extend(str(a) for a in al if a)
+                    name_parts.extend(str(a) for a in al if a)
             except Exception:
                 pass
-        needles = _expand_needles(" ".join(parts))
-        if any(n in query_lower for n in needles):
+        needles = _expand_needles(" ".join(name_parts))
+        needles |= _expand_needles(r["fact"] or "", cjk_min=3)
+        if _needles_match(needles, query_lower):
             hits.append(r)
     return hits
 
 
 def _memes_strong_hits(conn: sqlite3.Connection, query_lower: str) -> list[sqlite3.Row]:
-    """Scan active memes; substring needles from key+value+context."""
+    """Scan active memes; key keeps 2-char windows, value body needs ≥3."""
     rows = conn.execute(
         "SELECT id, type, key, value, context, pinned, use_count "
         "FROM memes WHERE status='active'"
     ).fetchall()
     hits: list[sqlite3.Row] = []
     for r in rows:
-        body = f"{r['key'] or ''} {r['value'] or ''}"
-        needles = _expand_needles(body)
-        if any(n in query_lower for n in needles):
+        needles = _expand_needles(r["key"] or "")
+        needles |= _expand_needles(r["value"] or "", cjk_min=3)
+        if _needles_match(needles, query_lower):
             hits.append(r)
     return hits
 
 
 def _milestone_strong_hits(conn: sqlite3.Connection, query_lower: str) -> list[sqlite3.Row]:
-    """Scan all milestones; substring needles from title+description."""
+    """Scan all milestones; title keeps 2-char windows, description needs ≥3."""
     rows = conn.execute(
         "SELECT id, scope, date, title, description, pinned FROM milestones"
     ).fetchall()
     hits: list[sqlite3.Row] = []
     for r in rows:
-        body = f"{r['title'] or ''} {r['description'] or ''}"
-        needles = _expand_needles(body)
-        if any(n in query_lower for n in needles):
+        needles = _expand_needles(r["title"] or "")
+        needles |= _expand_needles(r["description"] or "", cjk_min=3)
+        if _needles_match(needles, query_lower):
             hits.append(r)
     return hits
 
