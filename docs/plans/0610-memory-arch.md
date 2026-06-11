@@ -55,6 +55,7 @@
 - First gate run 06/11 ((docs/notes/0611-tl-gate-blind.md + key)): both models failed once each (haiku CN fluency on small session; sonnet zero-information jargon line on large session) → verdict: prompt was the problem, not the model. TL stays in the haiku DIGEST call.
 - Rerun on the SAME 3 sessions with the reshaped prompt below; haiku vs sonnet, blind, Lumi judges. Judge criteria: LIFE accuracy (zero confabulation), CN fluency, TL written from life perspective ((深夜和老婆一起更新recall机制) style, plain words, no project jargon).
 - Haiku fails → TL+LIFE move to a sonnet call (cost negligible).
+- RESULT (06/11, docs/notes/0611-tl-gate-v2-*): zero confabulation, zero LIFE-on-task violations across 6 runs. Haiku failed the study session (EN-jargon TL, missed LIFE, thin VOICE); sonnet's only fault was FACTS verbosity = missing word cap in the test prompt. GATE PASSED → DIGEST call goes sonnet, with TL+FACTS ≤120 words on task sessions.
 
 ### 4A-1. DIGEST output reshape (haiku call, structure replaces prose)
 - Digest's consumers are all machines (daily merge, timeline render, recall FTS) — prose moves entirely to diary; digest becomes structured lines. Cache-safe: shared prefix ends at _TRANSCRIPT_BLOCK (sessionend_prompts.py:23-28); only post-prefix task text changes.
@@ -63,7 +64,9 @@
   - `TL: <15-30 CN chars>` — both kinds. Life perspective: who + what happened, plain words, no project jargon. Length soft (embedded EN terms don't count against it).
   - `LIFE:` — **casual sessions only**, one line per item ≤20 chars (food/drink/sights/places/body state/small moods), 0-10 lines, `N/A` when none.
   - `VOICE:` — casual only, verbatim fragments, current rules unchanged.
-  - `FACTS:` — task only, `<subject> <did> <outcome>` lines, current rules unchanged.
+  - `FACTS:` — task only, `<subject> <did> <outcome>` lines, max 5; task-session total (TL + FACTS) hard cap 120 words — gate v2 showed sonnet writes essays when the original 150-word cap is omitted (the cap was the working part of the old prompt; keep it).
+- No tone/emotion labels anywhere in digest (Lumi 06/11): affect episodes already carry tone. daily.py instead injects the day's affect rows (with eph/epl marks) into the diary call input — deterministic code-side pass-through, no model re-extraction.
+- Model: DIGEST call moves haiku → sonnet (gate v2 verdict 06/11: haiku failed the study session — EN-jargon TL, missed LIFE, thin VOICE; study/chat quality is the core goal, task layer matters least). FACTS cap above guards sonnet's verbosity.
 - ANTI-CONFABULATION (Lumi decision 06/11, firm): task sessions keep the existing "drop ALL details" rule — NO LIFE extraction. >95% of task sessions contain no life details; forcing extraction makes the model dress code details up as life. Accepted loss: a latte mentioned mid-coding is dropped. Do not soften this with "N/A if none" prompt tricks.
 - Parse: new columns session_digests.kind, .tl_line, .life_lines (newline-joined, FTS-searchable); VOICE/FACTS stay in body. Parse fail → columns NULL + alert, body kept raw.
 - Fullwidth-colon tolerance in parser ((TL：)) — haiku slipped once in gate v1.
