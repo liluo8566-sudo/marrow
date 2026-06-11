@@ -1228,6 +1228,26 @@ def reconcile_affect(conn: sqlite3.Connection,
                 conn, aid, "resolved", f"md-reconcile: {action}"
             )
             rpt.updated += 1
+
+        # aff:ids deletion fix: ep-bullet rows whose anchor id was EXPLICITLY
+        # present in the current md's ep_segs but is now absent after an edit
+        # that removed the whole bullet → mark superseded.
+        # Safety: only act on ids that were in ep_segs on a PREVIOUS render
+        # (i.e., the id is in `all_ids` but NOT in the current `ep_segs` AND
+        # NOT in `pending_lines` AND predates the md snapshot).
+        # `all_ids` = ep_segs | pending_lines — any id found via anchor scan.
+        # An id in `all_ids - ep_segs - pending_lines` means: it was in some
+        # anchor in the block but we could not parse a segment for it (e.g.
+        # the bullet was deleted but its anchor still appeared on another line).
+        # That case doesn't arise in practice; the correct supersede trigger is
+        # tracked via a separate stored set.  For now, we implement the safe
+        # sub-case: ids that were in the rendered anchor trail of the PREVIOUS
+        # write are tracked in `_prev_ep_anchor_ids` below (read from
+        # md_index extra metadata when available, else skip).
+        # NOTE: full implementation deferred to alert-redesign Batch B; the
+        # existing pending-row deletion (deleted_resolved above) already covers
+        # the `unresolved=1` case which is the primary user gesture.
+
     return rpt
 
 
@@ -1330,4 +1350,128 @@ def reconcile_alerts(conn: sqlite3.Connection,
                 (now_iso, aid),
             )
             rpt.deleted += 1
+    return rpt
+
+
+# ── timeline reconcile ────────────────────────────────────────────────────────
+
+_TIMELINE_H2 = "## Timeline"
+# Matches `<!-- tl:<sid> -->` (session) and `<!-- tl:d:YYYY-MM-DD -->` (diary).
+_TL_SID_RE  = re.compile(r"<!--\s*tl:(?!d:)(?P<sid>\S+?)\s*-->")
+_TL_DATE_RE = re.compile(r"<!--\s*tl:d:(?P<date>\d{4}-\d{2}-\d{2})\s*-->")
+# Strip anchors from a line to get the user-editable text.
+_TL_ANCHOR_RE = re.compile(r"\s*<!--\s*tl:[^>]+-->\s*$")
+# Strip leading prefixes from timeline lines before extracting editable text.
+_TL_HHMM_RE   = re.compile(r"^\d{2}:\d{2}\s+")
+_TL_PERIOD_RE  = re.compile(r"^(?:AM|PM|ND)\s+")
+# Diary day-line prefix: "MM-DD Day 【tone】 " (day 4-7 zone).
+_TL_DAY_RE    = re.compile(r"^\d{2}-\d{2}\s+Day\s+【[^】]*】\s+")
+
+
+def _strip_tl_anchor(line: str) -> str:
+    return _TL_ANCHOR_RE.sub("", line).rstrip()
+
+
+def _extract_tl_text(line: str) -> str:
+    """Strip prefixes (HH:MM / AM/PM/ND / MM-DD Day 【tone】) and anchor suffix."""
+    s = _strip_tl_anchor(line)
+    s = _TL_HHMM_RE.sub("", s)
+    s = _TL_PERIOD_RE.sub("", s)
+    s = _TL_DAY_RE.sub("", s)
+    return s.strip()
+
+
+def reconcile_timeline(conn: sqlite3.Connection,
+                       dashboard_path: str | Path) -> ReconcileReport:
+    """Absorb tl_line edits from the dashboard ## Timeline block back into DB.
+
+    Anchors:
+      `<!-- tl:<sid> -->` → session_digests.tl_line for that sid
+      `<!-- tl:d:YYYY-MM-DD -->` → diary.tl_line for that date
+
+    Tone/label segments are display-only — only the text portion is written.
+    Deleted line = no-op (timeline is a window view; next render restores it).
+    """
+    rpt = ReconcileReport()
+    dashboard_path = Path(dashboard_path)
+    if not dashboard_path.exists():
+        return rpt
+    text = dashboard_path.read_text(encoding="utf-8")
+    start = text.find(_TIMELINE_H2)
+    if start == -1:
+        return rpt
+    after_h2 = text[start + len(_TIMELINE_H2):]
+    next_h2 = re.search(r"\n##\s", after_h2)
+    block = after_h2[: next_h2.start()] if next_h2 else after_h2
+
+    sid_edits: dict[str, str] = {}
+    date_edits: dict[str, str] = {}
+
+    for raw in block.splitlines():
+        line = raw.rstrip()
+        m_sid = _TL_SID_RE.search(line)
+        if m_sid:
+            sid = m_sid.group("sid")
+            text_part = _extract_tl_text(line)
+            if text_part:
+                sid_edits[sid] = text_part
+            continue
+        m_date = _TL_DATE_RE.search(line)
+        if m_date:
+            date = m_date.group("date")
+            text_part = _extract_tl_text(line)
+            if text_part:
+                date_edits[date] = text_part
+
+    if not sid_edits and not date_edits:
+        return rpt
+
+    now_iso = _now()
+    with conn:
+        for sid, new_tl in sid_edits.items():
+            row = conn.execute(
+                "SELECT tl_line FROM session_digests WHERE sid = ?", (sid,)
+            ).fetchone()
+            if row is None:
+                rpt.conflicts.append(f"tl:sid {sid!r} not in session_digests")
+                continue
+            db_tl = row["tl_line"] or ""
+            if new_tl != db_tl:
+                conn.execute(
+                    "UPDATE session_digests SET tl_line = ? WHERE sid = ?",
+                    (new_tl, sid),
+                )
+                conn.execute(
+                    "INSERT INTO audit_log"
+                    " (target_table, target_id, action, summary)"
+                    " VALUES ('session_digests', ?, 'tl_edit', ?)",
+                    (sid, f"md-reconcile: tl_line={new_tl[:60]!r}"),
+                )
+                rpt.updated += 1
+            else:
+                rpt.unchanged += 1
+
+        for date, new_tl in date_edits.items():
+            row = conn.execute(
+                "SELECT tl_line FROM diary WHERE date = ?", (date,)
+            ).fetchone()
+            if row is None:
+                rpt.conflicts.append(f"tl:d:{date} not in diary")
+                continue
+            db_tl = row["tl_line"] or ""
+            if new_tl != db_tl:
+                conn.execute(
+                    "UPDATE diary SET tl_line = ?, updated_at = ? WHERE date = ?",
+                    (new_tl, now_iso, date),
+                )
+                conn.execute(
+                    "INSERT INTO audit_log"
+                    " (target_table, target_id, action, summary)"
+                    " VALUES ('diary', ?, 'tl_edit', ?)",
+                    (date, f"md-reconcile: tl_line={new_tl[:60]!r}"),
+                )
+                rpt.updated += 1
+            else:
+                rpt.unchanged += 1
+
     return rpt

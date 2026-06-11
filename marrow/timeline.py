@@ -158,6 +158,14 @@ def _tl_or_fallback(sd: dict) -> str:
     return body
 
 
+def _tl_anchor_sid(sid: str) -> str:
+    return f"<!-- tl:{sid} -->"
+
+
+def _tl_anchor_date(date: str) -> str:
+    return f"<!-- tl:d:{date} -->"
+
+
 # ── DB queries ───────────────────────────────────────────────────────────────
 
 def _query_open_episodes(conn: sqlite3.Connection,
@@ -266,14 +274,15 @@ def _render_24h(digests: list[dict],
         life_items = [x.strip() for x in life_raw.splitlines() if x.strip()]
 
         session_lines: list[str] = []
+        anchor = _tl_anchor_sid(sd["sid"])
         if kind == "casual":
-            # First item carries tone marker; rest are plain
+            # First item carries the anchor; rest are plain
             first_content = life_items[0] if life_items else tl
-            session_lines.append(f"{hhmm} {first_content}")
+            session_lines.append(f"{hhmm} {first_content} {anchor}")
             for item in life_items[1:]:
                 session_lines.append(f"  {item}")
         else:
-            session_lines.append(f"{hhmm} {tl}")
+            session_lines.append(f"{hhmm} {tl} {anchor}")
 
         entries.append((disp_date, ts, session_lines))
 
@@ -365,10 +374,13 @@ def _render_day47(dates_4_7: list[_dt.date],
         day_affect = affect_rows_by_date.get(date, [])
         tone_label = _tone_from_rows(day_affect)
         dtl = diary_tl.get(date.isoformat(), "")
+        anchor = _tl_anchor_date(date.isoformat())
         if dtl:
-            lines.append(f"{date.strftime('%m-%d')} Day 【{tone_label}】 {dtl}")
+            lines.append(
+                f"{date.strftime('%m-%d')} Day 【{tone_label}】 {dtl} {anchor}")
         else:
-            lines.append(f"{date.strftime('%m-%d')} Day 【{tone_label}】")
+            lines.append(
+                f"{date.strftime('%m-%d')} Day 【{tone_label}】 {anchor}")
     return lines
 
 

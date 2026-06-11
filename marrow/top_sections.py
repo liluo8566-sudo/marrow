@@ -447,17 +447,20 @@ DASHBOARD_BLOCK_IDS = (
     "dashboard.tasks",
     "dashboard.milestone_cand",
     "dashboard.affect",
+    "dashboard.timeline",
     "dashboard.content",
 )
 
 # Blocks whose user edits are absorbed into the DB by a reconcile pass before
 # render — safe to overwrite the block body with fresh DB-driven content.
 # alerts: reconcile_alerts treats a deleted bullet as `resolved=1`.
+# timeline: reconcile_timeline writes tl_line edits back to session_digests/diary.
 RECONCILED_BLOCK_IDS = frozenset({
     "dashboard.alerts",
     "dashboard.tasks",
     "dashboard.milestone_cand",
     "dashboard.affect",
+    "dashboard.timeline",
 })
 
 
@@ -486,11 +489,13 @@ def iter_top_blocks(conn: sqlite3.Connection,
     body carries the `<!-- id:<block_id> -->` marker on its H2 line so the
     inserter and md_index see the same block boundary.
     """
+    from .timeline import render_timeline
     pairs = [
         ("dashboard.alerts", render_alerts(conn)),
         ("dashboard.tasks", render_tasks(conn)),
         ("dashboard.milestone_cand", render_milestone_candidate(conn)),
         ("dashboard.affect", render_affect(conn)),
+        ("dashboard.timeline", render_timeline(conn)),
         ("dashboard.content",
          render_content(conn, dashboard_path=dashboard_path)),
     ]

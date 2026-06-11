@@ -27,7 +27,7 @@ from ._atomic import atomic_write as _atomic_write
 from .md_index import MdIndex
 from .reconcile import (reconcile_affect, reconcile_alerts,
                         reconcile_milestone_candidates,
-                        reconcile_tasks)
+                        reconcile_tasks, reconcile_timeline)
 
 M0 = "<!-- marrow:top:start -->"
 M1 = "<!-- marrow:top:end -->"
@@ -180,6 +180,15 @@ def write_dashboard(path: str, conn, *, state_dir: str,
                 "dashboard_reconcile:alerts",
                 source="dashboard.py", db=db,
                 message=f"alerts reconcile failed: {e}; falling through to render",
+            )
+        try:
+            reconcile_timeline(conn, Path(path))
+        except Exception as e:
+            repo.add_alert(
+                "warn", "dashboard",
+                "dashboard_reconcile:timeline",
+                source="dashboard.py", db=db,
+                message=f"timeline reconcile failed: {e}; falling through to render",
             )
     Path(state_dir).mkdir(parents=True, exist_ok=True)
 
