@@ -225,8 +225,8 @@ def test_catchup_keeps_skipping_genuinely_done_sids(db_env, monkeypatch):
 
 
 def test_sessionend_async_writes_fail_audit_on_exception(db_env):
-    """Both LLM calls raise → final summary='fail:task_affect=...,digest=...',
-    rc=1. Both calls blown means full fail."""
+    """Single merged LLM call raises → final summary='fail:llm=RuntimeError',
+    rc=1. One call = one fail path."""
     db, _ = db_env
     _insert_events(db, "test-fail", count=10, role="user")
 
@@ -238,8 +238,7 @@ def test_sessionend_async_writes_fail_audit_on_exception(db_env):
     assert rc == 1
     rows = _audit_rows(db, "test-fail")
     assert rows[0]["summary"] == "start"
-    assert rows[-1]["summary"] == (
-        "fail:task_affect=RuntimeError,digest=RuntimeError")
+    assert rows[-1]["summary"] == "fail:llm=RuntimeError"
 
 
 def _write_extract_row(db: str, sid: str, summary: str) -> None:
@@ -888,24 +887,31 @@ def test_sessionend_two_calls_routes_to_three_writers(db_env):
 
 
 def test_sessionend_task_affect_fail_digest_ok_partial(db_env):
-    """TASK_AFFECT raises, DIGEST succeeds → digest writer runs, task_cand/affect
-    skipped → final summary='partial:...'. Call independence."""
+    """Merged call succeeds but affect writer raises → partial:affect, rc=0.
+    LLM call is single; writer-level failures still produce partial summary."""
     db, _ = db_env
     _insert_events(db, "test-partial", count=10, role="user")
 
-    digest_raw = "===DIGEST===\nshort digest\n===END===\n"
-    task_affect_err = RuntimeError("task-affect-blew-up")
+    # Return a valid digest block from the single merged call.
+    merged_raw = (
+        "===TASK===\n[]\n===END===\n"
+        "===AFFECT===\n[]\n===END===\n"
+        "===DIGEST===\nKIND: casual\nTL: 和老婆聊天\nLIFE: N/A\n"
+        "VOICE: N/A\nFACTS: N/A\n===END===\n"
+    )
 
-    with patch("marrow.sessionend_async.LLMClient") as MockClient:
-        MockClient.return_value.call.side_effect = [task_affect_err, digest_raw]
-        from marrow import sessionend_async
-        rc = sessionend_async.main(["--sid", "test-partial"])
+    with patch("marrow.sessionend_async.seg_affect",
+               side_effect=RuntimeError("affect-blew")):
+        with patch("marrow.sessionend_async.LLMClient") as MockClient:
+            MockClient.return_value.call.return_value = merged_raw
+            from marrow import sessionend_async
+            rc = sessionend_async.main(["--sid", "test-partial"])
 
     assert rc == 0  # partial = recovered, not fatal
     rows = _audit_rows(db, "test-partial")
     final = rows[-1]["summary"]
     assert final.startswith("partial:")
-    assert "task_cand" in final and "affect" in final
+    assert "affect" in final
 
 
 def test_session_events_text_prefixes_local_hhmm(db_env):

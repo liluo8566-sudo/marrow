@@ -316,7 +316,8 @@ def _parse_digest_block(raw: str) -> dict:
         j = tail.find("===END===")
         block = tail[:j].strip() if j >= 0 else tail.strip()
     else:
-        block = raw.strip()
+        # No DIGEST fence — strip any trailing ===END=== before parse.
+        block = raw.replace("===END===", "").strip()
 
     kind: str | None = None
     tl_line: str | None = None
