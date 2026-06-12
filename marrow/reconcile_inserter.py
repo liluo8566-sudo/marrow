@@ -11,7 +11,6 @@ Public surface (imported by subpages.py):
   reconcile_diary         — diary wrapper
   reconcile_stickers      — stickers wrapper
   reconcile_wallet        — wallet wrapper
-  reconcile_goose         — goose wrapper
 """
 from __future__ import annotations
 
@@ -406,17 +405,5 @@ def reconcile_wallet(conn: sqlite3.Connection,
     return reconcile_inserter_sync(
         conn, spec, md_path, "wallet",
         editable_cols=["summary"],
-        soft_delete=False,
-    )
-
-
-def reconcile_goose(conn: sqlite3.Connection,
-                    md_path: Path) -> ReconcileReport:
-    """UPDATE goose_bites.bites on edit; DELETE absent rows."""
-    from . import subpage_specs
-    spec = subpage_specs.build_goose_spec(str(Path(md_path).parent))
-    return reconcile_inserter_sync(
-        conn, spec, md_path, "goose_bites",
-        editable_cols=["bites"],
         soft_delete=False,
     )
