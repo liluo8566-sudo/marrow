@@ -25,7 +25,7 @@ from ._atomic import atomic_write as _atomic_write
 from .atlas import atlas_sweep_fs, reconcile_atlas, seed_atlas_from_roots
 from .inserter import InserterSpec, write_subpage_inserter
 from .md_index import MdIndex
-from .reconcile import reconcile_milestones
+from .reconcile import reconcile_milestones, emit_conflict_alerts
 from .reconcile_inserter import (
     reconcile_memes,
     reconcile_profile,
@@ -119,7 +119,8 @@ def write_subpage(cfg: SubPageConfig, conn: sqlite3.Connection,
     # Run reconcile BEFORE the writer so the new render reflects Lumi's edits.
     if cfg.reconcile is not None and os.path.exists(path) and not cfg.read_only:
         try:
-            cfg.reconcile(conn, Path(path))
+            _rpt = cfg.reconcile(conn, Path(path))
+            emit_conflict_alerts(_rpt, f"subpage:{key}", db=db)
         except Exception as e:
             repo.add_alert(
                 "warn", "db_pages",

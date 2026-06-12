@@ -27,7 +27,8 @@ from ._atomic import atomic_write as _atomic_write
 from .md_index import MdIndex
 from .reconcile import (reconcile_affect, reconcile_alerts,
                         reconcile_milestone_candidates,
-                        reconcile_tasks, reconcile_timeline)
+                        reconcile_tasks, reconcile_timeline,
+                        emit_conflict_alerts)
 
 M0 = "<!-- marrow:top:start -->"
 M1 = "<!-- marrow:top:end -->"
@@ -146,7 +147,8 @@ def write_dashboard(path: str, conn, *, state_dir: str,
     # Fail-soft: a reconcile error must never block dashboard refresh.
     if os.path.exists(path):
         try:
-            reconcile_milestone_candidates(conn, Path(path))
+            _rpt = reconcile_milestone_candidates(conn, Path(path))
+            emit_conflict_alerts(_rpt, "dashboard:milestone_candidates", db=db)
         except Exception as e:
             repo.add_alert(
                 "warn", "dashboard",
@@ -155,7 +157,8 @@ def write_dashboard(path: str, conn, *, state_dir: str,
                 message=f"candidate reconcile failed: {e}; falling through to render",
             )
         try:
-            reconcile_tasks(conn, Path(path))
+            _rpt = reconcile_tasks(conn, Path(path))
+            emit_conflict_alerts(_rpt, "dashboard:tasks", db=db)
         except Exception as e:
             repo.add_alert(
                 "warn", "dashboard",
@@ -164,7 +167,8 @@ def write_dashboard(path: str, conn, *, state_dir: str,
                 message=f"task reconcile failed: {e}; falling through to render",
             )
         try:
-            reconcile_affect(conn, Path(path))
+            _rpt = reconcile_affect(conn, Path(path))
+            emit_conflict_alerts(_rpt, "dashboard:affect", db=db)
         except Exception as e:
             repo.add_alert(
                 "warn", "dashboard",
@@ -173,7 +177,8 @@ def write_dashboard(path: str, conn, *, state_dir: str,
                 message=f"affect reconcile failed: {e}; falling through to render",
             )
         try:
-            reconcile_alerts(conn, Path(path))
+            _rpt = reconcile_alerts(conn, Path(path))
+            emit_conflict_alerts(_rpt, "dashboard:alerts", db=db)
         except Exception as e:
             repo.add_alert(
                 "warn", "dashboard",
@@ -182,7 +187,8 @@ def write_dashboard(path: str, conn, *, state_dir: str,
                 message=f"alerts reconcile failed: {e}; falling through to render",
             )
         try:
-            reconcile_timeline(conn, Path(path))
+            _rpt = reconcile_timeline(conn, Path(path))
+            emit_conflict_alerts(_rpt, "dashboard:timeline", db=db)
         except Exception as e:
             repo.add_alert(
                 "warn", "dashboard",

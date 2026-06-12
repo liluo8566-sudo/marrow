@@ -633,3 +633,273 @@ def test_reconcile_memes_missing_file_noop(tmp_path):
     rpt = reconcile.reconcile_memes(conn, md)
     assert rpt.deleted == 0
     conn.close()
+
+
+# ── Task 1: tag parsing — no-space CJK ────────────────────────────────────────
+
+def test_parse_unanchored_task_body_cjk_no_space():
+    """[appointment]看牙医 → category Appointment, clean title, no prefix."""
+    result = reconcile._parse_unanchored_task_body("[appointment]看牙医")
+    assert result is not None
+    assert result["category"] == "Appointment"
+    assert result["title"] == "看牙医"
+    assert result["due"] is None
+
+
+def test_parse_unanchored_task_body_cjk_with_due():
+    """[appointment]看牙医 [06-20] → Appointment + title + due peeled."""
+    result = reconcile._parse_unanchored_task_body("[appointment]看牙医 [06-20]")
+    assert result is not None
+    assert result["category"] == "Appointment"
+    assert result["title"] == "看牙医"
+    assert result["due"] == "06-20"
+
+
+def test_parse_unanchored_task_body_spaced_unchanged():
+    """[Study] existing spaced form still works after the \\s* fix."""
+    result = reconcile._parse_unanchored_task_body("[Study] review notes")
+    assert result is not None
+    assert result["category"] == "Study"
+    assert result["title"] == "review notes"
+
+
+def test_parse_task_row_body_cjk_no_space():
+    """_parse_task_row_body strips [appointment] prefix with no space before CJK."""
+    result = reconcile._parse_task_row_body("[appointment]看牙医", None, None)
+    assert result is not None
+    title, ns = result
+    assert title == "看牙医"
+    assert ns is None
+
+
+# ── Task 2a: bare-text insert in ## Us / ## Me ────────────────────────────────
+
+_MELB_DATE = reconcile._today_melb()
+
+_BARE_US_MD = f"""\
+<!-- marrow:milestone:start -->
+
+## Us
+
+这是一个新里程碑
+
+## Me
+
+<!-- marrow:milestone:end -->
+"""
+
+_BARE_ME_MD = f"""\
+<!-- marrow:milestone:start -->
+
+## Us
+
+## Me
+
+新的me里程碑
+
+<!-- marrow:milestone:end -->
+"""
+
+
+def _fresh_conn(tmp_path, name="t.db"):
+    p = str(tmp_path / name)
+    conn = storage.init_db(p)
+    return conn, p
+
+
+def test_bare_text_us_inserts(tmp_path):
+    """Bare text line in ## Us → INSERT with today's date, pinned=1."""
+    conn, db = _fresh_conn(tmp_path)
+    md = tmp_path / "milestone.md"
+    md.write_text(_BARE_US_MD, encoding="utf-8")
+    rpt = reconcile.reconcile_milestones(conn, md)
+    assert rpt.inserted == 1
+    row = conn.execute(
+        "SELECT scope, date, title, pinned FROM milestones WHERE title=?",
+        ("这是一个新里程碑",),
+    ).fetchone()
+    assert row is not None
+    assert row["scope"] == "us"
+    assert row["date"] == _MELB_DATE
+    assert row["pinned"] == 1
+    conn.close()
+
+
+def test_bare_text_me_inserts(tmp_path):
+    """Bare text line in ## Me → INSERT with today's date, scope=me."""
+    conn, db = _fresh_conn(tmp_path)
+    md = tmp_path / "milestone.md"
+    md.write_text(_BARE_ME_MD, encoding="utf-8")
+    rpt = reconcile.reconcile_milestones(conn, md)
+    assert rpt.inserted == 1
+    row = conn.execute(
+        "SELECT scope FROM milestones WHERE title=?", ("新的me里程碑",)
+    ).fetchone()
+    assert row is not None
+    assert row["scope"] == "me"
+    conn.close()
+
+
+def test_bare_text_writeback_canonical_line(tmp_path):
+    """After bare-text INSERT, the md line is rewritten to canonical H5 form."""
+    conn, db = _fresh_conn(tmp_path)
+    md = tmp_path / "milestone.md"
+    md.write_text(_BARE_US_MD, encoding="utf-8")
+    reconcile.reconcile_milestones(conn, md)
+    txt = md.read_text(encoding="utf-8")
+    rid = conn.execute(
+        "SELECT id FROM milestones WHERE title=?", ("这是一个新里程碑",)
+    ).fetchone()["id"]
+    assert f"##### [{_MELB_DATE}] 这是一个新里程碑 <!-- id:{rid} -->" in txt
+    conn.close()
+
+
+def test_bare_text_second_pass_noop(tmp_path):
+    """Second reconcile after bare-text write-back is a no-op (idempotent)."""
+    conn, db = _fresh_conn(tmp_path)
+    md = tmp_path / "milestone.md"
+    md.write_text(_BARE_US_MD, encoding="utf-8")
+    reconcile.reconcile_milestones(conn, md)
+    rpt2 = reconcile.reconcile_milestones(conn, md)
+    assert rpt2.inserted == 0
+    assert rpt2.updated == 0
+    count = conn.execute("SELECT COUNT(*) c FROM milestones").fetchone()["c"]
+    assert count == 1
+    conn.close()
+
+
+def test_bare_text_after_h5_merges_into_description(tmp_path):
+    """Regression: bare line AFTER an H5 heading (cur is not None) still
+    becomes part of that block's description, not a new milestone."""
+    md_text = """\
+<!-- marrow:milestone:start -->
+
+## Us
+
+##### [2026-06-01] Our trip
+This is the description line
+
+<!-- marrow:milestone:end -->
+"""
+    conn, db = _fresh_conn(tmp_path)
+    md = tmp_path / "milestone.md"
+    md.write_text(md_text, encoding="utf-8")
+    rpt = reconcile.reconcile_milestones(conn, md)
+    # Should be 1 insert (the H5 row), NOT 2 (description not treated as milestone)
+    assert rpt.inserted == 1
+    row = conn.execute(
+        "SELECT description FROM milestones WHERE title='Our trip'"
+    ).fetchone()
+    assert row is not None
+    assert row["description"] == "This is the description line"
+    conn.close()
+
+
+# ── Task 2b: unanchored single-bracket Me row → insert with today ─────────────
+
+_SINGLE_BRACKET_MD = """\
+<!-- marrow:milestone:start -->
+
+## Us
+
+## Me
+
+##### [My childhood label]
+
+<!-- marrow:milestone:end -->
+"""
+
+
+def test_single_bracket_unanchored_me_inserts(tmp_path):
+    """Unanchored ##### [label] under ## Me → INSERT with today's date."""
+    conn, db = _fresh_conn(tmp_path)
+    md = tmp_path / "milestone.md"
+    md.write_text(_SINGLE_BRACKET_MD, encoding="utf-8")
+    rpt = reconcile.reconcile_milestones(conn, md)
+    assert rpt.inserted == 1
+    row = conn.execute(
+        "SELECT scope, date, title FROM milestones WHERE title='My childhood label'"
+    ).fetchone()
+    assert row is not None
+    assert row["scope"] == "me"
+    assert row["date"] == _MELB_DATE
+    conn.close()
+
+
+def test_single_bracket_anchored_date_inherited(tmp_path):
+    """Anchored single-bracket Me row (with id) keeps DB date unchanged."""
+    conn, db = _fresh_conn(tmp_path)
+    with conn:
+        cur = conn.execute(
+            "INSERT INTO milestones(scope,date,title,pinned) "
+            "VALUES('me','1995','Age 0-10 | Shanghai',1)"
+        )
+        rid = cur.lastrowid
+    md_text = f"""\
+<!-- marrow:milestone:start -->
+
+## Us
+
+## Me
+
+##### [Age 0-10 | Shanghai] <!-- id:{rid} -->
+
+<!-- marrow:milestone:end -->
+"""
+    md = tmp_path / "milestone.md"
+    md.write_text(md_text, encoding="utf-8")
+    rpt = reconcile.reconcile_milestones(conn, md)
+    assert rpt.inserted == 0
+    row = conn.execute(
+        "SELECT date FROM milestones WHERE id=?", (rid,)
+    ).fetchone()
+    assert row["date"] == "1995"
+    conn.close()
+
+
+# ── Task 3: reconcile conflicts surfaced as alerts ────────────────────────────
+
+def test_conflict_produces_alert(tmp_path):
+    """Anchored id not in DB → one alert row created."""
+    conn, db = _fresh_conn(tmp_path)
+    md = tmp_path / "milestone.md"
+    md.write_text(
+        "<!-- marrow:milestone:start -->\n"
+        "## Us\n\n"
+        "##### [2026-01-01] Ghost row <!-- id:9999 -->\n\n"
+        "<!-- marrow:milestone:end -->\n",
+        encoding="utf-8",
+    )
+    rpt = reconcile.reconcile_milestones(conn, md)
+    assert rpt.conflicts
+    # emit_conflict_alerts needs a db path — call directly
+    reconcile.emit_conflict_alerts(rpt, "test:milestone", db=db)
+    rows = conn.execute(
+        "SELECT type, fingerprint, hit_count FROM alerts WHERE resolved=0"
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["type"] == "reconcile_conflict"
+    assert "9999" in rows[0]["fingerprint"]
+    conn.close()
+
+
+def test_conflict_repeat_bumps_hit_count(tmp_path):
+    """Repeated reconcile + emit bumps hit_count, not row count."""
+    conn, db = _fresh_conn(tmp_path)
+    md = tmp_path / "milestone.md"
+    md.write_text(
+        "<!-- marrow:milestone:start -->\n"
+        "## Us\n\n"
+        "##### [2026-01-01] Ghost row <!-- id:9999 -->\n\n"
+        "<!-- marrow:milestone:end -->\n",
+        encoding="utf-8",
+    )
+    for _ in range(3):
+        rpt = reconcile.reconcile_milestones(conn, md)
+        reconcile.emit_conflict_alerts(rpt, "test:milestone", db=db)
+    rows = conn.execute(
+        "SELECT hit_count FROM alerts WHERE type='reconcile_conflict' AND resolved=0"
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["hit_count"] == 3
+    conn.close()

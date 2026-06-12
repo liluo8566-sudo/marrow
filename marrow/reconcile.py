@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ._atomic import atomic_write as _atomic_write
+from .timeutil import _MELB as _MELB_TZ
 
 
 MILESTONE_KEY = "milestone"
@@ -42,6 +43,12 @@ _H5_RE = re.compile(
 )
 _H5_AGE_RE = re.compile(r"^##### \[(?P<title>.+?)\]\s*$")
 _ID_RE = re.compile(r"<!-- id:(?P<id>\d+) -->")
+
+
+def _today_melb() -> str:
+    """Return today's date as YYYY-MM-DD in Melbourne local time."""
+    import datetime
+    return datetime.datetime.now(datetime.timezone.utc).astimezone(_MELB_TZ).strftime("%Y-%m-%d")
 
 
 @dataclass
@@ -154,6 +161,27 @@ def _parse(md_text: str) -> list[dict]:
             continue
         if cur is not None and s:
             body.append(s)
+            continue
+        # Bare text line (non-empty, not `- ` prefixed, not H5) while cur is
+        # None inside a section → treat as new milestone typed by Lumi without
+        # using H5 format. date = today (Melbourne local), pinned = 1.
+        # _bare_line=True signals write-back to replace the whole line with
+        # the canonical H5 form instead of just appending an anchor.
+        # Skip lines that carry an existing `<!-- id:N -->` anchor — those are
+        # orphaned description lines from a deleted H5 block, not new titles.
+        if cur is None and section is not None and s and not _ID_RE.search(s):
+            cur = {
+                "scope": section,
+                "date": _today_melb(),
+                "title": s.strip(),
+                "theme": None,
+                "pinned": 1,
+                "description": None,
+                "id": None,
+                "_heading_line": lineno,
+                "_bare_line": True,
+            }
+            flush()
     flush()
     return rows
 
@@ -175,6 +203,31 @@ def _audit(conn, mid: int | str, action: str, summary: str) -> None:
         "VALUES ('milestones', ?, ?, ?)",
         (str(mid), action, summary),
     )
+
+
+def emit_conflict_alerts(rpt: ReconcileReport, source_name: str,
+                          db: str | None = None) -> None:
+    """Emit one warn alert per conflict in rpt.conflicts. Fail-soft — alert
+    emission must never raise. Dedup via (type, fingerprint, resolved=0)
+    so repeated reconcile rounds bump hit_count instead of flooding.
+    """
+    if not rpt.conflicts:
+        return
+    try:
+        from . import repo as _repo
+        for conflict in rpt.conflicts:
+            try:
+                _repo.add_alert(
+                    "warn", "reconcile_conflict",
+                    fingerprint=conflict,
+                    source=source_name,
+                    message=f"{source_name}: {conflict}",
+                    db=db,
+                )
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 def reconcile_milestones(conn: sqlite3.Connection,
@@ -209,8 +262,10 @@ def reconcile_milestones(conn: sqlite3.Connection,
     }
 
     seen: set[int] = set()
-    # (heading_line_index, new_id) pairs to splice into md after INSERT lands.
-    line_anchor_writes: list[tuple[int, int]] = []
+    # (heading_line_index, new_id, bare_line) triples to splice into md after
+    # INSERT lands. bare_line=True means the source line was plain text (not
+    # H5) and needs a full-line replacement to canonical H5 form.
+    line_anchor_writes: list[tuple[int, int, bool]] = []
 
     with conn:
         # inserts + updates
@@ -253,14 +308,10 @@ def reconcile_milestones(conn: sqlite3.Connection,
                 )
             else:
                 if row["date"] is None:
-                    # Unanchored single-bracket Me row carries no date.
-                    # We can't synthesise one; report conflict so Lumi can
-                    # rewrite the heading with a date or restore the anchor.
-                    rpt.conflicts.append(
-                        f"single-bracket row needs date or id anchor: "
-                        f"{row['title'][:40]}"
-                    )
-                    continue
+                    # Unanchored single-bracket Me row (##### [label]) carries
+                    # no date and no anchor. Insert with today's Melbourne date
+                    # and write anchor back — same path as bare-text inserts.
+                    row["date"] = _today_melb()
                 # Safety net: exact-match dedup. Prevents runaway loop if the
                 # md anchor-write fails for any reason (file lock, perm, race).
                 existing = conn.execute(
@@ -287,7 +338,9 @@ def reconcile_milestones(conn: sqlite3.Connection,
                 # sees the row as present in md (prevents dup canonical block).
                 hl = row.get("_heading_line")
                 if hl is not None:
-                    line_anchor_writes.append((hl, new_id))
+                    line_anchor_writes.append(
+                        (hl, new_id, bool(row.get("_bare_line")))
+                    )
                 seen.add(new_id)
 
         # deletes: db rows whose ids are not present in md
@@ -306,15 +359,30 @@ def reconcile_milestones(conn: sqlite3.Connection,
     # Splice new ids back into the user's heading lines (idempotent: skip if
     # the line already carries any `<!-- id:N -->` anchor). Atomic write keeps
     # the watcher from racing on a half-written file.
+    # bare_line=True: replace the whole line with canonical H5 form.
+    # bare_line=False: append anchor to existing H5 heading line.
     if line_anchor_writes:
+        # Build a lookup of (row.date, row.title) -> row for bare-line rewrites.
+        _row_by_hl = {r["_heading_line"]: r for r in md_rows if r.get("_heading_line") is not None}
         changed = False
-        for hl, new_id in line_anchor_writes:
+        for hl, new_id, bare in line_anchor_writes:
             if hl < 0 or hl >= len(md_lines):
                 continue
             line = md_lines[hl]
             if _ID_RE.search(line):
                 continue
-            md_lines[hl] = line.rstrip() + f" <!-- id:{new_id} -->"
+            if bare:
+                # Full-line replacement: rewrite bare text as canonical H5.
+                row = _row_by_hl.get(hl)
+                if row is not None:
+                    md_lines[hl] = (
+                        f"##### [{row['date']}] {row['title']}"
+                        f" <!-- id:{new_id} -->"
+                    )
+                else:
+                    md_lines[hl] = line.rstrip() + f" <!-- id:{new_id} -->"
+            else:
+                md_lines[hl] = line.rstrip() + f" <!-- id:{new_id} -->"
             changed = True
         if changed:
             trailing_nl = "\n" if md_text.endswith("\n") else ""
@@ -538,7 +606,7 @@ _TASK_ROW_NOID_RE = re.compile(
 _TASK_CATEGORIES = ("Study", "Project", "Appointment", "Daily", "Others")
 # Allow any non-ws text in tag — render emits Title/None-fallback Others so it
 # may carry spaces in user-renamed categories. The first `]` ends the tag.
-_TAG_PREFIX_RE = re.compile(r"^\[(?P<tag>[^\]]+)\]\s+(?P<rest>.*)$")
+_TAG_PREFIX_RE = re.compile(r"^\[(?P<tag>[^\]]+)\]\s*(?P<rest>.*)$")
 _TRAILING_DATE_RE = re.compile(r"^(?P<rest>.*?)\s+\[(?P<date>[^\]]+)\]\s*$")
 _TASK_TRAIL_RE = re.compile(
     r"<!-- cand:task:ids=\[(?P<ids>[^\]]*)\] -->"
