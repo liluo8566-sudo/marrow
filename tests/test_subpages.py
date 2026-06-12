@@ -35,8 +35,6 @@ def db(tmp_path):
                      "VALUES('me','2026-03-01','Head of school award',1)")
         conn.execute("INSERT INTO memes(type,key,value,context,use_count) "
                      "VALUES('cipher','大龙虾','Openclaw','popular AI agent',5)")
-        conn.execute("INSERT INTO goose_bites(date,bites,best) "
-                     "VALUES('2026-05-20','quack quack',1)")
         conn.execute("INSERT INTO tasks(category,title,status,due,next_step) "
                      "VALUES('study','Biochem:Unit 3','active','2026-06-01','read ch5')")
         conn.execute("INSERT INTO tasks(category,title,status,next_step) "
@@ -145,51 +143,6 @@ def test_render_memes_structured_anchor(db):
     finally:
         conn.close()
     assert f"<!-- id:{row['id']} -->" in block
-
-
-# ---------------------------------------------------------------------------
-# Goose-bites (flat list, one best quote per day)
-# ---------------------------------------------------------------------------
-
-def test_render_goose_flat_list(db):
-    conn = storage.connect(db)
-    try:
-        block = subpages.render_goose(conn)
-    finally:
-        conn.close()
-    assert "- [2026-05-20]quack quack" in block
-    assert "<!-- marrow:goose:start -->" in block
-    # Year + month-name headings group the bullets; no per-day H2.
-    assert "## 2026" in block
-    assert "### May" in block
-    assert "## 2026-05-20" not in block
-
-
-def test_render_goose_no_structured_anchor(db):
-    conn = storage.connect(db)
-    try:
-        block = subpages.render_goose(conn)
-    finally:
-        conn.close()
-    assert "<!-- id:" not in block
-
-
-def test_render_goose_legacy_multiline_takes_first_line(tmp_path):
-    """Legacy multiline bites: only first non-empty line rendered."""
-    from marrow import storage as _storage
-    p = str(tmp_path / "g.db")
-    conn = _storage.init_db(p)
-    with conn:
-        conn.execute(
-            "INSERT INTO goose_bites (date, bites, best) VALUES ('2026-05-01', ?, 0)",
-            ("line one\nline two",),
-        )
-    try:
-        block = subpages.render_goose(conn)
-    finally:
-        conn.close()
-    assert "- [2026-05-01]line one" in block
-    assert "line two" not in block
 
 
 # ---------------------------------------------------------------------------
@@ -373,7 +326,7 @@ def test_build_all_configs_returns_expected_keys(db, tmp_path):
     assert "diary" in keys
     assert "milestone" in keys
     assert "memes" in keys
-    assert "goose" in keys
+    assert "goose" not in keys
     assert "cheatsheet" in keys
     assert "study" in keys
     assert "projects" in keys
@@ -390,7 +343,7 @@ def test_write_all_subpages_creates_files(db, tmp_path):
     finally:
         conn.close()
     for name in ("diary.md", "milestone.md", "memes.md",
-                  "goose-bites.md", "cheatsheet.md", "study.md", "projects.md",
+                  "cheatsheet.md", "study.md", "projects.md",
                   "profile.md", "stickers.md", "wallet.md"):
         assert (Path(folder) / name).exists(), f"Missing {name}"
     # pit.md no longer auto-created; mw export-pit writes it on demand.

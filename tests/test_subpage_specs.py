@@ -31,8 +31,6 @@ def db(tmp_path):
                      " VALUES('paw','大龙虾','Openclaw','popular',5)")
         conn.execute("INSERT INTO memes(type,key,value)"
                      " VALUES('meme','rickroll','GG')")
-        conn.execute("INSERT INTO goose_bites(date,bites,best)"
-                     " VALUES('2026-05-20','quack quack',1)")
         conn.execute("INSERT INTO tasks(category,title,status,next_step)"
                      " VALUES('project','Marrow','active','build subpages')")
         conn.execute("INSERT INTO tasks(category,title,status)"
@@ -129,20 +127,6 @@ def test_memes_bootstrap_divider_between_types(db, tmp_path):
     assert personal_block.count("---") == 1
 
 
-# ── goose ──────────────────────────────────────────────────────────────────
-
-
-def test_goose_bootstrap_uses_year_section_and_row_id(db, tmp_path):
-    spec = subpage_specs.build_goose_spec(str(tmp_path / "ny"))
-    counts = _run(spec, db)
-    text = Path(spec.path).read_text()
-    assert "## 2026" in text
-    assert "quack quack" in text
-    # block_id is the DB row id, not the date (multiple bites per day possible).
-    assert "<!-- id:1 -->" in text
-    assert counts["bootstrapped"] == 1
-
-
 # ── projects index ─────────────────────────────────────────────────────────
 
 
@@ -204,8 +188,9 @@ def test_wallet_bootstrap_emits_empty_placeholder(db, tmp_path):
 def test_registry_covers_expected_subpages():
     keys = set(subpage_specs.SPEC_BUILDERS)
     expected = {"profile", "milestone", "diary", "memes",
-                "stickers", "wallet", "goose", "projects", "study"}
+                "stickers", "wallet", "projects", "study"}
     assert expected.issubset(keys)
+    assert "goose" not in keys
     # Cheatsheet stays disk-driven; not in the registry.
     assert "cheatsheet" not in keys
 
