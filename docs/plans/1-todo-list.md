@@ -45,14 +45,18 @@
 ---
 ## Audit items (MAP review)
 
-### 1. Subpage 双向 reconcile — 剩 6 个 render-only (merged from 2Subpage-reconcile.md)
-- ⚑ 前置决策未拍: 前端走 db CRUD → reconcile 整条路作废全砍; 前端走 md → 按下表补。先拍这个再动工。
-- Done: milestones · milestone_candidates · tasks (tick→archive works, reconcile.py:737) · affect · memes · profile · alerts · atlas (hash-diff guard atlas.py:395 — 打字被吞 bug 已修)
-- 剩 render-only (spec 在 subpage_specs.py): diary:141 · stickers:224 · wallet:261 · projects_index:325 · study_index:366
-- 不补: cheatsheet (read-only, hand-edit preserved) · dir_tree (atlas 替代) · projects/<name>.md (走 reconcile_tasks)
-- 模式: 抄 reconcile_milestones (reconcile.py:162) — id anchor parse、diff vs DB、INSERT/UPDATE/DELETE + audit_log
+### 1. Subpage 双向 reconcile — md route locked (Lumi 0613)
+- Decision: frontend stays md; reconcile fills gaps. (db-CRUD alternative dropped)
+- Wired (subpages.py:311-340 + dashboard.py:149-191): milestones · milestone_candidates · tasks · affect · alerts · timeline (edit-only) · atlas · memes · profile · diary (block scanner, reconcile_inserter.py:261) · stickers · wallet (table not shipped, fetch=[])
+- Shipped 0613: task tag no-space CJK fix · milestone bare-text/me insert · conflicts→add_alert (emit_conflict_alerts) · memes/profile/diary unanchored INSERT · timeline add (`+ [HH:MM] text` → manual event, backdating) / delete (trail diff → tl_hidden / event DELETE) · storage v18. Live-verified round-trip 0613 01:20.
+- 不补: cheatsheet (read-only) · dir_tree (atlas 替代) · projects/study index (redesign below)
 - 遗留 bug: milestone 剪贴 id 短暂消失即 dead — 要 "消失 X 分钟内可复活, 超时才 dead"
-- Acceptance: dashboard 改 meme pin → save → sync tick → DB pin 变 + render 重发
+
+### 1b. Projects / Study redesign (Lumi 0613 — parked, not started)
+- Current specs (subpage_specs.py:367-442) source from tasks — WRONG, no relation to tasks; replace wholesale when built.
+- Index = auto-updating directory: one line per project (name · status · date · one-sentence intro), rows go to DB + vector recall.
+- Subpage = maintenance notes (traps, followups, care info invisible from code — e.g. buddy, weclaude); plain reference page, grep/read only, NOT embedded.
+- Study: one page per unit.
 
 ### 2. Alert types 待加 (§8 重写 done 48862fd; 以下未核验逐条状态)
 - persistent process health (critical) — watcher 死 + MCP daemon 死

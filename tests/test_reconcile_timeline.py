@@ -356,6 +356,26 @@ def test_add_plus_line_with_time_inserts_event(conn, dash_path):
     assert melb_ts.minute == 30
 
 
+def test_add_plus_line_future_time_rolls_back_one_day(conn, dash_path):
+    """Backdating: a future-resolving HH:MM means the previous day."""
+    import datetime as _dt
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo("Australia/Melbourne")
+    now_melb = _dt.datetime.now(tz)
+    future = now_melb + _dt.timedelta(hours=1)
+    hhmm = future.strftime("%H:%M")
+    dash_path.write_text(f"## Timeline\n+ {hhmm} 补记昨晚的事")
+    reconcile_timeline(conn, dash_path)
+    row = conn.execute(
+        "SELECT timestamp FROM events WHERE channel='manual'"
+    ).fetchone()
+    assert row is not None
+    ts = _dt.datetime.fromisoformat(row["timestamp"].replace("Z", "+00:00"))
+    assert ts <= _dt.datetime.now(_dt.timezone.utc)
+    melb_ts = ts.astimezone(tz)
+    assert (melb_ts.hour, melb_ts.minute) == (future.hour, future.minute)
+
+
 def test_add_plus_line_without_time_uses_now(conn, dash_path):
     import datetime as _dt
     # _now() truncates to seconds; truncate before/after to match

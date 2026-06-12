@@ -1662,6 +1662,11 @@ def reconcile_timeline(conn: sqlite3.Connection,
                     continue
                 now_melb = _dt.datetime.now(_TZ_MELB)
                 ts_melb = now_melb.replace(hour=h, minute=mi, second=0, microsecond=0)
+                # Backdating semantics: a note is always about the past. A
+                # future-resolving HH:MM means the previous day (e.g. `+ 23:00`
+                # written at 09:00 = last night), so roll back 24h.
+                if ts_melb > now_melb:
+                    ts_melb -= _dt.timedelta(days=1)
                 ts_utc = ts_melb.astimezone(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             else:
                 ts_utc = _now()
