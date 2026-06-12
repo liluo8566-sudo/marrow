@@ -52,6 +52,24 @@ def _scan_anchored_ids(md_text: str) -> set[int]:
     return {int(m.group(1)) for m in _ANCHOR_RE.finditer(md_text)}
 
 
+def _marker_bounds(md_lines: list[str], key: str) -> tuple[int, int]:
+    """Line-index window inside `<!-- marrow:<key>:start/end -->` markers.
+
+    Missing start → 0; missing end → len(md_lines) (legacy / test fixtures).
+    Scanners must ignore lines outside — stray content beyond the end marker
+    must never reconcile (0613: a duplicate date block after the end marker
+    parsed as empty body and wiped the real row's content).
+    """
+    lo, hi = 0, len(md_lines)
+    for i, line in enumerate(md_lines):
+        if f"<!-- marrow:{key}:start -->" in line:
+            lo = i + 1
+        elif f"<!-- marrow:{key}:end -->" in line:
+            hi = i
+            break
+    return lo, hi
+
+
 def _audit(conn: sqlite3.Connection, table: str, row_id: str,
            action: str, summary: str) -> None:
     conn.execute(
@@ -107,7 +125,9 @@ def _insert_diary_blocks(
         cur_body = []
         cur_has_anchor = False
 
-    for idx, line in enumerate(md_lines):
+    lo, hi = _marker_bounds(md_lines, "diary")
+    for idx in range(lo, hi):
+        line = md_lines[idx]
         if _MARROW_RE.search(line):
             _flush_block()
             continue
@@ -406,7 +426,9 @@ def _insert_memes(
     candidates: list[tuple[int, dict]] = []
     cur_section: str | None = None
 
-    for idx, line in enumerate(md_lines):
+    _lo, _hi = _marker_bounds(md_lines, "memes")
+    for idx in range(_lo, _hi):
+        line = md_lines[idx]
         stripped = line.strip()
         if not stripped:
             continue
@@ -425,6 +447,26 @@ def _insert_memes(
         # None for bare hand-typed lines.
         m = _MEME_UNANCHORED_RE.match(stripped)
         if not m:
+            # Bare hand-typed bullet: `- some text`. Full row shape is the
+            # renderer's job — the whole text becomes the meme key, type
+            # defaults from the section.
+            if not stripped.startswith("- "):
+                continue
+            bare = stripped[2:].strip()
+            if not bare:
+                continue
+            if cur_section not in _valid_sections:
+                rpt.conflicts.append(
+                    f"memes insert: unmappable section '{cur_section}' — {line[:60]}"
+                )
+                continue
+            default_type = "fact" if cur_section == "Personal" else "others"
+            candidates.append((idx, {
+                "type": default_type,
+                "key": bare,
+                "value": None,
+                "context": None,
+            }))
             continue
         parsed = {
             "type": m.group("type").strip(),
@@ -522,6 +564,7 @@ def _insert_profile(
     _section_to_kind: dict[str, str] = {
         "Person": "person",
         "Pref": "pref",
+        "Preference": "pref",
         "Place": "place",
     }
 
@@ -540,7 +583,9 @@ def _insert_profile(
     candidates: list[tuple[int, dict, str]] = []  # (idx, parsed, kind)
     cur_section: str | None = None
 
-    for idx, line in enumerate(md_lines):
+    _lo, _hi = _marker_bounds(md_lines, "profile")
+    for idx in range(_lo, _hi):
+        line = md_lines[idx]
         stripped = line.strip()
         if not stripped:
             continue
@@ -554,13 +599,25 @@ def _insert_profile(
             continue
         # Use unanchored regex — spec.parse_row requires the anchor.
         m = _PROFILE_UNANCHORED_RE.match(stripped)
-        if not m:
+        if m:
+            parsed = {
+                "kind": m.group("kind").strip(),
+                "name": m.group("name").strip(),
+                "fact": (m.group("fact") or "").strip() or None,
+            }
+        elif stripped.startswith("- "):
+            # Bare hand-typed bullet: `- name — fact` or `- name`.
+            bare = stripped[2:].strip()
+            if not bare:
+                continue
+            if " — " in bare:
+                bname, _, bfact = bare.partition(" — ")
+                parsed = {"kind": "", "name": bname.strip(),
+                          "fact": bfact.strip() or None}
+            else:
+                parsed = {"kind": "", "name": bare, "fact": None}
+        else:
             continue
-        parsed = {
-            "kind": m.group("kind").strip(),
-            "name": m.group("name").strip(),
-            "fact": (m.group("fact") or "").strip() or None,
-        }
         kind = _section_to_kind.get(cur_section or "")
         if kind is None:
             rpt.conflicts.append(
@@ -673,12 +730,16 @@ def reconcile_diary(conn: sqlite3.Connection,
     # existing anchors can still receive inserts.
     _insert_diary_blocks(conn, md_path, rpt)
 
-    # Reload md_text after potential anchor write-back.
+    # Reload md_text after potential anchor write-back. Scan only inside the
+    # marrow markers — stray blocks beyond them must never reconcile.
     md_text = md_path.read_text(encoding="utf-8")
+    _all_lines = md_text.splitlines()
+    _lo, _hi = _marker_bounds(_all_lines, "diary")
+    bounded_text = "\n".join(_all_lines[_lo:_hi])
 
-    # Collect all date anchors present in md.
+    # Collect all date anchors present in md (bounded).
     _DATE_ANCHOR_RE = re.compile(r"<!-- id:(\d{4}-\d{2}-\d{2}) -->")
-    md_dates = {m.group(1) for m in _DATE_ANCHOR_RE.finditer(md_text)}
+    md_dates = {m.group(1) for m in _DATE_ANCHOR_RE.finditer(bounded_text)}
     if not md_dates:
         return rpt  # empty-file guard (no anchors even after insert pass)
 
@@ -693,9 +754,14 @@ def reconcile_diary(conn: sqlite3.Connection,
     def _flush():
         if cur_date is not None:
             body = "\n".join(body_lines).strip()
-            blocks[cur_date] = body
+            if cur_date in blocks:
+                # Duplicate date block — keep the first, never overwrite
+                # (an empty-bodied duplicate would wipe the real content).
+                rpt.conflicts.append(f"diary: duplicate block #### {cur_date}")
+            else:
+                blocks[cur_date] = body
 
-    for line in md_text.splitlines():
+    for line in bounded_text.splitlines():
         # Stop collecting at any marrow marker line.
         if "<!-- marrow:" in line:
             _flush()

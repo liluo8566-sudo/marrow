@@ -133,8 +133,10 @@ def build_milestone_spec(folder: str) -> InserterSpec:
     def render(r: dict) -> str:
         title = r["title"] or "(untitled)"
         date = (r["date"] or "").strip()
+        # Me life-phase rows (year-only date) render label-only — the year
+        # lives in DB. ("Age " prefix was the old gate; real titles are CN.)
         is_age = (len(date) == 4 and date.isdigit()
-                  and title.startswith("Age "))
+                  and r.get("scope") == "me")
         head = f"##### [{title}]" if is_age else f"##### [{date}] {title}"
         desc = (r["description"] or "").strip()
         anchor = _anchor(r["id"])

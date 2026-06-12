@@ -843,3 +843,187 @@ def test_diary_insert_anchor_position(tmp_path):
 
     heading_idx = next(i for i, l in enumerate(lines) if l.startswith("#### 2026-04-01"))
     assert lines[heading_idx + 1] == "<!-- id:2026-04-01 -->"
+
+
+# ── bare-text (no row shape) inserts ─────────────────────────────────────────
+
+def test_memes_insert_bare_text_personal(tmp_path):
+    """Plain `- text` bullet under Personal → fact meme keyed on whole text."""
+    db_path = _db(tmp_path)
+    conn = _conn(db_path)
+    md = tmp_path / "memes.md"
+    md.write_text("## Personal\n- 鸭子是个大笨蛋\n", encoding="utf-8")
+
+    rpt = reconcile_memes(conn, md)
+    row = conn.execute(
+        "SELECT type, key, value, pinned FROM memes WHERE key='鸭子是个大笨蛋'"
+    ).fetchone()
+    md_text = md.read_text()
+    conn.close()
+
+    assert rpt.inserted == 1
+    assert row is not None
+    assert row["type"] == "fact"
+    assert row["value"] is None
+    assert row["pinned"] == 1
+    assert "<!-- id:" in md_text
+
+
+def test_memes_insert_bare_text_public(tmp_path):
+    """Plain bullet under Public → type defaults to 'others'."""
+    db_path = _db(tmp_path)
+    conn = _conn(db_path)
+    md = tmp_path / "memes.md"
+    md.write_text("## Public\n- 内卷\n", encoding="utf-8")
+
+    rpt = reconcile_memes(conn, md)
+    row = conn.execute(
+        "SELECT type FROM memes WHERE key='内卷'"
+    ).fetchone()
+    conn.close()
+
+    assert rpt.inserted == 1
+    assert row["type"] == "others"
+
+
+def test_profile_insert_bare_text_preference(tmp_path):
+    """Plain bullet under ## Preference → kind=pref, whole text as name."""
+    db_path = _db(tmp_path)
+    conn = _conn(db_path)
+    md = tmp_path / "profile.md"
+    md.write_text("## Preference\n- 爱吃榴莲\n", encoding="utf-8")
+
+    rpt = reconcile_profile(conn, md)
+    row = conn.execute(
+        "SELECT kind, name, fact FROM entities WHERE name='爱吃榴莲'"
+    ).fetchone()
+    md_text = md.read_text()
+    conn.close()
+
+    assert rpt.inserted == 1
+    assert row is not None
+    assert row["kind"] == "pref"
+    assert row["fact"] is None
+    assert "<!-- id:" in md_text
+
+
+def test_profile_insert_bare_text_em_dash_split(tmp_path):
+    """`- name — fact` bare bullet splits into name + fact."""
+    db_path = _db(tmp_path)
+    conn = _conn(db_path)
+    md = tmp_path / "profile.md"
+    md.write_text("## Person\n- 小王 — 同事，人很好\n", encoding="utf-8")
+
+    rpt = reconcile_profile(conn, md)
+    row = conn.execute(
+        "SELECT kind, name, fact FROM entities WHERE name='小王'"
+    ).fetchone()
+    conn.close()
+
+    assert rpt.inserted == 1
+    assert row["kind"] == "person"
+    assert row["fact"] == "同事，人很好"
+
+
+def test_profile_insert_full_shape_under_preference(tmp_path):
+    """Regression: full-shape row under real-page heading ## Preference maps
+    to kind=pref (mapping previously only knew ## Pref)."""
+    db_path = _db(tmp_path)
+    conn = _conn(db_path)
+    md = tmp_path / "profile.md"
+    md.write_text(
+        "## Preference\n- [pref] **奶茶** — 三分糖去冰\n", encoding="utf-8"
+    )
+
+    rpt = reconcile_profile(conn, md)
+    row = conn.execute(
+        "SELECT kind, fact FROM entities WHERE name='奶茶'"
+    ).fetchone()
+    conn.close()
+
+    assert rpt.inserted == 1
+    assert row["kind"] == "pref"
+    assert row["fact"] == "三分糖去冰"
+
+
+def test_diary_stray_block_outside_markers_never_wipes(tmp_path):
+    """0613 incident: duplicate date block AFTER the end marker (no anchor,
+    empty-parsed body) must not overwrite the real row's content."""
+    db_path = _db(tmp_path)
+    conn = _conn(db_path)
+    conn.execute(
+        "INSERT INTO diary (date, content) VALUES ('2026-06-10', '真实日记内容')"
+    )
+    conn.commit()
+    md = tmp_path / "diary.md"
+    md.write_text(
+        "<!-- marrow:diary:start -->\n"
+        "#### 2026-06-10\n"
+        "<!-- id:2026-06-10 -->\n"
+        "\n真实日记内容\n"
+        "<!-- marrow:diary:end -->\n"
+        "\n#### 2026-06-10\n奇怪的尾巴块\n",
+        encoding="utf-8",
+    )
+
+    rpt = reconcile_diary(conn, md)
+    row = conn.execute(
+        "SELECT content FROM diary WHERE date='2026-06-10'"
+    ).fetchone()
+    conn.close()
+
+    assert row["content"] == "真实日记内容"
+    assert rpt.updated == 0
+
+
+def test_diary_duplicate_block_inside_markers_conflict(tmp_path):
+    """Duplicate date block inside markers → first wins + conflict reported."""
+    db_path = _db(tmp_path)
+    conn = _conn(db_path)
+    conn.execute(
+        "INSERT INTO diary (date, content) VALUES ('2026-06-09', '原文')"
+    )
+    conn.commit()
+    md = tmp_path / "diary.md"
+    md.write_text(
+        "<!-- marrow:diary:start -->\n"
+        "#### 2026-06-09\n"
+        "<!-- id:2026-06-09 -->\n"
+        "\n原文\n"
+        "#### 2026-06-09\n"
+        "<!-- id:2026-06-09 -->\n"
+        "\n重复块\n"
+        "<!-- marrow:diary:end -->\n",
+        encoding="utf-8",
+    )
+
+    rpt = reconcile_diary(conn, md)
+    row = conn.execute(
+        "SELECT content FROM diary WHERE date='2026-06-09'"
+    ).fetchone()
+    conn.close()
+
+    assert row["content"] == "原文"
+    assert any("duplicate" in c for c in rpt.conflicts)
+
+
+def test_memes_insert_ignores_lines_outside_markers(tmp_path):
+    """Bare bullets beyond the end marker are not ingested."""
+    db_path = _db(tmp_path)
+    conn = _conn(db_path)
+    md = tmp_path / "memes.md"
+    md.write_text(
+        "<!-- marrow:memes:start -->\n"
+        "## Personal\n"
+        "- 圈内的梗\n"
+        "<!-- marrow:memes:end -->\n"
+        "- 圈外的野生行\n",
+        encoding="utf-8",
+    )
+
+    rpt = reconcile_memes(conn, md)
+    rows = [r["key"] for r in conn.execute("SELECT key FROM memes").fetchall()]
+    conn.close()
+
+    assert rpt.inserted == 1
+    assert rows == ["圈内的梗"]
