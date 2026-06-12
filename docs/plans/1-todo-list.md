@@ -45,11 +45,9 @@
 ---
 ## Audit items (MAP review)
 
-### 1. Subpage 双向 reconcile — md route locked (Lumi 0613)
-- Decision: frontend stays md; reconcile fills gaps. (db-CRUD alternative dropped)
-- Wired (subpages.py:311-340 + dashboard.py:149-191): milestones · milestone_candidates · tasks · affect · alerts · timeline (edit-only) · atlas · memes · profile · diary (block scanner, reconcile_inserter.py:261) · stickers · wallet (table not shipped, fetch=[])
-- Shipped 0613: task tag no-space CJK fix · milestone bare-text/me insert · conflicts→add_alert (emit_conflict_alerts) · memes/profile/diary unanchored INSERT · timeline add (`+ [HH:MM] text` → manual event, backdating) / delete (trail diff → tl_hidden / event DELETE) · storage v18. Live-verified round-trip 0613 01:20.
+### 1. Subpage 双向 reconcile — md route locked (Lumi 0613); full CRUD live, see MAP §3/§6
 - 不补: cheatsheet (read-only) · dir_tree (atlas 替代) · projects/study index (redesign below)
+- Remaining: timeline anchor-less lines (AM/PM/ND · Week · casual non-first) edits don't sync — add anchors (batch 3)
 - 遗留 bug: milestone 剪贴 id 短暂消失即 dead — 要 "消失 X 分钟内可复活, 超时才 dead"
 
 ### 1b. Projects / Study redesign (Lumi 0613 — parked, not started)
