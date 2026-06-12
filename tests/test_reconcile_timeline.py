@@ -287,3 +287,174 @@ def test_aff_episode_text_edit_survives(conn, tmp_path):
         "SELECT description FROM affect WHERE label='开心'"
     ).fetchone()
     assert row["description"] == "大项目过审了"
+
+
+# ── tl_hidden migration idempotent ───────────────────────────────────────────
+
+def test_migration_tl_hidden_columns(conn):
+    cols_sd = {r[1] for r in conn.execute("PRAGMA table_info(session_digests)")}
+    cols_d  = {r[1] for r in conn.execute("PRAGMA table_info(diary)")}
+    assert "tl_hidden" in cols_sd
+    assert "tl_hidden" in cols_d
+    import marrow.storage as _s
+    _s._migrate_to_v18(conn)  # must not raise
+
+
+def test_delete_sid_line_sets_hidden(conn, dash_path):
+    sid = "sid-del-1"
+    _insert_digest(conn, sid, tl="要删的TL")
+    dash_path.write_text(f"## Timeline\n_none_\n<!-- tl-rendered:s={sid} -->")
+    rpt = reconcile_timeline(conn, dash_path)
+    assert rpt.updated >= 1
+    row = conn.execute("SELECT tl_hidden FROM session_digests WHERE sid=?", (sid,)).fetchone()
+    assert row["tl_hidden"] == 1
+
+
+def test_delete_sid_hidden_excludes_from_render(conn):
+    from marrow import timeline
+    import datetime as _dt
+    ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    conn.execute(
+        "INSERT INTO session_digests (sid, date, ts, text, kind, tl_line, tl_hidden)"
+        " VALUES (?, ?, ?, 'body', 'casual', '隐藏TL', 1)",
+        ("sid-hidden", ts[:10], ts),
+    )
+    conn.commit()
+    result = timeline.render_timeline(conn)
+    assert "隐藏TL" not in result
+    assert "sid-hidden" not in result
+
+
+def test_delete_diary_line_sets_hidden(conn, dash_path):
+    date = "2026-06-01"
+    _insert_diary(conn, date, tl="日记TL")
+    dash_path.write_text(f"## Timeline\n_none_\n<!-- tl-rendered:d={date} -->")
+    rpt = reconcile_timeline(conn, dash_path)
+    assert rpt.updated >= 1
+    row = conn.execute("SELECT tl_hidden FROM diary WHERE date=?", (date,)).fetchone()
+    assert row["tl_hidden"] == 1
+
+
+def test_add_plus_line_with_time_inserts_event(conn, dash_path):
+    dash_path.write_text("## Timeline\n+ 14:30 下午喝了咖啡")
+    rpt = reconcile_timeline(conn, dash_path)
+    assert rpt.updated >= 1
+    row = conn.execute(
+        "SELECT id, content, channel, session_id, timestamp FROM events WHERE channel='manual'"
+    ).fetchone()
+    assert row is not None
+    assert row["content"] == "下午喝了咖啡"
+    assert row["channel"] == "manual"
+    assert row["session_id"].startswith("manual:")
+    assert "T" in row["timestamp"]
+    from zoneinfo import ZoneInfo
+    import datetime as _dt
+    tz = ZoneInfo("Australia/Melbourne")
+    ts = _dt.datetime.fromisoformat(row["timestamp"].replace("Z", "+00:00"))
+    melb_ts = ts.astimezone(tz)
+    assert melb_ts.hour == 14
+    assert melb_ts.minute == 30
+
+
+def test_add_plus_line_without_time_uses_now(conn, dash_path):
+    import datetime as _dt
+    before = _dt.datetime.now(_dt.timezone.utc)
+    dash_path.write_text("## Timeline\n+ 随手记录一句话")
+    reconcile_timeline(conn, dash_path)
+    row = conn.execute("SELECT timestamp FROM events WHERE channel='manual'").fetchone()
+    assert row is not None
+    ts = _dt.datetime.fromisoformat(row["timestamp"].replace("Z", "+00:00"))
+    after = _dt.datetime.now(_dt.timezone.utc)
+    assert before <= ts <= after
+
+
+def test_manual_event_appears_in_render(conn, dash_path):
+    from marrow import timeline
+    import datetime as _dt
+    ts_utc = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    conn.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, channel)"
+        " VALUES ('manual:aabbccdd', ?, 'user', '手动笔记测试', 'manual')",
+        (ts_utc,),
+    )
+    conn.commit()
+    eid = conn.execute("SELECT id FROM events WHERE channel='manual'").fetchone()["id"]
+    result = timeline.render_timeline(conn)
+    assert "手动笔记测试" in result
+    assert f"<!-- tl:e:{eid} -->" in result
+
+
+def test_edit_manual_event_updates_content(conn, dash_path):
+    import datetime as _dt
+    ts_utc = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    conn.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, channel)"
+        " VALUES ('manual:aabbccdd', ?, 'user', '原始内容', 'manual')",
+        (ts_utc,),
+    )
+    conn.commit()
+    eid = conn.execute("SELECT id FROM events WHERE channel='manual'").fetchone()["id"]
+    dash_path.write_text(f"## Timeline\n14:00 修改后的内容 <!-- tl:e:{eid} -->")
+    rpt = reconcile_timeline(conn, dash_path)
+    assert rpt.updated >= 1
+    row = conn.execute("SELECT content FROM events WHERE id=?", (eid,)).fetchone()
+    assert row["content"] == "修改后的内容"
+
+
+def test_delete_manual_event_line_removes_row(conn, dash_path):
+    import datetime as _dt
+    ts_utc = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    conn.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, channel)"
+        " VALUES ('manual:aabbccdd', ?, 'user', '要删的手动事件', 'manual')",
+        (ts_utc,),
+    )
+    conn.commit()
+    eid = conn.execute("SELECT id FROM events WHERE channel='manual'").fetchone()["id"]
+    dash_path.write_text(f"## Timeline\n_none_\n<!-- tl-rendered:e={eid} -->")
+    rpt = reconcile_timeline(conn, dash_path)
+    assert rpt.updated >= 1
+    row = conn.execute("SELECT id FROM events WHERE id=?", (eid,)).fetchone()
+    assert row is None
+
+
+def test_round_trip_no_reingest(conn, dash_path):
+    from marrow import timeline
+    import datetime as _dt
+    ts_utc = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    conn.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, channel)"
+        " VALUES ('manual:test0001', ?, 'user', '测试循环', 'manual')",
+        (ts_utc,),
+    )
+    conn.commit()
+    rendered = timeline.render_timeline(conn)
+    dash_path.write_text(rendered)
+    count_before = conn.execute("SELECT count(*) FROM events WHERE channel='manual'").fetchone()[0]
+    reconcile_timeline(conn, dash_path)
+    count_after = conn.execute("SELECT count(*) FROM events WHERE channel='manual'").fetchone()[0]
+    assert count_after == count_before
+
+
+def test_trail_marker_present_in_render(conn):
+    from marrow import timeline
+    import datetime as _dt
+    ts_utc = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    conn.execute(
+        "INSERT INTO session_digests (sid, date, ts, text, kind, tl_line)"
+        " VALUES ('sid-trail', ?, ?, 'body', 'casual', 'TL行')",
+        (ts_utc[:10], ts_utc),
+    )
+    conn.commit()
+    result = timeline.render_timeline(conn)
+    assert "<!-- tl-rendered:" in result
+    assert "sid-trail" in result
+
+
+def test_delete_without_trail_is_noop(conn, dash_path):
+    sid = "sid-legacy"
+    _insert_digest(conn, sid, tl="遗留TL")
+    dash_path.write_text("## Timeline\n_none_")
+    rpt = reconcile_timeline(conn, dash_path)
+    row = conn.execute("SELECT tl_hidden FROM session_digests WHERE sid=?", (sid,)).fetchone()
+    assert row["tl_hidden"] == 0
