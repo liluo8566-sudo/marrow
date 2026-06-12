@@ -783,6 +783,7 @@ _CJK_STOP_BIGRAMS = frozenset((
     "已经", "今天", "明天", "昨天", "现在", "什么", "怎么", "这样",
     "那样", "一下", "一个", "有点", "比较", "真的", "直接", "或者",
     "就是", "可能", "应该", "需要", "知道", "出现", "发现", "继续",
+    "希望", "一句", "句话",
 ))
 
 
@@ -814,6 +815,40 @@ def _expand_needles(text: str, cjk_min: int = 2, cjk_max: int = 4,
             for n in range(cjk_min, n_max + 1):
                 for i in range(len(run) - n + 1):
                     out.add(run[i:i + n])
+    return out
+
+
+def _filter_generic_cjk(needles: set[str]) -> set[str]:
+    """Drop generic CJK needles from a name/key/title needle set.
+
+    Rules:
+    - Non-CJK (pure ASCII or len-1): pass through unchanged.
+    - len 2: drop if in _CJK_STOP_BIGRAMS OR contains any char in _CJK_FUNC_CHARS.
+    - len 3-4: drop if ≥2 chars from _CJK_FUNC_CHARS OR any 2-char substring is
+      in _CJK_STOP_BIGRAMS.
+    - len >4 or len 1: keep.
+    """
+    out: set[str] = set()
+    for n in needles:
+        if n.isascii() or len(n) == 1:
+            out.add(n)
+            continue
+        if len(n) == 2:
+            if n in _CJK_STOP_BIGRAMS:
+                continue
+            if any(ch in _CJK_FUNC_CHARS for ch in n):
+                continue
+            out.add(n)
+        elif len(n) in (3, 4):
+            func_count = sum(1 for ch in n if ch in _CJK_FUNC_CHARS)
+            if func_count >= 2:
+                continue
+            bigrams = {n[i:i + 2] for i in range(len(n) - 1)}
+            if bigrams & _CJK_STOP_BIGRAMS:
+                continue
+            out.add(n)
+        else:
+            out.add(n)
     return out
 
 
@@ -850,13 +885,23 @@ def _body_needles(bodies: list[str]) -> list[set[str]]:
                 df[n] = df.get(n, 0) + 1
 
     def _keep(n: str) -> bool:
-        if n.isascii() or len(n) != 2:
+        if n.isascii():
             return True
-        if n in _CJK_STOP_BIGRAMS:
-            return False
-        if any(ch in _CJK_FUNC_CHARS for ch in n):
-            return False
-        return df.get(n, 0) < _BODY_DF_MAX
+        if len(n) == 2:
+            if n in _CJK_STOP_BIGRAMS:
+                return False
+            if any(ch in _CJK_FUNC_CHARS for ch in n):
+                return False
+            return df.get(n, 0) < _BODY_DF_MAX
+        if len(n) in (3, 4):
+            func_count = sum(1 for ch in n if ch in _CJK_FUNC_CHARS)
+            if func_count >= 2:
+                return False
+            bigrams = {n[i:i + 2] for i in range(len(n) - 1)}
+            if bigrams & _CJK_STOP_BIGRAMS:
+                return False
+            return True
+        return True
 
     return [{n for n in s if _keep(n)} for s in per_row]
 
@@ -885,7 +930,7 @@ def _entity_strong_hits(
                     name_parts.extend(str(a) for a in al if a)
             except Exception:
                 pass
-        name_sets.append(_expand_needles(" ".join(name_parts)))
+        name_sets.append(_filter_generic_cjk(_expand_needles(" ".join(name_parts))))
     body_sets = _body_needles([r["fact"] or "" for r in rows])
     hits: list[tuple[sqlite3.Row, str]] = []
     for r, ns, bs in zip(rows, name_sets, body_sets):
@@ -907,7 +952,7 @@ def _memes_strong_hits(
     body_sets = _body_needles([r["value"] or "" for r in rows])
     hits: list[tuple[sqlite3.Row, str]] = []
     for r, bs in zip(rows, body_sets):
-        if _needles_match(_expand_needles(r["key"] or ""), query_lower):
+        if _needles_match(_filter_generic_cjk(_expand_needles(r["key"] or "")), query_lower):
             hits.append((r, "name"))
         elif _needles_match(bs, query_lower):
             hits.append((r, "body"))
@@ -924,7 +969,7 @@ def _milestone_strong_hits(
     body_sets = _body_needles([r["description"] or "" for r in rows])
     hits: list[tuple[sqlite3.Row, str]] = []
     for r, bs in zip(rows, body_sets):
-        if _needles_match(_expand_needles(r["title"] or ""), query_lower):
+        if _needles_match(_filter_generic_cjk(_expand_needles(r["title"] or "")), query_lower):
             hits.append((r, "name"))
         elif _needles_match(bs, query_lower):
             hits.append((r, "body"))
@@ -1106,6 +1151,12 @@ def recall_fusion(
 
     # Strip emotion punctuation (?/!/？/！, single + repeated) — no FTS/vec signal.
     q = re.sub(r"[？?！!]+", " ", q).strip()
+    if not q:
+        return []
+
+    # Strip CC harness markers (command tags, image refs, stdout blocks).
+    from .transcript import strip_harness_markers as _strip_harness
+    q = _strip_harness(q)
     if not q:
         return []
 
