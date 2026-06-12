@@ -1027,3 +1027,90 @@ def test_memes_insert_ignores_lines_outside_markers(tmp_path):
 
     assert rpt.inserted == 1
     assert rows == ["圈内的梗"]
+
+
+def test_memes_bare_anchored_edit_syncs(tmp_path):
+    """Editing a bare-shape anchored row updates the meme key in DB."""
+    db_path = _db(tmp_path)
+    conn = _conn(db_path)
+    conn.execute(
+        "INSERT INTO memes (id, type, key, pinned, status)"
+        " VALUES (17, 'fact', '鸭子是个大笨蛋', 1, 'active')"
+    )
+    conn.commit()
+    md = tmp_path / "memes.md"
+    md.write_text(
+        "## Personal\n- 鸭子是只可爱的大笨蛋 <!-- id:17 -->\n", encoding="utf-8"
+    )
+
+    rpt = reconcile_memes(conn, md)
+    row = conn.execute("SELECT key, type FROM memes WHERE id=17").fetchone()
+    conn.close()
+
+    assert rpt.updated == 1
+    assert row["key"] == "鸭子是只可爱的大笨蛋"
+    assert row["type"] == "fact"  # untouched
+
+
+def test_memes_bare_anchored_arrow_adds_value(tmp_path):
+    """Adding ` → note` to a bare anchored row lands in value, key intact."""
+    db_path = _db(tmp_path)
+    conn = _conn(db_path)
+    conn.execute(
+        "INSERT INTO memes (id, type, key, pinned, status)"
+        " VALUES (18, 'fact', '内卷', 1, 'active')"
+    )
+    conn.commit()
+    md = tmp_path / "memes.md"
+    md.write_text("## Personal\n- 内卷 → 卷不动了 <!-- id:18 -->\n",
+                  encoding="utf-8")
+
+    reconcile_memes(conn, md)
+    row = conn.execute("SELECT key, value FROM memes WHERE id=18").fetchone()
+    conn.close()
+
+    assert row["key"] == "内卷"
+    assert row["value"] == "卷不动了"
+
+
+def test_profile_bare_anchored_edit_syncs(tmp_path):
+    """Bare anchored profile row: em-dash edit updates name + fact."""
+    db_path = _db(tmp_path)
+    conn = _conn(db_path)
+    conn.execute(
+        "INSERT INTO entities (id, kind, name) VALUES (26, 'pref', '爱吃榴莲')"
+    )
+    conn.commit()
+    md = tmp_path / "profile.md"
+    md.write_text(
+        "## Preference\n- 爱吃榴莲 — 金枕头最好 <!-- id:26 -->\n",
+        encoding="utf-8",
+    )
+
+    rpt = reconcile_profile(conn, md)
+    row = conn.execute(
+        "SELECT name, fact, kind FROM entities WHERE id=26"
+    ).fetchone()
+    conn.close()
+
+    assert rpt.updated == 1
+    assert row["name"] == "爱吃榴莲"
+    assert row["fact"] == "金枕头最好"
+    assert row["kind"] == "pref"  # untouched
+
+
+def test_bare_anchored_unchanged_noop(tmp_path):
+    """Unedited bare anchored row → no UPDATE (idempotent)."""
+    db_path = _db(tmp_path)
+    conn = _conn(db_path)
+    conn.execute(
+        "INSERT INTO memes (id, type, key, pinned, status)"
+        " VALUES (19, 'fact', '原样', 1, 'active')"
+    )
+    conn.commit()
+    md = tmp_path / "memes.md"
+    md.write_text("## Personal\n- 原样 <!-- id:19 -->\n", encoding="utf-8")
+
+    rpt = reconcile_memes(conn, md)
+    conn.close()
+    assert rpt.updated == 0

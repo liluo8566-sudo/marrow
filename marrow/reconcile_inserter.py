@@ -44,6 +44,30 @@ _PROFILE_UNANCHORED_RE = re.compile(
 )
 
 
+def _parse_bare_anchored(line: str, bare_cols: tuple[str, str]) -> dict | None:
+    """Parse an anchored bare row (`- text <!-- id:N -->`) for the UPDATE pass.
+
+    Bare rows inserted by the bare-text path keep their hand-typed shape (the
+    inserter never rewrites existing blocks), so full-shape parse_row returns
+    None on them forever. `text` → primary col; ` → ` / ` — ` split feeds the
+    secondary col. Cols not returned are left untouched by the caller.
+    Returns None for non-bullet lines or mangled full-shape rows (`[` lead).
+    """
+    body = _ANCHOR_STR_RE.sub("", line).strip()
+    if not body.startswith("- "):
+        return None
+    text = body[2:].strip()
+    if not text or text.startswith("["):
+        return None
+    primary, secondary = bare_cols
+    for sep in (" → ", " — "):
+        if sep in text:
+            head, _, tail = text.partition(sep)
+            if head.strip() and tail.strip():
+                return {primary: head.strip(), secondary: tail.strip()}
+    return {primary: text}
+
+
 def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -206,6 +230,7 @@ def reconcile_inserter_sync(
     editable_cols: list[str],
     soft_delete: bool = False,
     block_id_col: str = "id",
+    bare_cols: tuple[str, str] | None = None,
 ) -> ReconcileReport:
     """Generic md->DB sync for any InserterSpec-backed subpage.
 
@@ -272,11 +297,17 @@ def reconcile_inserter_sync(
                     parsed = spec.parse_row(line)
                 except Exception:
                     continue
+                if parsed is None and bare_cols is not None:
+                    # Bare hand-typed row that gained an anchor on insert —
+                    # keep its in-line edits syncing even without full shape.
+                    parsed = _parse_bare_anchored(line, bare_cols)
                 if parsed is None:
                     continue
                 db_row = db_rows[rid]
                 changes: dict[str, object] = {}
                 for col in editable_cols:
+                    if col not in parsed:
+                        continue  # bare fallback edits only the cols it parsed
                     md_val = parsed.get(col) or None
                     db_val = db_row.get(col) or None
                     if md_val != db_val:
@@ -680,6 +711,7 @@ def reconcile_memes(conn: sqlite3.Connection, md_path: Path) -> ReconcileReport:
     rpt = reconcile_inserter_sync(
         conn, spec, md_path, "memes",
         editable_cols=["type", "key", "value", "context"],
+        bare_cols=("key", "value"),
         soft_delete=False,
     )
     _insert_memes(conn, spec, Path(md_path), rpt)
@@ -694,6 +726,7 @@ def reconcile_profile(conn: sqlite3.Connection,
     rpt = reconcile_inserter_sync(
         conn, spec, md_path, "entities",
         editable_cols=["name", "kind", "fact"],
+        bare_cols=("name", "fact"),
         soft_delete=True,
     )
     _insert_profile(conn, spec, Path(md_path), rpt)
