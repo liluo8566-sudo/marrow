@@ -13,7 +13,7 @@ import sqlite_vec
 
 from . import config
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 # Phase 1 first-class tables + Phase 2 affect/entities (DECISIONS Phase 2).
 # The retired emotions/people/preferences/dir placeholders stay absent.
@@ -495,6 +495,7 @@ def init_db(path: str | None = None) -> sqlite3.Connection:
         _migrate_to_v15(conn)
         _migrate_to_v16(conn)
         _migrate_to_v17(conn)
+        _migrate_to_v18(conn)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     return conn
 
@@ -862,6 +863,24 @@ END;
             "FROM session_digests "
             "WHERE tl_line IS NOT NULL OR life_lines IS NOT NULL"
         )
+
+
+def _migrate_to_v18(conn: sqlite3.Connection) -> None:
+    """v18: tl_hidden flag on session_digests + diary — lets user permanently
+    hide a timeline line from future renders without deleting the row.
+    Idempotent — duplicate ALTER swallowed; user_version short-circuits.
+    """
+    v = conn.execute("PRAGMA user_version").fetchone()[0]
+    if v >= 18:
+        return
+    for tbl, col, decl in (
+        ("session_digests", "tl_hidden", "INTEGER NOT NULL DEFAULT 0"),
+        ("diary", "tl_hidden", "INTEGER NOT NULL DEFAULT 0"),
+    ):
+        try:
+            conn.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {decl}")
+        except sqlite3.OperationalError:
+            pass
 
 
 def _migrate_to_v14(conn: sqlite3.Connection) -> None:
