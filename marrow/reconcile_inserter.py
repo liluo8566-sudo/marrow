@@ -19,11 +19,29 @@ import sqlite3
 import time
 from pathlib import Path
 
+from ._atomic import atomic_write as _atomic_write
 from .inserter import InserterSpec
 from .reconcile import ReconcileReport
 
 _ANCHOR_RE = re.compile(r"<!-- id:(\d+) -->")
 _ANCHOR_STR_RE = re.compile(r"<!-- id:([^>]+?) -->")
+# Section heading: ## Word  (profile uses ## Person / ## Pref / ## Place)
+_SECTION_H2_RE = re.compile(r"^##\s+(?P<label>\S.*?)\s*$")
+
+# Unanchored row patterns for INSERT pass (anchor optional/absent).
+# Memes: `- [type] **key**{ → value}{ _context_}`
+_MEME_UNANCHORED_RE = re.compile(
+    r"^-\s+\[(?P<type>[^\]]+)\]\s+\*\*(?P<key>[^*]+)\*\*"
+    r"(?:\s+→\s+(?P<value>.+?))?"
+    r"(?:\s+_(?P<context>[^_]+)_)?"
+    r"\s*$"
+)
+# Profile: `- [kind] **name**{ — fact}`
+_PROFILE_UNANCHORED_RE = re.compile(
+    r"^-\s+\[(?P<kind>[^\]]+)\]\s+\*\*(?P<name>[^*]+)\*\*"
+    r"(?:\s+—\s+(?P<fact>.+?))?"
+    r"\s*$"
+)
 
 
 def _now() -> str:
@@ -41,6 +59,122 @@ def _audit(conn: sqlite3.Connection, table: str, row_id: str,
         " VALUES (?, ?, ?, ?)",
         (table, row_id, action, summary),
     )
+
+
+
+
+def _insert_diary_blocks(
+    conn: sqlite3.Connection,
+    md_path: Path,
+    rpt: ReconcileReport,
+) -> None:
+    """INSERT pass for diary block-shaped subpage.
+
+    A `#### YYYY-MM-DD` heading block with no `<!-- id:YYYY-MM-DD -->`
+    anchor line → INSERT diary(date, content), then write the anchor
+    line back under the heading.
+
+    Guards: future-dated or malformed date → conflict, skip.
+    Idempotent: if the date is already in DB, skip silently (dedup).
+    """
+    import datetime
+
+    _DATE_ANCHOR_RE = re.compile(r"<!-- id:(\d{4}-\d{2}-\d{2}) -->")
+    _H4_DATE_RE = re.compile(r"^#### (?P<date>\d{4}-\d{2}-\d{2})(?P<rest>.*)?$")
+    _MARROW_RE = re.compile(r"<!-- marrow:")
+
+    if not md_path.exists():
+        return
+    md_text = md_path.read_text(encoding="utf-8")
+    md_lines = md_text.splitlines()
+
+    today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+
+    # Scan for heading blocks that lack an anchor.
+    # Each block: heading_line_idx, date, body lines, has_anchor flag.
+    blocks: list[tuple[int, str, list[str]]] = []  # (heading_idx, date, body_lines)
+    cur_heading_idx: int | None = None
+    cur_date: str | None = None
+    cur_body: list[str] = []
+    cur_has_anchor = False
+
+    def _flush_block():
+        nonlocal cur_heading_idx, cur_date, cur_body, cur_has_anchor
+        if cur_heading_idx is not None and cur_date is not None and not cur_has_anchor:
+            blocks.append((cur_heading_idx, cur_date, list(cur_body)))
+        cur_heading_idx = None
+        cur_date = None
+        cur_body = []
+        cur_has_anchor = False
+
+    for idx, line in enumerate(md_lines):
+        if _MARROW_RE.search(line):
+            _flush_block()
+            continue
+        h4 = _H4_DATE_RE.match(line)
+        if h4:
+            _flush_block()
+            cur_heading_idx = idx
+            cur_date = h4.group("date")
+            cur_body = []
+            cur_has_anchor = False
+            continue
+        if cur_heading_idx is None:
+            continue
+        if _DATE_ANCHOR_RE.search(line):
+            cur_has_anchor = True
+            continue
+        cur_body.append(line)
+    _flush_block()
+
+    if not blocks:
+        return
+
+    # For each candidate block: validate date, dedup, insert, queue anchor.
+    anchor_inserts: list[tuple[int, str]] = []  # (heading_idx, date)
+
+    with conn:
+        for heading_idx, date, body_lines in blocks:
+            # Validate date format and not future.
+            try:
+                d = datetime.date.fromisoformat(date)
+            except ValueError:
+                rpt.conflicts.append(f"diary insert: malformed date '{date}'")
+                continue
+            if date > today_str:
+                rpt.conflicts.append(f"diary insert: future date '{date}'")
+                continue
+
+            # Dedup: date already in DB → skip.
+            existing = conn.execute(
+                "SELECT date FROM diary WHERE date=?", (date,)
+            ).fetchone()
+            if existing is not None:
+                continue
+
+            content = "\n".join(body_lines).strip()
+            conn.execute(
+                "INSERT INTO diary(date, content) VALUES(?, ?)",
+                (date, content),
+            )
+            _audit(conn, "diary", date, "insert",
+                   f"md-reconcile: new diary entry {date}")
+            rpt.inserted += 1
+            anchor_inserts.append((heading_idx, date))
+
+    if not anchor_inserts:
+        return
+
+    # Write anchor lines back. Insert `<!-- id:YYYY-MM-DD -->` as the
+    # line immediately after the heading (matching render output).
+    offset = 0
+    for heading_idx, date in anchor_inserts:
+        insert_at = heading_idx + 1 + offset
+        md_lines.insert(insert_at, f"<!-- id:{date} -->")
+        offset += 1
+
+    trailing_nl = "\n" if md_text.endswith("\n") else ""
+    _atomic_write(str(md_path), "\n".join(md_lines) + trailing_nl)
 
 
 def reconcile_inserter_sync(
@@ -233,29 +367,280 @@ def reconcile_inserter_sync(
     return rpt
 
 
+# ── concrete insert helpers ───────────────────────────────────────────────────
+
+def _insert_memes(
+    conn: sqlite3.Connection,
+    spec: InserterSpec,
+    md_path: Path,
+    rpt: ReconcileReport,
+) -> None:
+    """INSERT pass for memes.md.
+
+    Unanchored lines matching the meme row format are inserted into DB.
+    type is read directly from the line's [type] bracket (already in
+    parse_row output). Section heading ("Personal" / "Public") is used
+    only to validate consistency:
+      Personal → type must be in _MEME_PERSONAL (paw, fact)
+      Public   → type must NOT be in _MEME_PERSONAL
+    If inconsistent, add to conflicts and skip.
+    Dedup: same type+key with status='active' already present → skip.
+    Hand-typed rows get pinned=1, status='active'.
+    """
+    from .subpage_specs import _MEME_PERSONAL
+    _personal_types: frozenset[str] = frozenset(_MEME_PERSONAL)
+    _valid_sections = {"Personal", "Public"}
+
+    if not md_path.exists():
+        return
+    md_text = md_path.read_text(encoding="utf-8")
+    md_lines = md_text.splitlines()
+
+    try:
+        table_cols = {
+            r[1] for r in conn.execute("PRAGMA table_info(memes)").fetchall()
+        }
+    except sqlite3.Error:
+        return
+
+    candidates: list[tuple[int, dict]] = []
+    cur_section: str | None = None
+
+    for idx, line in enumerate(md_lines):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        # Track section headings (## Personal / ## Public).
+        m_sec = _SECTION_H2_RE.match(stripped)
+        if m_sec:
+            cur_section = m_sec.group("label")
+            continue
+        # Skip heading lines, marrow markers, quote lines.
+        if stripped.startswith("#") or stripped.startswith("<!-- ") or stripped.startswith(">"):
+            continue
+        # Skip already-anchored lines.
+        if _ANCHOR_RE.search(line):
+            continue
+        # Use unanchored regex — spec.parse_row requires the anchor and returns
+        # None for bare hand-typed lines.
+        m = _MEME_UNANCHORED_RE.match(stripped)
+        if not m:
+            continue
+        parsed = {
+            "type": m.group("type").strip(),
+            "key": m.group("key").strip(),
+            "value": (m.group("value") or "").strip() or None,
+            "context": (m.group("context") or "").strip() or None,
+        }
+        meme_type = (parsed.get("type") or "").strip()
+        if not meme_type:
+            rpt.conflicts.append(f"memes insert: missing type — {line[:60]}")
+            continue
+        # Section consistency check.
+        if cur_section not in _valid_sections:
+            rpt.conflicts.append(
+                f"memes insert: unmappable section '{cur_section}' — {line[:60]}"
+            )
+            continue
+        is_personal = meme_type in _personal_types
+        if cur_section == "Personal" and not is_personal:
+            rpt.conflicts.append(
+                f"memes insert: type '{meme_type}' under Personal section — {line[:60]}"
+            )
+            continue
+        if cur_section == "Public" and is_personal:
+            rpt.conflicts.append(
+                f"memes insert: personal type '{meme_type}' under Public section — {line[:60]}"
+            )
+            continue
+        candidates.append((idx, parsed))
+
+    if not candidates:
+        return
+
+    anchor_writes: list[tuple[int, int]] = []
+    with conn:
+        for idx, parsed in candidates:
+            meme_type = parsed["type"]
+            meme_key = parsed.get("key") or ""
+            # Dedup: type+key active.
+            existing = conn.execute(
+                "SELECT id FROM memes WHERE type=? AND key=? AND status='active'",
+                (meme_type, meme_key),
+            ).fetchone()
+            if existing is not None:
+                continue
+            insert_cols: dict[str, object] = {
+                "type": meme_type,
+                "key": meme_key,
+                "value": parsed.get("value"),
+                "context": parsed.get("context"),
+                "pinned": 1,
+                "status": "active",
+            }
+            valid = {k: v for k, v in insert_cols.items() if k in table_cols}
+            col_names = ", ".join(valid.keys())
+            placeholders = ", ".join("?" for _ in valid)
+            cur = conn.execute(
+                f"INSERT INTO memes ({col_names}) VALUES ({placeholders})",
+                list(valid.values()),
+            )
+            new_id = cur.lastrowid
+            _audit(conn, "memes", str(new_id), "insert",
+                   f"md-reconcile: {meme_key[:60]}")
+            rpt.inserted += 1
+            anchor_writes.append((idx, new_id))
+
+    if not anchor_writes:
+        return
+    changed = False
+    for idx, new_id in anchor_writes:
+        if _ANCHOR_RE.search(md_lines[idx]):
+            continue
+        md_lines[idx] = md_lines[idx].rstrip() + f" <!-- id:{new_id} -->"
+        changed = True
+    if changed:
+        trailing_nl = "\n" if md_text.endswith("\n") else ""
+        _atomic_write(str(md_path), "\n".join(md_lines) + trailing_nl)
+
+
+def _insert_profile(
+    conn: sqlite3.Connection,
+    spec: InserterSpec,
+    md_path: Path,
+    rpt: ReconcileReport,
+) -> None:
+    """INSERT pass for profile.md.
+
+    Unanchored lines matching the entity row format are inserted into DB.
+    kind is derived from the section heading: `## Person` → kind='person',
+    `## Pref` → kind='pref', `## Place` → kind='place'
+    (render_section_header uses k.capitalize() so heading is capitalised).
+    Dedup: same kind+name not superseded → skip silently.
+    """
+    # Heading label → kind (reverse of k.capitalize() used by renderer).
+    _section_to_kind: dict[str, str] = {
+        "Person": "person",
+        "Pref": "pref",
+        "Place": "place",
+    }
+
+    if not md_path.exists():
+        return
+    md_text = md_path.read_text(encoding="utf-8")
+    md_lines = md_text.splitlines()
+
+    try:
+        table_cols = {
+            r[1] for r in conn.execute("PRAGMA table_info(entities)").fetchall()
+        }
+    except sqlite3.Error:
+        return
+
+    candidates: list[tuple[int, dict, str]] = []  # (idx, parsed, kind)
+    cur_section: str | None = None
+
+    for idx, line in enumerate(md_lines):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        m_sec = _SECTION_H2_RE.match(stripped)
+        if m_sec:
+            cur_section = m_sec.group("label")
+            continue
+        if stripped.startswith("#") or stripped.startswith("<!-- ") or stripped.startswith(">"):
+            continue
+        if _ANCHOR_RE.search(line):
+            continue
+        # Use unanchored regex — spec.parse_row requires the anchor.
+        m = _PROFILE_UNANCHORED_RE.match(stripped)
+        if not m:
+            continue
+        parsed = {
+            "kind": m.group("kind").strip(),
+            "name": m.group("name").strip(),
+            "fact": (m.group("fact") or "").strip() or None,
+        }
+        kind = _section_to_kind.get(cur_section or "")
+        if kind is None:
+            rpt.conflicts.append(
+                f"profile insert: unmappable section '{cur_section}' — {line[:60]}"
+            )
+            continue
+        candidates.append((idx, parsed, kind))
+
+    if not candidates:
+        return
+
+    anchor_writes: list[tuple[int, int]] = []
+    with conn:
+        for idx, parsed, kind in candidates:
+            name = (parsed.get("name") or "").strip()
+            # Dedup: kind+name not superseded.
+            existing = conn.execute(
+                "SELECT id FROM entities WHERE kind=? AND name=? AND superseded_by IS NULL",
+                (kind, name),
+            ).fetchone()
+            if existing is not None:
+                continue
+            insert_cols: dict[str, object] = {
+                "kind": kind,
+                "name": name,
+                "fact": parsed.get("fact"),
+            }
+            valid = {k: v for k, v in insert_cols.items() if k in table_cols}
+            col_names = ", ".join(valid.keys())
+            placeholders = ", ".join("?" for _ in valid)
+            cur = conn.execute(
+                f"INSERT INTO entities ({col_names}) VALUES ({placeholders})",
+                list(valid.values()),
+            )
+            new_id = cur.lastrowid
+            _audit(conn, "entities", str(new_id), "insert",
+                   f"md-reconcile: {name[:60]}")
+            rpt.inserted += 1
+            anchor_writes.append((idx, new_id))
+
+    if not anchor_writes:
+        return
+    changed = False
+    for idx, new_id in anchor_writes:
+        if _ANCHOR_RE.search(md_lines[idx]):
+            continue
+        md_lines[idx] = md_lines[idx].rstrip() + f" <!-- id:{new_id} -->"
+        changed = True
+    if changed:
+        trailing_nl = "\n" if md_text.endswith("\n") else ""
+        _atomic_write(str(md_path), "\n".join(md_lines) + trailing_nl)
+
+
 # ── thin wrappers ─────────────────────────────────────────────────────────────
 
 def reconcile_memes(conn: sqlite3.Connection, md_path: Path) -> ReconcileReport:
-    """Delete memes rows absent from md; UPDATE editable fields on edit."""
+    """INSERT unanchored rows; UPDATE editable fields; DELETE absent rows."""
     from . import subpage_specs
     spec = subpage_specs.build_memes_spec(str(Path(md_path).parent))
-    return reconcile_inserter_sync(
+    rpt = reconcile_inserter_sync(
         conn, spec, md_path, "memes",
         editable_cols=["type", "key", "value", "context"],
         soft_delete=False,
     )
+    _insert_memes(conn, spec, Path(md_path), rpt)
+    return rpt
 
 
 def reconcile_profile(conn: sqlite3.Connection,
                       md_path: Path) -> ReconcileReport:
-    """Soft-delete entity rows absent from md; UPDATE editable fields."""
+    """INSERT unanchored rows; UPDATE editable fields; soft-delete absent rows."""
     from . import subpage_specs
     spec = subpage_specs.build_profile_spec(str(Path(md_path).parent))
-    return reconcile_inserter_sync(
+    rpt = reconcile_inserter_sync(
         conn, spec, md_path, "entities",
         editable_cols=["name", "kind", "fact"],
         soft_delete=True,
     )
+    _insert_profile(conn, spec, Path(md_path), rpt)
+    return rpt
 
 
 def reconcile_diary(conn: sqlite3.Connection,
@@ -284,11 +669,18 @@ def reconcile_diary(conn: sqlite3.Connection,
     except OSError:
         pass
 
+    # INSERT pass: run before the anchor-guard so a brand-new file with no
+    # existing anchors can still receive inserts.
+    _insert_diary_blocks(conn, md_path, rpt)
+
+    # Reload md_text after potential anchor write-back.
+    md_text = md_path.read_text(encoding="utf-8")
+
     # Collect all date anchors present in md.
     _DATE_ANCHOR_RE = re.compile(r"<!-- id:(\d{4}-\d{2}-\d{2}) -->")
     md_dates = {m.group(1) for m in _DATE_ANCHOR_RE.finditer(md_text)}
     if not md_dates:
-        return rpt  # empty-file guard
+        return rpt  # empty-file guard (no anchors even after insert pass)
 
     # Parse blocks: #### YYYY-MM-DD[...] heading signals a new entry.
     # Body runs from the line after the anchor until the next #### or ## or EOF.
