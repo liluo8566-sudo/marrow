@@ -1438,12 +1438,13 @@ def reconcile_timeline(conn: sqlite3.Connection,
     m_trail = _TL_TRAIL_RE.search(block)
     if m_trail:
         for segment in m_trail.group("payload").split(";"):
+            segment = segment.strip()
             if segment.startswith("s="):
-                trail_sids.update(x for x in segment[2:].split(",") if x)
+                trail_sids.update(x.strip() for x in segment[2:].split(",") if x.strip())
             elif segment.startswith("d="):
-                trail_dates.update(x for x in segment[2:].split(",") if x)
+                trail_dates.update(x.strip() for x in segment[2:].split(",") if x.strip())
             elif segment.startswith("e="):
-                trail_evts.update(int(x) for x in segment[2:].split(",") if x)
+                trail_evts.update(int(x.strip()) for x in segment[2:].split(",") if x.strip())
 
     sid_edits:    dict[str, str] = {}
     date_edits:   dict[str, str] = {}

@@ -400,10 +400,14 @@ def _query_diary_range(conn: sqlite3.Connection,
 
 def _query_manual_events_24h(conn: sqlite3.Connection,
                              from_utc: str, to_utc: str) -> list[dict]:
-    """Manual events (channel='manual') in the 24h window."""
+    """Manual events (channel='manual') in the 24h window.
+
+    Uses inclusive upper bound (<=) so an event inserted in the same second
+    as the render is not excluded.
+    """
     rows = conn.execute(
         "SELECT id, timestamp, content FROM events"
-        " WHERE channel='manual' AND timestamp >= ? AND timestamp < ?"
+        " WHERE channel='manual' AND timestamp >= ? AND timestamp <= ?"
         " ORDER BY timestamp ASC",
         (from_utc, to_utc),
     ).fetchall()

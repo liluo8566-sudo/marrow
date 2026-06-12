@@ -134,7 +134,7 @@ def test_24h_cap_15_lines(conn):
     for ln in lines[1:]:  # skip ## Timeline
         if not ln or ln.startswith("**") or ln.startswith("Week"):
             break
-        if ln.startswith("---") or ln.startswith("> 未解:"):
+        if ln.startswith("---") or ln.startswith("> 未解:") or ln.startswith("<!--"):
             continue
         content_lines.append(ln)
     assert len(content_lines) <= timeline._24H_CAP

@@ -98,8 +98,8 @@ def test_atlas_depth_default_0(conn):
 
 
 def test_schema_version_current(conn):
-    # Bumped to 17 with session_digests structured columns + diary.tl_line.
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 17
+    # Bumped to 18 with tl_hidden on session_digests + diary.
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 18
 
 
 # ---------------------------------------------------------------------------

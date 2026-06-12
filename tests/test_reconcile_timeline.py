@@ -358,7 +358,8 @@ def test_add_plus_line_with_time_inserts_event(conn, dash_path):
 
 def test_add_plus_line_without_time_uses_now(conn, dash_path):
     import datetime as _dt
-    before = _dt.datetime.now(_dt.timezone.utc)
+    # _now() truncates to seconds; truncate before/after to match
+    before = _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0)
     dash_path.write_text("## Timeline\n+ 随手记录一句话")
     reconcile_timeline(conn, dash_path)
     row = conn.execute("SELECT timestamp FROM events WHERE channel='manual'").fetchone()
@@ -439,7 +440,8 @@ def test_round_trip_no_reingest(conn, dash_path):
 def test_trail_marker_present_in_render(conn):
     from marrow import timeline
     import datetime as _dt
-    ts_utc = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Insert 5s in the past so it falls within the 24h window (strict < now)
+    ts_utc = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
     conn.execute(
         "INSERT INTO session_digests (sid, date, ts, text, kind, tl_line)"
         " VALUES ('sid-trail', ?, ?, 'body', 'casual', 'TL行')",
