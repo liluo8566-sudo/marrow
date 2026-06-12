@@ -15,12 +15,15 @@ writer wires the candidate + task passes via write_dashboard.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import hashlib
 import re
+import secrets
 import sqlite3
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from ._atomic import atomic_write as _atomic_write
 
@@ -1383,6 +1386,12 @@ _TL_PERIOD_RE  = re.compile(r"^(?:AM|PM|ND)\s+")
 _TL_DAY_RE    = re.compile(r"^\d{2}-\d{2}\s+Day\s+【[^】]*】\s*")
 
 
+_TL_TRAIL_RE  = re.compile(r"<!--\s*tl-rendered:(?P<payload>[^>]+)\s*-->")
+_TL_EVT_RE    = re.compile(r"<!--\s*tl:e:(?P<eid>\d+)\s*-->")
+_TL_PLUS_RE   = re.compile(r"^\+\s+(?:(?P<hhmm>\d{2}:\d{2})\s+)?(?P<text>.+)$")
+_TZ_MELB      = ZoneInfo("Australia/Melbourne")
+
+
 def _strip_tl_anchor(line: str) -> str:
     return _TL_ANCHOR_RE.sub("", line).rstrip()
 
@@ -1404,9 +1413,11 @@ def reconcile_timeline(conn: sqlite3.Connection,
     Anchors:
       `<!-- tl:<sid> -->` → session_digests.tl_line for that sid
       `<!-- tl:d:YYYY-MM-DD -->` → diary.tl_line for that date
+      `<!-- tl:e:N -->` → events.content for manual event id N (edit)
+      `<!-- tl-rendered:s=...;d=...;e=... -->` → trail marker; absent sid/date/evt = hidden
 
     Tone/label segments are display-only — only the text portion is written.
-    Deleted line = no-op (timeline is a window view; next render restores it).
+    Lines starting with `+ ` → insert as manual events (channel='manual').
     """
     rpt = ReconcileReport()
     dashboard_path = Path(dashboard_path)
@@ -1420,14 +1431,52 @@ def reconcile_timeline(conn: sqlite3.Connection,
     next_h2 = re.search(r"\n##\s", after_h2)
     block = after_h2[: next_h2.start()] if next_h2 else after_h2
 
-    sid_edits: dict[str, str] = {}
-    date_edits: dict[str, str] = {}
+    # Parse trail marker first — tells us what was rendered last time
+    trail_sids:  set[str] = set()
+    trail_dates: set[str] = set()
+    trail_evts:  set[int] = set()
+    m_trail = _TL_TRAIL_RE.search(block)
+    if m_trail:
+        for segment in m_trail.group("payload").split(";"):
+            if segment.startswith("s="):
+                trail_sids.update(x for x in segment[2:].split(",") if x)
+            elif segment.startswith("d="):
+                trail_dates.update(x for x in segment[2:].split(",") if x)
+            elif segment.startswith("e="):
+                trail_evts.update(int(x) for x in segment[2:].split(",") if x)
+
+    sid_edits:    dict[str, str] = {}
+    date_edits:   dict[str, str] = {}
+    present_sids:  set[str] = set()
+    present_dates: set[str] = set()
+    present_evts:  set[int] = set()
+    plus_lines:    list[str] = []
+    evt_edits:     dict[int, str] = {}
 
     for raw in block.splitlines():
         line = raw.rstrip()
+        # Skip the trail marker line itself
+        if _TL_TRAIL_RE.search(line):
+            continue
+        # Lines starting with `+ ` are manual add requests
+        if _TL_PLUS_RE.match(line):
+            plus_lines.append(line)
+            continue
+        # Manual event anchor
+        m_evt = _TL_EVT_RE.search(line)
+        if m_evt:
+            eid = int(m_evt.group("eid"))
+            present_evts.add(eid)
+            # Extract editable text: strip the tl:e anchor + leading HH:MM prefix
+            text_part = re.sub(r"\s*<!--\s*tl:e:\d+\s*-->\s*$", "", line).rstrip()
+            text_part = _TL_HHMM_RE.sub("", text_part).strip()
+            if text_part:
+                evt_edits[eid] = text_part
+            continue
         m_sid = _TL_SID_RE.search(line)
         if m_sid:
             sid = m_sid.group("sid")
+            present_sids.add(sid)
             text_part = _extract_tl_text(line)
             if text_part:
                 sid_edits[sid] = text_part
@@ -1435,15 +1484,17 @@ def reconcile_timeline(conn: sqlite3.Connection,
         m_date = _TL_DATE_RE.search(line)
         if m_date:
             date = m_date.group("date")
+            present_dates.add(date)
             text_part = _extract_tl_text(line)
             if text_part:
                 date_edits[date] = text_part
 
-    if not sid_edits and not date_edits:
+    if not sid_edits and not date_edits and not m_trail and not plus_lines and not evt_edits:
         return rpt
 
     now_iso = _now()
     with conn:
+        # ── existing: session tl_line edits ──────────────────────────────────
         for sid, new_tl in sid_edits.items():
             row = conn.execute(
                 "SELECT tl_line FROM session_digests WHERE sid = ?", (sid,)
@@ -1467,6 +1518,7 @@ def reconcile_timeline(conn: sqlite3.Connection,
             else:
                 rpt.unchanged += 1
 
+        # ── existing: diary tl_line edits ────────────────────────────────────
         for date, new_tl in date_edits.items():
             row = conn.execute(
                 "SELECT tl_line FROM diary WHERE date = ?", (date,)
@@ -1486,6 +1538,95 @@ def reconcile_timeline(conn: sqlite3.Connection,
                     " VALUES ('diary', ?, 'tl_edit', ?)",
                     (date, f"md-reconcile: tl_line={new_tl[:60]!r}"),
                 )
+                rpt.updated += 1
+            else:
+                rpt.unchanged += 1
+
+        # ── DELETE: anchors in trail but absent from current block → hidden ──
+        if m_trail:
+            for sid in trail_sids - present_sids:
+                conn.execute(
+                    "UPDATE session_digests SET tl_hidden=1 WHERE sid=?", (sid,))
+                conn.execute(
+                    "INSERT INTO audit_log (target_table, target_id, action, summary)"
+                    " VALUES ('session_digests', ?, 'tl_delete', 'user deleted tl line')",
+                    (sid,))
+                rpt.updated += 1
+            for date in trail_dates - present_dates:
+                conn.execute(
+                    "UPDATE diary SET tl_hidden=1 WHERE date=?", (date,))
+                conn.execute(
+                    "INSERT INTO audit_log (target_table, target_id, action, summary)"
+                    " VALUES ('diary', ?, 'tl_delete', 'user deleted tl line')",
+                    (date,))
+                rpt.updated += 1
+            for eid in trail_evts - present_evts:
+                conn.execute(
+                    "DELETE FROM events WHERE id=? AND channel='manual'", (eid,))
+                try:
+                    conn.execute("DELETE FROM events_vec WHERE rowid=?", (eid,))
+                    conn.execute("DELETE FROM events_vec_meta WHERE rowid=?", (eid,))
+                except sqlite3.OperationalError:
+                    pass
+                conn.execute(
+                    "INSERT INTO audit_log (target_table, target_id, action, summary)"
+                    " VALUES ('events', ?, 'tl_manual_delete', 'user deleted manual event')",
+                    (str(eid),))
+                rpt.updated += 1
+
+        # ── ADD: lines starting with `+ ` → insert manual events ─────────────
+        for raw_line in plus_lines:
+            m_plus = _TL_PLUS_RE.match(raw_line)
+            if not m_plus:
+                rpt.conflicts.append(f"tl:+ unparseable: {raw_line[:60]!r}")
+                continue
+            hhmm_str = m_plus.group("hhmm")
+            add_text = (m_plus.group("text") or "").strip()
+            if not add_text:
+                rpt.conflicts.append(f"tl:+ empty text: {raw_line[:60]!r}")
+                continue
+            if hhmm_str:
+                try:
+                    h, mi = int(hhmm_str[:2]), int(hhmm_str[3:5])
+                except ValueError:
+                    rpt.conflicts.append(f"tl:+ bad time {hhmm_str!r}: {raw_line[:60]!r}")
+                    continue
+                now_melb = _dt.datetime.now(_TZ_MELB)
+                ts_melb = now_melb.replace(hour=h, minute=mi, second=0, microsecond=0)
+                ts_utc = ts_melb.astimezone(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            else:
+                ts_utc = _now()
+            sid_manual = "manual:" + secrets.token_hex(4)
+            conn.execute(
+                "INSERT INTO events (session_id, timestamp, role, content, channel)"
+                " VALUES (?, ?, 'user', ?, 'manual')",
+                (sid_manual, ts_utc, add_text),
+            )
+            rpt.updated += 1
+
+        # ── EDIT: manual event content ────────────────────────────────────────
+        for eid, new_text in evt_edits.items():
+            row = conn.execute(
+                "SELECT content, channel FROM events WHERE id=?", (eid,)
+            ).fetchone()
+            if row is None:
+                rpt.conflicts.append(f"tl:e:{eid} not in events")
+                continue
+            if row["channel"] != "manual":
+                rpt.conflicts.append(
+                    f"tl:e:{eid} not a manual event (channel={row['channel']!r})")
+                continue
+            if new_text != (row["content"] or ""):
+                conn.execute("UPDATE events SET content=? WHERE id=?", (new_text, eid))
+                try:
+                    conn.execute("DELETE FROM events_vec WHERE rowid=?", (eid,))
+                    conn.execute("DELETE FROM events_vec_meta WHERE rowid=?", (eid,))
+                except sqlite3.OperationalError:
+                    pass
+                conn.execute(
+                    "INSERT INTO audit_log (target_table, target_id, action, summary)"
+                    " VALUES ('events', ?, 'tl_edit', ?)",
+                    (str(eid), f"md-reconcile: content={new_text[:60]!r}"))
                 rpt.updated += 1
             else:
                 rpt.unchanged += 1
