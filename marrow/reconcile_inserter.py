@@ -44,12 +44,28 @@ _PROFILE_UNANCHORED_RE = re.compile(
 )
 
 
+# Separators accepted in hand-typed rows, longest first so `——` never
+# half-matches `—`. Plain ` - ` requires surrounding spaces (CJK keyboards
+# rarely produce ` — ` without effort — 0613 Lumi).
+_BARE_SEPS = (" → ", " —— ", " — ", " - ")
+
+
+def _split_bare(text: str) -> tuple[str, str | None]:
+    """(head, tail) on the first matching separator; (text, None) if none."""
+    for sep in _BARE_SEPS:
+        if sep in text:
+            head, _, tail = text.partition(sep)
+            if head.strip() and tail.strip():
+                return head.strip(), tail.strip()
+    return text, None
+
+
 def _parse_bare_anchored(line: str, bare_cols: tuple[str, str]) -> dict | None:
     """Parse an anchored bare row (`- text <!-- id:N -->`) for the UPDATE pass.
 
     Bare rows inserted by the bare-text path keep their hand-typed shape (the
     inserter never rewrites existing blocks), so full-shape parse_row returns
-    None on them forever. `text` → primary col; ` → ` / ` — ` split feeds the
+    None on them forever. `text` → primary col; a `_BARE_SEPS` split feeds the
     secondary col. Cols not returned are left untouched by the caller.
     Returns None for non-bullet lines or mangled full-shape rows (`[` lead).
     """
@@ -60,11 +76,9 @@ def _parse_bare_anchored(line: str, bare_cols: tuple[str, str]) -> dict | None:
     if not text or text.startswith("["):
         return None
     primary, secondary = bare_cols
-    for sep in (" → ", " — "):
-        if sep in text:
-            head, _, tail = text.partition(sep)
-            if head.strip() and tail.strip():
-                return {primary: head.strip(), secondary: tail.strip()}
+    head, tail = _split_bare(text)
+    if tail is not None:
+        return {primary: head, secondary: tail}
     return {primary: text}
 
 
@@ -492,10 +506,11 @@ def _insert_memes(
                 )
                 continue
             default_type = "fact" if cur_section == "Personal" else "others"
+            bkey, bval = _split_bare(bare)
             candidates.append((idx, {
                 "type": default_type,
-                "key": bare,
-                "value": None,
+                "key": bkey,
+                "value": bval,
                 "context": None,
             }))
             continue
@@ -637,16 +652,12 @@ def _insert_profile(
                 "fact": (m.group("fact") or "").strip() or None,
             }
         elif stripped.startswith("- "):
-            # Bare hand-typed bullet: `- name — fact` or `- name`.
+            # Bare hand-typed bullet: `- name<sep>fact` or `- name`.
             bare = stripped[2:].strip()
             if not bare:
                 continue
-            if " — " in bare:
-                bname, _, bfact = bare.partition(" — ")
-                parsed = {"kind": "", "name": bname.strip(),
-                          "fact": bfact.strip() or None}
-            else:
-                parsed = {"kind": "", "name": bare, "fact": None}
+            bname, bfact = _split_bare(bare)
+            parsed = {"kind": "", "name": bname, "fact": bfact}
         else:
             continue
         kind = _section_to_kind.get(cur_section or "")

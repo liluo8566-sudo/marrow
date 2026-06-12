@@ -1114,3 +1114,70 @@ def test_bare_anchored_unchanged_noop(tmp_path):
     rpt = reconcile_memes(conn, md)
     conn.close()
     assert rpt.updated == 0
+
+
+def test_profile_bare_plain_hyphen_splits(tmp_path):
+    """0613: `- 奶茶 - 三分糖` (plain hyphen) must split name/fact too."""
+    db_path = _db(tmp_path)
+    conn = _conn(db_path)
+    md = tmp_path / "profile.md"
+    md.write_text("## Preference\n- 奶茶 - 三分糖\n", encoding="utf-8")
+
+    rpt = reconcile_profile(conn, md)
+    row = conn.execute(
+        "SELECT name, fact FROM entities WHERE name='奶茶'"
+    ).fetchone()
+    conn.close()
+
+    assert rpt.inserted == 1
+    assert row["fact"] == "三分糖"
+
+
+def test_profile_bare_double_dash_splits(tmp_path):
+    """CJK `——` double em-dash separator splits cleanly (no half-match)."""
+    db_path = _db(tmp_path)
+    conn = _conn(db_path)
+    md = tmp_path / "profile.md"
+    md.write_text("## Person\n- 阿姨 —— 楼下邻居\n", encoding="utf-8")
+
+    reconcile_profile(conn, md)
+    row = conn.execute(
+        "SELECT name, fact FROM entities WHERE name='阿姨'"
+    ).fetchone()
+    conn.close()
+
+    assert row["fact"] == "楼下邻居"
+
+
+def test_memes_bare_insert_splits_value(tmp_path):
+    """Bare meme insert with separator lands key + value (parity with edit)."""
+    db_path = _db(tmp_path)
+    conn = _conn(db_path)
+    md = tmp_path / "memes.md"
+    md.write_text("## Personal\n- 秃鹫梗 - 仓鸮被记成秃鹫\n", encoding="utf-8")
+
+    reconcile_memes(conn, md)
+    row = conn.execute(
+        "SELECT key, value FROM memes WHERE key='秃鹫梗'"
+    ).fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row["value"] == "仓鸮被记成秃鹫"
+
+
+def test_bare_hyphenated_word_not_split(tmp_path):
+    """`Wi-Fi 王` has no spaced hyphen — stays whole in name."""
+    db_path = _db(tmp_path)
+    conn = _conn(db_path)
+    md = tmp_path / "profile.md"
+    md.write_text("## Person\n- Wi-Fi王\n", encoding="utf-8")
+
+    reconcile_profile(conn, md)
+    row = conn.execute(
+        "SELECT name, fact FROM entities WHERE name='Wi-Fi王'"
+    ).fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row["fact"] is None
