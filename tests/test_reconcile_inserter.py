@@ -453,3 +453,393 @@ def test_memes_audit_log_on_update(tmp_path):
     assert audit is not None
     assert audit["action"] == "update"
     assert "md-reconcile" in audit["summary"]
+
+
+# ── INSERT: memes ─────────────────────────────────────────────────────────────
+
+def test_memes_insert_unanchored_row(tmp_path):
+    """Unanchored meme line → INSERT + anchor written back to md."""
+    db_path = _db(tmp_path)
+    conn = _conn(db_path)
+
+    md = tmp_path / "memes.md"
+    md.write_text(
+        "## Personal\n"
+        "- [fact] **sky is blue** → true\n",
+        encoding="utf-8",
+    )
+
+    rpt = reconcile_memes(conn, md)
+    row = conn.execute(
+        "SELECT type, key, value, pinned, status FROM memes WHERE key='sky is blue'"
+    ).fetchone()
+    md_text = md.read_text()
+    conn.close()
+
+    assert rpt.inserted == 1
+    assert row is not None
+    assert row["type"] == "fact"
+    assert row["value"] == "true"
+    assert row["pinned"] == 1
+    assert row["status"] == "active"
+    # Anchor written back into md.
+    assert "<!-- id:" in md_text
+
+
+def test_memes_insert_public_section(tmp_path):
+    """Unanchored line under Public section is inserted with correct type."""
+    db_path = _db(tmp_path)
+    conn = _conn(db_path)
+
+    md = tmp_path / "memes.md"
+    md.write_text(
+        "## Public\n"
+        "- [meme] **stonks** → only goes up\n",
+        encoding="utf-8",
+    )
+
+    rpt = reconcile_memes(conn, md)
+    row = conn.execute(
+        "SELECT type, key FROM memes WHERE key='stonks'"
+    ).fetchone()
+    conn.close()
+
+    assert rpt.inserted == 1
+    assert row["type"] == "meme"
+
+
+def test_memes_insert_dedup_skip(tmp_path):
+    """Same type+key already active → insert skipped silently."""
+    db_path = _db(tmp_path)
+    conn = _conn(db_path)
+    with conn:
+        conn.execute(
+            "INSERT INTO memes(type,key,status) VALUES('fact','sky is blue','active')"
+        )
+
+    md = tmp_path / "memes.md"
+    # Write a file that has the existing row anchored AND a bare duplicate.
+    existing_id = conn.execute("SELECT id FROM memes WHERE key='sky is blue'").fetchone()[0]
+    md.write_text(
+        f"## Personal\n"
+        f"- [fact] **sky is blue** <!-- id:{existing_id} -->\n"
+        f"- [fact] **sky is blue** → duplicate\n",
+        encoding="utf-8",
+    )
+
+    rpt = reconcile_memes(conn, md)
+    count = conn.execute("SELECT COUNT(*) FROM memes WHERE key='sky is blue'").fetchone()[0]
+    conn.close()
+
+    assert rpt.inserted == 0
+    assert count == 1
+
+
+def test_memes_insert_unmappable_section_conflict(tmp_path):
+    """Line under an unrecognised section → conflict, not inserted."""
+    db_path = _db(tmp_path)
+    conn = _conn(db_path)
+
+    md = tmp_path / "memes.md"
+    md.write_text(
+        "## Unknown\n"
+        "- [fact] **orphan** → value\n",
+        encoding="utf-8",
+    )
+
+    rpt = reconcile_memes(conn, md)
+    count = conn.execute("SELECT COUNT(*) FROM memes").fetchone()[0]
+    conn.close()
+
+    assert rpt.inserted == 0
+    assert len(rpt.conflicts) == 1
+
+
+def test_memes_insert_idempotent(tmp_path):
+    """Second reconcile after anchor write-back is a full no-op."""
+    db_path = _db(tmp_path)
+    conn = _conn(db_path)
+
+    md = tmp_path / "memes.md"
+    md.write_text(
+        "## Personal\n"
+        "- [paw] **fluffy** → soft\n",
+        encoding="utf-8",
+    )
+
+    rpt1 = reconcile_memes(conn, md)
+    assert rpt1.inserted == 1
+
+    # Second pass on the now-anchored file.
+    rpt2 = reconcile_memes(conn, md)
+    count = conn.execute("SELECT COUNT(*) FROM memes WHERE key='fluffy'").fetchone()[0]
+    conn.close()
+
+    assert rpt2.inserted == 0
+    assert count == 1
+
+
+def test_memes_insert_audit_log(tmp_path):
+    """INSERT action is recorded in audit_log."""
+    db_path = _db(tmp_path)
+    conn = _conn(db_path)
+
+    md = tmp_path / "memes.md"
+    md.write_text(
+        "## Personal\n"
+        "- [fact] **audit-me** → yes\n",
+        encoding="utf-8",
+    )
+
+    reconcile_memes(conn, md)
+    audit = conn.execute(
+        "SELECT action FROM audit_log WHERE target_table='memes' AND action='insert' LIMIT 1"
+    ).fetchone()
+    conn.close()
+
+    assert audit is not None
+    assert audit["action"] == "insert"
+
+
+# ── INSERT: profile ────────────────────────────────────────────────────────────
+
+def test_profile_insert_unanchored_row(tmp_path):
+    """Unanchored entity line → INSERT + anchor written back."""
+    db_path = _db(tmp_path)
+    conn = _conn(db_path)
+
+    md = tmp_path / "profile.md"
+    md.write_text(
+        "## Person\n"
+        "- [person] **Charlie** — chef\n",
+        encoding="utf-8",
+    )
+
+    rpt = reconcile_profile(conn, md)
+    row = conn.execute(
+        "SELECT kind, name, fact FROM entities WHERE name='Charlie'"
+    ).fetchone()
+    md_text = md.read_text()
+    conn.close()
+
+    assert rpt.inserted == 1
+    assert row["kind"] == "person"
+    assert row["fact"] == "chef"
+    assert "<!-- id:" in md_text
+
+
+def test_profile_insert_kind_from_section(tmp_path):
+    """kind is derived from ## Section heading, not from the line's [tag]."""
+    db_path = _db(tmp_path)
+    conn = _conn(db_path)
+
+    md = tmp_path / "profile.md"
+    md.write_text(
+        "## Pref\n"
+        "- [pref] **coffee**\n",
+        encoding="utf-8",
+    )
+
+    rpt = reconcile_profile(conn, md)
+    row = conn.execute(
+        "SELECT kind FROM entities WHERE name='coffee'"
+    ).fetchone()
+    conn.close()
+
+    assert rpt.inserted == 1
+    assert row["kind"] == "pref"
+
+
+def test_profile_insert_dedup_skip(tmp_path):
+    """Same kind+name not superseded → skip silently."""
+    db_path = _db(tmp_path)
+    conn = _conn(db_path)
+    with conn:
+        conn.execute(
+            "INSERT INTO entities(kind,name) VALUES('person','Dana')"
+        )
+
+    existing_id = conn.execute("SELECT id FROM entities WHERE name='Dana'").fetchone()[0]
+    md = tmp_path / "profile.md"
+    md.write_text(
+        f"## Person\n"
+        f"- [person] **Dana** <!-- id:{existing_id} -->\n"
+        f"- [person] **Dana** — duplicate\n",
+        encoding="utf-8",
+    )
+
+    rpt = reconcile_profile(conn, md)
+    count = conn.execute(
+        "SELECT COUNT(*) FROM entities WHERE name='Dana' AND superseded_by IS NULL"
+    ).fetchone()[0]
+    conn.close()
+
+    assert rpt.inserted == 0
+    assert count == 1
+
+
+def test_profile_insert_unmappable_section_conflict(tmp_path):
+    """Unknown section heading → conflict, row not inserted."""
+    db_path = _db(tmp_path)
+    conn = _conn(db_path)
+
+    md = tmp_path / "profile.md"
+    md.write_text(
+        "## Alien\n"
+        "- [alien] **ET**\n",
+        encoding="utf-8",
+    )
+
+    rpt = reconcile_profile(conn, md)
+    count = conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
+    conn.close()
+
+    assert rpt.inserted == 0
+    assert len(rpt.conflicts) == 1
+
+
+def test_profile_insert_idempotent(tmp_path):
+    """Second reconcile after anchor write-back is a full no-op."""
+    db_path = _db(tmp_path)
+    conn = _conn(db_path)
+
+    md = tmp_path / "profile.md"
+    md.write_text(
+        "## Place\n"
+        "- [place] **Melbourne** — best city\n",
+        encoding="utf-8",
+    )
+
+    rpt1 = reconcile_profile(conn, md)
+    assert rpt1.inserted == 1
+
+    rpt2 = reconcile_profile(conn, md)
+    count = conn.execute(
+        "SELECT COUNT(*) FROM entities WHERE name='Melbourne' AND superseded_by IS NULL"
+    ).fetchone()[0]
+    conn.close()
+
+    assert rpt2.inserted == 0
+    assert count == 1
+
+
+# ── INSERT: diary ──────────────────────────────────────────────────────────────
+
+def test_diary_insert_unanchored_block(tmp_path):
+    """#### YYYY-MM-DD block with no anchor → INSERT + anchor line added."""
+    db_path = _db(tmp_path)
+    conn = _conn(db_path)
+
+    md = tmp_path / "diary.md"
+    md.write_text(
+        "#### 2026-01-10\n"
+        "\n"
+        "Went for a walk.\n",
+        encoding="utf-8",
+    )
+
+    rpt = reconcile_diary(conn, md)
+    row = conn.execute(
+        "SELECT date, content FROM diary WHERE date='2026-01-10'"
+    ).fetchone()
+    md_text = md.read_text()
+    conn.close()
+
+    assert rpt.inserted == 1
+    assert row is not None
+    assert row["content"] == "Went for a walk."
+    assert "<!-- id:2026-01-10 -->" in md_text
+
+
+def test_diary_insert_dedup_skip(tmp_path):
+    """Date already in DB → skip silently even without anchor in md."""
+    db_path = _db(tmp_path)
+    conn = _conn(db_path)
+    with conn:
+        conn.execute(
+            "INSERT INTO diary(date,content) VALUES('2026-02-01','existing')"
+        )
+
+    md = tmp_path / "diary.md"
+    md.write_text(
+        "#### 2026-02-01\n"
+        "\n"
+        "new content without anchor\n",
+        encoding="utf-8",
+    )
+
+    rpt = reconcile_diary(conn, md)
+    row = conn.execute(
+        "SELECT content FROM diary WHERE date='2026-02-01'"
+    ).fetchone()
+    conn.close()
+
+    assert rpt.inserted == 0
+    assert row["content"] == "existing"
+
+
+def test_diary_insert_future_date_conflict(tmp_path):
+    """Future-dated block → conflict, not inserted."""
+    db_path = _db(tmp_path)
+    conn = _conn(db_path)
+
+    md = tmp_path / "diary.md"
+    md.write_text(
+        "#### 2099-12-31\n"
+        "\n"
+        "From the future.\n",
+        encoding="utf-8",
+    )
+
+    rpt = reconcile_diary(conn, md)
+    count = conn.execute("SELECT COUNT(*) FROM diary").fetchone()[0]
+    conn.close()
+
+    assert rpt.inserted == 0
+    assert len(rpt.conflicts) == 1
+    assert "future" in rpt.conflicts[0]
+
+
+def test_diary_insert_idempotent(tmp_path):
+    """Second reconcile after anchor write-back is a full no-op."""
+    db_path = _db(tmp_path)
+    conn = _conn(db_path)
+
+    md = tmp_path / "diary.md"
+    md.write_text(
+        "#### 2026-03-15\n"
+        "\n"
+        "Sunny day.\n",
+        encoding="utf-8",
+    )
+
+    rpt1 = reconcile_diary(conn, md)
+    assert rpt1.inserted == 1
+
+    rpt2 = reconcile_diary(conn, md)
+    count = conn.execute("SELECT COUNT(*) FROM diary WHERE date='2026-03-15'").fetchone()[0]
+    conn.close()
+
+    assert rpt2.inserted == 0
+    assert count == 1
+
+
+def test_diary_insert_anchor_position(tmp_path):
+    """Anchor line is placed immediately after the #### heading."""
+    db_path = _db(tmp_path)
+    conn = _conn(db_path)
+
+    md = tmp_path / "diary.md"
+    md.write_text(
+        "#### 2026-04-01\n"
+        "\n"
+        "April fools.\n",
+        encoding="utf-8",
+    )
+
+    reconcile_diary(conn, md)
+    lines = md.read_text().splitlines()
+    conn.close()
+
+    heading_idx = next(i for i, l in enumerate(lines) if l.startswith("#### 2026-04-01"))
+    assert lines[heading_idx + 1] == "<!-- id:2026-04-01 -->"
