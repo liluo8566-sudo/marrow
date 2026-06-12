@@ -4,7 +4,7 @@ Contract:
 - Each sub-page rendered from one table, same render contract (markers +
   atomic write) differing only by table + view.
 - Structured views: row-id anchor `<!-- id:{id} -->` at line end.
-- Narrative views (diary, goose-bites): `## YYYY-MM-DD` heading is the row
+- Narrative views (diary): `## YYYY-MM-DD` heading is the row
   boundary; no extra inline anchor.
 - Cheatsheet: read-only, always overwrite.
 - Anchored md edits flow back to DB via reconcile; free-form hand-edits

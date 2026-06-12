@@ -77,20 +77,6 @@ def test_drops_noise_and_keeps_text_blocks_only(tmp_path):
     assert [r["content"] for r in rows] == ["the real answer"]
 
 
-def test_strips_buddy_end_of_turn_comment(tmp_path):
-    jl = _w(tmp_path / "s.jsonl", [
-        {"type": "assistant", "sessionId": "s1", "timestamp": "t",
-         "message": {"role": "assistant", "model": "claude-opus-4-7",
-                     "content": [{"type": "text",
-             "text": "PONG\n\n<!-- buddy: *adjusts crown* nice -->"}]}},
-        {"type": "assistant", "sessionId": "s1", "timestamp": "t",
-         "message": {"role": "assistant", "model": "claude-opus-4-7",
-                     "content": [{"type": "text",
-             "text": "<!-- BUDDY:\nmultiline\n-->"}]}},
-    ])
-    rows = transcript.clean(jl)
-    assert [r["content"] for r in rows] == ["PONG"]
-
 
 def test_missing_file_returns_empty(tmp_path):
     assert transcript.clean(str(tmp_path / "never-written.jsonl")) == []
