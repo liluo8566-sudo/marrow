@@ -361,58 +361,6 @@ def build_wallet_spec(folder: str) -> InserterSpec:
     )
 
 
-# ── goose-bites ────────────────────────────────────────────────────────────
-
-
-def build_goose_spec(folder: str) -> InserterSpec:
-    """Goose-bites — one block per date (best quote of the day)."""
-    def fetch(conn: sqlite3.Connection) -> list[dict]:
-        rows = conn.execute(
-            "SELECT id, date, bites FROM goose_bites ORDER BY date ASC"
-        ).fetchall()
-        out = []
-        for r in rows:
-            d = dict(r)
-            bites = (d.get("bites") or "").strip()
-            if "\n" in bites:
-                bites = next((ln for ln in bites.splitlines() if ln.strip()),
-                             bites)
-            d["bites"] = bites
-            out.append(d)
-        return out
-
-    def render(r: dict) -> str:
-        return f"- [{r['date']}]{r['bites']} {_anchor(r['id'])}"
-
-    # Pattern: `- [YYYY-MM-DD]<bites> <!-- id:N -->`
-    _GOOSE_RE = re.compile(
-        r"^-\s+\[\d{4}-\d{2}-\d{2}\](?P<bites>.+?)\s*<!-- id:(?P<id>\d+) -->"
-    )
-
-    def parse_goose(line: str) -> dict | None:
-        m = _GOOSE_RE.match(line.strip())
-        if not m:
-            return None
-        return {"bites": m.group("bites").strip()}
-
-    return InserterSpec(
-        key="goose",
-        path=str(Path(folder) / "goose-bites.md"),
-        fetch=fetch,
-        block_id_of=lambda r: str(r["id"]),
-        render_row=render,
-        parse_row=parse_goose,
-        group_by="date",
-        section_of=lambda r: _year(r["date"]),
-        section_order=lambda labels: sorted(set(labels)),
-        render_section_header=lambda y: f"## {y}",
-        subsection_of=lambda r: _month_name(r["date"]),
-        render_subsection_header=lambda m: f"### {m}",
-        empty_message="_No goose-bites yet._",
-        force_sort_consistency=True,
-    )
-
-
 # ── projects (index placeholder) ───────────────────────────────────────────
 
 
@@ -599,7 +547,6 @@ SPEC_BUILDERS = {
     "memes":    build_memes_spec,
     "stickers": build_stickers_spec,
     "wallet":   build_wallet_spec,
-    "goose":    build_goose_spec,
     "projects": build_projects_index_spec,
     "study":    build_study_index_spec,
     "atlas":    build_atlas_spec,

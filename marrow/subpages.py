@@ -32,12 +32,10 @@ from .reconcile_inserter import (
     reconcile_diary,
     reconcile_stickers,
     reconcile_wallet,
-    reconcile_goose,
 )
 from .subpages_render import (
     render_cheatsheet,
     render_diary,
-    render_goose,
     render_memes,
     render_milestone,
     render_profile,
@@ -340,10 +338,6 @@ _REGISTRY: dict[str, Callable[[sqlite3.Connection, str, str], SubPageConfig]] = 
         "wallet", render_wallet, "wallet.md",
         subpage_specs.build_wallet_spec,
         reconcile=reconcile_wallet),
-    "goose":      _flat_with_inserter(
-        "goose", render_goose, "goose-bites.md",
-        subpage_specs.build_goose_spec,
-        reconcile=reconcile_goose),
     "cheatsheet": lambda c, f, s: SubPageConfig(
         "cheatsheet", render_cheatsheet, str(Path(f) / "cheatsheet.md"), s,
         read_only=True),
@@ -355,7 +349,7 @@ _REGISTRY: dict[str, Callable[[sqlite3.Connection, str, str], SubPageConfig]] = 
 # Render order when [subpages] is absent from config — covers fresh installs
 # and tests. Mirrors DESIGN L43-65 default order.
 _DEFAULT_TOP = ["profile", "milestone", "diary", "memes",
-                "stickers", "wallet", "goose"]
+                "stickers", "wallet"]
 _DEFAULT_BOTTOM = ["study", "projects", "cheatsheet", "atlas"]
 
 
@@ -439,9 +433,7 @@ def content_list(*, folder: str | None = None) -> dict:
     return out
 
 
-# Filename override for keys whose written file != "<key>.md".
-# Historical: goose key writes to goose-bites.md (see _REGISTRY).
-_FILENAME = {"goose": "goose-bites.md"}
+_FILENAME: dict[str, str] = {}
 
 
 # Display names for dashboard Content section. Falls back to key.capitalize().
@@ -452,7 +444,6 @@ _DISPLAY = {
     "memes":      "Memes",
     "stickers":   "Stickers",
     "wallet":     "Wallet",
-    "goose":      "Goose-bites",
     "study":      "Study",
     "projects":   "Projects",
     "cheatsheet": "Cheatsheet",

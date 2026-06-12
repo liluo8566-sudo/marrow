@@ -226,42 +226,6 @@ def render_memes(conn: sqlite3.Connection) -> str:
     return "\n".join(out)
 
 
-# -- Goose-bites (flat list, one best quote per day) -----------------------
-
-def render_goose(conn: sqlite3.Connection) -> str:
-    key = "goose"
-    rows = conn.execute(
-        "SELECT date, bites FROM goose_bites ORDER BY date ASC"
-    ).fetchall()
-    out = [_m0(key), ""]
-    if not rows:
-        out.append("_No goose-bites yet._")
-        out.append("")
-    else:
-        # Hierarchy: ## YYYY → ### MonthName → bullet rows.
-        cur_year = None
-        cur_month = None
-        for r in rows:
-            year, month = _year_month(r["date"])
-            if year != cur_year:
-                out.append(f"## {year}")
-                out.append("")
-                cur_year = year
-                cur_month = None
-            if month != cur_month:
-                out.append(f"### {month}")
-                out.append("")
-                cur_month = month
-            bites = (r["bites"] or "").strip()
-            # Legacy multiline: take first non-empty line only.
-            if "\n" in bites:
-                bites = next((l for l in bites.splitlines() if l.strip()), bites)
-            out.append(f"- [{r['date']}]{bites}")
-        out.append("")
-    out.append(_m1(key))
-    return "\n".join(out)
-
-
 # -- Study ------------------------------------------------------------------
 
 def render_study_index(units: list[dict]) -> str:
