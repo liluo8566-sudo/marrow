@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import shutil
 from pathlib import Path
 
@@ -89,12 +90,33 @@ def ingest_sticker(conn, src_path: str, desc: str, source: str = "wechat") -> di
     return {"duplicate": False, "id": stk_id, "path": str(new_path), "desc": desc}
 
 
+def _stickers_md_path() -> Path:
+    from . import config
+    return Path(config.db_pages_path()) / "stickers.md"
+
+
+def _patch_md_line(sticker_id: int, desc: str) -> bool:
+    md = _stickers_md_path()
+    if not md.exists():
+        return False
+    anchor = f"<!-- id:{sticker_id} -->"
+    pattern = re.compile(
+        rf"^(- stk_\d+\s+).+?(\s*{re.escape(anchor)})$", re.MULTILINE
+    )
+    text = md.read_text()
+    new_text, n = pattern.subn(rf"\g<1>{desc} \2", text)
+    if n:
+        md.write_text(new_text)
+    return n > 0
+
+
 def update_sticker(conn, sticker_id: int, desc: str) -> dict:
     row = conn.execute("SELECT id FROM stickers WHERE id = ?", (sticker_id,)).fetchone()
     if not row:
         return {"ok": False, "error": "not_found"}
     conn.execute("UPDATE stickers SET desc = ? WHERE id = ?", (desc, sticker_id))
     conn.commit()
+    _patch_md_line(sticker_id, desc)
     return {"ok": True, "id": sticker_id, "desc": desc}
 
 
