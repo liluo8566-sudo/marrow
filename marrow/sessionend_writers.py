@@ -400,8 +400,8 @@ def _append_digest_log(sid: str, raw_llm: str) -> None:
     now = _dt.datetime.now(_dt.timezone.utc)
     day = _digest_local_date(now)
     log_path = _digest_log_dir() / f"digest-{day}.log"
-    utc_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-    entry = f"[{utc_iso} sid={sid[:8]}]\n{raw_llm}\n\n"
+    local_iso = now.astimezone(_TZ).strftime("%Y-%m-%dT%H:%M:%S%z")
+    entry = f"[{local_iso} sid={sid[:8]}]\n{raw_llm}\n\n"
     with log_path.open("a", encoding="utf-8") as f:
         f.write(entry)
 
