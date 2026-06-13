@@ -4,8 +4,6 @@
 > ⚑ FLAG = conflict/overlap found in audit — resolve at next brainstorm/grill before building that item.
 
 ---
-## Monitor
-- wx sessionend: bridge owns timing (P1 bridge_owns), alt-end paths skip OK (7ba1b5f). True 6h-idle timeout NOT implemented — keep watching if bridge close is enough.
 
 ## daily_cand quality bug (Lumi 06/11 — handle later, with alert batch)
 - Symptom: cand output efficiency ≈ 0; "mentioned 3×/week before recording" rule NOT enforced in current pipeline.
@@ -35,7 +33,7 @@
 - 召回单位: 单条 affect row, entity overlap + 时间 decay + unresolved boost 排序, vec 辅助
 - SessionStart 3 行保持不动
 
-### Phase D · decay 公式升级 (partial — floor tiers done, formula not)
+### Phase D · decay 公式升级 (partial — floor tiers done, formula not) - 先跟我确认不要按照下面说的直接写，我要了解一下机制
 - `weight = importance × exp(-Δt/τ × (1 - arousal/2))`, τ 起步 24h, arousal 高拉长有效 τ
 - resolved 不删, 权重降 5% 沉底可钓
 - ⚑ "recall 回温 weight +0.1" 与 0610 plan §5 recall-hit boost 是同一机制两处规划 — 合并成一个实现 (recall_count 地基在 0610 Batch 2)
@@ -44,17 +42,6 @@
 
 ---
 ## Audit items (MAP review)
-
-### 1. Subpage 双向 reconcile — md route locked (Lumi 0613); full CRUD live, see MAP §3/§6
-- 不补: cheatsheet (read-only) · dir_tree (atlas 替代) · projects/study index (redesign below)
-- Remaining: timeline anchor-less lines (AM/PM/ND · Week · casual non-first) edits don't sync — add anchors (batch 3)
-- 遗留 bug: milestone 剪贴 id 短暂消失即 dead — 要 "消失 X 分钟内可复活, 超时才 dead"
-
-### 1b. Projects / Study redesign (Lumi 0613 — parked, not started)
-- Current specs (subpage_specs.py:367-442) source from tasks — WRONG, no relation to tasks; replace wholesale when built.
-- Index = auto-updating directory: one line per project (name · status · date · one-sentence intro), rows go to DB + vector recall.
-- Subpage = maintenance notes (traps, followups, care info invisible from code — e.g. buddy, weclaude); plain reference page, grep/read only, NOT embedded.
-- Study: one page per unit.
 
 ### 2. Alert types 待加 (§8 重写 done 48862fd; 以下未核验逐条状态)
 - persistent process health (critical) — watcher 死 + MCP daemon 死
@@ -70,11 +57,6 @@
 - backlog catchup: aging 或 sessionstart_catchup 查 backlog ≤ N, 超了 critical alert
 - 注: 0610 Batch 2 vec eviction 会写 delete-vec 路径 — 这几条顺路一起修最省
 
-### 4. Milestone 裸文本自动补格式 (not done)
-- scope 区段 (## us/me/cn) 下随手一行 → reconcile 自动补 `##### [today] xxx` 落 DB + 写回 md
-- date 缺省今天, description 空, 走 unanchored insert 同路径 (exact dedup + 回写 id), atomic_write 回 md
-- 跟 BUG-1 修法 B 共享 line splice + atomic_write helper
-
 ### 5. Memes aging — DELETE 改 demote dormant (not done, aging.py:60 仍硬删)
 - memes 加 `dormant` 列; aging UPDATE dormant=1; recall filter dormant=0
 - FTS 命中 dormant → 复活 + last_seen 刷新; 加 `mw memes promote <key>`
@@ -87,27 +69,10 @@
 - synapse-wx 扫不到 — 自己一份或只扫 MCP 接入点
 - Acceptance: 改阈值 commit + 新 endpoint commit → 次日 staging 两条带 hunk, MAP 不动
 
----
-## Recall backlog
-
-### 06/06 遗留 (未做部分)
-- pinned milestone 在 query vec 强时仍可能擦闸门进 top5 (noise ~15%) — pinned 加 vec_score≥0.55 预过滤 (现在 pinned 与普通同走 0.50 floor)
-- ⚑ "去掉 entity 加成" (06/06 决定) 与现状冲突: 2f752ed 恢复了全 anchor +0.10 (含 entity), HANDOVER 06/08 钦定方案也含 +0.10 — 重新拍: entity 到底去不去加成
-
-### R2 · events superseded_by + events_live view (not done)
-- events 加列; sessionend 语义矛盾检测标旧 turn; events_live view; recall 读 live, FTS 命中旧 turn 可 revive
-- 短期止血 (±1 context) 已上线
-
-### R4 · diary / pit 主动 recall (partial — diary 已出 passive lane; pit 表已存在)
-- MCP recall 加 kind filter 或独立 diary_recall/pit_recall tool
-- pit 关键词 (填坑/想做X/那个想法) → 主动调; 等 pit subpage 做完一起
-
-### R5 · dashboard last-recall 块 (not done, log 基建已在 ~/.config/marrow/logs/recall/) — 低优先级
+### R5 · dashboard last-recall 块 (not done, log 基建已在 ~/.config/marrow/logs/recall/)
+- 可以做，等稳定了代替log - Monitor zone可以是单独一个subpage
 
 ### R6 · memes 入表门槛 (partial)
 - cosine 邻近合并 done (memes_dedup); 现状 gate = 14d 内 <3 次
-- ⚑ todo 原定 "7 天 3 次 + same-day 只算 1 次", 现实是 14d/3 — 确认 14d 是有意改的还是漂移, 再决定改不改
 - 一次性术语 (mc=1 + 7d 一次) 不入表; daily writer 绕门槛塞 pinned (旧 BUG-2) 一并消化
 
-### R8 · bump_mention_counts 上 FTS5 (not done, entity_recall.py:25 仍 substring)
-- event.content → _fts_terms → MATCH entities_fts → mc+=1; 顺手删 entity_force_include + 旧测试
