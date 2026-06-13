@@ -179,6 +179,21 @@ def sticker_delete(sticker_id: int) -> dict:
         conn.close()
 
 
+@mcp.tool()
+def sticker_list_pending() -> list[dict]:
+    """List stickers with missing or placeholder descriptions."""
+    conn = storage.connect(_DB)
+    try:
+        rows = conn.execute(
+            "SELECT id, path, desc FROM stickers"
+            " WHERE desc IS NULL OR desc = '' OR desc = '(pending)'"
+            " ORDER BY id"
+        ).fetchall()
+        return [{"id": r["id"], "path": r["path"], "desc": r["desc"]} for r in rows]
+    finally:
+        conn.close()
+
+
 def main() -> None:
     storage.init_db(_DB).close()
     mcp.run()
