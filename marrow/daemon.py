@@ -146,6 +146,17 @@ def sticker_pick(sticker_id: int) -> dict:
         conn.close()
 
 
+@mcp.tool()
+def sticker_ingest(image_path: str, desc: str, source: str = "wechat") -> dict:
+    """Ingest a new sticker into the catalog. Copies file, deduplicates by SHA256 + perceptual hash, generates thumbnail, writes DB. Returns the new sticker info or duplicate notice."""
+    conn = storage.connect(_DB)
+    try:
+        from .sticker_ops import ingest_sticker
+        return ingest_sticker(conn, image_path, desc, source)
+    finally:
+        conn.close()
+
+
 def main() -> None:
     storage.init_db(_DB).close()
     mcp.run()
