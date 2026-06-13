@@ -25,7 +25,7 @@
 Three runtimes:
 - **hooks** — one-shot per CC lifecycle event, exit after injecting/spawning.
 - **watcher** — launchd persistent (KeepAlive); hosts SyncLoop(5s) + AtlasSweepLoop(60s) threads.
-- **daemon** — stdio MCP (recall / atlas_lookup / embed_pending / sticker_search / sticker_pick / sticker_ingest), spawned by CC via .mcp.json, no plist; holds bge-m3 in memory.
+- **daemon** — stdio MCP (recall / atlas_lookup / embed_pending / sticker_search / sticker_pick / sticker_ingest / sticker_update / sticker_delete / sticker_list_pending), spawned by CC via .mcp.json, no plist; holds bge-m3 in memory.
 
 ### 1.2 Hooks registry (all in marrow/hooks.py)
 
@@ -95,7 +95,7 @@ Three runtimes:
 
 ### 5.3 sync machinery
 - `md_index` — SHA-256 per (path, block_id); baseline = last auto-write; observe mode freezes baseline on user edit. Missing file in observe mode bulk-tombstones its blocks (debounced 200ms). Tombstone aging 30d.
-- `watcher` — watchdog on dashboard/handover/db-pages; 200ms debounce; boot full_scan(observe=True) covers crash gap; never renders.
+- `watcher` — watchdog on dashboard/handover/db-pages + ~/Desktop/NY/stickers/ (non-recursive, `_StickerHandler`: 1.5s debounce, size-stability check, auto-ingest new images via `sticker_ops:ingest_sticker`, skips stk_NNN/dotfiles/_thumb); 200ms debounce for md; boot full_scan(observe=True) covers crash gap; never renders.
 - `sync_loop` — 5s tick: md newer (mtime epsilon 1s) → reconcile; DB newer (max updated_at per source table) → render. USER_ACTIVE_WINDOW 3s skips render under cursor. KNOWN GAP: tick exception is log-only, no alert (plan B-9).
 - `reconcile.py` — routes: milestones (bidirectional + id-anchor splice-back; bare-text line or unanchored single-bracket Me row → insert w/ date=today Melb + canonical line write-back) · milestone_candidates (✅pin/❌tombstone/✏️edit + trail diff) · tasks (trail marker, tick/untick/archive/insert, cosine dedup; [tag] needs no trailing space — CJK-friendly) · affect (aff:id segments + pending id:affect.N; delete window mtime-7d; aff-rendered id-set diff → removed id marks row superseded) · alerts (md delete = resolve; zero-anchor block no-op guard; mtime gate) · timeline (tl_line edits + `+ ` manual add + trail-diff delete, §3). reconcile_memes/profile/diary/etc live in reconcile_inserter.py (reconcile.py shims are back-compat only) — UPDATE/DELETE + unanchored-INSERT pass (memes Personal/Public section→type, profile section→kind, diary new `#### date` block; anchor write-back, natural-key dedup). Conflicts → `reconcile:emit_conflict_alerts` at dashboard + subpage call sites — add_alert(warn, reconcile_conflict), fingerprint=conflict text.
 - `drift_sweep` — Trigger A same-root move (immediate) · B cross-root delete+create matched by basename+size within 30s batch window, pending TTL 1800s · dangling delete warn. Refs via rg (timeout 30s, 10MB cap, Python fallback); safe exts auto-apply with info alert; unsafe → pending JSON + `mw drift apply <pid>`. AUTHORIZED_ROOTS ×5 = atlas seed roots.
@@ -153,4 +153,4 @@ Three runtimes:
 
 **Invariants**: flock every md write · lifecycle:end commits before popen · single merged sessionend call, fenced segment blocks · 4-flag detach · DB never trusts md free-text inside rendered blocks · journal DELETE + no second conn inside write txn · all DB timestamps UTC.
 
-**Status**: stub = wallet, cheatsheet, profile-render(rows flow once entities populate) · shipped = stickers C2 (MCP: sticker_search/sticker_pick/sticker_ingest; sticker_ops.py: sha256+phash dedup, thumb gen; subpage sync live) · wip = study/projects child pages (legacy read_only), candidate pin/drop HTML buttons · deletable = subpages_render legacy fns (verified unreachable), sessionend_prompts parse_doing_diff cluster (dead ~90 LOC) · open bugs/gaps = review P0/P1 list (docs/notes/0611-system-review.md) until alert-redesign batches land.
+**Status**: stub = wallet, cheatsheet, profile-render(rows flow once entities populate) · shipped = stickers C2 (MCP: search/pick/ingest/update/delete/list_pending; sticker_ops.py: sha256+phash dedup, thumb gen; subpage sync live; watcher Finder auto-ingest; nudge counter wx-only 10-turn; /sticker-entry command for batch desc fill; system prompt rules in synapse-wx cc.py) · wip = study/projects child pages (legacy read_only), candidate pin/drop HTML buttons · deletable = subpages_render legacy fns (verified unreachable), sessionend_prompts parse_doing_diff cluster (dead ~90 LOC) · open bugs/gaps = review P0/P1 list (docs/notes/0611-system-review.md) until alert-redesign batches land.
