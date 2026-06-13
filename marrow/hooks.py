@@ -85,6 +85,39 @@ def _wipe_recall_seen(sid: str) -> None:
         pass
 
 
+def _sticker_nudge_path(sid: str) -> Path:
+    return config.DATA_DIR / "state" / "sticker_nudge" / f"{sid}.json"
+
+
+def _load_sticker_nudge(sid: str) -> dict:
+    if not sid:
+        return {"turn_count": 0, "last_sticker_turn": 0}
+    try:
+        return json.loads(_sticker_nudge_path(sid).read_text())
+    except Exception:
+        return {"turn_count": 0, "last_sticker_turn": 0}
+
+
+def _save_sticker_nudge(sid: str, state: dict) -> None:
+    if not sid:
+        return
+    p = _sticker_nudge_path(sid)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(state))
+    except Exception:
+        pass
+
+
+def _wipe_sticker_nudge(sid: str) -> None:
+    if not sid:
+        return
+    try:
+        _sticker_nudge_path(sid).unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def _recall_log_dir() -> Path:
     """~/.config/marrow/logs/recall/ — created on first use."""
     d = config.DATA_DIR / "logs" / "recall"
@@ -530,6 +563,7 @@ def session_start() -> int:
             # Fresh window or resume — drop prior recall dedup state either way
             # (cheap; resume re-shows seen rows once, acceptable).
             _wipe_recall_seen(sid)
+            _wipe_sticker_nudge(sid)
             try:
                 # Resume detection: if sid already has a lifecycle:start row, this
                 # is a cc resume. Clear any manual skip so sessionend runs normally.
@@ -659,6 +693,7 @@ def session_end() -> int:
             except Exception:  # noqa: BLE001 — never block session_end
                 pass
             _wipe_recall_seen(early_sid)
+            _wipe_sticker_nudge(early_sid)
             return 0
 
         rows = transcript.clean(tpath)
@@ -695,6 +730,7 @@ def session_end() -> int:
                 pass
             # Drop per-session recall dedup state — next window starts clean.
             _wipe_recall_seen(sid)
+            _wipe_sticker_nudge(sid)
 
             # Bridge gate: when synapse-wx wraps cc, it owns sessionend timing
             # (fires on 6h idle, not on every /model swap). Archive runs, marker
@@ -982,6 +1018,19 @@ def user_prompt_submit() -> int:
     if prompt_text.startswith("===== BEGIN ORIGINAL TRANSCRIPT"):
         return 0
 
+    # Sticker nudge: increment turn counter; flag nudge if 10 turns since last sticker.
+    _nudge_line: str | None = None
+    if sid:
+        try:
+            _sn = _load_sticker_nudge(sid)
+            _sn["turn_count"] = _sn.get("turn_count", 0) + 1
+            if _sn["turn_count"] - _sn.get("last_sticker_turn", 0) >= 10:
+                _nudge_line = "你已经好久没发表情包了，翻翻 sticker_search 找个应景的发一下。"
+                _sn["last_sticker_turn"] = _sn["turn_count"]
+            _save_sticker_nudge(sid, _sn)
+        except Exception:
+            pass
+
     # Sticky title + model backfill for wx /resume picker — run regardless
     # of recall config so short-lived cli sessions still get a model written.
     _maybe_set_session_model(sid)
@@ -1071,6 +1120,14 @@ def user_prompt_submit() -> int:
         hits = []
 
     if not hits and not wlane:
+        if _nudge_line:
+            json.dump(
+                {"hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": _nudge_line,
+                }},
+                sys.stdout,
+            )
         return 0
 
     # ── relative score cutoff (semantic pool only) ────────────────────────────
@@ -1096,6 +1153,14 @@ def user_prompt_submit() -> int:
         candidates.append(h)
 
     if not candidates and not wlane:
+        if _nudge_line:
+            json.dump(
+                {"hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": _nudge_line,
+                }},
+                sys.stdout,
+            )
         return 0
 
     # ── fetch context only for rank-1 semantic hit (event, not anchor) ──────
@@ -1168,6 +1233,14 @@ def user_prompt_submit() -> int:
             seen.add((kind, hid))
 
     if not visible:
+        if _nudge_line:
+            json.dump(
+                {"hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": _nudge_line,
+                }},
+                sys.stdout,
+            )
         return 0
     _save_recall_seen(sid, seen)
     # Best-effort: bump recall_count for injected event-kind hits only.
@@ -1183,6 +1256,8 @@ def user_prompt_submit() -> int:
         except Exception:
             pass
     ctx = "\n".join(lines)
+    if _nudge_line:
+        ctx = ctx + "\n\n" + _nudge_line
 
     # Side log — markdown append so VSCode preview / tail both readable.
     # Mirror what actually got injected: dedup-filtered `visible`, not raw hits.
@@ -1262,6 +1337,16 @@ def pretool_use() -> int:
         inp = _read_input()
         tool = inp.get("tool_name", "")
         ti = inp.get("tool_input", {})
+
+        if tool == "sticker_pick":
+            sid = inp.get("session_id") if isinstance(inp, dict) else None
+            if sid:
+                try:
+                    _sn = _load_sticker_nudge(sid)
+                    _sn["last_sticker_turn"] = _sn.get("turn_count", 0)
+                    _save_sticker_nudge(sid, _sn)
+                except Exception:
+                    pass
 
         _literal = "[Path] Use paths with /, not bare filenames."
 

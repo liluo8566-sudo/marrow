@@ -19,6 +19,7 @@ from pathlib import Path
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
+import re
 import sqlite3
 
 import sqlite_vec
@@ -26,6 +27,7 @@ import sqlite_vec
 from . import config, storage
 from .drift_sweep import AUTHORIZED_ROOTS, EXCLUDE_DIRS_SCAN, DriftWatcher
 from .md_index import MdIndex
+from .sticker_ops import STICKERS_DIR, ingest_sticker
 from .sync_loop import AtlasSweepLoop, SyncLoop, build_targets
 
 _DEBOUNCE_S = 0.2
@@ -256,6 +258,83 @@ class _DriftHandler(FileSystemEventHandler):
             self._log.exception("drift on_created failed: %s", event.src_path)
 
 
+_STICKER_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+_STK_RE = re.compile(r"^stk_\d{3,}", re.IGNORECASE)
+_STICKER_DEBOUNCE_S = 1.5
+
+
+class _StickerHandler(FileSystemEventHandler):
+
+    def __init__(self, log: logging.Logger) -> None:
+        self._log = log
+        self._pending: dict[str, threading.Timer] = {}
+        self._lock = threading.Lock()
+
+    def _skip(self, path: str) -> bool:
+        p = Path(path)
+        if p.suffix.lower() not in _STICKER_EXTS:
+            return True
+        name = p.name
+        if name.startswith("."):
+            return True
+        if _STK_RE.match(name):
+            return True
+        parts = p.parts
+        if "_thumb" in parts:
+            return True
+        return False
+
+    def _schedule(self, path: str) -> None:
+        if self._skip(path):
+            return
+        with self._lock:
+            t = self._pending.get(path)
+            if t is not None:
+                t.cancel()
+            t = threading.Timer(_STICKER_DEBOUNCE_S, self._ingest, args=(path,))
+            t.daemon = True
+            self._pending[path] = t
+            t.start()
+
+    def _ingest(self, path: str) -> None:
+        with self._lock:
+            self._pending.pop(path, None)
+        p = Path(path)
+        if not p.exists():
+            return
+        size_a = p.stat().st_size
+        time.sleep(0.5)
+        if not p.exists():
+            return
+        size_b = p.stat().st_size
+        if size_a != size_b:
+            self._schedule(path)
+            return
+        conn = storage.connect()
+        try:
+            result = ingest_sticker(conn, path, desc="(pending)", source="finder")
+            if result.get("duplicate"):
+                self._log.info("sticker_ingest duplicate skipped: %s -> id=%s",
+                               path, result.get("existing_id"))
+            else:
+                self._log.info("sticker_ingest new: %s -> id=%s path=%s",
+                               path, result.get("id"), result.get("path"))
+        except Exception:
+            self._log.exception("sticker_ingest failed: %s", path)
+        finally:
+            conn.close()
+
+    def on_created(self, event) -> None:
+        if event.is_directory:
+            return
+        self._schedule(str(Path(event.src_path).resolve()))
+
+    def on_moved(self, event) -> None:
+        if event.is_directory:
+            return
+        self._schedule(str(Path(event.dest_path).resolve()))
+
+
 def _warmup_imports() -> None:
     """Force-load every stdlib + marrow module the worker threads may touch.
 
@@ -389,6 +468,12 @@ class Watcher:
             if root.is_dir():
                 self.observer.schedule(drift_handler, str(root), recursive=True)
                 self.log.info("drift_watcher watching %s", root)
+
+        stickers_dir = STICKERS_DIR.expanduser().resolve()
+        stickers_dir.mkdir(parents=True, exist_ok=True)
+        sticker_handler = _StickerHandler(self.log)
+        self.observer.schedule(sticker_handler, str(stickers_dir), recursive=False)
+        self.log.info("sticker_ingest watching %s", stickers_dir)
 
         self.observer.start()
         # Start sync loop — boot tick fires immediately (after _reconcile_boot)

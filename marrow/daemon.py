@@ -157,6 +157,28 @@ def sticker_ingest(image_path: str, desc: str, source: str = "wechat") -> dict:
         conn.close()
 
 
+@mcp.tool()
+def sticker_update(sticker_id: int, desc: str) -> dict:
+    """Update a sticker's description."""
+    conn = storage.connect(_DB)
+    try:
+        from .sticker_ops import update_sticker
+        return update_sticker(conn, sticker_id, desc)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def sticker_delete(sticker_id: int) -> dict:
+    """Delete a sticker from the catalog. Removes file, thumbnail, and DB row."""
+    conn = storage.connect(_DB)
+    try:
+        from .sticker_ops import delete_sticker
+        return delete_sticker(conn, sticker_id)
+    finally:
+        conn.close()
+
+
 def main() -> None:
     storage.init_db(_DB).close()
     mcp.run()

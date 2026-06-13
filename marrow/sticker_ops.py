@@ -87,3 +87,28 @@ def ingest_sticker(conn, src_path: str, desc: str, source: str = "wechat") -> di
     )
     conn.commit()
     return {"duplicate": False, "id": next_id, "path": str(new_path), "desc": desc}
+
+
+def update_sticker(conn, sticker_id: int, desc: str) -> dict:
+    row = conn.execute("SELECT id FROM stickers WHERE id = ?", (sticker_id,)).fetchone()
+    if not row:
+        return {"ok": False, "error": "not_found"}
+    conn.execute("UPDATE stickers SET desc = ? WHERE id = ?", (desc, sticker_id))
+    conn.commit()
+    return {"ok": True, "id": sticker_id, "desc": desc}
+
+
+def delete_sticker(conn, sticker_id: int) -> dict:
+    row = conn.execute("SELECT path FROM stickers WHERE id = ?", (sticker_id,)).fetchone()
+    if not row:
+        return {"ok": False, "error": "not_found"}
+    path = row["path"]
+    conn.execute("DELETE FROM stickers WHERE id = ?", (sticker_id,))
+    conn.commit()
+    p = Path(path)
+    if p.exists():
+        p.unlink()
+    thumb = p.parent / "_thumb" / (p.stem + ".webp")
+    if thumb.exists():
+        thumb.unlink()
+    return {"ok": True, "id": sticker_id, "deleted_path": path}
