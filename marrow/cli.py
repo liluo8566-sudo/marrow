@@ -217,9 +217,10 @@ def cmd_list_recent_sessions(args) -> int:
         sid = r.get("sid") or ""
         model = r.get("model") or "-"
         channel = r.get("channel") or "-"
+        cwd = r.get("cwd") or ""
         last = r.get("last_active") or "-"
         title = r.get("title") or ""
-        print(f"{sid}\t{model}\t{channel}\t{last}\t{title}")
+        print(f"{sid}\t{model}\t{channel}\t{cwd}\t{last}\t{title}")
     return 0
 
 

@@ -199,7 +199,7 @@ def list_recent_sessions(
     """
     if channels and exclude_channels:
         raise ValueError("channels and exclude_channels are mutually exclusive")
-    sql = "SELECT sid, model, channel, last_active, title FROM sessions"
+    sql = "SELECT sid, model, channel, cwd, last_active, title FROM sessions"
     where: list[str] = []
     params: list = []
     if channels:
