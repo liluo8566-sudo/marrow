@@ -127,6 +127,27 @@ def _stickers_md_path() -> Path:
     return Path(config.db_pages_path()) / "stickers.md"
 
 
+def _insert_md_line(sticker_id: int, desc: str) -> bool:
+    md = _stickers_md_path()
+    if not md.exists():
+        return False
+    anchor = f"<!-- id:{sticker_id} -->"
+    new_line = f"- stk_{sticker_id:03d} {desc} {anchor}"
+    lines = md.read_text().splitlines()
+    insert_idx = None
+    for i, line in enumerate(lines):
+        m = re.search(r"<!-- id:(\d+) -->", line)
+        if m and int(m.group(1)) > sticker_id:
+            insert_idx = i
+            break
+    if insert_idx is None:
+        end = next((i for i, l in enumerate(lines) if "marrow:stickers:end" in l), len(lines))
+        insert_idx = end
+    lines.insert(insert_idx, new_line)
+    md.write_text("\n".join(lines) + "\n")
+    return True
+
+
 def _patch_md_line(sticker_id: int, desc: str) -> bool:
     md = _stickers_md_path()
     if not md.exists():
@@ -227,7 +248,8 @@ def sweep_file_orphans(conn) -> list[int]:
             continue
         sha = sha256_file(str(f))
         conn.execute(
-            "INSERT INTO stickers(id, path, sha256, phash, desc, source) VALUES(?,?,?,?,?,?)",
+            "INSERT INTO stickers(id, path, sha256, phash, desc, source, created_at)"
+            " VALUES(?,?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%SZ','now'))",
             (stk_id, str(f), sha, ph, "(pending)", "finder"),
         )
         registered.append(stk_id)
