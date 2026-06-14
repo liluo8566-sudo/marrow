@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import shutil
+import subprocess
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 STICKERS_DIR = Path.home() / "Desktop/NY/stickers"
+_SIPS = "/usr/bin/sips"
+_CANVAS = 320
 
 
 def sha256_file(path: str) -> str:
@@ -31,6 +37,26 @@ def _hamming(a: str, b: str) -> int | None:
         return (int(a, 16) ^ int(b, 16)).bit_count()
     except (TypeError, ValueError):
         return None
+
+
+def _standardize_image(path: Path) -> bool:
+    """Fit to _CANVAS x _CANVAS square (aspect-preserved, white pad). Skips GIF."""
+    if path.suffix.lower() == ".gif":
+        return False
+    try:
+        subprocess.run(
+            [_SIPS, "-Z", str(_CANVAS), str(path), "--out", str(path)],
+            check=True, timeout=15, capture_output=True,
+        )
+        subprocess.run(
+            [_SIPS, "-p", str(_CANVAS), str(_CANVAS),
+             "--padColor", "FFFFFF", str(path), "--out", str(path)],
+            check=True, timeout=15, capture_output=True,
+        )
+        return True
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
+        logger.warning("sticker standardize failed for %s: %s", path.name, e)
+        return False
 
 
 def ingest_sticker(conn, src_path: str, desc: str, source: str = "wechat") -> dict:
@@ -71,6 +97,7 @@ def ingest_sticker(conn, src_path: str, desc: str, source: str = "wechat") -> di
     ext = src.suffix
     new_path = stickers_dir / f"stk_{stk_id:03d}{ext}"
     shutil.copy2(src, new_path)
+    _standardize_image(new_path)
 
     try:
         from PIL import Image
