@@ -1693,6 +1693,7 @@ def recall_fusion(
     used = 0
     for _, row in picks[:limit]:
         content = re.sub(r"^\[time:[^\]]+\]\s*", "", row["content"] or "")
+        content = re.sub(r'\s*<image\s+path="[^"]*?/stickers/[^"]*?"[^>]*>\s*', " ", content).strip()
         if budget_chars is not None and used + len(content) > budget_chars:
             break
         out.append({**row, "content": content})
