@@ -27,7 +27,7 @@ import sqlite_vec
 from . import config, storage
 from .drift_sweep import AUTHORIZED_ROOTS, EXCLUDE_DIRS_SCAN, DriftWatcher
 from .md_index import MdIndex
-from .sticker_ops import STICKERS_DIR, ingest_sticker
+from .sticker_ops import STICKERS_DIR, ingest_sticker, sweep_orphans
 from .sync_loop import AtlasSweepLoop, SyncLoop, build_targets
 
 _DEBOUNCE_S = 0.2
@@ -327,10 +327,28 @@ class _StickerHandler(FileSystemEventHandler):
         finally:
             conn.close()
 
+    def _sweep(self) -> None:
+        conn = storage.connect()
+        try:
+            removed = sweep_orphans(conn)
+            if removed:
+                self._log.info("sticker orphan sweep removed ids: %s", removed)
+        except Exception:
+            self._log.exception("sticker orphan sweep failed")
+        finally:
+            conn.close()
+
     def on_created(self, event) -> None:
         if event.is_directory:
             return
         self._schedule(str(Path(event.src_path).resolve()))
+
+    def on_deleted(self, event) -> None:
+        if event.is_directory:
+            return
+        p = Path(event.src_path)
+        if _STK_RE.match(p.name):
+            threading.Timer(1.0, self._sweep).start()
 
     def on_moved(self, event) -> None:
         if event.is_directory:

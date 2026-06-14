@@ -147,6 +147,20 @@ def update_sticker(conn, sticker_id: int, desc: str) -> dict:
     return {"ok": True, "id": sticker_id, "desc": desc}
 
 
+def _remove_md_line(sticker_id: int) -> bool:
+    md = _stickers_md_path()
+    if not md.exists():
+        return False
+    anchor = f"<!-- id:{sticker_id} -->"
+    text = md.read_text()
+    lines = text.splitlines(keepends=True)
+    new_lines = [l for l in lines if anchor not in l]
+    if len(new_lines) < len(lines):
+        md.write_text("".join(new_lines))
+        return True
+    return False
+
+
 def delete_sticker(conn, sticker_id: int) -> dict:
     row = conn.execute("SELECT path FROM stickers WHERE id = ?", (sticker_id,)).fetchone()
     if not row:
@@ -160,4 +174,22 @@ def delete_sticker(conn, sticker_id: int) -> dict:
     thumb = p.parent / "_thumb" / (p.stem + ".webp")
     if thumb.exists():
         thumb.unlink()
+    _remove_md_line(sticker_id)
     return {"ok": True, "id": sticker_id, "deleted_path": path}
+
+
+def sweep_orphans(conn) -> list[int]:
+    """Remove DB+md entries whose sticker file no longer exists on disk."""
+    rows = conn.execute("SELECT id, path FROM stickers").fetchall()
+    removed = []
+    for r in rows:
+        if not Path(r["path"]).exists():
+            conn.execute("DELETE FROM stickers WHERE id = ?", (r["id"],))
+            _remove_md_line(r["id"])
+            thumb = Path(r["path"]).parent / "_thumb" / (Path(r["path"]).stem + ".webp")
+            if thumb.exists():
+                thumb.unlink()
+            removed.append(r["id"])
+    if removed:
+        conn.commit()
+    return removed
