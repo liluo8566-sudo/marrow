@@ -1026,7 +1026,7 @@ def user_prompt_submit() -> int:
             _sn = _load_sticker_nudge(sid)
             _sn["turn_count"] = _sn.get("turn_count", 0) + 1
             if _sn["turn_count"] - _sn.get("last_sticker_turn", 0) >= 10:
-                _nudge_line = "你已经好久没发表情包了，翻翻 sticker_search 找个应景的发一下。"
+                _nudge_line = "你怎么还不发表情包，Lumi都等急了——翻翻 sticker_search 找个应景的发一下。"
                 _sn["last_sticker_turn"] = _sn["turn_count"]
             _save_sticker_nudge(sid, _sn)
         except Exception:
