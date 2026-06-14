@@ -277,8 +277,6 @@ class _StickerHandler(FileSystemEventHandler):
         name = p.name
         if name.startswith("."):
             return True
-        if _STK_RE.match(name):
-            return True
         parts = p.parts
         if "_thumb" in parts:
             return True
