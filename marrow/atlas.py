@@ -355,30 +355,28 @@ def rekey_paths(conn: sqlite3.Connection,
 # ---------------------------------------------------------------------------
 
 
-def reconcile_atlas(conn: sqlite3.Connection, md_path: Path) -> int:
+def reconcile_atlas(conn: sqlite3.Connection, md_path: Path):
     """Parse atlas.md heading tree -> upsert into atlas table.
 
     Paths in md -> upsert (updates fields).
     Paths in db NOT in md -> DELETE (user explicitly removed the row).
-    Returns number of rows changed (insert + update + delete).
+    Returns ReconcileReport.
     """
+    from .reconcile import ReconcileReport
     from . import drift_sweep
     roots = [r.expanduser().resolve() for r in drift_sweep.AUTHORIZED_ROOTS]
 
+    rpt = ReconcileReport()
     md_path = Path(md_path)
     if not md_path.exists():
-        return 0
+        return rpt
 
     text = md_path.read_text(encoding="utf-8")
     md_rows = _parse_atlas_md(text, roots)
 
     now = _NOW()
-    changed = 0
 
     with conn:
-        # Bug 2 guard: skip md rows whose path is not under any
-        # AUTHORIZED_ROOT — they're noise (stale imports, manual mistakes)
-        # and must not get inserted/upserted into atlas.
         md_rows = [r for r in md_rows if _under_any_root(r["path"], roots)]
         md_paths = {r["path"] for r in md_rows}
 
@@ -396,18 +394,19 @@ def reconcile_atlas(conn: sqlite3.Connection, md_path: Path) -> int:
                     " VALUES (?, ?, ?, ?, ?)",
                     (r["path"], new_desc, new_naming, new_depth, now),
                 )
-                changed += 1
+                rpt.inserted += 1
                 continue
             if (existing["description"] == new_desc
                     and existing["naming_hint"] == new_naming
                     and existing["depth"] == new_depth):
+                rpt.unchanged += 1
                 continue
             conn.execute(
                 "UPDATE atlas SET description=?, naming_hint=?, depth=?, updated_at=?"
                 " WHERE path=?",
                 (new_desc, new_naming, new_depth, now, r["path"]),
             )
-            changed += 1
+            rpt.updated += 1
 
         root_strs = {str(r) for r in roots}
         db_rows = conn.execute(
@@ -421,14 +420,14 @@ def reconcile_atlas(conn: sqlite3.Connection, md_path: Path) -> int:
             if not has_manual:
                 continue
             conn.execute("DELETE FROM atlas WHERE path=?", (path,))
-            changed += 1
+            rpt.deleted += 1
 
     try:
         atlas_sweep_fs(conn)
     except Exception:  # noqa: BLE001
         pass
 
-    return changed
+    return rpt
 
 
 # ---------------------------------------------------------------------------

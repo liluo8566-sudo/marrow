@@ -151,8 +151,8 @@ def test_reconcile_parses_description_naming_depth(conn, tmp_path, monkeypatch):
     md_file.write_text(_marker_md(child_path, description="Test desc",
                                   naming="snake_case", depth=2))
 
-    n = reconcile_atlas(conn, md_file)
-    assert n > 0
+    rpt = reconcile_atlas(conn, md_file)
+    assert rpt.any_change()
 
     row = conn.execute(
         "SELECT description, naming_hint, depth FROM atlas WHERE path=?",

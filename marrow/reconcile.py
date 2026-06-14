@@ -1609,7 +1609,8 @@ def reconcile_timeline(conn: sqlite3.Connection,
             present_evts.add(eid)
             # Extract editable text: strip the tl:e anchor + leading HH:MM prefix
             text_part = re.sub(r"\s*<!--\s*tl:e:\d+\s*-->\s*$", "", line).rstrip()
-            text_part = _TL_HHMM_RE.sub("", text_part).strip()
+            text_part = _TL_HHMM_RE.sub("", text_part)
+            text_part = _TL_PERIOD_RE.sub("", text_part).strip()
             if text_part:
                 evt_edits[eid] = text_part
             continue
