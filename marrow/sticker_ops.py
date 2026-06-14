@@ -162,7 +162,8 @@ def update_sticker(conn, sticker_id: int, desc: str) -> dict:
         return {"ok": False, "error": "not_found"}
     conn.execute("UPDATE stickers SET desc = ? WHERE id = ?", (desc, sticker_id))
     conn.commit()
-    _patch_md_line(sticker_id, desc)
+    if not _patch_md_line(sticker_id, desc):
+        _insert_md_line(sticker_id, desc)
     return {"ok": True, "id": sticker_id, "desc": desc}
 
 
