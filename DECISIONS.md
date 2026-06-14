@@ -11,7 +11,7 @@
 - **Decay**: read-time lazy weighting + floor tiers. No destructive background demotion job.
 - **Affect granularity**: per-episode, Lumi-locked. Not per-event, not per-day.
 - **Importance 1–5 anchor**: 5 = life-shaping (1m+) · 4 = weighty (days–weeks) · 3 = short-term (<1w) · 2 = daily routine · 1 = trivial. V/A measure THIS moment; importance measures future retention. Independent axes; tiebreak picks lower.
-- **SoT**: md is SoT, DB is index. Hand-edits always preserved.
+- **SoT**: md is user-facing SoT for dims; hand-edits always preserved. sticker_update/ingest sync DB+md atomically. (verified)
 - **Candidate ingest**: 0-audit direct insert (entity/pref ≥0.8 · memes ≥0.7 · milestone ≥0.85). No staging table, no confirm CLI.
 - **Handover shape**: state-axis (Done / Open / Plan / Reference).
 - **SessionEnd LLM**: single sonnet call, multi-seg output, Popen detach. No multi-call split.
