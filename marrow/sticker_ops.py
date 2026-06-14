@@ -39,12 +39,7 @@ def _hamming(a: str, b: str) -> int | None:
 
 
 def _standardize_image(path: Path) -> Path:
-    """Scale down to max edge _CANVAS (aspect-preserved, LANCZOS, no pad). Skips GIF.
-
-    Images already within _CANVAS are left as-is.
-    Converts all formats to PNG for lossless storage.
-    Returns the (possibly renamed) output path.
-    """
+    """Convert to PNG, preserve original resolution. Skips GIF."""
     if path.suffix.lower() == ".gif":
         return path
     out = path.with_suffix(".png") if path.suffix.lower() in (".jpg", ".jpeg") else path
@@ -53,8 +48,6 @@ def _standardize_image(path: Path) -> Path:
         with Image.open(path) as img:
             if img.mode not in ("RGBA", "RGB"):
                 img = img.convert("RGBA")
-            if max(img.size) > _CANVAS:
-                img.thumbnail((_CANVAS, _CANVAS), Image.LANCZOS)
             img.save(out, "PNG")
         if out != path and path.exists():
             path.unlink()
