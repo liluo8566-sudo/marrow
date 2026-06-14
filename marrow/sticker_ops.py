@@ -9,7 +9,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 STICKERS_DIR = Path.home() / "Desktop/NY/stickers"
-_CANVAS = 370
+_CANVAS = 240
 
 
 def sha256_file(path: str) -> str:
