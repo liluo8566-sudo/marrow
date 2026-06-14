@@ -117,7 +117,7 @@ Three runtimes:
 ## 8. Alerts
 
 - `repo:add_alert(severity, type, fingerprint, message=, db=)` — dedup key (type, fingerprint, resolved=0); repeats bump hit_count/updated_at/message. Never raises: any DB failure appends the record to DATA_DIR/alerts-fallback.jsonl + stderr note, returns -1; drained at catchup boot (truncate-then-replay). resolve = acknowledge: recurrence re-inserts (anti-mute, by design). Surface: dashboard ## Alerts (`top_sections:render_alerts`, resolved=0) ; resolve via md-delete (reconcile_alerts) or `mw resolve <id>`; aging auto-resolves milestone_added >7d only.
-- Current contract + full call-site/falsing audit + fixes: docs/plans/0611-alert-redesign.md. Batch A landed 06/11 (P5 unpark, digest-zero retry chain, fallback sink, aging finally-flush). Batch B/C landed 06/15 (stable fingerprints · reconcile_ref date-scoped · sync_loop 3-consecutive alert · watcher thread-start critical · stub diary unblock · overflow auto-resolve · offsite 30s retry · dangling path-absent gate). Remaining: wx death escalation + wx media failure alerts (synapse-wx side).
+- Current contract + full call-site/falsing audit + fixes: docs/archives/0611-alert-redesign.md. Batch A landed 06/11 (P5 unpark, digest-zero retry chain, fallback sink, aging finally-flush). Batch B/C landed 06/15 (stable fingerprints · reconcile_ref date-scoped · sync_loop 3-consecutive alert · watcher thread-start critical · stub diary unblock · overflow auto-resolve · offsite 30s retry · dangling path-absent gate). Remaining: wx death escalation + wx media failure alerts (synapse-wx side).
 
 ## 9. Catchup & self-heal
 
