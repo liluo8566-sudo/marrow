@@ -1036,7 +1036,10 @@ def user_prompt_submit() -> int:
     # of recall config so short-lived cli sessions still get a model written.
     _maybe_set_session_model(sid)
     _maybe_set_session_title(sid, prompt_text)
-    repo.touch_session_active(sid)
+    try:
+        repo.touch_session_active(sid, db=config.db_path())
+    except Exception:  # noqa: BLE001 — best-effort timestamp bump
+        pass
 
     cfg = config.load()
     if not cfg.get("recall", {}).get("vector", False):

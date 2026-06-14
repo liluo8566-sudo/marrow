@@ -99,7 +99,7 @@ def test_atlas_depth_default_0(conn):
 
 def test_schema_version_current(conn):
     # Bumped to 19 with stickers C2 schema.
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 19
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 20
 
 
 # ---------------------------------------------------------------------------
