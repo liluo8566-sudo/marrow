@@ -167,6 +167,7 @@ def cmd_add_session(args) -> int:
         args.model or None,
         args.channel or None,
         args.title or "",
+        args.effort or "",
         last_active=getattr(args, "last_active", None) or None,
         db=args.db,
     )
@@ -220,7 +221,8 @@ def cmd_list_recent_sessions(args) -> int:
         cwd = r.get("cwd") or ""
         last = r.get("last_active") or "-"
         title = r.get("title") or ""
-        print(f"{sid}\t{model}\t{channel}\t{cwd}\t{last}\t{title}")
+        effort = r.get("effort") or ""
+        print(f"{sid}\t{model}\t{channel}\t{cwd}\t{last}\t{title}\t{effort}")
     return 0
 
 
@@ -577,6 +579,7 @@ def build_parser() -> argparse.ArgumentParser:
     asn.add_argument("--model", default="")
     asn.add_argument("--channel", default="")
     asn.add_argument("--title", default="")
+    asn.add_argument("--effort", default="")
     asn.add_argument("--last-active", default="",
                      help="ISO8601 timestamp (default: now). Used by backfill "
                           "to preserve historical jsonl mtimes.")

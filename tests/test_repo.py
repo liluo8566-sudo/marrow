@@ -463,6 +463,34 @@ def test_archived_today_empty_when_none(tmp_path):
     assert results == []
 
 
+# ── sessions ─────────────────────────────────────────────────────────────────
+
+def test_upsert_session_effort_sticky(tmp_path):
+    p = str(tmp_path / "sessions.db")
+    storage.init_db(p).close()
+
+    repo.upsert_session("s1", "opus", "wx", effort="high", db=p)
+    repo.upsert_session("s1", "opus", "wx", effort="", db=p)
+    assert repo.get_session("s1", db=p)["effort"] == "high"
+
+    repo.upsert_session("s1", "opus", "wx", effort="low", db=p)
+    assert repo.get_session("s1", db=p)["effort"] == "low"
+
+
+def test_list_recent_sessions_includes_effort(tmp_path):
+    p = str(tmp_path / "recent.db")
+    storage.init_db(p).close()
+
+    repo.upsert_session(
+        "s1", "opus", "wx", effort="medium",
+        last_active="2026-06-15T01:00:00Z", db=p,
+    )
+    rows = repo.list_recent_sessions(limit=1, db=p)
+
+    assert rows[0]["sid"] == "s1"
+    assert rows[0]["effort"] == "medium"
+
+
 # ── daemon smoke ──────────────────────────────────────────────────────────────
 
 def test_daemon_mcp_exists():

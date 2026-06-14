@@ -103,7 +103,8 @@ def archived_today(conn: sqlite3.Connection) -> list[dict]:
 
 
 def upsert_session(sid: str, model: str | None, channel: str | None,
-                   title: str = "", *, last_active: str | None = None,
+                   title: str = "", effort: str = "",
+                   *, last_active: str | None = None,
                    cwd: str | None = None,
                    db: str | None = None) -> None:
     """B1: record/refresh the sessions row for `sid`. Bridge calls this on
@@ -132,8 +133,9 @@ def upsert_session(sid: str, model: str | None, channel: str | None,
             # (cli backfill / session_start hook) keeps the prior model.
             if last_active:
                 conn.execute(
-                    "INSERT INTO sessions (sid, model, channel, cwd, last_active, title) "
-                    "VALUES (?, ?, ?, ?, ?, ?) "
+                    "INSERT INTO sessions "
+                    "(sid, model, channel, cwd, last_active, title, effort) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?) "
                     "ON CONFLICT(sid) DO UPDATE SET "
                     "  model=COALESCE(NULLIF(excluded.model, ''), sessions.model),"
                     "  channel=CASE WHEN sessions.channel IS NULL OR sessions.channel='' "
@@ -143,13 +145,16 @@ def upsert_session(sid: str, model: str | None, channel: str | None,
                     "  last_active=CASE WHEN excluded.last_active > sessions.last_active "
                     "                  THEN excluded.last_active ELSE sessions.last_active END,"
                     "  title=CASE WHEN excluded.title='' THEN sessions.title "
-                    "             ELSE excluded.title END",
-                    (sid, model, channel, cwd, last_active, title or ""),
+                    "             ELSE excluded.title END,"
+                    "  effort=CASE WHEN excluded.effort='' THEN sessions.effort "
+                    "              ELSE excluded.effort END",
+                    (sid, model, channel, cwd, last_active, title or "", effort or ""),
                 )
             else:
                 conn.execute(
-                    "INSERT INTO sessions (sid, model, channel, cwd, last_active, title) "
-                    "VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), ?) "
+                    "INSERT INTO sessions "
+                    "(sid, model, channel, cwd, last_active, title, effort) "
+                    "VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), ?, ?) "
                     "ON CONFLICT(sid) DO UPDATE SET "
                     "  model=COALESCE(NULLIF(excluded.model, ''), sessions.model),"
                     "  channel=CASE WHEN sessions.channel IS NULL OR sessions.channel='' "
@@ -158,8 +163,10 @@ def upsert_session(sid: str, model: str | None, channel: str | None,
                     "           THEN excluded.cwd ELSE sessions.cwd END,"
                     "  last_active=excluded.last_active,"
                     "  title=CASE WHEN excluded.title='' THEN sessions.title "
-                    "             ELSE excluded.title END",
-                    (sid, model, channel, cwd, title or ""),
+                    "             ELSE excluded.title END,"
+                    "  effort=CASE WHEN excluded.effort='' THEN sessions.effort "
+                    "              ELSE excluded.effort END",
+                    (sid, model, channel, cwd, title or "", effort or ""),
                 )
     finally:
         conn.close()
@@ -172,7 +179,7 @@ def get_session(sid: str, *, db: str | None = None) -> dict | None:
     conn = storage.connect(db)
     try:
         row = conn.execute(
-            "SELECT sid, model, channel, cwd, last_active, title "
+            "SELECT sid, model, channel, cwd, last_active, title, effort "
             "FROM sessions WHERE sid=?",
             (sid,),
         ).fetchone()
@@ -213,7 +220,7 @@ def list_recent_sessions(
     """
     if channels and exclude_channels:
         raise ValueError("channels and exclude_channels are mutually exclusive")
-    sql = "SELECT sid, model, channel, cwd, last_active, title FROM sessions"
+    sql = "SELECT sid, model, channel, cwd, last_active, title, effort FROM sessions"
     where: list[str] = []
     params: list = []
     if channels:

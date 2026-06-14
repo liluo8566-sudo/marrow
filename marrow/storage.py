@@ -13,7 +13,7 @@ import sqlite_vec
 
 from . import config
 
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 
 # Phase 1 first-class tables + Phase 2 affect/entities (DECISIONS Phase 2).
 # The retired emotions/people/preferences/dir placeholders stay absent.
@@ -205,7 +205,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   channel TEXT,
   cwd TEXT,
   last_active TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
-  title TEXT NOT NULL DEFAULT ''
+  title TEXT NOT NULL DEFAULT '',
+  effort TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_last_active
   ON sessions(last_active DESC);
@@ -504,6 +505,7 @@ def init_db(path: str | None = None) -> sqlite3.Connection:
         _migrate_to_v17(conn)
         _migrate_to_v18(conn)
         _migrate_to_v19(conn)
+        _migrate_to_v20(conn)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     return conn
 
@@ -902,6 +904,19 @@ def _migrate_to_v19(conn: sqlite3.Connection) -> None:
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(stickers)")}
     if "meme_id" in cols:
         conn.execute("DROP TABLE stickers")
+
+
+def _migrate_to_v20(conn: sqlite3.Connection) -> None:
+    """v20: sessions.effort for cross-channel /switch inheritance.
+    Idempotent via user_version + column check.
+    """
+    v = conn.execute("PRAGMA user_version").fetchone()[0]
+    if v >= 20:
+        return
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(sessions)")}
+    if "effort" not in cols:
+        conn.execute("ALTER TABLE sessions ADD COLUMN effort TEXT DEFAULT ''")
+    conn.execute("PRAGMA user_version=20")
 
 
 def _migrate_to_v14(conn: sqlite3.Connection) -> None:
