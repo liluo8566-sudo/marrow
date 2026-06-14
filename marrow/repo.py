@@ -181,6 +181,20 @@ def get_session(sid: str, *, db: str | None = None) -> dict | None:
         conn.close()
 
 
+def touch_session_active(sid: str, *, db: str | None = None) -> None:
+    if not sid:
+        return
+    conn = storage.connect(db)
+    try:
+        conn.execute(
+            "UPDATE sessions SET last_active = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE sid = ?",
+            (sid,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def list_recent_sessions(
     limit: int = 5,
     *,
