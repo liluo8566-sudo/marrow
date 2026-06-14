@@ -118,14 +118,40 @@ def sticker_search(query: str, limit: int = 5) -> list[dict]:
     """Search sticker catalog by description. Returns top matches with path.
     Use when you want to send a sticker — pick one from results, then send
     it with <image path="..."/>. Call sticker_pick(id) after sending."""
-    terms = [t.strip() for t in query.split() if t.strip()]
-    if not terms:
+    if not query.strip():
         return []
-    where = " OR ".join("desc LIKE ?" for _ in terms)
-    params = [f"%{t}%" for t in terms]
-    params.append(limit)
     conn = storage.connect(_DB)
     try:
+        try:
+            from .recall import _blob_to_vec, _ensure_embedder, _vec_to_blob
+            _ = _blob_to_vec
+            emb = _ensure_embedder()
+            if emb is not None:
+                query_vec = emb.embed([query])[0]
+                hits = conn.execute(
+                    "SELECT rowid, distance FROM stickers_vec "
+                    "WHERE embedding MATCH ? AND k = ? ORDER BY distance",
+                    (_vec_to_blob(query_vec), limit),
+                ).fetchall()
+                rows = []
+                for hit in hits:
+                    row = conn.execute(
+                        "SELECT id, desc, path, source FROM stickers WHERE id = ?",
+                        (hit["rowid"],),
+                    ).fetchone()
+                    if row:
+                        rows.append(dict(row))
+                if rows:
+                    return rows
+        except Exception:
+            pass
+
+        terms = [t.strip() for t in query.split() if t.strip()]
+        if not terms:
+            return []
+        where = " OR ".join("desc LIKE ?" for _ in terms)
+        params = [f"%{t}%" for t in terms]
+        params.append(limit)
         rows = conn.execute(
             f"SELECT id, desc, path, source FROM stickers"
             f" WHERE {where} ORDER BY last_used DESC NULLS LAST"

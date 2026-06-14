@@ -190,6 +190,11 @@ CREATE TABLE IF NOT EXISTS tasks_vec_meta (
   embedder_id TEXT NOT NULL,
   dim INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS stickers_vec_meta (
+  rowid INTEGER PRIMARY KEY,
+  embedder_id TEXT NOT NULL,
+  dim INTEGER NOT NULL
+);
 -- B1 (2026-06-02): sessions table — one row per (sid, model). Bridge
 -- swap_provider upserts on every model swap; /resume <sid> reads model back
 -- so a cross-client resume preserves the selected model. channel = wx | cli |
@@ -330,6 +335,7 @@ def _vec_table(dim: int, name: str = "events_vec") -> str:
 # helper.
 _VEC_LANES = (
     "memes_vec", "entities_vec", "milestones_vec", "diary_vec", "tasks_vec",
+    "stickers_vec",
 )
 
 

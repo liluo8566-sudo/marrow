@@ -226,6 +226,18 @@ _LANES: dict[str, dict[str, str]] = {
             "ORDER BY t.id DESC LIMIT ?"
         ),
     },
+    "stickers": {
+        "vec_table": "stickers_vec",
+        "meta_table": "stickers_vec_meta",
+        "pending_sql": (
+            "SELECT s.id AS id, COALESCE(s.desc, '') AS text "
+            "FROM stickers s "
+            "WHERE COALESCE(s.desc, '') NOT IN ('', '(pending)') "
+            "AND NOT EXISTS (SELECT 1 FROM stickers_vec_meta x "
+            "                WHERE x.rowid=s.id) "
+            "ORDER BY s.id DESC LIMIT ?"
+        ),
+    },
 }
 
 
@@ -293,6 +305,17 @@ def embed_entity(
 ) -> bool:
     """Embed one entity row into entities_vec + entities_vec_meta. Idempotent."""
     return _embed_one(conn, "entities", entity_id, text, embedder_id, dim)
+
+
+def embed_sticker(
+    conn: sqlite3.Connection,
+    sticker_id: int,
+    text: str,
+    embedder_id: str = "bge-m3",
+    dim: int = 1024,
+) -> bool:
+    """Embed one sticker row into stickers_vec + stickers_vec_meta. Idempotent."""
+    return _embed_one(conn, "stickers", sticker_id, text, embedder_id, dim)
 
 
 def embed_milestone(
@@ -403,8 +426,8 @@ def embed_pending(
     embedder_id: str = "bge-m3",
     dim: int = 1024,
 ) -> int:
-    """Backfill all six lanes (events + memes + entities + milestones + diary
-    + tasks).
+    """Backfill all seven lanes (events + memes + entities + milestones + diary
+    + tasks + stickers).
 
     Per-lane budget = `batch` so a large events backlog cannot starve the
     cross-table lanes on a single hook firing. Returns total rows written.
