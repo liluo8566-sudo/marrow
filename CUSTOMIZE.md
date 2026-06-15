@@ -4,7 +4,19 @@ Marrow ships with author defaults. Walk this list to override what doesn't fit. 
 
 ## 1. Persona
 
-Persona lives in global `~/.claude/CLAUDE.md`, not in this repo. Drop your own CLAUDE.md (or start blank).
+Edit `~/.config/marrow/config.toml` → `[persona]`:
+
+```toml
+[persona]
+user_name = "YourName"
+assistant_name = "AssistantName"
+user_aliases = ["Nick1"]
+assistant_aliases = ["AltName"]
+relationship_terms = []
+anchor_keys = ["YourName", "AssistantName"]
+```
+
+Runtime prompts (diary, sessionend, recall labels) read these values. Interaction style / personality goes in `~/.claude/CLAUDE.md` (not this repo).
 
 ## 2. cwd → recall bucket
 
