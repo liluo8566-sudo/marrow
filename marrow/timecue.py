@@ -10,7 +10,9 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-_MELB = ZoneInfo("Australia/Melbourne")
+from . import config as _config
+
+_MELB = _config.get_tz()
 
 _CN_DIGIT = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
              "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}

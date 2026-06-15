@@ -28,12 +28,11 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo
 from . import config, repo, storage, top_sections, transcript
 from .popen_detach import popen_detach, popen_detach_lazy
 from .timeutil import utc_iso_to_local_date, utc_iso_to_local_datetime, format_recall_ts
 
-_RECALL_TZ = ZoneInfo("Australia/Melbourne")
+_RECALL_TZ = config.get_tz()
 _RECALL_CUTOFF_H = 6  # 6AM local day boundary (matches digest)
 
 SESSION_START_HARD_CAP = 6000

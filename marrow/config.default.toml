@@ -1,6 +1,9 @@
 # Marrow config. Live copy: ~/.config/marrow/config.toml
 # Swap the conversation/pipeline provider by editing one chain entry below.
 
+[core]
+timezone = "Australia/Melbourne"
+
 [paths]
 # Empty = use defaults under ~/.config/marrow/
 db = ""

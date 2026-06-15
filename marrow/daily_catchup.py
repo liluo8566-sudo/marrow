@@ -9,11 +9,9 @@ import contextlib
 import datetime as _dt
 import fcntl
 from pathlib import Path
-from zoneinfo import ZoneInfo
-
 from . import config
 
-_TZ = ZoneInfo("Australia/Melbourne")
+_TZ = config.get_tz()
 _CUTOFF_H = 6  # 6AM boundary (was 4AM at diary.py:319)
 
 CATCHUP_WINDOW_DAYS = 7

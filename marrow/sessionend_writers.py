@@ -14,14 +14,12 @@ import json
 import os
 import sys
 from pathlib import Path
-from zoneinfo import ZoneInfo
-
 import re as _re
 
-from . import candidates
+from . import candidates, config as _config
 from .sessionend_prompts import parse_task_rows
 
-_TZ = ZoneInfo("Australia/Melbourne")
+_TZ = _config.get_tz()
 _CUTOFF_H = 6  # 6AM local day boundary
 
 
