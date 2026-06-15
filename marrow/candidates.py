@@ -271,12 +271,7 @@ def write_milestone_cand(conn, raw: str, date: str,
 
 
 def _events_like_count_14d(conn, key: str, ref_date: str | None) -> int:
-    """Count distinct CALENDAR DAYS on which an event's content LIKE '%key%'
-    over the 14d window ending at ref_date (or now if None). LIKE not FTS —
-    trigram tokenizer silently drops <3-char CJK keys (野鸡 etc.). Distinct
-    days, not distinct events: same-day repetition does not count toward the
-    3-in-14d gate.
-    """
+    """LEGACY text fallback — used only when embedder unavailable."""
     pat = "%" + key.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
     if ref_date:
         sql = (
@@ -297,6 +292,68 @@ def _events_like_count_14d(conn, key: str, ref_date: str | None) -> int:
         return conn.execute(sql, params).fetchone()[0]
     except Exception:
         return 0
+
+
+_FREQ_COSINE_THRESHOLD = 0.65
+_FREQ_VEC_K = 200
+
+
+def _events_semantic_count_14d(conn, key: str, ref_date: str | None) -> int:
+    """Count distinct calendar days with semantically similar events in the
+    14d window. Combines LIKE (exact text) and vec KNN (semantic) — returns
+    the max of both so neither partial vec coverage nor paraphrasing causes
+    false negatives. Cosine threshold 0.65 (looser than dedup 0.85 — here
+    we want 'mentioned the topic', not 'exact duplicate').
+    """
+    like_count = _events_like_count_14d(conn, key, ref_date)
+
+    from . import recall
+    emb = recall._ensure_embedder()
+    if emb is None:
+        return like_count
+
+    import math
+    qvec = emb.embed([key])[0]
+    qblob = recall._vec_to_blob(qvec)
+
+    try:
+        rows = conn.execute(
+            "SELECT e.timestamp, v.distance "
+            "FROM events_vec v JOIN events e ON e.id = v.rowid "
+            "WHERE embedding MATCH ? AND k = ? "
+            "ORDER BY v.distance",
+            (qblob, _FREQ_VEC_K),
+        ).fetchall()
+    except Exception:
+        return like_count
+
+    # vec0 L2 distance on L2-normalized vecs: cos_sim = 1 - dist²/2
+    max_l2 = math.sqrt(2 * (1 - _FREQ_COSINE_THRESHOLD))
+
+    if ref_date:
+        rd = _dt.date.fromisoformat(ref_date)
+        win_start = (rd - _dt.timedelta(days=14)).isoformat()
+        win_end = (rd + _dt.timedelta(days=1)).isoformat()
+    else:
+        now = _dt.datetime.now(_dt.timezone.utc)
+        win_start = (now - _dt.timedelta(days=14)).isoformat()
+        win_end = None
+
+    dates: set[str] = set()
+    for row in rows:
+        dist = row["distance"]
+        if dist > max_l2:
+            break
+        ts = row["timestamp"]
+        if not ts:
+            continue
+        if ref_date:
+            if ts < win_start or ts >= win_end:
+                continue
+        elif ts < win_start:
+            continue
+        dates.add(ts[:10])
+    return max(like_count, len(dates))
 
 
 def bump_use_counts(conn, rows: list[dict]) -> int:
@@ -421,10 +478,11 @@ def write_memes_cand(conn, raw: str, source: str = "daily",
                 )
             n += 1
             continue
-        # New row path. Frequency gate first (cheap), then dedup (string +
-        # cosine). freq_gate rejects are time-relative — NOT logged.
+        # New row path. Frequency gate first, then dedup (string + cosine).
+        # Semantic match (vec KNN) counts topic mentions across paraphrases;
+        # falls back to LIKE when embedder unavailable.
         if vtype in _MEMES_FREQ_GATED:
-            if _events_like_count_14d(conn, key, date) < 3:
+            if _events_semantic_count_14d(conn, key, date) < 3:
                 continue
         # Exact-string dedup against milestones / entities (incl. aliases).
         reason = memes_dedup.string_dup_reason(conn, key)
