@@ -34,7 +34,10 @@ def recall(
     recency + affect fusion when bge-m3 is loaded; FTS5-only fallback.
     Call when the user references the past.
     Set context=True to attach ±1 adjacent same-session turns to each event row.
-    since/until: Melbourne-local YYYY-MM-DD day strings for time-lane filtering."""
+    since/until: Melbourne-local YYYY-MM-DD day strings for time-lane filtering.
+    Diary: when since/until are set, diary entries for those dates are fetched
+    directly (bypasses vec floor). To read a specific day's diary, set both
+    since and until to the same date, e.g. since='2026-06-12' until='2026-06-12'."""
     from .timecue import melb_day_range
     since_utc: str | None = None
     until_utc: str | None = None
