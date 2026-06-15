@@ -324,8 +324,15 @@ class _StickerHandler(FileSystemEventHandler):
             if p.exists() and p.resolve() != Path(result.get("path", "")).resolve():
                 p.unlink()
                 self._log.info("sticker_ingest cleaned source: %s", path)
-        except Exception:
+        except Exception as exc:
             self._log.exception("sticker_ingest failed: %s", path)
+            try:
+                repo.add_alert("warn", "sticker_ingest",
+                               f"sticker_ingest:{Path(path).name}",
+                               source="watcher",
+                               message=f"sticker ingest failed: {Path(path).name} — {exc}")
+            except Exception:
+                pass
         finally:
             conn.close()
 

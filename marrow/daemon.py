@@ -6,6 +6,8 @@ land in alerts.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from mcp.server.fastmcp import FastMCP
 
 from . import config, recall as _recall_mod, repo, storage
@@ -183,6 +185,13 @@ def sticker_ingest(image_path: str, desc: str, source: str = "wechat") -> dict:
     try:
         from .sticker_ops import ingest_sticker
         return ingest_sticker(conn, image_path, desc, source)
+    except Exception as exc:
+        from . import repo
+        repo.add_alert("warn", "sticker_ingest",
+                       f"sticker_ingest:mcp",
+                       source="daemon",
+                       message=f"sticker ingest failed: {Path(image_path).name} — {exc}")
+        raise
     finally:
         conn.close()
 

@@ -1,0 +1,320 @@
+- generic [ref=e4]:
+  - banner [ref=e5]:
+    - generic [ref=e6]:
+      - link [ref=e7] [cursor=pointer]:
+        - /url: /doc/
+      - generic [ref=e11] [cursor=pointer]: 小程序
+    - navigation [ref=e14]:
+      - link "开发" [ref=e16] [cursor=pointer]:
+        - /url: /miniprogram/dev/framework/
+      - link "介绍" [ref=e18] [cursor=pointer]:
+        - /url: /miniprogram/introduction/
+      - link "设计" [ref=e20] [cursor=pointer]:
+        - /url: /miniprogram/design/
+      - link "运营" [ref=e22] [cursor=pointer]:
+        - /url: /miniprogram/product/
+      - link "数据" [ref=e24] [cursor=pointer]:
+        - /url: /miniprogram/analysis/wedata/intro/
+      - link "安全" [ref=e26] [cursor=pointer]:
+        - /url: /miniprogram/security/basic/
+    - generic [ref=e27]:
+      - navigation [ref=e28]:
+        - link "社区" [ref=e30] [cursor=pointer]:
+          - /url: https://developers.weixin.qq.com/community/develop/mixflow
+        - link "学堂" [ref=e32] [cursor=pointer]:
+          - /url: https://developers.weixin.qq.com/community/business
+      - list [ref=e33]:
+        - listitem [ref=e34] [cursor=pointer]:
+          - img [ref=e35]
+      - button [ref=e39] [cursor=pointer]:
+        - img [ref=e40]
+  - list [ref=e43]:
+    - listitem [ref=e44]:
+      - link "指南" [ref=e46] [cursor=pointer]:
+        - /url: /miniprogram/dev/framework/
+    - listitem [ref=e47]:
+      - link "框架" [ref=e49] [cursor=pointer]:
+        - /url: /miniprogram/dev/reference/
+    - listitem [ref=e50]:
+      - link "组件" [ref=e52] [cursor=pointer]:
+        - /url: /miniprogram/dev/component/
+    - listitem [ref=e53]:
+      - link "API" [ref=e55] [cursor=pointer]:
+        - /url: /miniprogram/dev/api/
+    - listitem [ref=e56]:
+      - link "服务端" [ref=e58] [cursor=pointer]:
+        - /url: /miniprogram/dev/server/API/
+    - listitem [ref=e59]:
+      - generic [ref=e61] [cursor=pointer]: 平台能力
+    - listitem [ref=e63]:
+      - link "工具" [ref=e65] [cursor=pointer]:
+        - /url: /miniprogram/dev/devtools/devtools
+    - listitem [ref=e66]:
+      - generic [ref=e68] [cursor=pointer]: 云服务
+    - listitem [ref=e70]:
+      - link "AI 能力" [ref=e72] [cursor=pointer]:
+        - /url: /miniprogram/dev/ai/guide
+  - generic [ref=e74]:
+    - complementary [ref=e75]:
+      - list [ref=e78]:
+        - listitem [ref=e79]:
+          - link "基础" [ref=e84] [cursor=pointer]:
+            - /url: /miniprogram/dev/api/base/wx.env.html
+        - listitem [ref=e85]:
+          - link "路由" [ref=e90] [cursor=pointer]:
+            - /url: /miniprogram/dev/api/route/wx.switchTab.html
+        - listitem [ref=e91]:
+          - link "跳转" [ref=e96] [cursor=pointer]:
+            - /url: /miniprogram/dev/api/navigate/wx.restartMiniProgram.html
+        - listitem [ref=e97]:
+          - link "聊天工具" [ref=e102] [cursor=pointer]:
+            - /url: /miniprogram/dev/api/chattool/wx.shareVideoToGroup.html
+        - listitem [ref=e103]:
+          - link "转发" [ref=e108] [cursor=pointer]:
+            - /url: /miniprogram/dev/api/share/wx.updateShareMenu.html
+        - listitem [ref=e109]:
+          - link "界面" [ref=e114] [cursor=pointer]:
+            - /url: /miniprogram/dev/api/ui/interaction/wx.showToast.html
+        - listitem [ref=e115]:
+          - link "网络" [ref=e120] [cursor=pointer]:
+            - /url: /miniprogram/dev/api/network/request/wx.request.html
+        - listitem [ref=e121]:
+          - link "支付" [ref=e126] [cursor=pointer]:
+            - /url: /miniprogram/dev/api/payment/wx.requestVirtualPayment.html
+        - listitem [ref=e127]:
+          - link "数据缓存" [ref=e132] [cursor=pointer]:
+            - /url: /miniprogram/dev/api/storage/wx.setStorageSync.html
+        - listitem [ref=e133]:
+          - link "数据分析" [ref=e138] [cursor=pointer]:
+            - /url: /miniprogram/dev/api/data-analysis/wx.reportMonitor.html
+        - listitem [ref=e139]:
+          - link "画布" [ref=e144] [cursor=pointer]:
+            - /url: /miniprogram/dev/api/canvas/wx.createOffscreenCanvas.html
+        - listitem [ref=e145]:
+          - link "媒体" [ref=e150] [cursor=pointer]:
+            - /url: /miniprogram/dev/api/media/map/wx.createMapContext.html
+        - listitem [ref=e151]:
+          - link "位置" [ref=e156] [cursor=pointer]:
+            - /url: /miniprogram/dev/api/location/wx.stopLocationUpdate.html
+        - listitem [ref=e157]:
+          - link "文件" [ref=e162] [cursor=pointer]:
+            - /url: /miniprogram/dev/api/file/wx.saveFileToDisk.html
+        - listitem [ref=e163]:
+          - generic [ref=e164]:
+            - link "开放接口" [ref=e168] [cursor=pointer]:
+              - /url: /miniprogram/dev/api/open-api/login/wx.pluginLogin.html
+            - list [ref=e169]:
+              - listitem [ref=e170]:
+                - link "登录" [ref=e175] [cursor=pointer]:
+                  - /url: /miniprogram/dev/api/open-api/login/wx.pluginLogin.html
+              - listitem [ref=e176]:
+                - link "账号信息" [ref=e181] [cursor=pointer]:
+                  - /url: /miniprogram/dev/api/open-api/account-info/wx.getAccountInfoSync.html
+              - listitem [ref=e182]:
+                - link "用户信息" [ref=e187] [cursor=pointer]:
+                  - /url: /miniprogram/dev/api/open-api/user-info/wx.getUserProfile.html
+              - listitem [ref=e188]:
+                - link "授权" [ref=e193] [cursor=pointer]:
+                  - /url: /miniprogram/dev/api/open-api/authorize/wx.authorizeForMiniProgram.html
+              - listitem [ref=e194]:
+                - link "设置" [ref=e199] [cursor=pointer]:
+                  - /url: /miniprogram/dev/api/open-api/setting/wx.openSetting.html
+              - listitem [ref=e200]:
+                - link "收货地址" [ref=e205] [cursor=pointer]:
+                  - /url: /miniprogram/dev/api/open-api/address/wx.chooseAddress.html
+              - listitem [ref=e206]:
+                - link "卡券" [ref=e211] [cursor=pointer]:
+                  - /url: /miniprogram/dev/api/open-api/card/wx.openCard.html
+              - listitem [ref=e212]:
+                - link "发票" [ref=e217] [cursor=pointer]:
+                  - /url: /miniprogram/dev/api/open-api/invoice/wx.chooseInvoiceTitle.html
+              - listitem [ref=e218]:
+                - link "生物认证" [ref=e223] [cursor=pointer]:
+                  - /url: /miniprogram/dev/api/open-api/soter/wx.startSoterAuthentication.html
+              - listitem [ref=e224]:
+                - link "微信运动" [ref=e229] [cursor=pointer]:
+                  - /url: /miniprogram/dev/api/open-api/werun/wx.shareToWeRun.html
+              - listitem [ref=e230]:
+                - link "订阅消息" [ref=e235] [cursor=pointer]:
+                  - /url: /miniprogram/dev/api/open-api/subscribe-message/wx.requestSubscribeMessage.html
+              - listitem [ref=e236]:
+                - link "微信红包" [ref=e241] [cursor=pointer]:
+                  - /url: /miniprogram/dev/api/open-api/redpackage/wx.showRedPackage.html
+              - listitem [ref=e242]:
+                - link "微信小店" [ref=e247] [cursor=pointer]:
+                  - /url: /miniprogram/dev/api/open-api/store/wx.openStoreOrderDetail.html
+              - listitem [ref=e248]:
+                - link "收藏" [ref=e253] [cursor=pointer]:
+                  - /url: /miniprogram/dev/api/open-api/favorites/wx.addVideoToFavorites.html
+              - listitem [ref=e254]:
+                - link "用工关系" [ref=e259] [cursor=pointer]:
+                  - /url: /miniprogram/dev/api/open-api/employee-relation/wx.requestSubscribeEmployeeMessage.html
+              - listitem [ref=e260]:
+                - link "我的小程序" [ref=e265] [cursor=pointer]:
+                  - /url: /miniprogram/dev/api/open-api/my-miniprogram/wx.checkIsAddedToMyMiniProgram.html
+              - listitem [ref=e266]:
+                - link "人脸检测" [ref=e271] [cursor=pointer]:
+                  - /url: /miniprogram/dev/api/open-api/face/wx.requestFacialVerify.html
+              - listitem [ref=e272]:
+                - link "车牌" [ref=e277] [cursor=pointer]:
+                  - /url: /miniprogram/dev/api/open-api/license-plate/wx.chooseLicensePlate.html
+              - listitem [ref=e278]:
+                - link "视频号" [ref=e283] [cursor=pointer]:
+                  - /url: /miniprogram/dev/api/open-api/channels/wx.reserveChannelsLive.html
+              - listitem [ref=e284]:
+                - link "音视频通话" [ref=e289] [cursor=pointer]:
+                  - /url: /miniprogram/dev/api/open-api/device-voip/wx.requestDeviceVoIP.html
+              - listitem [ref=e290]:
+                - link "微信群" [ref=e295] [cursor=pointer]:
+                  - /url: /miniprogram/dev/api/open-api/group/wx.getGroupEnterInfo.html
+              - listitem [ref=e296]:
+                - link "隐私信息授权" [ref=e301] [cursor=pointer]:
+                  - /url: /miniprogram/dev/api/open-api/privacy/wx.requirePrivacyAuthorize.html
+              - listitem [ref=e302]:
+                - link "微信客服" [ref=e307] [cursor=pointer]:
+                  - /url: /miniprogram/dev/api/open-api/service-chat/wx.openCustomerServiceChat.html
+              - listitem [ref=e308]:
+                - generic [ref=e309]:
+                  - link "微信表情" [ref=e313] [cursor=pointer]:
+                    - /url: /miniprogram/dev/api/open-api/sticker/wx.openStickerSetView.html
+                  - list [ref=e314]:
+                    - listitem [ref=e315]:
+                      - link "wx.openStickerSetView" [ref=e317] [cursor=pointer]:
+                        - /url: /miniprogram/dev/api/open-api/sticker/wx.openStickerSetView.html
+                    - listitem [ref=e318]:
+                      - link "wx.openStickerIPView" [ref=e320] [cursor=pointer]:
+                        - /url: /miniprogram/dev/api/open-api/sticker/wx.openStickerIPView.html
+                    - listitem [ref=e321]:
+                      - link "wx.openSingleStickerView" [ref=e323] [cursor=pointer]:
+                        - /url: /miniprogram/dev/api/open-api/sticker/wx.openSingleStickerView.html
+                    - listitem [ref=e324]:
+                      - link "wx.openDesignerProfile" [ref=e326] [cursor=pointer]:
+                        - /url: /miniprogram/dev/api/open-api/sticker/wx.openDesignerProfile.html
+        - listitem [ref=e327]:
+          - link "设备" [ref=e332] [cursor=pointer]:
+            - /url: /miniprogram/dev/api/device/bluetooth/wx.stopBluetoothDevicesDiscovery.html
+        - listitem [ref=e333]:
+          - link "AI" [ref=e338] [cursor=pointer]:
+            - /url: /miniprogram/dev/api/ai/inference/wx.getInferenceEnvInfo.html
+        - listitem [ref=e339]:
+          - link "Worker" [ref=e344] [cursor=pointer]:
+            - /url: /miniprogram/dev/api/worker/wx.createWorker.html
+        - listitem [ref=e345]:
+          - link "WXML" [ref=e350] [cursor=pointer]:
+            - /url: /miniprogram/dev/api/wxml/wx.createSelectorQuery.html
+        - listitem [ref=e351]:
+          - link "第三方平台" [ref=e356] [cursor=pointer]:
+            - /url: /miniprogram/dev/api/ext/wx.getExtConfigSync.html
+        - listitem [ref=e357]:
+          - link "广告" [ref=e362] [cursor=pointer]:
+            - /url: /miniprogram/dev/api/ad/wx.getShowSplashAdStatus.html
+        - listitem [ref=e363]:
+          - link "Skyline" [ref=e368] [cursor=pointer]:
+            - /url: /miniprogram/dev/api/skyline/DraggableSheetContext.scrollTo.html
+        - listitem [ref=e369]:
+          - link "XR-FRAME" [ref=e374] [cursor=pointer]:
+            - /url: /miniprogram/dev/api/xr-frame/modules.html
+    - main [ref=e376]:
+      - generic [ref=e377]:
+        - generic [ref=e378]:
+          - generic [ref=e379]:
+            - generic [ref=e380]: 开放接口 /
+            - generic [ref=e381]: 微信表情 /
+            - generic [ref=e382]: wx.openStickerSetView
+          - generic [ref=e383]:
+            - heading "wx.openStickerSetView(Object object)" [level=1] [ref=e384]
+            - blockquote [ref=e385]:
+              - paragraph [ref=e386]:
+                - text: 基础库 3.0.1 开始支持，低版本需做
+                - link "兼容处理" [ref=e387] [cursor=pointer]:
+                  - /url: ../../../framework/compatibility.html
+                - text: 。
+            - blockquote [ref=e388]:
+              - paragraph [ref=e389]:
+                - strong [ref=e390]:
+                  - text: 以
+                  - link "Promise 风格" [ref=e391] [cursor=pointer]:
+                    - /url: ../../../framework/app-service/api.html#%E5%BC%82%E6%AD%A5-API-%E8%BF%94%E5%9B%9E-Promise
+                  - text: 调用
+                - text: ：不支持
+              - paragraph [ref=e392]:
+                - strong [ref=e393]: 小程序插件
+                - text: ：不支持
+              - paragraph [ref=e394]:
+                - strong [ref=e395]: 微信 鸿蒙 OS 版
+                - text: ：支持
+            - heading "功能描述" [level=2] [ref=e396]
+            - paragraph [ref=e397]: 打开表情专辑
+            - heading "参数" [level=2] [ref=e398]
+            - heading "Object object" [level=3] [ref=e399]
+            - table [ref=e401]:
+              - rowgroup [ref=e402]:
+                - row "属性 类型 默认值 必填 说明" [ref=e403]:
+                  - columnheader "属性" [ref=e404]
+                  - columnheader "类型" [ref=e405]
+                  - columnheader "默认值" [ref=e406]
+                  - columnheader "必填" [ref=e407]
+                  - columnheader "说明" [ref=e408]
+              - rowgroup [ref=e409]:
+                - row "url string 是 表情专辑链接，可前往表情开放平台，在详情页中的「小程序跳转链接」入口复制" [ref=e410]:
+                  - cell "url" [ref=e411]
+                  - cell "string" [ref=e412]
+                  - cell [ref=e413]
+                  - cell "是" [ref=e414]
+                  - cell "表情专辑链接，可前往表情开放平台，在详情页中的「小程序跳转链接」入口复制" [ref=e415]:
+                    - text: 表情专辑链接，可前往
+                    - link "表情开放平台" [ref=e416] [cursor=pointer]:
+                      - /url: https://sticker.weixin.qq.com/cgi-bin/mmemoticon-bin/loginpage?t=login/index
+                      - text: 表情开放平台
+                    - text: ，在详情页中的「小程序跳转链接」入口复制
+                - row "success function 否 接口调用成功的回调函数" [ref=e417]:
+                  - cell "success" [ref=e418]
+                  - cell "function" [ref=e419]
+                  - cell [ref=e420]
+                  - cell "否" [ref=e421]
+                  - cell "接口调用成功的回调函数" [ref=e422]
+                - row "fail function 否 接口调用失败的回调函数" [ref=e423]:
+                  - cell "fail" [ref=e424]
+                  - cell "function" [ref=e425]
+                  - cell [ref=e426]
+                  - cell "否" [ref=e427]
+                  - cell "接口调用失败的回调函数" [ref=e428]
+                - row "complete function 否 接口调用结束的回调函数（调用成功、失败都会执行）" [ref=e429]:
+                  - cell "complete" [ref=e430]
+                  - cell "function" [ref=e431]
+                  - cell [ref=e432]
+                  - cell "否" [ref=e433]
+                  - cell "接口调用结束的回调函数（调用成功、失败都会执行）" [ref=e434]
+            - heading "示例代码" [level=2] [ref=e435]
+            - code [ref=e438]: "wx.openStickerSetView({ url: '', success(res) {} })"
+        - generic [ref=e439]:
+          - list [ref=e440]:
+            - listitem [ref=e441]:
+              - link "关于腾讯" [ref=e442] [cursor=pointer]:
+                - /url: http://www.tencent.com/zh-cn/index.shtml
+            - listitem [ref=e443]:
+              - link "文档中心" [ref=e444] [cursor=pointer]:
+                - /url: https://mp.weixin.qq.com/debug/wxadoc/introduction/index.html?t=1484641676
+            - listitem [ref=e445]:
+              - link "辟谣中心" [ref=e446] [cursor=pointer]:
+                - /url: https://kf.qq.com/faq/17030722muuu170307MFBny2.html
+            - listitem [ref=e447]:
+              - link "客服中心" [ref=e448] [cursor=pointer]:
+                - /url: http://kf.qq.com/faq/120911VrYVrA1509086vyumm.html
+          - paragraph [ref=e449]: Copyright © 2012-2026 Tencent. All Rights Reserved.
+    - generic [ref=e451]:
+      - list [ref=e452]:
+        - listitem [ref=e453]:
+          - generic [ref=e454] [cursor=pointer]: 功能描述
+      - list [ref=e455]:
+        - listitem [ref=e456]:
+          - generic [ref=e457] [cursor=pointer]: 参数
+          - list [ref=e459]:
+            - listitem [ref=e460]:
+              - generic [ref=e461] [cursor=pointer]: · Object object
+      - list [ref=e462]:
+        - listitem [ref=e463]:
+          - generic [ref=e464] [cursor=pointer]: 示例代码
+  - link "反馈" [ref=e466] [cursor=pointer]:
+    - /url: javascript:;
+    - generic [ref=e469]: 反馈

@@ -202,10 +202,10 @@ def _bridge_owns_active(conn, sid: str) -> bool:
 def _classify(conn, sid: str, live_ppids: set[int]) -> Literal["spawn", "skip"]:
     """7-state decision table. Returns 'spawn' or 'skip'.
 
-    # TODO: WeClaude bridge integration — when source=wechat, ppid field carries
+    # TODO: WeChat bridge integration — when source=wechat, ppid field carries
     # the wechat bridge process pid. _live_cc_ppids already handles this correctly
     # since it only checks os.kill + started_at; no special-casing needed here.
-    # Next step: weclaude bridge writes lifecycle:start/end markers into marrow.db
+    # Next step: wx bridge writes lifecycle:start/end markers into marrow.db
     # on rotate_session / idle_fire_loop. See Task 5 in wt-lifecycle plan.
     """
     # P1: bridge owns sessionend timing for this sid.

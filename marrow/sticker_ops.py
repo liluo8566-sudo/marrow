@@ -94,24 +94,30 @@ def ingest_sticker(conn, src_path: str, desc: str, source: str = "wechat") -> di
 
     ext = src.suffix
     new_path = stickers_dir / f"stk_{stk_id:03d}{ext}"
-    shutil.copy2(src, new_path)
+    if src.resolve() != new_path.resolve():
+        shutil.copy2(src, new_path)
     new_path = _standardize_image(new_path)
 
+    thumb_path = thumb_dir / f"stk_{stk_id:03d}.webp"
     try:
         from PIL import Image
     except ImportError:
         pass
     else:
-        thumb_path = thumb_dir / f"stk_{stk_id:03d}.webp"
         with Image.open(new_path) as img:
             img.thumbnail((240, 240))
             img.save(thumb_path, "WEBP")
 
-    conn.execute(
-        "UPDATE stickers SET path = ? WHERE id = ?",
-        (str(new_path), stk_id),
-    )
-    conn.commit()
+    try:
+        conn.execute(
+            "UPDATE stickers SET path = ? WHERE id = ?",
+            (str(new_path), stk_id),
+        )
+        conn.commit()
+    except Exception:
+        if thumb_path.exists():
+            thumb_path.unlink(missing_ok=True)
+        raise
     return {"duplicate": False, "id": stk_id, "path": str(new_path), "desc": desc}
 
 

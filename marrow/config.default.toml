@@ -27,7 +27,7 @@ keep = 14
 # claude_cli isolation (--setting-sources "" --strict-mcp-config) is built in,
 # not configurable: pipeline output must never inherit persona/MCP/output-style.
 # Channel note: claude -p uses machine OAuth login (subscription today, credit
-# pool from 6/15). cyberboss no-`-p` stream-json subscription = Phase 4 Pending.
+# pool from 6/15). no-`-p` stream-json subscription mode = Phase 4 Pending.
 default = "claude_cli"
 emergency = ""
 

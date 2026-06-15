@@ -1,0 +1,51 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - generic [ref=e7]:
+      - generic [ref=e8]:
+        - heading "微信开放社区" [level=1] [ref=e11]:
+          - link "微信开放社区" [ref=e12] [cursor=pointer]:
+            - /url: /community/homepage
+            - img [ref=e13]
+        - generic [ref=e15]:
+          - link "交流专区" [ref=e17] [cursor=pointer]:
+            - /url: /community
+          - link "服务市场" [ref=e19] [cursor=pointer]:
+            - /url: https://fuwu.weixin.qq.com
+          - link "开发者平台" [ref=e21] [cursor=pointer]:
+            - /url: https://developers.weixin.qq.com/platform/?utm_source=community&aibot=1
+          - link "学堂" [ref=e23] [cursor=pointer]:
+            - /url: /community/business
+          - link "文档" [ref=e25] [cursor=pointer]:
+            - /url: https://developers.weixin.qq.com/miniprogram/dev/framework/
+      - generic [ref=e29] [cursor=pointer]: 登录
+    - list [ref=e35]:
+      - listitem [ref=e36]:
+        - link "关于腾讯" [ref=e37] [cursor=pointer]:
+          - /url: http://www.tencent.com/zh-cn/index.shtml
+      - listitem [ref=e38]:
+        - link "运营规范" [ref=e39] [cursor=pointer]:
+          - /url: https://developers.weixin.qq.com/community/develop/doc/000e2cb63d8c28e6cf79d839b51809
+      - listitem [ref=e40]:
+        - link "文档中心" [ref=e41] [cursor=pointer]:
+          - /url: https://mp.weixin.qq.com/debug/wxadoc/dev/index.html
+      - listitem [ref=e42]:
+        - link "辟谣中心" [ref=e43] [cursor=pointer]:
+          - /url: https://kf.qq.com/faq/17030722muuu170307MFBny2.html
+      - listitem [ref=e44]:
+        - link "客服中心" [ref=e45] [cursor=pointer]:
+          - /url: http://kf.qq.com/product/wx_xcx.html
+      - listitem [ref=e46]:
+        - paragraph [ref=e47]: Copyright © 2012-2026 Tencent. All Rights Reserved.
+    - generic [ref=e50]:
+      - link "关闭" [ref=e51] [cursor=pointer]:
+        - /url: javascript:;
+      - generic [ref=e52]:
+        - generic [ref=e53]:
+          - paragraph [ref=e54]: 微信登录
+          - paragraph [ref=e55]: 请先阅读并同意服务协议
+          - paragraph [ref=e57]: 请使用微信扫一扫登录
+        - generic [ref=e58]:
+          - checkbox [ref=e59] [cursor=pointer]
+          - paragraph [ref=e60]: 我已阅读并同意《微信开放社区交流专区服务协议》
+  - alert [ref=e61]:
+    - generic [ref=e62]: 请登录后再试
