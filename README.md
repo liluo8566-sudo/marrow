@@ -101,7 +101,17 @@ Add to your `.claude/settings.json`:
 }
 ```
 
-### 7. Install launchd jobs
+### 7. Download embedding model
+
+Marrow uses [bge-m3](https://huggingface.co/BAAI/bge-m3) (600MB ONNX) for semantic recall. First daemon launch downloads it automatically. To pre-download:
+
+```bash
+uv run python -c "from marrow.recall import _load_model; _load_model()"
+```
+
+If download fails or you skip this step, recall gracefully degrades to text search (FTS5) — everything works, just no semantic matching. 24GB+ RAM recommended for best performance.
+
+### 8. Install launchd jobs
 
 ```bash
 uv run python -m marrow.cli install-launchd
