@@ -186,7 +186,8 @@ def _session_events_text(conn, sid: str) -> tuple[str, str]:
     ).fetchall()
     if not rows:
         return "", _dt.date.today().isoformat()
-    label = {"user": "念念", "assistant": "屿忱"}
+    _p = config.persona()
+    label = {"user": _p["user_name"], "assistant": _p["assistant_name"]}
     lines = [
         f"[{_local_hhmm(r['timestamp'])}] [{label.get(r['role'], r['role'])}]"
         f" {r['content']}"
@@ -451,12 +452,19 @@ def _run_extraction(conn, sid: str, date: str,
 
     # ── single call: all segments (sonnet mid) ────────────────────────────────
     raw, call_err = "", None
+    persona = config.persona()
+    user_terms = " / ".join(config.all_user_terms())
+    assistant_terms = " / ".join(config.all_assistant_terms())
     try:
         raw = client.call(
             role="sessionend_task_affect",
             body=TASK_AFFECT_DIGEST_PROMPT.format(
                 sid=sid, events=events_text,
-                active_tasks=active_tasks, git_log=git_log),
+                active_tasks=active_tasks, git_log=git_log,
+                user_name=persona["user_name"],
+                assistant_name=persona["assistant_name"],
+                user_terms=user_terms,
+                assistant_terms=assistant_terms),
             tier="mid",
         )
     except (LLMError, ValueError, RuntimeError) as e:

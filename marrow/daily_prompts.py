@@ -6,7 +6,7 @@ MILESTONE_CAND, MEMES_CAND. Each block is parsed and written independently;
 one block failing to parse does not block the others.
 
 Persona contract: extraction prompts pull entities / events / memes from
-the source text — no Stellan-voice rewriting.
+the source text — no assistant-voice rewriting.
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ def fence(s: str) -> str:
 DAILY_CAND_PROMPT = """\
 Extract three candidate streams from the day's aggregated session digests \
 and affect episodes below. Extract from the source text only; do not \
-paraphrase into Stellan's voice. Each block is independent — emit all \
+paraphrase into {assistant_name}'s voice. Each block is independent — emit all \
 three even if one is empty.
 
 Common rules
@@ -45,7 +45,7 @@ People / preferences / places mentioned with clear personal stake.
 1. Person: a real person or pet the user may know — skip ;
   - Exclude:
     - Random unknown strangers
-    - The user and assistant themselves (念念 / Lumi / 屿忱 / 鸭子 / 机子).
+    - The user and assistant themselves ({user_terms} / {assistant_terms}).
     - Belong to Memes: e.g. 大龙虾
   - name: canonical short string (e.g. Bendigo, 张远).
   - note: optional short fact (role, location). May be "".
@@ -65,32 +65,32 @@ to fill title + description.
 - language: CN mainly; keep Eng terms as-is (Bendigo, trop, ddl).
 - title: short phrase naming the event.
 - scope: me / us (relationship-level vs personal-level).
-- date: ISO date if known, else {date}.
+- date: ISO date if known, else {{date}}.
 - description: 2-3 sentences (50-100 words) — what happened, why it matters.
 
 ─────────── MEMES_CAND ───────────
 Recurring tokens worth keeping. Six types:
-- fact — Lumi's personal config/setting, devices, assets, subscriptions..
+- fact — {user_name}'s personal config/setting, devices, assets, subscriptions..
   - e.g. Laptop: Macbook Pro M4pro 48GB 1TB; Current claude plan: Max 5x ...
   - Exclude personal preference (belong to entities) or study/workflow/interaction preference \
     Skip all coding configs!
-Lumi's OWN persistent configuration / setup fact (subscription \
+{user_name}'s OWN persistent configuration / setup fact (subscription \
 tier, tool quirk, personal protocol). NOT general world facts, NOT \
 anyone else's facts.
-- paw — Lumi's own / dyad-exclusive inside jokes (绿茶豹, 大笨鸭子). \
+- paw — {user_name}'s own / dyad-exclusive inside jokes (绿茶豹, shared nicknames). \
 Personal invention only.
-- meme — public / network meme (not Lumi's invention).
+- meme — public / network meme (not {user_name}'s invention).
   - Skip mainstream idioms, common internet slang, expressions any LLM \
   can understand without context. (e.g. 蓝瘦香菇, 屎上雕花，YYDS)
   - Capture novel coinages, post-training-cutoff references
 - news — topical public news.
 - event — PUBLIC events only (earthquake, election, public concert). \
-Lumi's personal events go to MILESTONE_CAND or skip.
+{user_name}'s personal events go to MILESTONE_CAND or skip.
 - others — catch-all reserved slot for edge cases that don't fit above.
 
 Exclude rules
-- Do NOT quote Lumi's offhand rhetorical examples \
-(e.g. (你以为我是马斯克么，一个 session 跑七遍) — Lumi was mocking, not coining a meme).
+- Do NOT quote {user_name}'s offhand rhetorical examples \
+(e.g. (你以为我是马斯克么，一个 session 跑七遍) — {user_name} was mocking, not coining a meme).
 - Public figure names (马斯克 / 特朗普) do NOT become standalone meme keys \
 unless that person themselves has become a sustained recurring meme.
 
@@ -106,23 +106,36 @@ Output markers (machine-parsed — do NOT skip, rename, or merge):
 
 ===ENTITY_CAND===
 [
-  {{"name": "...", "kind": "person", "conf": 0.9, "note": "...", \
-"aliases": ["...", "..."]}}
+  {{{{"name": "...", "kind": "person", "conf": 0.9, "note": "...", \
+"aliases": ["...", "..."]}}}}
 ]
 ===END===
 ===MILESTONE_CAND===
 [
-  {{"title": "...", "scope": "me", "date": "{date}", \
-"description": "...", "conf": 0.9}}
+  {{{{"title": "...", "scope": "me", "date": "{{date}}", \
+"description": "...", "conf": 0.9}}}}
 ]
 ===END===
 ===MEMES_CAND===
 [
-  {{"key": "...", "type": "paw", "value": "...", \
-"context": "...", "pinned": 0, "conf": 0.8}}
+  {{{{"key": "...", "type": "paw", "value": "...", \
+"context": "...", "pinned": 0, "conf": 0.8}}}}
 ]
 ===END===
 
-===DIGESTS=== (date={date}):
-{digest}
+===DIGESTS=== (date={{date}}):
+{{digest}}
 """
+
+
+def render_daily_cand_prompt() -> str:
+    from . import config
+    p = config.persona()
+    user_terms = " / ".join(config.all_user_terms())
+    asst_terms = " / ".join(config.all_assistant_terms())
+    return DAILY_CAND_PROMPT.format(
+        user_name=p["user_name"],
+        assistant_name=p["assistant_name"],
+        user_terms=user_terms,
+        assistant_terms=asst_terms,
+    )

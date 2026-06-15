@@ -926,8 +926,10 @@ def test_session_events_text_prefixes_local_hhmm(db_env):
     text, _date = sessionend_async._session_events_text(conn, "s-hhmm")
     conn.close()
     import re
-    # 00:30 UTC → Melbourne (UTC+10) = 10:30; assert the [HH:MM] [念念] shape.
-    assert re.match(r"\[\d{2}:\d{2}\] \[念念\] hi", text), text
+    # 00:30 UTC → Melbourne (UTC+10) = 10:30; assert the [HH:MM] [<user>] shape.
+    from marrow import config
+    uname = config.persona()["user_name"]
+    assert re.match(rf"\[\d{{2}}:\d{{2}}\] \[{re.escape(uname)}\] hi", text), text
 
 
 def test_load_active_tasks_includes_id(db_env):

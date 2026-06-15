@@ -32,6 +32,9 @@ handover.md
 # Pre-rewrite originals: local migration reference only, carry personal-info fragments
 archive/
 
+# Eval results (contain personal paths + decision logs)
+eval-results/
+
 # Local dev artefacts
 *.swp
 *.swo

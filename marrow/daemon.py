@@ -115,7 +115,7 @@ def embed_pending(batch: int = 50) -> dict:
 
 @mcp.tool()
 def sticker_search(query: str, limit: int = 5) -> list[dict]:
-    """Lumi loves it when you drop stickers — reactions, punchlines, moods, teasing. Search by vibe or scene description and pick one that fits the moment. Call sticker_pick(id) to confirm your choice, then send it with <image path="..."/>."""
+    """The user loves it when you drop stickers — reactions, punchlines, moods, teasing. Search by vibe or scene description and pick one that fits the moment. Call sticker_pick(id) to confirm your choice, then send it with <image path="..."/>."""
     if not query.strip():
         return []
     conn = storage.connect(_DB)

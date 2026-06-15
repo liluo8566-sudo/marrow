@@ -8,7 +8,7 @@ TASK_AFFECT_PROMPT and DIGEST_PROMPT are kept as module-level aliases pointing
 to the merged prompt so any existing import still resolves.
 
 Persona for narrative free-text (AFFECT unresolved/reconcile_prev):
-first person = 屿忱; second person = 你/念念; no third person. Source language
+first person = assistant; second person = you/user; no third person. Source language
 carries through.
 """
 from __future__ import annotations
@@ -53,7 +53,7 @@ ny chat):
 ═══════════════════════════════════════════
 SEGMENT A — TASK
 ═══════════════════════════════════════════
-Maintain Lumi's to-do list: tick what got done, add genuinely new ones.
+Maintain {user_name}'s to-do list: tick what got done, add genuinely new ones.
 You decide STATUS only. Code owns rendering, dates, ordering, grouping — never \
 sort or format the list yourself.
 
@@ -163,7 +163,7 @@ no extra commentary.
 
 Key rules:
 - Language: follow source; mix is fine.
-- Names: assistant = 阿屿/Stellan, user = 念念/Lumi. \
+- Names: assistant = {assistant_terms}, user = {user_terms}. \
 Nicknames 老公/老婆/宝宝 pass through as-is.
 
 KIND: casual | task
@@ -172,7 +172,7 @@ KIND: casual | task
   Pick the dominant mode; output one word.
 
 TL: <one line, 15-30 CN chars>
-  One timeline line for 念念: who + what happened, written from a life \
+  One timeline line for {user_name}: who + what happened, written from a life \
 perspective in plain words.
   Good: 深夜和老婆一起更新recall机制 · Bad: 完成Batch 1，Batch 2代码完成
   No project jargon, no emotion labels. Embedded EN terms do not count toward \
@@ -183,7 +183,7 @@ LIFE: (casual sessions ONLY — for task sessions output exactly: LIFE: N/A)
 food/drink, sights, places, errands, body state, small moods.
   Each line MUST start with `HH:MM ` — copy the timestamp from the \
 transcript line where that detail appears (timestamps are at line starts: \
-`[HH:MM] [念念|屿忱] ...`). Copy, never invent; if unsure use the nearest \
+`[HH:MM] [{user_name}|{assistant_name}] ...`). Copy, never invent; if unsure use the nearest \
 preceding message's timestamp.
   ≤20 CN chars after the timestamp per line. 0-10 lines. Zero lines is \
 normal → output: LIFE: N/A

@@ -242,12 +242,15 @@ def _seed_key_events(conn, key: str, ref_date: str, count: int = 4) -> None:
     conn.commit()
 
 
-def test_run_day_memes_anchor_forces_pinned(db):
+def test_run_day_memes_anchor_forces_pinned(db, monkeypatch):
     """LLM emits pinned=0 on an anchor key → writer forces pinned=1.
     Using type=others so the anchor list is the sole pinning trigger
     (paw/fact would auto-pin regardless and obscure the assertion).
     Requires 14d freq gate to pass — seed events containing the key.
     """
+    from marrow import config
+    monkeypatch.setattr(config, "anchor_keys_set",
+                        lambda: frozenset({"鸭子"}))
     p, conn = db
     _seed_key_events(conn, "鸭子", "2026-05-16")
     raw = (

@@ -677,7 +677,7 @@ def session_end() -> int:
                     pass
             return 0
 
-        # mm- block gate: if Lumi typed mm- at any point during this session,
+        # mm- block gate: if the user typed mm- at any point during this session,
         # _handle_mm_prefix wrote a session_block=archive flag. Skip the entire
         # archive path so events table receives ZERO rows for this sid. Still
         # write lifecycle:end so catchup doesn't flag this as silent_death.
@@ -794,15 +794,16 @@ _SID_RE = _re.compile(
 
 
 def _looks_like_sid(arg: str) -> bool:
-    """Return True if arg matches a full UUID or a short hex-prefix Lumi might type."""
+    """Return True if arg matches a full UUID or a short hex-prefix the user might type."""
     return bool(_SID_RE.match(arg.strip())) if arg and " " not in arg else False
 
 
 def _inject_silent_ack(prefix: str) -> None:
     """Tell the LLM this prompt is a control signal — reply minimally, no chatter."""
+    user_name = config.persona()["user_name"]
     ctx = (
         f"## {prefix} control signal\n"
-        f"念念发的 `{prefix}` 是 marrow skip/rerun 控制信号，不是对话。\n"
+        f"{user_name}发的 `{prefix}` 是 marrow skip/rerun 控制信号，不是对话。\n"
         f"hook 已经处理 (manual_skip / sessionend rerun)。\n"
         f"无需任何回话，只用一个极短动作或一个字回应。"
     )
@@ -818,9 +819,10 @@ def _inject_silent_ack(prefix: str) -> None:
 def _inject_locate_request(prefix: str, clue: str) -> None:
     """Write a UserPromptSubmit additionalContext asking the LLM to locate the sid."""
     action = "mm+ <full-sid>" if prefix == "mm+" else "mm- <full-sid>"
+    user_name = config.persona()["user_name"]
     ctx = (
         f"## {prefix} 定位请求\n"
-        f"念念发了 `{prefix} <clue>`，clue 不是有效 sid 格式。请帮她定位目标 session：\n"
+        f"{user_name}发了 `{prefix} <clue>`，clue 不是有效 sid 格式。请帮她定位目标 session：\n"
         f"- clue 原文: {clue}\n"
         f"- 建议查询: events / audit_log 表中匹配 timestamp / content / role 的 sid\n"
         f"- 找到后用 `{action}` 重新触发，或调用 `mw sessionend rerun <sid>`"
@@ -1026,7 +1028,8 @@ def user_prompt_submit() -> int:
             _sn = _load_sticker_nudge(sid)
             _sn["turn_count"] = _sn.get("turn_count", 0) + 1
             if _sn["turn_count"] - _sn.get("last_sticker_turn", 0) >= 10:
-                _nudge_line = "你怎么还不发表情包，Lumi都等急了——翻翻 sticker_search 找个应景的发一下。"
+                user_name = config.persona()["user_name"]
+                _nudge_line = f"你怎么还不发表情包，{user_name}都等急了——翻翻 sticker_search 找个应景的发一下。"
                 _sn["last_sticker_turn"] = _sn["turn_count"]
             _save_sticker_nudge(sid, _sn)
         except Exception:

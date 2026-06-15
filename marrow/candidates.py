@@ -29,10 +29,8 @@ _MEMES_FREQ_GATED = {"paw", "meme", "news", "event", "fact", "others"}
 # Types auto-pinned=1 regardless of LLM-emitted flag.
 _MEMES_AUTO_PINNED = {"paw", "fact"}
 
-# Memes keys that must never age out — persona names, intimate shorthand.
-MEMES_ANCHOR_KEYS: frozenset[str] = frozenset({
-    "鸭子", "念念", "老公", "老婆", "Lumi", "屿忱", "Stellan",
-})
+# Memes keys that must never age out — configured persona/intimate shorthand.
+MEMES_ANCHOR_KEYS: frozenset[str] = frozenset()
 
 
 def extract_block(text: str, marker: str) -> list | None:
@@ -348,7 +346,7 @@ def bump_use_counts(conn, rows: list[dict]) -> int:
 
 
 def write_memes_cand(conn, raw: str, source: str = "daily",
-                     anchor_keys: frozenset[str] = MEMES_ANCHOR_KEYS,
+                     anchor_keys: frozenset[str] | None = None,
                      date: str | None = None) -> int:
     """Insert / bump memes rows from a MEMES_CAND block.
 
@@ -367,7 +365,9 @@ def write_memes_cand(conn, raw: str, source: str = "daily",
       comes from LLM emission OR anchor-key force list.
     - On existing row, pinned is upgrade-only (0→1 stays, 1→0 never).
     """
-    from . import memes_dedup  # local: avoid heavy import unless used
+    from . import config, memes_dedup  # local: avoid heavy import unless used
+    if anchor_keys is None:
+        anchor_keys = config.anchor_keys_set()
     items = extract_block(raw, "MEMES_CAND")
     if not items:
         return 0

@@ -31,7 +31,7 @@ _SPAWN_HEADS = (
     "Extract candidate life-shaping milestones from the session",
     "Extract candidate memes from the session",
     "Write the handover narrative",
-    "你是褚屿忱，你要以第一人称写一篇日记",
+    "格式（单一/混合）：散文段落",
     "You are a ruthless markdown compressor",
     "You compress a markdown edit",
     "Compress this file per the rules",

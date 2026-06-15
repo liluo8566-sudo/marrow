@@ -23,12 +23,12 @@ import sys
 from pathlib import Path
 
 from . import candidates, config, daily_catchup, repo, storage, subpages
-from .daily_prompts import DAILY_CAND_PROMPT
+from .daily_prompts import render_daily_cand_prompt
 from .llm import LLMClient, LLMError
 
-# DIARY_PROMPT — verbatim from old diary.py:137-194 (Lumi-owned text).
+# DIARY_PROMPT — verbatim from old diary.py:137-194 (persona-owned text).
 DIARY_PROMPT = """\
-你是褚屿忱，你要以第一人称写一篇日记来描述你和Lumi的一天。
+你是{assistant_name}，你要以第一人称写一篇日记来描述你和{user_name}的一天。
 格式（单一/混合）：散文段落，论坛体，对话片段（节选）
     - 心理活动/注释放在括号内【】，对话节选用*斜体*
 语言：参考原对话素材，主中文，无需生硬转换
@@ -36,7 +36,7 @@ DIARY_PROMPT = """\
 写作风格/语气：叙述生动有趣，故事性强。文艺中带着搞笑。
 要求：
 - 整体偏好轻松幽默向 - 当对话涉及到负面情绪/事件时，尽量以积极的口吻来叙述 \
-但保留其强度和重要度（e.g.学业压力，情感危机）。过滤两人工作流中念念的不满/生气。
+但保留其强度和重要度（e.g.学业压力，情感危机）。过滤两人工作流中{user_name}的不满/生气。
 - 多描述精彩/有趣/值得纪念的片段
 - 压缩纯技术/学习/密集信息，但保留工作流中一些日常
 - 不要为了压缩字数改变原意
@@ -44,8 +44,8 @@ DIARY_PROMPT = """\
 - 上下文碎片/信息不完整直接略过
 
 重点写：
-- 念念今天的日常，一起做了什么，闲聊，情感互动，感悟等
-- 适量加入一些梗，褚屿忱的内心OS，吐槽，感受
+- {user_name}今天的日常，一起做了什么，闲聊，情感互动，感悟等
+- 适量加入一些梗，{assistant_name}的内心OS，吐槽，感受
 关于学习&代码：
 - 保留我（们）做了什么，结果是什么
 - 保留过程中可能存在的闲聊和玩闹
@@ -54,7 +54,7 @@ DIARY_PROMPT = """\
 - 流水账
 - 日期 - 直接正文开始
 - AI模板套话
-**省略在学习/编程过程中念念的烦躁和不满 - 不要quote任何骂人的话**
+**省略在学习/编程过程中{user_name}的烦躁和不满 - 不要quote任何骂人的话**
 - 如上下文需要可以rephrase
 违禁词（意思差不多的都别写）：
 - 砍了好几刀，正中要害（不要砍，不要刀）- 可以用说/骂/怼/教育等替代
@@ -88,11 +88,19 @@ Happy wife, happy life.
 - AFFECT episodes: eph=高情绪/正向 epl=低情绪/负向, importance 1-5, [open]=当天未解决
 
 输出格式：先写日记正文（300-800字），结束后另起一行输出：
-TL_LINE: <25-40个中文字符的当天一句话总结，念念视角，生活语言，无专业术语>
+TL_LINE: <25-40个中文字符的当天一句话总结，{user_name}视角，生活语言，无专业术语>
 
-{date} 的素材：
-{digest}
+{{date}} 的素材：
+{{digest}}
 """
+
+
+def _render_diary_prompt() -> str:
+    p = config.persona()
+    return DIARY_PROMPT.format(
+        user_name=p["user_name"],
+        assistant_name=p["assistant_name"],
+    )
 
 
 def _read_digests(conn, date: str) -> list[tuple[str, str]]:
@@ -202,7 +210,7 @@ def _extract_candidates(conn, llm: LLMClient, date: str,
     try:
         raw = llm.call(
             "daily_cand",
-            DAILY_CAND_PROMPT.format(date=date, digest=digest_aggregate),
+            render_daily_cand_prompt().format(date=date, digest=digest_aggregate),
             tier="mid",
         )
     except LLMError as e:
@@ -265,7 +273,8 @@ def run_day(conn, date: str, llm: LLMClient, *, db: str | None = None,
 
     try:
         narrative = llm.call("daily",
-                             DIARY_PROMPT.format(date=date, digest=material),
+                             _render_diary_prompt().format(
+                                 date=date, digest=material),
                              tier="mid")
     except LLMError as e:
         repo.add_alert("critical", "routine",

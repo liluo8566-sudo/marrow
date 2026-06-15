@@ -139,6 +139,17 @@ cosine_threshold = 0.85
 # matched row's aliases JSON (auto-learn), does not block insert path.
 cosine_threshold = 0.85
 
+[persona]
+# Fork users: fill these in your ~/.config/marrow/config.toml.
+user_name = "User"
+assistant_name = "Assistant"
+user_aliases = []
+assistant_aliases = []
+# Relationship terms excluded from entity extraction (e.g. ["husband", "wife"]).
+relationship_terms = []
+# Memes keys that never age out. Explicit list, not derived from aliases.
+anchor_keys = []
+
 [subpages]
 # Sub-page render order + visibility (DESIGN L43-65). Known keys:
 #   profile · milestone · diary · memes · stickers · wallet

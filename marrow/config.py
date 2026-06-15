@@ -76,6 +76,38 @@ def load() -> dict:
     return cfg
 
 
+def persona() -> dict:
+    """Merged persona config with sanitized fallbacks."""
+    raw = load().get("persona", {})
+    uname = (raw.get("user_name") or "").strip() or "User"
+    aname = (raw.get("assistant_name") or "").strip() or "Assistant"
+    def _strlist(key: str) -> list[str]:
+        return [s.strip() for s in raw.get(key, [])
+                if isinstance(s, str) and s.strip()]
+    return {
+        "user_name": uname,
+        "assistant_name": aname,
+        "user_aliases": _strlist("user_aliases"),
+        "assistant_aliases": _strlist("assistant_aliases"),
+        "relationship_terms": _strlist("relationship_terms"),
+        "anchor_keys": _strlist("anchor_keys"),
+    }
+
+
+def all_user_terms() -> list[str]:
+    p = persona()
+    return [p["user_name"]] + p["user_aliases"] + p["relationship_terms"]
+
+
+def all_assistant_terms() -> list[str]:
+    p = persona()
+    return [p["assistant_name"]] + p["assistant_aliases"]
+
+
+def anchor_keys_set() -> frozenset[str]:
+    return frozenset(persona()["anchor_keys"])
+
+
 def dashboard_path() -> str:
     return load()["paths"]["dashboard"]
 
