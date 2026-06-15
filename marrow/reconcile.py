@@ -23,8 +23,6 @@ import sqlite3
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from zoneinfo import ZoneInfo
-
 from ._atomic import atomic_write as _atomic_write
 from .timeutil import _MELB as _MELB_TZ
 
@@ -1464,7 +1462,7 @@ _TL_DAY_DIVIDER_RE = re.compile(r"^-+\s*(?P<mmdd>\d{2}-\d{2})\s*-+\s*$")
 _TL_DAY_HEADER_RE = re.compile(
     r"^\**(?P<mmdd>\d{2}-\d{2})\s+Day\b"
 )
-_TZ_MELB      = ZoneInfo("Australia/Melbourne")
+_TZ_MELB      = _MELB_TZ
 _TL_PERIOD_HOUR = {"AM": 9, "PM": 15, "ND": 21}
 
 

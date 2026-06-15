@@ -4,6 +4,7 @@ from __future__ import annotations
 import shutil
 import tomllib
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 DATA_DIR = Path.home() / ".config" / "marrow"
 CONFIG_PATH = DATA_DIR / "config.toml"
@@ -128,3 +129,8 @@ def db_pages_state_path() -> str:
 # uncommitted edits in marrow/daily.py and tests still call these.
 sub_pages_path = db_pages_path
 sub_pages_state_path = db_pages_state_path
+
+
+def get_tz() -> ZoneInfo:
+    tz_name = load().get("core", {}).get("timezone", "Australia/Melbourne")
+    return ZoneInfo(tz_name)

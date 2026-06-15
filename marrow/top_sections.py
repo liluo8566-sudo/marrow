@@ -11,12 +11,13 @@ import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo
+
+from . import config as _config
 
 # ── day boundary ─────────────────────────────────────────────────────────────
 # 6AM local day boundary — aligned with daily_catchup._CUTOFF_H and
 # sessionend_async._CUTOFF_H.
-_TZ = ZoneInfo("Australia/Melbourne")
+_TZ = _config.get_tz()
 _DAY_CUTOFF_H = 6
 
 # ── 9-tone table: (V-band, A-band) → main tone ───────────────────────────────

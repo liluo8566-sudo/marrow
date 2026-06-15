@@ -23,8 +23,6 @@ import datetime as _dt
 import subprocess as _sp
 import sys
 from pathlib import Path as _Path
-from zoneinfo import ZoneInfo
-
 # Lazy stdio redirect — MUST run before any heavyweight import so
 # import-time tracebacks land in --log-path when they fire. popen_detach
 # itself is stdlib-only, safe to import first.
@@ -37,7 +35,7 @@ from .llm import LLMClient, LLMError
 from .sessionend_prompts import TASK_AFFECT_DIGEST_PROMPT
 from .sessionend_writers import seg_affect, seg_digest, seg_task_cand
 
-_TZ = ZoneInfo("Australia/Melbourne")
+_TZ = config.get_tz()
 _CUTOFF_H = 6  # 6AM day boundary (per pipeline §6)
 
 _OK_PREFIX = "ok,user_count="

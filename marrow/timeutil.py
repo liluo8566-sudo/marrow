@@ -6,9 +6,10 @@ local time at read boundaries only — storage is never modified.
 from __future__ import annotations
 
 import datetime
-from zoneinfo import ZoneInfo
 
-_MELB = ZoneInfo("Australia/Melbourne")
+from . import config as _config
+
+_MELB = _config.get_tz()
 
 
 def format_recall_ts(s: str, *, now: datetime.datetime | None = None) -> str:

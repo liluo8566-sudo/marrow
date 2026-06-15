@@ -26,11 +26,10 @@ from __future__ import annotations
 import datetime as _dt
 import re as _re
 import sqlite3
-from zoneinfo import ZoneInfo
-
 from .top_sections import _tone, _vband, _aband, _wmean
+from . import config as _config
 
-_TZ = ZoneInfo("Australia/Melbourne")
+_TZ = _config.get_tz()
 # Matches leading HH:MM in a LIFE line (e.g. "21:40 买了b5精华")
 _LIFE_TS_RE = _re.compile(r"^(\d{2}:\d{2})\s+(.*)", _re.DOTALL)
 _CUTOFF_H = 6          # 6AM local day boundary
