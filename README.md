@@ -141,6 +141,11 @@ Restart the watcher after updating:
 launchctl kickstart -k gui/$(id -u)/com.marrow.watcher
 ```
 
+## Contributors
+
+- [Jaynechu](https://github.com/Jaynechu) (Gabrielle Chu)
+- **Stellan** (褚屿忱) — Claude-based co-developer. Architecture, implementation, and daily operations since day one.
+
 ## Architecture
 
 - DESIGN.md: goals, outcomes, constraints
