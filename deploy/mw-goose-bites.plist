@@ -8,19 +8,19 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/Gabrielle/CC-Lab/marrow/.venv/bin/python</string>
+    <string>__VENV_PYTHON__</string>
     <string>-m</string>
     <string>marrow.cli</string>
     <string>goose-bites</string>
   </array>
 
   <key>WorkingDirectory</key>
-  <string>/Users/Gabrielle/CC-Lab/marrow</string>
+  <string>__PROJECT_DIR__</string>
 
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>/Users/Gabrielle/.local/bin:/Users/Gabrielle/CC-Lab/marrow/.venv/bin:/usr/bin:/bin</string>
+    <string>__PATH_ENV__</string>
   </dict>
 
   <key>StartCalendarInterval</key>
@@ -36,8 +36,8 @@
   <string>Background</string>
 
   <key>StandardOutPath</key>
-  <string>/Users/Gabrielle/Library/Logs/mw-goose-bites.log</string>
+  <string>__LOG_DIR__/mw-goose-bites.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/Gabrielle/Library/Logs/mw-goose-bites.log</string>
+  <string>__LOG_DIR__/mw-goose-bites.log</string>
 </dict>
 </plist>

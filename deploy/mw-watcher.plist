@@ -8,18 +8,18 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/Gabrielle/CC-Lab/marrow/.venv/bin/python</string>
+    <string>__VENV_PYTHON__</string>
     <string>-m</string>
     <string>marrow.watcher</string>
   </array>
 
   <key>WorkingDirectory</key>
-  <string>/Users/Gabrielle/CC-Lab/marrow</string>
+  <string>__PROJECT_DIR__</string>
 
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>/Users/Gabrielle/.local/bin:/Users/Gabrielle/CC-Lab/marrow/.venv/bin:/usr/bin:/bin</string>
+    <string>__PATH_ENV__</string>
   </dict>
 
   <key>RunAtLoad</key>
@@ -35,8 +35,8 @@
   <string>Background</string>
 
   <key>StandardOutPath</key>
-  <string>/Users/Gabrielle/.config/marrow/logs/watcher-launchd.log</string>
+  <string>__DATA_DIR__/logs/watcher-launchd.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/Gabrielle/.config/marrow/logs/watcher-launchd.log</string>
+  <string>__DATA_DIR__/logs/watcher-launchd.log</string>
 </dict>
 </plist>
