@@ -20,6 +20,9 @@ Two autouse guards:
 """
 from __future__ import annotations
 
+import os
+os.environ.setdefault("WATCHDOG_USE_POLLING", "1")
+
 import pytest
 
 

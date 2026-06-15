@@ -17,7 +17,11 @@ import time
 from pathlib import Path
 
 from watchdog.events import FileSystemEventHandler
-from watchdog.observers import Observer
+
+if os.environ.get("WATCHDOG_USE_POLLING"):
+    from watchdog.observers.polling import PollingObserver as Observer
+else:
+    from watchdog.observers import Observer
 
 import re
 import sqlite3
