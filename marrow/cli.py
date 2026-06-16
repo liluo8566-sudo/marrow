@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import re
 import shutil
 import subprocess
@@ -423,10 +424,50 @@ def cmd_refresh(args) -> int:
                 msg += " + subpages"
             except Exception as e:
                 print(f"mw: subpages refresh failed: {e}", file=sys.stderr)
+        _maybe_restart_watcher()
         print(msg)
         return 0
     finally:
         conn.close()
+
+
+def _maybe_restart_watcher() -> None:
+    """Restart watcher if any marrow .py is newer than its PID start time."""
+    import subprocess, time as _time
+    pkg_dir = Path(__file__).resolve().parent
+    try:
+        info = subprocess.run(
+            ["launchctl", "list", _WATCHER_LABEL],
+            capture_output=True, text=True,
+        )
+        if info.returncode != 0:
+            return
+        pid = None
+        for line in info.stdout.splitlines():
+            if '"PID"' in line:
+                pid = int("".join(c for c in line if c.isdigit()))
+                break
+        if not pid:
+            return
+        ps = subprocess.run(
+            ["ps", "-o", "etime=", "-p", str(pid)],
+            capture_output=True, text=True,
+        )
+        if ps.returncode != 0:
+            return
+        parts = ps.stdout.strip().replace("-", ":").split(":")
+        secs = sum(int(x) * m for x, m in zip(reversed(parts), [1, 60, 3600, 86400]))
+        proc_start = _time.time() - secs
+    except Exception:
+        return
+    newest_py = max(
+        (f.stat().st_mtime for f in pkg_dir.rglob("*.py")), default=0
+    )
+    if newest_py > proc_start:
+        subprocess.run(
+            ["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{_WATCHER_LABEL}"],
+            capture_output=True,
+        )
 
 
 _WATCHER_LABEL = "com.marrow.watcher"
