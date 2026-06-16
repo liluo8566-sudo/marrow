@@ -644,7 +644,7 @@ def _render_day47(dates_4_7: list[_dt.date],
 
     lines: list[str] = []
     trend = _week_trend(this_week_affect, last_week_affect)
-    lines.append(f"Week 【{trend}】")
+    lines.append(f"**Week 【{trend}】**")
     for date in sorted(dates_4_7, reverse=True):
         day_affect = affect_rows_by_date.get(date, [])
         tone_label = _tone_from_rows(day_affect)
