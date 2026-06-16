@@ -125,6 +125,18 @@ CREATE TABLE IF NOT EXISTS alerts (
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
   resolved_at TEXT
 );
+CREATE TRIGGER IF NOT EXISTS alerts_sync_resolved
+AFTER UPDATE OF resolved_at ON alerts
+WHEN NEW.resolved_at IS NOT NULL AND NEW.resolved = 0
+BEGIN
+  UPDATE alerts SET resolved = 1 WHERE id = NEW.id;
+END;
+CREATE TRIGGER IF NOT EXISTS alerts_sync_resolved_insert
+AFTER INSERT ON alerts
+WHEN NEW.resolved_at IS NOT NULL AND NEW.resolved = 0
+BEGIN
+  UPDATE alerts SET resolved = 1 WHERE id = NEW.id;
+END;
 CREATE TABLE IF NOT EXISTS audit_log (
   id INTEGER PRIMARY KEY,
   target_table TEXT NOT NULL,
