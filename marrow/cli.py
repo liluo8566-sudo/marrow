@@ -99,12 +99,16 @@ def _shortcut(args, table: str, sql: str, summary: str) -> int:
 
 
 def cmd_resolve(args) -> int:
-    return _shortcut(
+    rc = _shortcut(
         args, "alerts",
         "UPDATE alerts SET resolved=1, "
         "resolved_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
         "resolved via mw",
     )
+    if rc == 0:
+        args.all = False
+        cmd_refresh(args)
+    return rc
 
 
 def _pin_toggle(args, val: int, summary: str) -> int:

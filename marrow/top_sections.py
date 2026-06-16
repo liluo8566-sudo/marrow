@@ -96,10 +96,12 @@ def render_alerts(conn: sqlite3.Connection) -> str:
     # Each row carries `<!-- id:alert.N -->` so reconcile_alerts can map a
     # deleted bullet back to the row to resolve. Lumi's md-side delete IS
     # the resolve gesture.
-    lines += (
-        [f"- {r[1]}: {r[2]} <!-- id:alert.{r[0]} -->" for r in rows]
-        if rows else ["_none_"]
-    )
+    if rows:
+        lines.append("<!-- resolve: mw resolve alerts <id> (auto-refreshes dashboard) -->")
+        lines += [f"- {r[1]}: {r[2]} <!-- id:alert.{r[0]} -->" for r in rows]
+    else:
+        lines.append("_none_")
+
     return "\n".join(lines)
 
 
