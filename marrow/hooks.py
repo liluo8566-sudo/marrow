@@ -1530,10 +1530,69 @@ def pretool_use() -> int:
     return 0
 
 
+def turn_inject() -> int:
+    """Inject current time + delta since last reply.
+
+    WX bridge injects its own time via system prompt — skip when
+    MARROW_CHANNEL=wx. CLI and TG both need this.
+    """
+    channel = (os.environ.get("MARROW_CHANNEL") or "").strip() or "cli"
+    if channel == "wx":
+        return 0
+
+    inp = _read_input()
+    tpath = (inp.get("transcript_path") or "")
+    if "/tasks/" in tpath:
+        return 0
+
+    sid = (inp.get("session_id") or "").strip()
+    if not sid:
+        return 0
+
+    tz = config.get_tz()
+    now = datetime.now(timezone.utc).astimezone(tz)
+    now_str = now.strftime("%Y-%m-%d %a %H:%M")
+    now_epoch = int(now.timestamp())
+
+    state_dir = config.DATA_DIR / "state" / "turn_delta"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state_file = state_dir / sid
+
+    delta = ""
+    try:
+        if state_file.exists():
+            last = int(state_file.read_text().strip())
+            d = now_epoch - last
+            if d < 60:
+                delta = f" · +{d}s since last reply"
+            elif d < 3600:
+                delta = f" · +{d // 60}m since last reply"
+            else:
+                delta = f" · +{d // 3600}h{(d % 3600) // 60}m since last reply"
+    except Exception:
+        pass
+
+    try:
+        state_file.write_text(str(now_epoch))
+    except Exception:
+        pass
+
+    ctx = f"# Context — {now_str}{delta}"
+    json.dump(
+        {"hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": ctx,
+        }},
+        sys.stdout,
+    )
+    return 0
+
+
 _EVENTS = {
     "session_start": session_start,
     "session_end": session_end,
     "user_prompt_submit": user_prompt_submit,
+    "turn_inject": turn_inject,
     "pretool_use": pretool_use,
 }
 

@@ -134,8 +134,8 @@ def upsert_session(sid: str, model: str | None, channel: str | None,
             if last_active:
                 conn.execute(
                     "INSERT INTO sessions "
-                    "(sid, model, channel, cwd, last_active, title, effort) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?) "
+                    "(sid, model, channel, cwd, created_at, last_active, title, effort) "
+                    "VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), ?, ?, ?) "
                     "ON CONFLICT(sid) DO UPDATE SET "
                     "  model=COALESCE(NULLIF(excluded.model, ''), sessions.model),"
                     "  channel=CASE WHEN sessions.channel IS NULL OR sessions.channel='' "
@@ -153,8 +153,8 @@ def upsert_session(sid: str, model: str | None, channel: str | None,
             else:
                 conn.execute(
                     "INSERT INTO sessions "
-                    "(sid, model, channel, cwd, last_active, title, effort) "
-                    "VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), ?, ?) "
+                    "(sid, model, channel, cwd, created_at, last_active, title, effort) "
+                    "VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'), ?, ?) "
                     "ON CONFLICT(sid) DO UPDATE SET "
                     "  model=COALESCE(NULLIF(excluded.model, ''), sessions.model),"
                     "  channel=CASE WHEN sessions.channel IS NULL OR sessions.channel='' "
@@ -179,7 +179,7 @@ def get_session(sid: str, *, db: str | None = None) -> dict | None:
     conn = storage.connect(db)
     try:
         row = conn.execute(
-            "SELECT sid, model, channel, cwd, last_active, title, effort "
+            "SELECT sid, model, channel, cwd, created_at, last_active, title, effort "
             "FROM sessions WHERE sid=?",
             (sid,),
         ).fetchone()

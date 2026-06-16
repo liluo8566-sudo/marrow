@@ -13,7 +13,7 @@ import sqlite_vec
 
 from . import config
 
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 
 # Phase 1 first-class tables + Phase 2 affect/entities (DECISIONS Phase 2).
 # The retired emotions/people/preferences/dir placeholders stay absent.
@@ -204,6 +204,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   model TEXT,
   channel TEXT,
   cwd TEXT,
+  created_at TEXT,
   last_active TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
   title TEXT NOT NULL DEFAULT '',
   effort TEXT DEFAULT ''
@@ -506,6 +507,7 @@ def init_db(path: str | None = None) -> sqlite3.Connection:
         _migrate_to_v18(conn)
         _migrate_to_v19(conn)
         _migrate_to_v20(conn)
+        _migrate_to_v21(conn)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     return conn
 
@@ -917,6 +919,23 @@ def _migrate_to_v20(conn: sqlite3.Connection) -> None:
     if "effort" not in cols:
         conn.execute("ALTER TABLE sessions ADD COLUMN effort TEXT DEFAULT ''")
     conn.execute("PRAGMA user_version=20")
+
+
+def _migrate_to_v21(conn: sqlite3.Connection) -> None:
+    """v21: sessions.created_at for real session duration in /info.
+    Idempotent via user_version + column check.
+    Backfills existing rows with last_active as best approximation.
+    """
+    v = conn.execute("PRAGMA user_version").fetchone()[0]
+    if v >= 21:
+        return
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(sessions)")}
+    if "created_at" not in cols:
+        conn.execute("ALTER TABLE sessions ADD COLUMN created_at TEXT")
+    conn.execute(
+        "UPDATE sessions SET created_at = last_active WHERE created_at IS NULL"
+    )
+    conn.execute("PRAGMA user_version=21")
 
 
 def _migrate_to_v14(conn: sqlite3.Connection) -> None:

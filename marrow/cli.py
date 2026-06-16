@@ -195,6 +195,15 @@ def cmd_get_session_cwd(args) -> int:
     return 0
 
 
+def cmd_get_session_created(args) -> int:
+    sid = (args.sid or "").strip()
+    if not sid:
+        return _fail("--sid required")
+    row = repo.get_session(sid, db=args.db)
+    print((row or {}).get("created_at") or "")
+    return 0
+
+
 def _split_csv(value: str | None) -> list[str]:
     if not value:
         return []
@@ -695,6 +704,11 @@ def build_parser() -> argparse.ArgumentParser:
                          help="print the persisted cwd for sid (or empty)")
     gsc.add_argument("--sid", required=True)
     gsc.set_defaults(fn=cmd_get_session_cwd)
+
+    gscr = sub.add_parser("get-session-created", parents=[common],
+                          help="Print created_at for sid")
+    gscr.add_argument("--sid", required=True)
+    gscr.set_defaults(fn=cmd_get_session_created)
 
     # B6 recent sessions — /resume picker.
     lrs = sub.add_parser("list-recent-sessions", parents=[common],
