@@ -1663,6 +1663,10 @@ def reconcile_timeline(conn: sqlite3.Connection,
                 "SELECT tl_line FROM diary WHERE date = ?", (date,)
             ).fetchone()
             if row is None:
+                now_melb = _dt.datetime.now(_MELB_TZ)
+                diary_cutoff = (now_melb - _dt.timedelta(hours=7)).date().isoformat()
+                if date >= diary_cutoff:
+                    continue
                 rpt.conflicts.append(f"tl:d:{date} not in diary")
                 continue
             db_tl = row["tl_line"] or ""
