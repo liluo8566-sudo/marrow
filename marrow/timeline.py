@@ -33,7 +33,7 @@ _TZ = _config.get_tz()
 # Matches leading HH:MM in a LIFE line (e.g. "21:40 买了b5精华")
 _LIFE_TS_RE = _re.compile(r"^(\d{2}:\d{2})\s+(.*)", _re.DOTALL)
 _CUTOFF_H = 6          # 6AM local day boundary
-_BUDGET = 1300         # soft char budget
+_BUDGET = 1500         # soft char budget
 _24H_CAP = 15          # max film-strip lines
 _2472H_CAP = 12        # max lines incl. headers for 24-72h zone
 _OPEN_EXPIRY_DAYS = 7  # open episodes older than this are hidden
@@ -692,14 +692,19 @@ def render_timeline(conn: sqlite3.Connection) -> str:
     manual_24h = _query_manual_events_24h(conn, t_24h, now_utc_iso)
     lines_24h = _render_24h(digests_24h, current_sid, affect_by_sid_24h, manual_24h)
 
+    # Overflow: 24h sessions truncated by cap → spill into zone (b)
+    rendered_sids = set(_TL_TRAIL_SID_RE.findall("\n".join(lines_24h)))
+    overflow = [d for d in digests_24h
+                if d["sid"] not in rendered_sids and d["sid"] != current_sid]
+
     # ── zone (b): diary dates today-1, today-2, today-3 ─────────────────────
     # Window: from diary-day-start of today-3 (06:00 local → UTC) up to t_24h
-    # so sessions shown in zone (a) are not repeated.
+    # plus any overflow from zone (a) cap truncation.
     # Bug 4 fix: use diary-date boundaries, not rolling 72h.
     day3 = today_melb - _dt.timedelta(days=3)
     zone_b_from_utc = _day_start_utc(day3).strftime("%Y-%m-%dT%H:%M:%SZ")
-    digests_2472 = _query_digests_range(conn, zone_b_from_utc, t_24h)
-    affect_2472 = _query_affect_range(conn, zone_b_from_utc, t_24h)
+    digests_2472 = overflow + _query_digests_range(conn, zone_b_from_utc, t_24h)
+    affect_2472 = _query_affect_range(conn, zone_b_from_utc, now_utc_iso)
     manual_2472 = _query_manual_events_range(conn, zone_b_from_utc, t_24h)
     lines_2472 = _render_2472h(
         digests_2472, affect_2472, current_sid, manual_2472
