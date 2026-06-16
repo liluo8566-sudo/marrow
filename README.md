@@ -150,4 +150,4 @@ launchctl kickstart -k gui/$(id -u)/com.marrow.watcher
 
 - DESIGN.md: goals, outcomes, constraints
 - MAP.md: how each feature works (speed-read for AI sessions)
-- DECISIONS.md: debated technical choices with rationale
+- DECISIONS.md: (moved to CC-Lab root — not in this repo)

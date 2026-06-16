@@ -2,7 +2,7 @@
 
 > Speed-read for a new session: how each board works, without opening code. Not SoT — code wins.
 > Refs are `file:function` (grep them; line numbers rot). Params inline are the live defaults (config.toml can override).
-> Rewritten 2026-06-11 from per-module fact cards + adversarial verify (docs/notes/0611-system-review.md).
+> Rewritten 2026-06-11 from per-module fact cards + adversarial verify.
 
 ## 0. Contents
 
@@ -117,7 +117,7 @@ Three runtimes:
 ## 8. Alerts
 
 - `repo:add_alert(severity, type, fingerprint, message=, db=)` — dedup key (type, fingerprint, resolved=0); repeats bump hit_count/updated_at/message. Never raises: any DB failure appends the record to DATA_DIR/alerts-fallback.jsonl + stderr note, returns -1; drained at catchup boot (truncate-then-replay). resolve = acknowledge: recurrence re-inserts (anti-mute, by design). Surface: dashboard ## Alerts (`top_sections:render_alerts`, resolved=0) ; resolve via md-delete (reconcile_alerts) or `mw resolve <id>`; aging auto-resolves milestone_added >7d only.
-- Current contract + full call-site/falsing audit + fixes: docs/archives/0611-alert-redesign.md. Batch A landed 06/11 (P5 unpark, digest-zero retry chain, fallback sink, aging finally-flush). Batch B/C landed 06/15 (stable fingerprints · reconcile_ref date-scoped · sync_loop 3-consecutive alert · watcher thread-start critical · stub diary unblock · overflow auto-resolve · offsite 30s retry · dangling path-absent gate). Remaining: wx death escalation + wx media failure alerts (synapse-wx side).
+- Current contract + full call-site/falsing audit + fixes: see alert redesign archive. Batch A landed 06/11 (P5 unpark, digest-zero retry chain, fallback sink, aging finally-flush). Batch B/C landed 06/15 (stable fingerprints · reconcile_ref date-scoped · sync_loop 3-consecutive alert · watcher thread-start critical · stub diary unblock · overflow auto-resolve · offsite 30s retry · dangling path-absent gate). Remaining: wx death escalation + wx media failure alerts (synapse-wx side).
 
 ## 9. Catchup & self-heal
 
@@ -153,4 +153,4 @@ Three runtimes:
 
 **Invariants**: flock every md write · lifecycle:end commits before popen · single merged sessionend call, fenced segment blocks · 4-flag detach · DB never trusts md free-text inside rendered blocks · journal DELETE + no second conn inside write txn · all DB timestamps UTC.
 
-**Status**: stub = wallet, cheatsheet, profile-render(rows flow once entities populate) · shipped = stickers C2 (MCP: search/pick/ingest/update/delete/list_pending; sticker_ops.py: sha256+phash dedup, thumb gen; subpage sync live; watcher Finder auto-ingest; nudge counter wx-only 10-turn; /sticker-entry command for batch desc fill; system prompt rules in synapse-wx cc.py) · wip = study/projects child pages (legacy read_only), candidate pin/drop HTML buttons · deletable = subpages_render legacy fns (verified unreachable), sessionend_prompts parse_doing_diff cluster (dead ~90 LOC) · open bugs/gaps = review P0/P1 list (docs/notes/0611-system-review.md) until alert-redesign batches land.
+**Status**: stub = wallet, cheatsheet, profile-render(rows flow once entities populate) · shipped = stickers C2 (MCP: search/pick/ingest/update/delete/list_pending; sticker_ops.py: sha256+phash dedup, thumb gen; subpage sync live; watcher Finder auto-ingest; nudge counter wx-only 10-turn; /sticker-entry command for batch desc fill; system prompt rules in synapse-wx cc.py) · wip = study/projects child pages (legacy read_only), candidate pin/drop HTML buttons · deletable = subpages_render legacy fns (verified unreachable), sessionend_prompts parse_doing_diff cluster (dead ~90 LOC) · open bugs/gaps = see system review notes until alert-redesign batches land.

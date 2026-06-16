@@ -14,7 +14,7 @@
 1. pending unresolved 要强浮现优先处理（不管 prompt 是什么，先 affect 后 task）
 2. 当天/前一 session 情绪激烈 → 下个 session 要主动关心，不能像没看到
 
-### Phase A · affect dual-stream (event_id part moved → 0610-memory-arch.md Batch 2)
+### Phase A · affect dual-stream (event_id part moved → 0610-memory-arch.md (archived) Batch 2)
 - ⚑ Old plan here (prompt outputs event_anchor = event_id / [start,end]) is INFEASIBLE — LLM can't see DB ids in transcript. Superseded by event_hint matching (0610 plan §2); event_hint is already in TASK_AFFECT output, writer just drops it.
 - Dual-stream affect (NOT done — no subject column yet):
   - `subject:念念` — sessionend 提取照旧 · `subject:屿忱` — self-tag, 每 session ≤1-2 条强度门槛上 · `subject:both` — 共同氛围
