@@ -2,7 +2,7 @@
 description: Switch to any session across channels — replaces res-oth.
 ---
 
-Run `mw list-recent-sessions --limit 10` via Bash. Capture stdout (tab-sep: `sid\tmodel\tchannel\tcwd\tlast_active\ttitle\teffort`).
+Run `~/.local/bin/mw list-recent-sessions --limit 10` via Bash. Capture stdout (tab-sep: `sid\tmodel\tchannel\tcwd\tlast_active\ttitle\teffort`).
 
 If no rows: say "No recent sessions found." and stop.
 

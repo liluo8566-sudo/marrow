@@ -16,6 +16,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]       # marrow/ repo root
 _DEPLOY_DIR = _REPO_ROOT / "deploy"
 _VENV = _REPO_ROOT / ".venv"
 _VENV_PYTHON = _VENV / "bin" / "python"
+_LOCAL_BIN = Path.home() / ".local" / "bin"
 _CONFIG_DIR = Path.home() / ".config" / "marrow"
 _CLAUDE_DIR = Path.home() / ".claude"
 _SETTINGS = _CLAUDE_DIR / "settings.json"
@@ -119,6 +120,21 @@ def setup_venv() -> bool:
         _fail(f"pip install failed: {r.stderr.strip()[-300:]}")
         return False
     _ok("marrow installed in venv")
+    _LOCAL_BIN.mkdir(parents=True, exist_ok=True)
+    mw_link = _LOCAL_BIN / "mw"
+    mw_target = _VENV / "bin" / "mw"
+    if mw_link.exists() or mw_link.is_symlink():
+        if mw_link.is_symlink() and mw_link.resolve() == mw_target:
+            _ok("mw command already linked")
+        elif mw_link.is_symlink():
+            mw_link.unlink()
+            mw_link.symlink_to(mw_target)
+            _ok("mw command relinked")
+        else:
+            _act(f"mw command exists at {mw_link}; leaving it untouched")
+    else:
+        mw_link.symlink_to(mw_target)
+        _ok("mw command linked in ~/.local/bin")
     return True
 
 
