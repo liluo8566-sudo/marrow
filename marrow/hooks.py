@@ -613,6 +613,15 @@ def session_start() -> int:
             if heartbeat:
                 parts.append(heartbeat)
 
+            alert_count = conn.execute(
+                "SELECT COUNT(*) FROM alerts WHERE resolved = 0"
+            ).fetchone()[0]
+            if alert_count:
+                parts.append(
+                    f"Alerts: {alert_count} unresolved — clear via:"
+                    " `mw resolve alerts <id>` (auto-refreshes dashboard + restarts watcher)"
+                )
+
             from . import timeline as _timeline_mod
             backdrop = _timeline_mod.render_timeline(conn)
             if backdrop:
