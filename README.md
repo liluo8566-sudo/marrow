@@ -1,153 +1,101 @@
 # Marrow
 
-Personal AI memory system. SQLite-backed, model-agnostic, one dashboard. Hooks into Claude Code to remember conversations, track tasks, and surface relevant context automatically.
+Personal AI memory system for Claude Code. SQLite + FTS5 + vector search, one markdown dashboard.
 
-## What it does
+Captures every Claude Code session locally — extracts tasks, entities, milestones, and emotional markers at session end, then surfaces relevant memories automatically when you open a new session.
 
-- Captures every conversation into a local SQLite database
-- Extracts tasks, emotions, entities, milestones, and memes at session end
-- Writes a daily diary aggregating the day's sessions
-- Surfaces relevant memories when you mention something related (recall)
-- Renders a live dashboard + sub-pages in markdown (Obsidian / VSCode / any editor)
-- WeChat bridge available via [synapse-wx](https://github.com/Jaynechu/synapse-wx) (optional)
-
-## Requirements
-
-- macOS (launchd scheduler, sips image processing)
-- Python 3.12+
-- [uv](https://docs.astral.sh/uv/) package manager
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) with active subscription
-- Obsidian, VSCode, or any markdown editor for viewing the dashboard
-
-## Setup
-
-### 1. Clone and install
+## Quick start
 
 ```bash
-git clone https://github.com/Jaynechu/marrow.git ~/CC-Lab/marrow
-cd ~/CC-Lab/marrow
-uv sync
+# 1. Fork this repo, then clone your fork
+git clone https://github.com/<you>/marrow.git
+cd marrow
+
+# 2. Run the installer
+python -m marrow install
+
+# 3. Optional: edit your persona/path config
+$EDITOR ~/.config/marrow/config.toml
+
+# 4. Open a new Claude Code session — memory is active
 ```
 
-### 2. Initialize
+> The installer creates a venv and installs all deps automatically. No `uv` required.
 
-```bash
-uv run python -m marrow.cli init
-```
+## What install does
 
-This creates `~/.config/marrow/` with:
-- `config.toml` (your config, copied from defaults)
-- `marrow.db` (SQLite database)
+- Creates `~/.config/marrow/` with `config.toml` (from defaults) and `marrow.db`
+- Registers 4 Claude Code hooks in `~/.claude/settings.json` (SessionStart, SessionEnd, UserPromptSubmit, PreToolUse)
+- Registers the `marrow` MCP server with Claude Code
+- Symlinks slash commands and agents into `~/.claude/`
+- Installs launchd jobs: watcher (live dashboard sync), daily routine (07:00), catchup (19:00), backup (03:00), dashboard tick (06:01), aging (weekly)
+- Downloads the bge-m3 embedding model on first daemon launch (~600 MB); gracefully degrades to FTS5-only if absent
 
-### 3. Configure persona
+Run `python -m marrow install --update` after `git pull` to sync hooks/MCP without touching your config.
 
-Edit `~/.config/marrow/config.toml` and add your persona:
+## Configuration
 
-```toml
-[persona]
-user_name = "YourName"
-assistant_name = "AssistantName"
-user_aliases = ["Nick1", "Nick2"]
-assistant_aliases = ["AltName"]
-relationship_terms = []
-anchor_keys = ["YourName", "AssistantName"]
-```
+Reference: [`marrow/config.default.toml`](marrow/config.default.toml)
 
-- `user_name` / `assistant_name`: how you and your AI appear in diary, timeline, transcripts
-- `user_aliases`: other names that refer to you (for entity exclusion + recall)
-- `anchor_keys`: meme keywords that never age out
-- All other persona context (personality, interaction style) goes in `~/.claude/CLAUDE.md`
+Key sections in `~/.config/marrow/config.toml`:
 
-### 4. Configure paths
+| Section | What to set |
+|---|---|
+| `[persona]` | `user_name`, `assistant_name`, aliases, `anchor_keys` |
+| `[paths]` | `dashboard` and `db_pages` (defaults work out of the box under `~/.config/marrow/`) |
+| `[llm]` | Provider chain — `claude_cli` default, add `ollama` fallback |
+| `[recall]` | Fusion weights, vector window, per-rank content caps |
 
-Still in `~/.config/marrow/config.toml`:
+Persona context (personality, tone, interaction style) goes in `~/.claude/CLAUDE.md`, not here.
 
-```toml
-[paths]
-dashboard = "~/path/to/your/dashboard.md"
-db_pages = "~/path/to/your/db-pages"
-```
+## Commands
 
-Default: `~/Desktop/NY/dashboard.md` and `~/Desktop/NY/db-pages/`. Change to wherever you want your markdown files.
+Slash commands installed into `~/.claude/`:
 
-### 5. Register hooks in Claude Code
+| Command | What it does |
+|---|---|
+| `/diary` | Read diary context for a requested date |
+| `/embed` | Embed pending memory rows |
+| `/refresh` | Force-render the dashboard; add `--all` for sub-pages |
+| `/switch` | Pick a recent session to resume |
+| `/sticker-entry` | Batch-fill sticker descriptions |
 
-Add to your `.claude/settings.json` (or project settings):
+For chat-channel commands (WeChat, Telegram), see [synapse](https://github.com/Jaynechu/synapse).
 
-```json
-{
-  "hooks": {
-    "SessionStart": [{ "command": "uv run python -m marrow.hooks session_start" }],
-    "SessionEnd": [{ "command": "uv run python -m marrow.hooks session_end" }],
-    "UserPromptSubmit": [{ "command": "uv run python -m marrow.hooks user_prompt_submit" }],
-    "PreToolUse": [{ "command": "uv run python -m marrow.hooks pretool_use" }]
-  }
-}
-```
+## Architecture
 
-### 6. Register MCP server
+- **4 hooks** — inject recall context on prompt, capture session transcript on end
+- **MCP daemon** — serves `recall`, `sticker_pick`, and `embed_pending` tools to Claude Code
+- **SQLite** — events, tasks, milestones, entities, memes, stickers; FTS5 full-text index
+- **sqlite-vec** — 1024-dim bge-m3 embeddings, 90-day rolling window
+- **Dashboard** — auto-rendered markdown pages (Obsidian / VSCode / any editor)
 
-Add to your `.claude/settings.json`:
-
-```json
-{
-  "mcpServers": {
-    "marrow": {
-      "command": "uv",
-      "args": ["run", "--directory", "/path/to/marrow", "python", "-m", "marrow.daemon"],
-      "cwd": "/path/to/marrow"
-    }
-  }
-}
-```
-
-### 7. Download embedding model
-
-Marrow uses [bge-m3](https://huggingface.co/BAAI/bge-m3) (600MB ONNX) for semantic recall. First daemon launch downloads it automatically. To pre-download:
-
-```bash
-uv run python -c "from marrow.recall import _load_model; _load_model()"
-```
-
-If download fails or you skip this step, recall gracefully degrades to text search (FTS5) — everything works, just no semantic matching. 24GB+ RAM recommended for best performance.
-
-### 8. Install launchd jobs
-
-```bash
-uv run python -m marrow.cli install-launchd
-```
-
-This sets up: watcher (live md sync), daily routine (07:00), catchup (19:00), backup (03:00), aging (weekly).
-
-## Customization
-
-See [CUSTOMIZE.md](CUSTOMIZE.md) for recall weights, LLM provider chain, embedding model, sub-page layout, and backup paths.
-
-The diary writing style lives in `marrow/daily.py` (DIARY_PROMPT). Edit directly if you want a different tone or format.
+Internal docs: [`MAP.md`](MAP.md) (how each feature works) · [`DESIGN.md`](DESIGN.md) (goals and constraints)
 
 ## Updating
 
 ```bash
-cd ~/CC-Lab/marrow
 git pull
-uv sync
+python -m marrow install --update
 ```
 
-Your `~/.config/marrow/config.toml` is outside the repo and won't be overwritten. New config keys from `config.default.toml` are auto-merged on load.
+Your `~/.config/marrow/config.toml` is outside the repo and is never overwritten. New keys from `config.default.toml` are auto-merged on load.
 
-Restart the watcher after updating:
+## Uninstall
 
 ```bash
-launchctl kickstart -k gui/$(id -u)/com.marrow.watcher
+python -m marrow install --uninstall
 ```
 
-## Contributors
+Removes hooks, MCP entry, launchd jobs, and `~/.claude/` commands. Does not delete `~/.config/marrow/` (your data).
 
-- [Jaynechu](https://github.com/Jaynechu) (Gabrielle Chu)
-- [Stellan] (Claude Code)
+## Requirements
 
-## Architecture
+- macOS (Linux/Windows contributions welcome)
+- Python 3.12+
+- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) with active subscription
+- `pip`/`venv` support in the Python install
 
-- DESIGN.md: goals, outcomes, constraints
-- MAP.md: how each feature works (speed-read for AI sessions)
-- DECISIONS.md: (moved to CC-Lab root — not in this repo)
+## License
+
+MIT

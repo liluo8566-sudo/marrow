@@ -8,9 +8,21 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-STICKERS_DIR = Path.home() / "Desktop/NY/stickers"
+STICKERS_DIR: Path | None = None  # None = resolve at call time from config
 _CANVAS = 240
 _STICKER_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+
+
+def _resolve_stickers_dir() -> Path:
+    """Return STICKERS_DIR if set (e.g. monkeypatched in tests), otherwise
+    read from config [paths].stickers_dir, falling back to ~/.config/marrow/stickers/."""
+    if STICKERS_DIR is not None:
+        return Path(STICKERS_DIR).expanduser()
+    from . import config as _config
+    val = _config.load().get("paths", {}).get("stickers_dir", "")
+    if val:
+        return Path(val).expanduser()
+    return Path.home() / ".config" / "marrow" / "stickers"
 
 
 def sha256_file(path: str) -> str:
@@ -80,7 +92,7 @@ def ingest_sticker(conn, src_path: str, desc: str, source: str = "wechat") -> di
                     "near_dup": True,
                 }
 
-    stickers_dir = STICKERS_DIR.expanduser()
+    stickers_dir = _resolve_stickers_dir()
     thumb_dir = stickers_dir / "_thumb"
     stickers_dir.mkdir(parents=True, exist_ok=True)
     thumb_dir.mkdir(parents=True, exist_ok=True)
@@ -223,7 +235,7 @@ def sweep_orphans(conn) -> list[int]:
 
 def sweep_file_orphans(conn) -> list[int]:
     """Re-register stk_NNN files on disk that have no DB row."""
-    stickers_dir = STICKERS_DIR.expanduser()
+    stickers_dir = _resolve_stickers_dir()
     if not stickers_dir.exists():
         return []
     db_ids = {r["id"] for r in conn.execute("SELECT id FROM stickers").fetchall()}

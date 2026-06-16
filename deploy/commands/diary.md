@@ -10,6 +10,6 @@ Otherwise parse the date from $ARGUMENTS (natural language or numeric: 前天, 6
 Call mcp__marrow__recall(query="diary", since=<YYYY-MM-DD>, until=<YYYY-MM-DD>) with Melbourne-local dates.
 
 Read the returned diary content as context. 
-No need to restate the whole diary unless user explicitly asks
-Respond natually with your comments and feelings.
+No need to restate the whole diary unless user explicitly asks.
+Respond naturally with your comments and feelings.
 If no diary found for that date, say so.

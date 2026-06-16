@@ -8,15 +8,17 @@ timezone = "Australia/Melbourne"
 # Empty = use defaults under ~/.config/marrow/
 db = ""
 backup_dir = ""
-# iCloud offsite copy of the daily DB snapshot. Empty =
-# ~/Library/Mobile Documents/com~apple~CloudDocs/Backup/marrow
+# iCloud offsite copy of the daily DB snapshot. Empty = disabled.
+# e.g. "~/Library/Mobile Documents/com~apple~CloudDocs/Backup/marrow"
 offsite_backup_dir = ""
-# Dashboard renders here (Obsidian vault). Empty = ~/Desktop/NY/dashboard.md
+# Dashboard renders here. Empty lets the installer fill a private default.
+# e.g. "~/Documents/my-vault/dashboard.md"
 dashboard = ""
 # DB-rendered pages folder (milestone.md, diary.md, ...).
-# Empty = ~/Desktop/NY/db-pages. Name signals "rendered from DB" — distinct
-# from hand-written notes elsewhere in the vault. Legacy key: `sub_pages`.
-db_pages = ""
+# Default is private and works without manual path setup.
+# e.g. "~/Documents/my-vault/db-pages". Name signals "rendered from DB".
+# Legacy key: `sub_pages`.
+db_pages = "~/.config/marrow/db-pages"
 # State dir for db-page hashes. Empty = <DATA_DIR>/state.
 db_pages_state = ""
 
@@ -48,7 +50,7 @@ mid = "claude-sonnet-4-6"
 top = "claude-opus-4-7"
 
 [embedding]
-# Phase 2: bge-m3 1024d in-process (DECISIONS, Lumi-locked). `model` tags
+# Phase 2: bge-m3 1024d in-process. `model` tags
 # which HuggingFace repo to source; `id` tags vector provenance so a future
 # swap re-embeds without a base-schema rewrite.
 model = "BAAI/bge-m3"
@@ -100,12 +102,14 @@ stopwords = []
 [recall.buckets]
 # cwd -> recall bucket (substring match, case-insensitive). same-bucket
 # events get +same_boost, cross-bucket events take -diff_penalty, missing
-# cwd stays neutral. Lists below are sample needles — adapt to your tree
-# (e.g. add (~/work/code) to project, (~/journal) to daily). Empty list
-# disables that bucket; clearing all three turns off cwd bias entirely.
-project = ["/cc-lab"]
-daily   = ["/desktop/ny"]
-study   = ["/study"]
+# cwd stays neutral. Lists below are sample needles — adapt to your tree.
+# Empty list disables that bucket; clearing all three turns off cwd bias entirely.
+# e.g. project = ["/code", "/projects"]
+#      daily   = ["/journal", "/notes"]
+#      study   = ["/study", "/courses"]
+project = []
+daily   = []
+study   = []
 same_boost   = 0.05
 diff_penalty = 0.00
 

@@ -16,8 +16,8 @@ _DEFAULT_TOML = _DATA_DIR / "paths.toml"
 
 _DEFAULTS = {
     "marrow_db": "~/.config/marrow/marrow.db",
-    "ny_root": "~/Desktop/NY",
-    "dashboard_md": "~/Desktop/NY/dashboard.md",
+    "ny_root": "",
+    "dashboard_md": "",
     "drift_pending_dir": "~/.config/marrow/drift_pending",
     "drift_backup_dir": "~/.config/marrow/drift_backup",
     "dir_tree_md": "~/.config/marrow/dir_tree.md",
@@ -54,6 +54,8 @@ def load_paths(toml_path: str | Path | None = None) -> Paths:
 
     def _p(key: str) -> Path:
         val = raw.get(key) or _DEFAULTS[key]
+        if not val:
+            return Path("")
         return Path(val).expanduser()
 
     return Paths(

@@ -38,9 +38,11 @@ def load() -> dict:
     from .paths import paths as _mpaths  # lazy to avoid circular at module init
     with _DEFAULT.open("rb") as f:
         cfg = tomllib.load(f)
+    user_paths: dict = {}
     if CONFIG_PATH.exists():
         with CONFIG_PATH.open("rb") as f:
             user = tomllib.load(f)
+        user_paths = user.get("paths", {})
         cfg = _deep_merge(cfg, user)
     paths = cfg.setdefault("paths", {})
     db = paths.get("db") or str(DATA_DIR / "marrow.db")
@@ -49,14 +51,21 @@ def load() -> dict:
         Path.home() / "Library" / "Mobile Documents"
         / "com~apple~CloudDocs" / "Backup" / "marrow"
     )
-    dash = paths.get("dashboard") or str(_mpaths.dashboard_md)
+    dash = paths.get("dashboard") or (
+        str(_mpaths.dashboard_md) if _mpaths.dashboard_md != Path("") else
+        str(DATA_DIR / "dashboard.md")
+    )
     # `db_pages` = folder of md files rendered from DB (was `sub_pages` until
     # 2026-05-24). Name signals provenance: rendered-from-DB vs hand-written
     # notes elsewhere in the Obsidian vault. Legacy `sub_pages` key still read
     # as a fallback so an old config.toml keeps working until rewritten.
-    sub = paths.get("db_pages") or paths.get("sub_pages") or str(
-        _mpaths.ny_root / "db-pages"
-    )
+    # Check user config directly for legacy key so the default `db_pages` value
+    # in config.default.toml does not shadow an explicit user `sub_pages` entry.
+    sub = (user_paths.get("db_pages") or user_paths.get("sub_pages")
+           or paths.get("db_pages") or paths.get("sub_pages") or (
+               str(_mpaths.ny_root / "db-pages") if _mpaths.ny_root != Path("") else
+               str(DATA_DIR / "db-pages")
+           ))
     sub_state = (
         paths.get("db_pages_state")
         or paths.get("sub_pages_state")
@@ -65,7 +74,7 @@ def load() -> dict:
     paths["db"] = db
     paths["backup_dir"] = backup
     paths["offsite_backup_dir"] = offsite
-    paths["dashboard"] = dash
+    paths["dashboard"] = str(Path(dash).expanduser()) if dash else dash
     paths["db_pages"] = str(Path(sub).expanduser())
     paths["db_pages_state"] = str(Path(sub_state).expanduser())
     # Legacy keys kept synchronised so any caller still using sub_pages_path()

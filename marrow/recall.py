@@ -1759,7 +1759,7 @@ def recall_with_config(
     Single shared path so hook (UserPromptSubmit) and MCP daemon return the
     same shape for the same query. Caller may override limit/budget per call.
     `current_cwd` enables per-event same-bucket boost / cross-bucket penalty
-    (CC-Lab=project, Desktop/NY=daily, Study=study).
+    (CC-Lab=project, ~/my-dashboard=daily, Study=study).
     `exclude_kinds`: kinds to suppress. Hook default = ("diary", "task");
     MCP callers pass () to include all kinds.
     `since`/`until`: UTC ISO strings for time-lane filtering.

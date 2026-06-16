@@ -1,7 +1,7 @@
 ---
 name: sticker-entry
 description: Vision-read pending stickers and fill descriptions. Dispatched by /sticker-entry command or when user says to batch-describe stickers.
-tools: Read, Bash
+tools: Read, mcp__marrow__sticker_update
 model: sonnet
 ---
 Batch sticker description worker.

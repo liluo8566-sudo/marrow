@@ -13,13 +13,13 @@ def test_load_default(tmp_path):
     """When toml is absent (nonexistent path), fallback defaults are used and expanduser'd."""
     p = load_paths(toml_path=tmp_path / "nonexistent.toml")
     assert p.marrow_db == Path(_DEFAULTS["marrow_db"]).expanduser()
-    assert p.dashboard_md == Path(_DEFAULTS["dashboard_md"]).expanduser()
     assert p.logs_dir == Path(_DEFAULTS["logs_dir"]).expanduser()
     assert p.state_dir == Path(_DEFAULTS["state_dir"]).expanduser()
-    assert p.ny_root == Path(_DEFAULTS["ny_root"]).expanduser()
-    # All paths must be absolute (expanduser applied)
+    # ny_root and dashboard_md default to empty (user must configure)
+    assert p.ny_root == Path("")
+    assert p.dashboard_md == Path("")
+    # Non-optional paths must be absolute (expanduser applied)
     assert p.marrow_db.is_absolute()
-    assert p.dashboard_md.is_absolute()
 
 
 def test_load_custom(tmp_path, monkeypatch):

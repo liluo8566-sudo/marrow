@@ -29,7 +29,7 @@ backup/
 # Symlink to ~/.config/marrow/handover.md (personal)
 handover.md
 
-# Decisions log lives at CC-Lab root (covers all projects, not marrow-only)
+# Decisions log lives outside this repo (covers multiple projects)
 DECISIONS.md
 
 # Pre-rewrite originals: local migration reference only, carry personal-info fragments
@@ -46,7 +46,12 @@ eval-results/
 *.tmp
 
 .claude/worktrees/
+.claude/
+.codex/
 .worktrees/
+.mcp.json
+config.toml
+paths.toml
 
 # Runtime locks
 *.lock

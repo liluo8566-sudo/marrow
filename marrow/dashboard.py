@@ -143,6 +143,9 @@ def _resolve_blocks(path: str, conn, fresh: list[tuple[str, str]],
 
 def write_dashboard(path: str, conn, *, state_dir: str,
                     db: str | None = None) -> None:
+    # Empty path means dashboard is not configured — skip silently.
+    if not path:
+        return
     # Reconcile md edits BEFORE render so Lumi's ✅/❌ + tick/untick flow back.
     # Fail-soft: a reconcile error must never block dashboard refresh.
     if os.path.exists(path):

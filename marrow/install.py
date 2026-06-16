@@ -22,6 +22,7 @@ _SETTINGS = _CLAUDE_DIR / "settings.json"
 _LAUNCH_AGENTS = Path.home() / "Library" / "LaunchAgents"
 _PATH_ENV = (
     f"{Path.home() / '.local' / 'bin'}:"
+    f"{_VENV / 'bin'}:"
     "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 )
 
@@ -49,7 +50,6 @@ _ALL_PLISTS: list[tuple[str, str]] = [
     ("mw-daily-routine.plist",  "com.marrow.daily-routine"),
     ("mw-dashboard-tick.plist", "com.marrow.dashboard-tick"),
     ("mw-db-backup.plist",      "com.marrow.db-backup"),
-    ("mw-goose-bites.plist",    "com.marrow.goose-bites"),
     ("mw-watcher.plist",        "com.marrow.watcher"),
 ]
 
@@ -128,35 +128,66 @@ def setup_venv() -> bool:
 
 def setup_config() -> bool:
     _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    (_CONFIG_DIR / "logs").mkdir(parents=True, exist_ok=True)
+    (_CONFIG_DIR / "db-pages").mkdir(parents=True, exist_ok=True)
+    paths_cfg = _CONFIG_DIR / "paths.toml"
+    if not paths_cfg.exists():
+        paths_cfg.write_text(
+            'marrow_db = "~/.config/marrow/marrow.db"\n'
+            'ny_root = "~/.config/marrow"\n'
+            'dashboard_md = "~/.config/marrow/dashboard.md"\n'
+            'drift_pending_dir = "~/.config/marrow/drift_pending"\n'
+            'drift_backup_dir = "~/.config/marrow/drift_backup"\n'
+            'dir_tree_md = "~/.config/marrow/dir_tree.md"\n'
+            'logs_dir = "~/.config/marrow/logs"\n'
+            'state_dir = "~/.config/marrow/state"\n',
+            encoding="utf-8",
+        )
+        _ok("paths.toml written")
     cfg = _CONFIG_DIR / "config.toml"
     if not cfg.exists():
         src = _REPO_ROOT / "marrow" / "config.default.toml"
         shutil.copy(src, cfg)
+        cfg_text = cfg.read_text(encoding="utf-8")
+        cfg_text = cfg_text.replace(
+            'dashboard = ""',
+            f'dashboard = "{(_CONFIG_DIR / "dashboard.md").as_posix()}"',
+            1,
+        )
+        cfg_text = cfg_text.replace(
+            'db_pages = "~/.config/marrow/db-pages"',
+            f'db_pages = "{(_CONFIG_DIR / "db-pages").as_posix()}"',
+            1,
+        )
+        cfg.write_text(cfg_text, encoding="utf-8")
         _act(f"config written to {cfg}")
-        print("    Edit ~/.config/marrow/config.toml to set your persona and paths")
+        print("    Optional: edit ~/.config/marrow/config.toml to set your persona")
     else:
         _ok("config.toml already exists")
 
     db = _CONFIG_DIR / "marrow.db"
     if not db.exists():
         _act("initialising marrow.db")
-        r = subprocess.run([str(_VENV_PYTHON), "-m", "marrow.storage"],
+        code = "from marrow import storage; c = storage.init_db(); c.close()"
+        r = subprocess.run([str(_VENV_PYTHON), "-c", code],
                            capture_output=True, text=True, cwd=str(_REPO_ROOT))
-        # storage.__main__ may not exist; fall back to importing init_db directly
         if r.returncode != 0:
-            try:
-                sys.path.insert(0, str(_REPO_ROOT))
-                from marrow import storage
-                conn = storage.init_db(str(db))
-                conn.close()
-                _ok("marrow.db initialised")
-            except Exception as e:
-                _fail(f"DB init failed: {e}")
-                return False
-        else:
-            _ok("marrow.db initialised")
+            _fail(f"DB init failed: {(r.stderr or r.stdout).strip()[-500:]}")
+            return False
+        _ok("marrow.db initialised")
     else:
         _ok("marrow.db already exists")
+    return True
+
+
+def render_initial_surface() -> bool:
+    _act("rendering dashboard + sub-pages")
+    r = subprocess.run([str(_VENV_PYTHON), "-m", "marrow.cli", "refresh", "--all"],
+                       capture_output=True, text=True, cwd=str(_REPO_ROOT))
+    if r.returncode != 0:
+        _fail(f"initial render failed: {(r.stderr or r.stdout).strip()[-500:]}")
+        return False
+    _ok((r.stdout.strip() or "dashboard rendered").splitlines()[-1])
     return True
 
 
@@ -226,10 +257,22 @@ def register_mcp() -> bool:
          "--", str(_VENV_PYTHON), "-m", "marrow.daemon"],
         capture_output=True, text=True,
     )
-    # "already exists" is not a failure
-    if r.returncode != 0 and "already" not in (r.stdout + r.stderr).lower():
-        _fail(f"mcp add failed: {(r.stdout + r.stderr).strip()}")
-        return False
+    if r.returncode != 0:
+        msg = (r.stdout + r.stderr).strip()
+        if "already" not in msg.lower():
+            _fail(f"mcp add failed: {msg}")
+            return False
+        _act("MCP server exists; replacing stale registration")
+        subprocess.run(["claude", "mcp", "remove", "marrow", "-s", "user"],
+                       capture_output=True, text=True)
+        r = subprocess.run(
+            ["claude", "mcp", "add", "marrow", "-s", "user",
+             "--", str(_VENV_PYTHON), "-m", "marrow.daemon"],
+            capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            _fail(f"mcp replace failed: {(r.stdout + r.stderr).strip()}")
+            return False
     _ok("MCP server registered (marrow)")
 
     # Ensure mcp__marrow__* in permissions.allow
@@ -291,6 +334,7 @@ def _resolve_plist(text: str) -> str:
 
 def install_plists() -> bool:
     _LAUNCH_AGENTS.mkdir(parents=True, exist_ok=True)
+    (_CONFIG_DIR / "logs").mkdir(parents=True, exist_ok=True)
     uid = _uid()
     domain = f"gui/{uid}"
     errors = 0
@@ -394,6 +438,8 @@ def run_install(update: bool = False) -> int:
         print("\n[3] config + DB")
         if not setup_config():
             return 1
+        if not render_initial_surface():
+            return 1
 
     print("\n[4] hooks")
     if not register_hooks():
@@ -404,10 +450,12 @@ def run_install(update: bool = False) -> int:
         return 1
 
     print("\n[6] commands + agents")
-    sync_symlinks()
+    if not sync_symlinks():
+        return 1
 
     print("\n[7] launchd plists")
-    install_plists()
+    if not install_plists():
+        return 1
 
     print("\n✓ marrow install complete")
     return 0

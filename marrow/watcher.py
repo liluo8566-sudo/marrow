@@ -31,7 +31,7 @@ import sqlite_vec
 from . import config, repo, storage
 from .drift_sweep import AUTHORIZED_ROOTS, EXCLUDE_DIRS_SCAN, DriftWatcher
 from .md_index import MdIndex
-from .sticker_ops import STICKERS_DIR, ingest_sticker, sweep_orphans, sweep_file_orphans
+from .sticker_ops import _resolve_stickers_dir, ingest_sticker, sweep_orphans, sweep_file_orphans
 from .sync_loop import AtlasSweepLoop, SyncLoop, build_targets
 
 _DEBOUNCE_S = 0.2
@@ -501,7 +501,7 @@ class Watcher:
                 self.observer.schedule(drift_handler, str(root), recursive=True)
                 self.log.info("drift_watcher watching %s", root)
 
-        stickers_dir = STICKERS_DIR.expanduser().resolve()
+        stickers_dir = _resolve_stickers_dir().resolve()
         stickers_dir.mkdir(parents=True, exist_ok=True)
         conn = storage.connect()
         try:
