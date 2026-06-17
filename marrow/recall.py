@@ -413,7 +413,10 @@ def _embed_pending_lane(
                     (rid, _vec_to_blob(vec)),
                 )
             except sqlite3.IntegrityError:
-                continue
+                pass
+            except sqlite3.OperationalError as e:
+                if "UNIQUE constraint" not in str(e):
+                    raise
             conn.execute(
                 f"INSERT OR IGNORE INTO {mt}(rowid, embedder_id, dim) "
                 f"VALUES(?, ?, ?)",
