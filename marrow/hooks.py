@@ -35,7 +35,6 @@ from .timeutil import utc_iso_to_local_date, utc_iso_to_local_datetime, format_r
 _RECALL_TZ = config.get_tz()
 _RECALL_CUTOFF_H = 6  # 6AM local day boundary (matches digest)
 
-SESSION_START_HARD_CAP = 6000
 
 # ── recall dedup state (per-session, hook-only) ──────────────────────────────
 
@@ -613,14 +612,25 @@ def session_start() -> int:
             if heartbeat:
                 parts.append(heartbeat)
 
-            alert_count = conn.execute(
-                "SELECT COUNT(*) FROM alerts WHERE resolved = 0"
-            ).fetchone()[0]
-            if alert_count:
-                parts.append(
-                    f"Alerts: {alert_count} unresolved — clear via:"
-                    " `mw resolve alerts <id>` (auto-refreshes dashboard + restarts watcher)"
-                )
+            alert_rows = conn.execute(
+                "SELECT id, severity, type, message FROM alerts WHERE resolved = 0 ORDER BY id"
+            ).fetchall()
+            alert_block = ""
+            if alert_rows:
+                header = f"Alerts: {len(alert_rows)} unresolved"
+                alert_lines = [header]
+                budget = 500 - len(header)
+                for ar in alert_rows:
+                    line = f"  #{ar['id']} [{ar['severity']}] {ar['type']}: {ar['message']}"
+                    if len(line) > 80:
+                        line = line[:79] + "…"
+                    if budget - len(line) - 1 < 0:
+                        alert_lines.append(f"  … +{len(alert_rows) - len(alert_lines) + 1} more")
+                        break
+                    budget -= len(line) + 1
+                    alert_lines.append(line)
+                alert_block = "\n".join(alert_lines)
+                parts.append(alert_block)
 
             from . import timeline as _timeline_mod
             backdrop = _timeline_mod.render_timeline(conn)
@@ -629,9 +639,19 @@ def session_start() -> int:
 
             ctx = "\n\n".join(p for p in parts if p)
 
-            # Hard cap: never exceed 6000 chars total for SessionStart.
-            if len(ctx) > SESSION_START_HARD_CAP:
-                ctx = ctx[: SESSION_START_HARD_CAP - 1] + "…"
+            try:
+                conn.execute(
+                    "INSERT INTO audit_log (target_table, action, summary) VALUES (?, ?, ?)",
+                    (
+                        "sessions",
+                        "session_start:zones",
+                        f"hb={len(heartbeat or '')} alerts={len(alert_block)}"
+                        f" tl={len(backdrop or '')} total={len(ctx)}",
+                    ),
+                )
+                conn.commit()
+            except Exception:
+                pass
     finally:
         conn.close()
 

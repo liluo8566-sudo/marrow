@@ -59,13 +59,14 @@ Bottom (utility):
 
 Dashboard top renders a `## Content` section below Affect, listing the above with md links to each subpage file. Candidate rows in dashboard sections carry three anchor buttons: `✅` pin (jump to target subpage, milestone uses `scope` to land in Us or Me) · `❌` drop (delete + tombstone) · `✏️` edit (in-place edit; md uses placeholder semantics, HTML layer realises it).
 
-## Content flow — md is SoT, DB is index
-- Markdown is authoritative. DB is an index/search/aggregation layer that follows md.
-- System → md: inserter mode. Per-block content_hash in md_index; hash match on user-modified block → auto-writer skips (preserves edit).
-- md → System: watcher (watchdog/FSEvents) monitors md roots. Edit → md_index hash diff → DB sync (insert/update/tombstone).
+## Content flow — bidirectional sync
+- DB and md are peers, not primary/replica. Both can be written to; both changes preserved.
+- DB → md: render (inserter mode). Per-block content_hash in md_index; hash match on user-modified block → auto-writer skips (preserves edit).
+- md → DB: watcher (watchdog/FSEvents) monitors md roots. Edit → md_index hash diff → DB sync (insert/update/tombstone).
+- MCP/CLI → DB: programmatic writes must render affected subpage/dashboard atomically after DB commit so md catches up before next sync_loop tick. Same pattern as alert_resolve.
 - Block id `<!-- id:N date:YYYY-MM-DD -->` stable across renders; tombstone via md_index.tombstones.
-- All hand-edits preserved across files, regions, blocks.
-- Recovery: md is canon; backups and system versioning cover loss.
+- All hand-edits preserved across files, regions, blocks. No silent overwrites in either direction.
+- Recovery: md readable + DB backed up; either side can reconstruct the other.
 
 ## Hooks (four)
 - SessionStart — inject open threads + alerts; Phase 2 adds emotion backdrop. No persona (static CLAUDE.md owns it).

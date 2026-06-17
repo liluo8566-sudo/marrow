@@ -17,7 +17,7 @@ Format (FINAL spec, plan 4A-3):
   Day 3-6: Week 【tone ↗/↘/→】 trend + one line per day 【tone】 diary.tl_line
   No in-progress session line.
   Trim order: day lines → period lines (farthest day first) → 24h farthest.
-  Budget ~1500 chars.
+  Budget ~4000 chars (safety net).
 
 Tone labels reuse top_sections._tone / _vband / _aband (no duplication).
 All DB timestamps are UTC; Melbourne on render via timeutil.
@@ -34,9 +34,8 @@ _TZ = _config.get_tz()
 # Matches leading HH:MM in a LIFE line (e.g. "21:40 买了b5精华")
 _LIFE_TS_RE = _re.compile(r"^(\d{2}:\d{2})\s+(.*)", _re.DOTALL)
 _CUTOFF_H = 6          # 6AM local day boundary
-_BUDGET = 2000         # soft char budget
+_BUDGET = 4000         # soft char budget (safety net; zone caps control sizing)
 _24H_CAP = 15          # max film-strip lines
-_2472H_CAP = 12        # max lines incl. headers for 24-72h zone
 _OPEN_EXPIRY_DAYS = 7  # open episodes older than this are hidden
 _TL_FALLBACK_CHARS = 60  # tl_line NULL → truncated body text
 
@@ -388,25 +387,31 @@ def _query_affect_by_session(conn: sqlite3.Connection,
 
 def _query_diary_range(conn: sqlite3.Connection,
                        date_from: str, date_to: str) -> dict[str, str]:
-    """diary.tl_line keyed by date string, for day 4-8 zone.
+    """diary.tl_line (or truncated text fallback) keyed by date string, for day 4-8 zone.
 
-    Bug 5 guard: rows whose tl_line matches the rendered-day-line pattern
-    (MM-DD Day 【tone】) or are empty/whitespace-only are excluded here so
-    the renderer treats them as missing and uses the fallback path.
+    Rows whose tl_line matches the rendered-day-line pattern or are empty fall
+    back to truncated diary.text (same logic as _tl_or_fallback).
     """
     rows = conn.execute(
-        "SELECT date, tl_line FROM diary"
-        " WHERE date >= ? AND date <= ? AND tl_line IS NOT NULL AND tl_hidden = 0",
+        "SELECT date, tl_line, content FROM diary"
+        " WHERE date >= ? AND date <= ? AND tl_hidden = 0",
         (date_from, date_to),
     ).fetchall()
     result: dict[str, str] = {}
     for r in rows:
         tl = (r["tl_line"] or "").strip()
-        if not tl:
+        if tl and not _RENDERED_DAY_RE.match(tl):
+            result[r["date"]] = tl
             continue
-        if _RENDERED_DAY_RE.match(tl):
+        # Fallback: truncated diary text
+        body = (r["content"] or "").strip()
+        body = _re.sub(r"[#*`>]+", "", body)
+        body = _re.sub(r"\s+", " ", body).strip()
+        if not body:
             continue
-        result[r["date"]] = tl
+        if len(body) > _TL_FALLBACK_CHARS:
+            body = body[:_TL_FALLBACK_CHARS] + "…"
+        result[r["date"]] = body
     return result
 
 
@@ -560,7 +565,7 @@ def _render_2472h(digests: list[dict],
                   affect_rows: list[dict],
                   current_sid: str | None,
                   manual_events: list[dict] | None = None) -> list[str]:
-    """Per-day headers + AM/PM/ND period lines, newest day first, cap ~12."""
+    """Per-day headers + AM/PM/ND period lines, newest day first."""
     from collections import defaultdict
     buckets: dict[tuple[_dt.date, str], list[tuple[str, str, str]]] = defaultdict(list)
     for sd in digests:
@@ -586,8 +591,6 @@ def _render_2472h(digests: list[dict],
     dates = sorted({k[0] for k in buckets}, reverse=True)
     lines: list[str] = []
     for date in dates:
-        if len(lines) >= _2472H_CAP:
-            break
         tone_label = _tone_from_rows(affect_by_date.get(date, []))
         lines.append(
             f"**{date.strftime('%m-%d')} Day 【{tone_label}】** {_tl_anchor_date(date.isoformat())}"
@@ -598,8 +601,6 @@ def _render_2472h(digests: list[dict],
                 continue
             text = _render_2472_period_text(items)
             lines.append(f"{period} {text}")
-            if len(lines) >= _2472H_CAP:
-                break
 
     return lines
 
@@ -611,7 +612,7 @@ def _render_2472_period_text(items: list[tuple[str, str, str]]) -> str:
     for _ts, text, anchor in items:
         visible = (text or "").strip()
         sep = " · " if parts else ""
-        room = 200 - visible_len - len(sep)
+        room = 250 - visible_len - len(sep)
         if room <= 0:
             if anchor:
                 deferred_anchors.append(anchor)
@@ -650,8 +651,6 @@ def _render_day47(dates_4_7: list[_dt.date],
         day_affect = affect_rows_by_date.get(date, [])
         tone_label = _tone_from_rows(day_affect)
         dtl = diary_tl.get(date.isoformat(), "")
-        if dtl and _RENDERED_DAY_RE.match(dtl.strip().lstrip("*")):
-            dtl = ""
         anchor = _tl_anchor_date(date.isoformat())
         if dtl:
             lines.append(

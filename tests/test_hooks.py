@@ -243,12 +243,11 @@ def test_affect_backdrop_anchors_after_6am_rollover(env, monkeypatch, capsys):
     assert "昨晚聊了很多" in ctx
 
 
-def test_session_start_total_hard_cap(env, monkeypatch, capsys):
-    """Total SessionStart output never exceeds SESSION_START_HARD_CAP chars."""
+def test_session_start_zone_caps_keep_output_bounded(env, monkeypatch, capsys):
+    """Zone-level caps keep SessionStart output under hook stdout limit."""
     db, _, _ = env
     conn = storage.connect(db)
     today = datetime.now(timezone.utc).date()
-    # Add a lot of tasks and alerts to bloat the output.
     for i in range(50):
         conn.execute("INSERT INTO tasks(category,title,status) VALUES('work',?,?)",
                      (f"Task {i} " + "x" * 100, "active"))
@@ -264,7 +263,7 @@ def test_session_start_total_hard_cap(env, monkeypatch, capsys):
     _stdin(monkeypatch, {})
     hooks.main(["session_start"])
     ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
-    assert len(ctx) <= hooks.SESSION_START_HARD_CAP
+    assert len(ctx) <= 10000
 
 
 # ── heartbeat tests ───────────────────────────────────────────────────────────
