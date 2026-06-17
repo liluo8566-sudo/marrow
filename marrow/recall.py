@@ -407,10 +407,13 @@ def _embed_pending_lane(
     mt = cfg["meta_table"]
     with conn:
         for rid, vec in zip(ids, vecs):
-            conn.execute(
-                f"INSERT OR IGNORE INTO {vt}(rowid, embedding) VALUES(?, ?)",
-                (rid, _vec_to_blob(vec)),
-            )
+            try:
+                conn.execute(
+                    f"INSERT INTO {vt}(rowid, embedding) VALUES(?, ?)",
+                    (rid, _vec_to_blob(vec)),
+                )
+            except sqlite3.IntegrityError:
+                continue
             conn.execute(
                 f"INSERT OR IGNORE INTO {mt}(rowid, embedder_id, dim) "
                 f"VALUES(?, ?, ?)",

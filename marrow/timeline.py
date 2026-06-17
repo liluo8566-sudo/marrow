@@ -5,7 +5,7 @@ Two outlets:
   Both use the same render fn; caller decides where to put the output.
 
 Format (FINAL spec, plan 4A-3):
-  > 未解: <desc> [label]  — open affect episodes, 7d expiry, top of block
+  未解: <desc> [label] <!-- tl:ep:<id> -->  — open affect episodes, 7d expiry, top of block
   Last 24h: flat HH:MM film-strip newest→oldest, cap 15
     - session's first line carries 【tone】
     - LIFE lines (casual) + TL line (task)
@@ -34,7 +34,7 @@ _TZ = _config.get_tz()
 # Matches leading HH:MM in a LIFE line (e.g. "21:40 买了b5精华")
 _LIFE_TS_RE = _re.compile(r"^(\d{2}:\d{2})\s+(.*)", _re.DOTALL)
 _CUTOFF_H = 6          # 6AM local day boundary
-_BUDGET = 1500         # soft char budget
+_BUDGET = 2000         # soft char budget
 _24H_CAP = 15          # max film-strip lines
 _2472H_CAP = 12        # max lines incl. headers for 24-72h zone
 _OPEN_EXPIRY_DAYS = 7  # open episodes older than this are hidden
@@ -465,7 +465,8 @@ def _render_open_episodes(episodes: list[dict]) -> list[str]:
         desc = ep.get("description") or ep.get("label") or "(ep)"
         label = ep.get("label") or ""
         tag = f" [{label}]" if label and label != desc else ""
-        lines.append(f"> 未解: {desc}{tag}")
+        ep_id = ep.get("id", 0)
+        lines.append(f"未解: {desc}{tag} <!-- tl:ep:{ep_id} -->")
     return lines
 
 
@@ -610,7 +611,7 @@ def _render_2472_period_text(items: list[tuple[str, str, str]]) -> str:
     for _ts, text, anchor in items:
         visible = (text or "").strip()
         sep = " · " if parts else ""
-        room = 150 - visible_len - len(sep)
+        room = 200 - visible_len - len(sep)
         if room <= 0:
             if anchor:
                 deferred_anchors.append(anchor)
@@ -743,11 +744,13 @@ def render_timeline(conn: sqlite3.Connection) -> str:
     trail_sids  = sorted(set(_TL_TRAIL_SID_RE.findall(text)))
     trail_dates = sorted(set(_TL_TRAIL_DATE_RE.findall(text)))
     trail_evts  = sorted(set(_TL_TRAIL_EVT_RE.findall(text)))
+    trail_eps   = sorted(set(_TL_TRAIL_EP_RE.findall(text)))
 
     parts: list[str] = []
     if trail_sids:  parts.append("s=" + ",".join(trail_sids))
     if trail_dates: parts.append("d=" + ",".join(trail_dates))
     if trail_evts:  parts.append("e=" + ",".join(trail_evts))
+    if trail_eps:   parts.append("ep=" + ",".join(trail_eps))
     if parts:
         text += f"\n<!-- tl-rendered:{';'.join(parts)} -->"
 
@@ -775,9 +778,10 @@ def _assemble(open_lines: list[str],
 _ANCHOR_RE = _re.compile(r"<!--.*?-->")
 
 # Trail marker regexes — used to extract rendered anchor IDs for reconcile
-_TL_TRAIL_SID_RE  = _re.compile(r"<!--\s*tl:(?!d:|e:)(\S+?)\s*-->")
+_TL_TRAIL_SID_RE  = _re.compile(r"<!--\s*tl:(?!d:|e:|ep:)(\S+?)\s*-->")
 _TL_TRAIL_DATE_RE = _re.compile(r"<!--\s*tl:d:(\d{4}-\d{2}-\d{2})\s*-->")
 _TL_TRAIL_EVT_RE  = _re.compile(r"<!--\s*tl:e:(\d+)\s*-->")
+_TL_TRAIL_EP_RE   = _re.compile(r"<!--\s*tl:ep:(\d+)\s*-->")
 
 
 def _visible_len(s: str) -> int:

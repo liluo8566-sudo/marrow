@@ -1439,7 +1439,7 @@ def reconcile_alerts(conn: sqlite3.Connection,
 
 _TIMELINE_H2 = "## Timeline"
 # Matches `<!-- tl:<sid> -->` (session) and `<!-- tl:d:YYYY-MM-DD -->` (diary).
-_TL_SID_RE  = re.compile(r"<!--\s*tl:(?!d:)(?P<sid>\S+?)\s*-->")
+_TL_SID_RE  = re.compile(r"<!--\s*tl:(?!d:|e:|ep:)(?P<sid>\S+?)\s*-->")
 _TL_DATE_RE = re.compile(r"<!--\s*tl:d:(?P<date>\d{4}-\d{2}-\d{2})\s*-->")
 # Strip anchors from a line to get the user-editable text.
 _TL_ANCHOR_RE = re.compile(r"\s*<!--\s*tl:[^>]+-->\s*$")
@@ -1454,6 +1454,7 @@ _TL_DAY_RE    = re.compile(r"^\d{2}-\d{2}\s+Day\s+【[^】]*】\s*")
 
 _TL_TRAIL_RE  = re.compile(r"<!--\s*tl-rendered:(?P<payload>[^>]+)\s*-->")
 _TL_EVT_RE    = re.compile(r"<!--\s*tl:e:(?P<eid>\d+)\s*-->")
+_TL_EP_RE     = re.compile(r"<!--\s*tl:ep:(?P<epid>\d+)\s*-->")
 _TL_PLUS_RE   = re.compile(
     r"^\+\s*(?:(?P<hhmm>\d{2}:\d{2})|(?P<period>AM|PM|ND))?\s*(?P<text>.+)$",
     re.IGNORECASE,
@@ -1565,6 +1566,7 @@ def reconcile_timeline(conn: sqlite3.Connection,
     trail_sids:  set[str] = set()
     trail_dates: set[str] = set()
     trail_evts:  set[int] = set()
+    trail_eps:   set[int] = set()
     m_trail = _TL_TRAIL_RE.search(block)
     if m_trail:
         for segment in m_trail.group("payload").split(";"):
@@ -1573,6 +1575,8 @@ def reconcile_timeline(conn: sqlite3.Connection,
                 trail_sids.update(x.strip() for x in segment[2:].split(",") if x.strip())
             elif segment.startswith("d="):
                 trail_dates.update(x.strip() for x in segment[2:].split(",") if x.strip())
+            elif segment.startswith("ep="):
+                trail_eps.update(int(x.strip()) for x in segment[3:].split(",") if x.strip())
             elif segment.startswith("e="):
                 trail_evts.update(int(x.strip()) for x in segment[2:].split(",") if x.strip())
 
@@ -1581,6 +1585,7 @@ def reconcile_timeline(conn: sqlite3.Connection,
     present_sids:  set[str] = set()
     present_dates: set[str] = set()
     present_evts:  set[int] = set()
+    present_eps:   set[int] = set()
     plus_lines:    list[tuple[_dt.date, bool, str]] = []
     evt_edits:     dict[int, str] = {}
     now_melb = _tl_now_melb()
@@ -1599,6 +1604,11 @@ def reconcile_timeline(conn: sqlite3.Connection,
         # Lines starting with `+ ` are manual add requests
         if _TL_PLUS_RE.match(line):
             plus_lines.append((current_day, current_day_explicit, line))
+            continue
+        # Episode anchor (unresolved affect)
+        m_ep = _TL_EP_RE.search(line)
+        if m_ep:
+            present_eps.add(int(m_ep.group("epid")))
             continue
         # Manual event anchor
         m_evt = _TL_EVT_RE.search(line)
@@ -1628,7 +1638,7 @@ def reconcile_timeline(conn: sqlite3.Connection,
             if text_part:
                 date_edits[date] = text_part
 
-    if not sid_edits and not date_edits and not m_trail and not plus_lines and not evt_edits:
+    if not sid_edits and not date_edits and not m_trail and not plus_lines and not evt_edits and not trail_eps:
         return rpt
 
     now_iso = _now()
@@ -1715,6 +1725,15 @@ def reconcile_timeline(conn: sqlite3.Connection,
                     "INSERT INTO audit_log (target_table, target_id, action, summary)"
                     " VALUES ('events', ?, 'tl_manual_delete', 'user deleted manual event')",
                     (str(eid),))
+                rpt.updated += 1
+            for epid in trail_eps - present_eps:
+                conn.execute(
+                    "UPDATE affect SET resolved_at=?, unresolved=0 WHERE id=?",
+                    (now_iso, epid))
+                conn.execute(
+                    "INSERT INTO audit_log (target_table, target_id, action, summary)"
+                    " VALUES ('affect', ?, 'ep_resolve', 'user deleted unresolved episode from timeline')",
+                    (str(epid),))
                 rpt.updated += 1
 
         # ── ADD: lines starting with `+ ` → insert manual events ─────────────

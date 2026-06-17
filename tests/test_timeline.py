@@ -80,15 +80,16 @@ def _freeze_timeline_now(monkeypatch, melb_dt: _dt.datetime) -> None:
 def test_open_episode_renders_at_top(conn):
     _affect(conn, 0.2, 0.7, 3, "委屈", "吵架了", unresolved=1, hours_ago=5)
     result = timeline.render_timeline(conn)
-    assert "> 未解: 吵架了" in result
+    assert "未解: 吵架了" in result
+    assert "<!-- tl:ep:" in result
     lines = result.splitlines()
-    top = [l for l in lines if l.startswith("> 未解:")]
+    top = [l for l in lines if l.startswith("未解:")]
     assert top, "open episode must appear"
     # Must be before any HH:MM content
     content_idx = next((i for i, l in enumerate(lines)
-                        if len(l) >= 5 and l[2] == ":"), None)
+                        if len(l) >= 5 and l[2] == ":" and not l.startswith("未解:")), None)
     open_idx = next((i for i, l in enumerate(lines)
-                     if l.startswith("> 未解:")), None)
+                     if l.startswith("未解:")), None)
     if content_idx is not None and open_idx is not None:
         assert open_idx < content_idx
 
@@ -145,7 +146,7 @@ def test_24h_cap_15_lines(conn):
     for ln in lines[1:]:  # skip ## Timeline
         if not ln or ln.startswith("**") or ln.startswith("Week"):
             break
-        if ln.startswith("---") or ln.startswith("> 未解:") or ln.startswith("<!--"):
+        if ln.startswith("---") or ln.startswith("未解:") or ln.startswith("<!--"):
             continue
         content_lines.append(ln)
     assert len(content_lines) <= timeline._24H_CAP
