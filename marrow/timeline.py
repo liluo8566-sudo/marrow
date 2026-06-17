@@ -788,6 +788,8 @@ def _visible_len(s: str) -> int:
     """Budget length: rendered text minus invisible HTML anchors."""
     return len(_ANCHOR_RE.sub("", s))
 
+visible_len = _visible_len
+
 
 def _trim_to_budget(text: str,
                     open_lines: list[str],
