@@ -7,9 +7,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import shutil
+import shlex
+import sqlite3
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -350,6 +353,105 @@ def cmd_atlas(args) -> int:
         print(f"{r['path']}  description={r.get('description') or ''}  "
               f"naming={r.get('naming_hint') or ''}  d={r.get('depth', 0)}")
     return 0
+
+
+def cmd_doctor(args) -> int:
+    from .install import _ALL_PLISTS, _MARROW_HOOKS, _SETTINGS, _VENV_PYTHON, _hook_command
+
+    def ok(msg: str) -> None: print(f"  ✓ {msg}")
+
+    def bad(msg: str) -> None:
+        nonlocal issues
+        issues += 1
+        print(f"  ✗ {msg}")
+
+    def hook_commands(settings: dict):
+        for event, groups in settings.get("hooks", {}).items():
+            if not isinstance(groups, list): continue
+            for group in groups:
+                if not isinstance(group, dict): continue
+                matcher = group.get("matcher", "")
+                for hook in group.get("hooks", []):
+                    if isinstance(hook, dict) and hook.get("command"):
+                        yield event, matcher, str(hook["command"])
+
+    print("mw doctor")
+    issues = 0
+
+    if _VENV_PYTHON.is_file() and os.access(_VENV_PYTHON, os.X_OK):
+        ok("venv: .venv/bin/python exists")
+    else:
+        bad("venv: .venv/bin/python missing or not executable")
+
+    try:
+        with sqlite3.connect(config.db_path()) as conn:
+            conn.execute("SELECT 1").fetchone()
+        ok("db: SELECT 1 ok")
+    except Exception as e:
+        bad(f"db: {e}")
+
+    try:
+        settings = json.loads(_SETTINGS.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        settings = {}
+        bad(f"settings missing: {_SETTINGS}")
+    except json.JSONDecodeError as e:
+        settings = {}
+        bad(f"settings invalid JSON: {e}")
+
+    actual = list(hook_commands(settings))
+    for event, entries in _MARROW_HOOKS.items():
+        for entry in entries:
+            matcher = entry["matcher"]
+            expected = _hook_command(entry["command"])
+            group_cmds = [
+                cmd for ev, ma, cmd in actual if ev == event and ma == matcher
+            ]
+            if expected in group_cmds:
+                continue
+            stale = next((cmd for cmd in group_cmds if "marrow.hooks" in cmd), None)
+            label = f"{event}[{matcher}]" if matcher else event
+            if stale:
+                bad(f"hook stale: {label} → {stale}")
+            else:
+                bad(f"hook missing: {label} → {expected}")
+
+    missing_execs = 0
+    for _event, _matcher, command in actual:
+        try:
+            parts = shlex.split(command)
+        except ValueError:
+            parts = []
+        exe_str = parts[0] if parts else None
+        exe = Path(exe_str).expanduser() if exe_str else None
+        if exe is None or not (exe.is_file() or shutil.which(exe_str)):
+            missing_execs += 1
+            bad(f"hook executable missing: {command}")
+    if missing_execs == 0:
+        ok("all hook executables found")
+
+    launch_agents = Path.home() / "Library" / "LaunchAgents"
+    loaded = subprocess.run(["launchctl", "list"], capture_output=True, text=True)
+    loaded_text = loaded.stdout if loaded.returncode == 0 else ""
+    loaded_count = 0
+    for _fname, label in _ALL_PLISTS:
+        plist = launch_agents / f"{label}.plist"
+        exists = plist.exists()
+        is_loaded = label in loaded_text
+        if exists and is_loaded: loaded_count += 1
+        elif not exists:
+            bad(f"plist missing: {label}")
+        else:
+            bad(f"plist not loaded: {label}")
+    total = len(_ALL_PLISTS)
+    if loaded_count == total:
+        ok(f"{loaded_count}/{total} plists loaded")
+    else:
+        print(f"  ✗ {loaded_count}/{total} plists loaded")
+
+    print()
+    print(f"{issues} issue{'s' if issues != 1 else ''} found")
+    return 0 if issues == 0 else 1
 
 
 def cmd_drift_scan(args) -> int:
@@ -837,6 +939,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="query atlas rows by path prefix")
     at.add_argument("prefix")
     at.set_defaults(fn=cmd_atlas)
+
+    doc = sub.add_parser("doctor", help="check hook and system health")
+    doc.set_defaults(fn=cmd_doctor)
 
     dr = sub.add_parser("drift", parents=[common],
                         help="drift_sweep: queue or apply file-move ref updates")
