@@ -59,6 +59,12 @@ def _claim_session_lock(sid: str, channel: str) -> None:
                 os.unlink(tmp)
             except OSError:
                 pass
+    try:
+        conn = storage.connect()
+        with conn:
+            conn.execute("UPDATE sessions SET channel=? WHERE sid=?", (channel, sid))
+    except Exception:
+        pass
 
 
 # ── recall dedup state (per-session, hook-only) ──────────────────────────────
