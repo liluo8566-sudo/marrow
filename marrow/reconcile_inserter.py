@@ -290,8 +290,26 @@ def reconcile_inserter_sync(
                     pass
 
         if id_to_line:
+            # Pre-check updated_at column existence before the per-row loop so
+            # the direction check (DB-wins vs md-wins) is available per row.
+            # try/except after a failed execute leaves the cursor mid-abort.
+            try:
+                _cols = {
+                    r[1] for r in conn.execute(
+                        f"PRAGMA table_info({table})"
+                    ).fetchall()
+                }
+            except sqlite3.Error:
+                _cols = set()
+            has_updated_at = "updated_at" in _cols
+
             placeholders = ",".join("?" for _ in id_to_line)
-            col_list = ", ".join([block_id_col] + editable_cols)
+            # Include updated_at in SELECT when the column exists so the
+            # DB-wins direction check can compare timestamps per row.
+            _select_cols = [block_id_col] + editable_cols
+            if has_updated_at:
+                _select_cols = _select_cols + ["updated_at"]
+            col_list = ", ".join(_select_cols)
             db_rows: dict[int, dict] = {}
             try:
                 for row in conn.execute(
@@ -304,6 +322,7 @@ def reconcile_inserter_sync(
                 pass  # table may not exist yet (fresh install)
 
             updates: list[tuple[int, dict]] = []
+            db_wins_ids: set[int] = set()
             for rid, line in id_to_line.items():
                 if rid not in db_rows:
                     continue
@@ -327,21 +346,20 @@ def reconcile_inserter_sync(
                     if md_val != db_val:
                         changes[col] = md_val
                 if changes:
-                    updates.append((rid, changes))
+                    # Direction check: if DB has updated_at newer than md
+                    # mtime, DB is the authoritative source — patch md instead.
+                    row_updated_at = db_row.get("updated_at") if has_updated_at else None
+                    if (
+                        has_updated_at
+                        and row_updated_at
+                        and md_mtime_iso
+                        and row_updated_at > md_mtime_iso
+                    ):
+                        db_wins_ids.add(rid)
+                    else:
+                        updates.append((rid, changes))
 
             if updates:
-                # Pre-check updated_at column existence — try/except after a
-                # failed execute leaves sqlite cursor mid-abort and the
-                # fallback statement errors with "SQL logic error".
-                try:
-                    _cols = {
-                        r[1] for r in conn.execute(
-                            f"PRAGMA table_info({table})"
-                        ).fetchall()
-                    }
-                except sqlite3.Error:
-                    _cols = set()
-                has_updated_at = "updated_at" in _cols
                 with conn:
                     for rid, changes in updates:
                         set_clause = ", ".join(f"{c}=?" for c in changes)
@@ -363,6 +381,42 @@ def reconcile_inserter_sync(
                         )
                         _audit(conn, table, str(rid), "update", summary)
                         rpt.updated += 1
+
+            # DB-wins: patch md lines where DB is newer than the md snapshot.
+            if db_wins_ids:
+                all_rows = spec.fetch(conn)
+                bid_to_row = {}
+                for r in all_rows:
+                    bid = spec.block_id_of(r)
+                    try:
+                        bid_int = int(bid)
+                    except (ValueError, TypeError):
+                        continue
+                    if bid_int in db_wins_ids:
+                        bid_to_row[bid_int] = r
+
+                if bid_to_row:
+                    patched_text = md_text
+                    for rid, row in bid_to_row.items():
+                        anchor = f"<!-- id:{rid} -->"
+                        new_line = spec.render_row(row)
+                        lines = patched_text.splitlines()
+                        for i, line in enumerate(lines):
+                            if anchor in line:
+                                lines[i] = new_line
+                                break
+                        patched_text = "\n".join(lines)
+                        if not patched_text.endswith("\n"):
+                            patched_text += "\n"
+
+                    if patched_text != md_text:
+                        _atomic_write(str(md_path), patched_text)
+                        rpt.updated += len(bid_to_row)
+
+                with conn:
+                    for rid in db_wins_ids:
+                        _audit(conn, table, str(rid), "db_wins_patch",
+                               "reconcile: DB newer than md")
 
     # ── pass 2: DELETE rows absent from md ────────────────────────────────
     # md-mtime gate: rows whose updated_at (or created_at if no updated_at)
