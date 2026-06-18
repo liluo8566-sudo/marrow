@@ -63,14 +63,14 @@ def build_profile_spec(folder: str) -> InserterSpec:
     """Profile — entity-backed, grouped by kind (person / pref / place).
 
     Section per kind gives a visual divider between tag types. Rows inside
-    a section keep mention_count DESC, id ASC ordering.
+    a section keep id ASC ordering.
     """
     def fetch(conn: sqlite3.Connection) -> list[dict]:
         try:
             rows = conn.execute(
                 "SELECT id, kind, name, fact FROM entities_live"
                 " WHERE kind IN ('person','pref','place')"
-                " ORDER BY mention_count DESC, id ASC"
+                " ORDER BY id ASC"
             ).fetchall()
         except sqlite3.Error:
             return []
@@ -106,6 +106,7 @@ def build_profile_spec(folder: str) -> InserterSpec:
         group_by="tag",
         section_of=lambda r: r["kind"],
         section_order=_canonical_order(["person", "pref", "place"]),
+        force_sort_consistency=True,
         render_section_header=lambda k: f"## {k.capitalize()}",
         empty_message=(
             "_Profile entries land here once Phase 2 entity render is wired._"
