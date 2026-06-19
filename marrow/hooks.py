@@ -1030,7 +1030,8 @@ def _inject_locate_request(prefix: str, clue: str) -> None:
 def _locate_jsonl(sid: str) -> str | None:
     """Glob ~/.claude/projects/**/<sid>.jsonl; return most-recent match or None."""
     import pathlib
-    matches = list(pathlib.Path.home().glob(f".claude/projects/**/{sid}.jsonl"))
+    projects_dir = pathlib.Path.home() / ".claude" / "projects"
+    matches = list(projects_dir.glob(f"**/{sid}.jsonl"))
     if not matches:
         return None
     return str(max(matches, key=lambda p: p.stat().st_mtime))
