@@ -29,7 +29,15 @@ $EDITOR ~/.config/marrow/config.toml
 - Registers the `marrow` MCP server with Claude Code
 - Symlinks slash commands and agents into `~/.claude/`
 - Installs launchd jobs: watcher (live dashboard sync), daily routine (07:00), catchup (19:00), backup (03:00), dashboard tick (06:01), aging (weekly)
-- Downloads the bge-m3 embedding model on first daemon launch (~600 MB); gracefully degrades to FTS5-only if absent
+- Downloads the bge-m3 ONNX embedding model (~600 MB); gracefully degrades to FTS5-only if absent
+
+To pre-download the model (recommended):
+
+```bash
+huggingface-cli download BAAI/bge-m3 --include "onnx/*" "tokenizer.json"
+```
+
+The ONNX runtime is used for inference — PyTorch is **not** required.
 
 Run `python -m marrow install --update` after `git pull` to sync hooks/MCP without touching your config.
 
