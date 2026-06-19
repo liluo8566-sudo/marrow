@@ -127,7 +127,7 @@ def _already_done(conn, sid: str) -> bool:
     ok_row = conn.execute(
         "SELECT summary FROM audit_log"
         " WHERE action='sessionend_extract' AND target_id=?"
-        " AND summary LIKE 'ok,user_count=%'"
+        " AND (summary LIKE 'ok,user_count=%' OR summary LIKE 'skip:short_session%')"
         " ORDER BY id DESC LIMIT 1",
         (sid,),
     ).fetchone()
@@ -402,6 +402,9 @@ def main(argv: list[str] | None = None) -> int:
                 pass
 
             count = _user_event_count(conn, sid)
+            if count == 0:
+                _write_final_audit(conn, sid, f"{_SUMMARY_SKIP},user_count=0")
+                return 0
             force_run = _has_force_sessionend(conn, sid) or _has_mm_plus_reset(conn, sid)
             if count <= threshold and not force_run:
                 _write_final_audit(conn, sid, f"{_SUMMARY_SKIP},user_count={count}")

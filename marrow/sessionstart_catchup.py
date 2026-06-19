@@ -290,6 +290,23 @@ def _classify(conn, sid: str, live_ppids: set[int]) -> Literal["spawn", "skip"]:
                 if terminal is None or not _is_terminal_summary(terminal["summary"]):
                     return "skip"  # genuinely in-flight
 
+    # P6: retry cap — stop if consecutive fail/partial rows since last terminal success
+    # exceed RETRY_LIMIT. Prevents infinite retry loops on sessions that can never
+    # produce events (e.g. mm+ reset on zero-event session).
+    fail_count_row = conn.execute(
+        "SELECT COUNT(*) c FROM audit_log"
+        " WHERE action='sessionend_extract' AND target_id=?"
+        " AND (summary LIKE 'fail:%' OR summary LIKE 'partial:%')"
+        " AND id > COALESCE("
+        "   (SELECT MAX(id) FROM audit_log"
+        "    WHERE action='sessionend_extract' AND target_id=?"
+        "    AND (summary='ok' OR summary LIKE 'ok,user_count=%'"
+        "         OR summary LIKE 'skip:%')), 0)",
+        (sid, sid),
+    ).fetchone()
+    if fail_count_row and fail_count_row["c"] >= RETRY_LIMIT:
+        return "skip"
+
     # Fetch most recent terminal row for this sid. `skip:short_session[,user_count=N]`
     # counts as terminal: short sessions need no LLM digest, and the embedded
     # user_count lets State 2 detect resume-and-grow without an extra DB hit.

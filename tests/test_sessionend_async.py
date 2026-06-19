@@ -1623,3 +1623,47 @@ def test_fallback_drain_replays_and_truncates(tmp_path, monkeypatch):
     finally:
         fresh.close()
     assert row is not None, "drained alert must land in DB"
+
+
+# ── Fix 1 regression: force_run with 0 events must skip, not fail ────────────
+
+def test_sessionend_zero_events_with_force_flag_skips(db_env, monkeypatch):
+    """Fix 1: force_run=True but 0 user events -> skip:short_session,user_count=0.
+
+    Session 9f11d4ed had a reset:mm_plus audit row (force_run=True via
+    _has_mm_plus_reset) but zero events, causing infinite fail:no_events retries.
+    The count==0 guard must fire before force_run is even evaluated.
+    """
+    db, tmp_path = db_env
+    sid = "zero-events-force"
+
+    # Write a reset:mm_plus row so _has_mm_plus_reset returns True.
+    conn = storage.connect(db)
+    with conn:
+        conn.execute(
+            "INSERT INTO audit_log (target_table, target_id, action, summary)"
+            " VALUES ('events', ?, 'sessionend_extract', 'reset:mm_plus')",
+            (sid,),
+        )
+    conn.close()
+
+    # No events inserted — count == 0.
+    call_count = []
+
+    def boom(*a, **kw):
+        call_count.append(1)
+        raise AssertionError("LLMClient must not be called with zero events")
+
+    with patch("marrow.sessionend_async.LLMClient") as MockClient:
+        MockClient.return_value.call.side_effect = boom
+        from marrow import sessionend_async
+        rc = sessionend_async.main(["--sid", sid])
+
+    assert rc == 0, "should exit 0 (skip), not 1 (fail)"
+    rows = _audit_rows(db, sid)
+    summaries = [r["summary"] for r in rows]
+    assert any(s == "skip:short_session,user_count=0" for s in summaries), \
+        f"expected skip:short_session,user_count=0 in {summaries}"
+    assert not any(s.startswith("fail:") for s in summaries), \
+        f"unexpected fail row in {summaries}"
+    assert not call_count
