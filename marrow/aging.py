@@ -57,7 +57,7 @@ def retire_memes(conn: sqlite3.Connection) -> int:
         "DELETE FROM memes "
         "WHERE pinned = 0 "
         "AND last_seen IS NOT NULL "
-        "AND last_seen < datetime('now', '-90 days')"
+        "AND last_seen < strftime('%Y-%m-%dT%H:%M:%SZ','now', '-90 days')"
     )
     return cur.rowcount or 0
 
@@ -81,7 +81,7 @@ def archive_tasks(conn: sqlite3.Connection) -> int:
                 "SELECT COUNT(*) FROM events_fts f "
                 "JOIN events e ON e.id = f.rowid "
                 "WHERE events_fts MATCH ? "
-                "AND e.timestamp >= datetime('now', '-30 days') "
+                "AND e.timestamp >= strftime('%Y-%m-%dT%H:%M:%SZ','now', '-30 days') "
                 "LIMIT 1",
                 (_fts_phrase(title),),
             ).fetchone()[0]
@@ -110,7 +110,7 @@ def confirm_milestone_alerts(conn: sqlite3.Connection) -> int:
         "resolved_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') "
         "WHERE type = 'milestone_added' "
         "AND resolved = 0 "
-        "AND created_at < datetime('now', '-7 days')"
+        "AND created_at < strftime('%Y-%m-%dT%H:%M:%SZ','now', '-7 days')"
     )
     return cur.rowcount or 0
 
@@ -126,7 +126,7 @@ def prune_md_index_tombstones(conn: sqlite3.Connection) -> int:
     cur = conn.execute(
         "DELETE FROM md_index "
         "WHERE tombstone_at IS NOT NULL "
-        "AND tombstone_at < datetime('now', '-30 days')"
+        "AND tombstone_at < strftime('%Y-%m-%dT%H:%M:%SZ','now', '-30 days')"
     )
     return cur.rowcount or 0
 
@@ -226,7 +226,7 @@ def evict_vec_window(
         result["skipped"] = True
         return result
 
-    cutoff_sql = f"datetime('now', '-{window_days} days')"
+    cutoff_sql = f"strftime('%Y-%m-%dT%H:%M:%SZ','now', '-{window_days} days')"
 
     # Candidate rowids: out-of-window and not exempt.
     # Exempt: affect.event_id link with importance>=3 OR recall_count>0.

@@ -581,7 +581,7 @@ def _git_housekeep_block(
                     rows = conn.execute(
                         "SELECT sid FROM sessions "
                         "WHERE cwd = ? AND sid != ? "
-                        "AND last_active > datetime('now', '-15 minutes')",
+                        "AND last_active > strftime('%Y-%m-%dT%H:%M:%SZ','now', '-15 minutes')",
                         (cwd, current_sid or ""),
                     ).fetchall()
                     if rows:

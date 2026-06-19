@@ -285,7 +285,7 @@ def _events_like_count_14d(conn, key: str, ref_date: str | None) -> int:
         sql = (
             "SELECT COUNT(DISTINCT date(timestamp)) FROM events "
             "WHERE content LIKE ? ESCAPE '\\' "
-            "AND timestamp >= datetime('now', '-14 days')"
+            "AND timestamp >= strftime('%Y-%m-%dT%H:%M:%SZ','now', '-14 days')"
         )
         params = (pat,)
     try:
