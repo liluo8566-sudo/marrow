@@ -67,7 +67,9 @@ def test_ingest_sticker_sha256_dedup(db, tmp_path, monkeypatch):
     first = sticker_ops.ingest_sticker(db, str(src), "first", "test")
     second = sticker_ops.ingest_sticker(db, str(src), "second", "test")
 
-    assert second == {"duplicate": True, "existing_id": first["id"]}
+    assert second["duplicate"] is True
+    assert second["existing_id"] == first["id"]
+    assert second["path"] == first["path"]
 
 
 def test_update_sticker_success(db, tmp_path, monkeypatch):

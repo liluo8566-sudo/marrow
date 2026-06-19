@@ -154,15 +154,23 @@ class LLMClient:
             pgid = os.getpgid(p.pid)
         except ProcessLookupError:
             pgid = p.pid
-        killer = threading.Timer(
-            timeout, lambda: _kill_group(pgid, signal.SIGKILL))
+        stdout_pipe = p.stdout
+
+        def _timeout_kill() -> None:
+            _kill_group(pgid, signal.SIGKILL)
+            try:
+                stdout_pipe.close()
+            except Exception:
+                pass
+
+        killer = threading.Timer(timeout, _timeout_kill)
         killer.start()
         lines: list[str] = []
         try:
             p.stdin.write(msg + "\n")
             p.stdin.flush()
             p.stdin.close()
-            for line in p.stdout:
+            for line in stdout_pipe:
                 line = line.strip()
                 if not line:
                     continue
@@ -314,4 +322,3 @@ class LLMClient:
             conn.close()
         except Exception:
             pass
-

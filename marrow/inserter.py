@@ -157,6 +157,7 @@ def write_subpage_inserter(spec: InserterSpec, conn: sqlite3.Connection,
     # db_order mirrors _bootstrap's emit order: rows grouped by section in
     # section_order, then fetch order inside each section.
     if spec.force_sort_consistency:
+        db_ids = {spec.block_id_of(r) for r in rows}
         sections_db: dict[str, list[str]] = {}
         for r in rows:
             bid = spec.block_id_of(r)
@@ -165,7 +166,7 @@ def write_subpage_inserter(spec: InserterSpec, conn: sqlite3.Connection,
         db_order: list[str] = []
         for label in spec.section_order(sections_db.keys()):
             db_order.extend(sections_db.get(label, []))
-        md_order = [b.block_id for b in md_blocks]
+        md_order = [b.block_id for b in md_blocks if b.block_id in db_ids]
         if md_order != db_order:
             live_rows = [r for r in rows
                          if spec.block_id_of(r) not in tombstoned]

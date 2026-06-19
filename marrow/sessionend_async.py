@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import atexit as _atexit
 import datetime as _dt
+import fcntl
 import subprocess as _sp
 import sys
 from pathlib import Path as _Path
@@ -44,6 +45,7 @@ _SUMMARY_SKIP = "skip:short_session"
 _SUMMARY_START = "start"
 
 _WRITERS = ("affect", "task_cand", "digest")
+_LOCK_FD = None
 
 
 def _cleanup_empty_log(log_path: _Path) -> None:
@@ -331,6 +333,14 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
         cfg = config.load()
+        global _LOCK_FD
+        lock_path = config.DATA_DIR / "sessionend.lock"
+        _LOCK_FD = lock_path.open("a+")
+        try:
+            fcntl.flock(_LOCK_FD, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 0
+
         threshold = cfg.get("sessionend", {}).get("skip_turn_threshold", 3)
         db = config.db_path()
         conn = storage.connect(db)
@@ -441,7 +451,6 @@ def _run_extraction(conn, sid: str, date: str,
     dashboard + embed_pending run at tail (fail-soft).
     """
     from . import dashboard as _dash_mod
-    from . import recall as _recall_mod
 
     client = LLMClient(cfg=cfg)
     active_tasks = _load_active_tasks_for_sonnet(conn)
@@ -481,6 +490,20 @@ def _run_extraction(conn, sid: str, date: str,
                 lambda: seg_digest(conn, raw, sid, date, raw_llm=raw),
                 zero_is_fail=True)
 
+    # ── final audit ───────────────────────────────────────────────────────────
+    failures = _collect_run_failures(conn, sid)
+
+    all_writers = ("task_cand", "affect", "digest")
+    if not failures:
+        _write_final_audit(conn, sid, f"{_OK_PREFIX}{count}")
+        rc = 0
+    elif len(failures) >= len(all_writers):
+        _write_final_audit(conn, sid, "fail:all")
+        rc = 1
+    else:
+        _write_final_audit(conn, sid, f"partial:{','.join(sorted(set(failures)))}")
+        rc = 0
+
     # ── tail: slow side-effects (fail-soft; cc can't kill us here) ───────────
     db = config.db_path()
     try:
@@ -496,29 +519,21 @@ def _run_extraction(conn, sid: str, date: str,
         except Exception:  # noqa: BLE001
             pass
 
-    try:
-        _recall_mod.embed_pending(conn, batch=200)
-    except Exception as e:  # noqa: BLE001
+    embed_batch = cfg.get("sessionend", {}).get("embed_batch", 200)
+    if embed_batch:
         try:
-            repo.add_alert("warn", "embed",
-                           "sessionend_async_embed_failed",
-                           source="sessionend_async.py", db=db,
-                           message=f"sessionend_async embed_pending failed: {e}")
-        except Exception:  # noqa: BLE001
-            pass
+            from . import recall as _recall_mod
+            _recall_mod.embed_pending(conn, batch=embed_batch)
+        except Exception as e:  # noqa: BLE001
+            try:
+                repo.add_alert("warn", "embed",
+                               "sessionend_async_embed_failed",
+                               source="sessionend_async.py", db=db,
+                               message=f"sessionend_async embed_pending failed: {e}")
+            except Exception:  # noqa: BLE001
+                pass
 
-    # ── final audit ───────────────────────────────────────────────────────────
-    failures = _collect_run_failures(conn, sid)
-
-    all_writers = ("task_cand", "affect", "digest")
-    if not failures:
-        _write_final_audit(conn, sid, f"{_OK_PREFIX}{count}")
-        return 0
-    if len(failures) >= len(all_writers):
-        _write_final_audit(conn, sid, "fail:all")
-        return 1
-    _write_final_audit(conn, sid, f"partial:{','.join(sorted(set(failures)))}")
-    return 0
+    return rc
 
 
 if __name__ == "__main__":

@@ -117,6 +117,8 @@ diff_penalty = 0.00
 # Sessions with ≤ this many user turns skip async LLM extraction (§2.7).
 # Threshold tunes after 1-week sample.
 skip_turn_threshold = 3
+# Tail embed batch size for sessionend_async. 0 = skip embed_pending.
+embed_batch = 200
 
 [memes_dedup]
 # Cosine similarity threshold for the bge-m3 dedup check against existing

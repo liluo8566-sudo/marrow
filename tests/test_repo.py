@@ -2,16 +2,24 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timedelta, timezone
 
 import marrow.daemon as daemon
 import pytest
 
 from marrow import repo, storage
 
+
+def _recent_ts(minutes: int = 0) -> str:
+    return (
+        datetime.now(timezone.utc) - timedelta(days=1) + timedelta(minutes=minutes)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 ROWS = [
-    {"session_id": "s1", "timestamp": "2026-05-17T01:00:00Z", "role": "user",
+    {"session_id": "s1", "timestamp": _recent_ts(), "role": "user",
      "content": "hello marrow world"},
-    {"session_id": "s1", "timestamp": "2026-05-17T01:01:00Z", "role": "assistant",
+    {"session_id": "s1", "timestamp": _recent_ts(1), "role": "assistant",
      "content": "hi there, welcome back"},
 ]
 
