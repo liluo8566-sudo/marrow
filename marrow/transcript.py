@@ -203,9 +203,9 @@ def _active_chain_uuids(records: list[dict]) -> set[str]:
     return chain
 
 
-def clean(jsonl_path: str) -> list[dict]:
+def clean(jsonl_path: str, *, skip_headless_check: bool = False) -> list[dict]:
     rows: list[dict] = []
-    if is_headless(jsonl_path):
+    if not skip_headless_check and is_headless(jsonl_path):
         return rows  # spawned claude -p (lint/digest): not a real session
     try:
         fh = open(jsonl_path, encoding="utf-8")

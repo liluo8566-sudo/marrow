@@ -899,7 +899,8 @@ def session_end() -> int:
             _wipe_sticker_nudge(early_sid)
             return 0
 
-        rows = transcript.clean(tpath)
+        is_bridge = os.environ.get("MARROW_BRIDGE") == "1"
+        rows = transcript.clean(tpath, skip_headless_check=is_bridge)
         if rows:
             repo.archive_events(conn, rows)
 

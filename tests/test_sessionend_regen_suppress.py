@@ -74,7 +74,7 @@ def test_session_end_without_regen_suppress_proceeds(env, monkeypatch, tmp_path)
         rc = hooks.session_end()
 
     assert rc == 0
-    mclean.assert_called_once_with(str(tpath))
+    mclean.assert_called_once_with(str(tpath), skip_headless_check=False)
     march.assert_called_once()
 
 
@@ -106,5 +106,5 @@ def test_session_end_wrong_regen_suppress_sid_does_not_suppress(
 
     assert rc == 0
     assert wrong.exists()
-    mclean.assert_called_once_with(str(tpath))
+    mclean.assert_called_once_with(str(tpath), skip_headless_check=False)
     march.assert_called_once()
