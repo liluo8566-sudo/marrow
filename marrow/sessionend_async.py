@@ -396,7 +396,7 @@ def main(argv: list[str] | None = None) -> int:
             return _run_extraction(conn, sid, date, events_text, cfg, count, cwd)
         except Exception as e:  # noqa: BLE001
             try:
-                _write_final_audit(conn, sid, f"fail:{type(e).__name__}")
+                _write_final_audit(conn, sid, f"fail:{type(e).__name__}: {e}"[:220])
             except Exception:
                 pass
             return 1
@@ -431,7 +431,7 @@ def _run_writer(conn, sid: str, name: str, writer, *, zero_is_fail: bool = False
         return n
     except Exception as e:  # noqa: BLE001
         try:
-            _write_segment_audit(conn, sid, name, f"fail:{type(e).__name__}")
+            _write_segment_audit(conn, sid, name, f"fail:{type(e).__name__}: {e}"[:200])
         except Exception:  # noqa: BLE001
             pass
         return None
@@ -489,7 +489,7 @@ def _run_extraction(conn, sid: str, date: str,
             tier="mid",
         )
     except (LLMError, ValueError, RuntimeError) as e:
-        call_err = type(e).__name__
+        call_err = f"{type(e).__name__}: {e}"[:200]
 
     if call_err:
         _write_segment_audit(conn, sid, "llm_call", f"fail:{call_err}")
