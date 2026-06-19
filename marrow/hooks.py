@@ -7,13 +7,13 @@ SessionStart additionalContext, side effects for SessionEnd).
 
   session_start      -> inject open tasks + alerts + affect backdrop; clear skip on resume
   session_end        -> clean transcript, archive events, regen dashboard top
-  user_prompt_submit -> mm-/mm+ skip control + recall fallback
+  user_prompt_submit -> mm controls + recall fallback
 
 PreToolUse is the global prompt-guard.py (scope already covers
 ~/CC-Lab/marrow/), not duplicated here.
 
 mm- prefix: writes audit_log manual_skip row; sessionend_async skips LLM pipeline.
-mm+ prefix: immediately reruns sessionend_async for current (or named) sid.
+mm+ prefix: clears manual skip and flags the sid for sessionend.
 resume detection: session_start fires on cc resume with same sid; if skip row exists,
   write skip_cleared row so sessionend_async runs normally.
 """
@@ -220,6 +220,10 @@ _STATUS_SKIP_BRIDGE_OWNS = "bridge_owns"
 _SESSION_BLOCK_ACTION = "session_block"
 _STATUS_BLOCK_ARCHIVE = "archive"
 _STATUS_BLOCK_CLEARED = "cleared"
+_FORCE_SESSIONEND_ACTION = "force_sessionend"
+_STATUS_MM_PLUS_FLAG = "mm_plus_flag"
+_STATUS_MM_IMMEDIATE = "mm_immediate"
+_STATUS_MM_IMMEDIATE_CURRENT = "mm_immediate_current"
 
 
 def _write_manual_skip_flag(conn: sqlite3.Connection, sid: str, status: str) -> None:
@@ -242,9 +246,32 @@ def _write_session_block_flag(conn: sqlite3.Connection, sid: str, status: str) -
         )
 
 
+def _write_force_sessionend_flag(conn: sqlite3.Connection, sid: str, status: str) -> None:
+    with conn:
+        conn.execute(
+            "INSERT INTO audit_log (target_table, target_id, action, summary)"
+            " VALUES ('events', ?, ?, ?)",
+            (sid, _FORCE_SESSIONEND_ACTION, status),
+        )
+
+
+def _has_force_sessionend(conn: sqlite3.Connection, sid: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM audit_log"
+        " WHERE action=? AND target_id=?"
+        " AND id > COALESCE("
+        "   (SELECT MAX(id) FROM audit_log"
+        "    WHERE action='sessionend_extract' AND target_id=?"
+        "    AND (summary='ok' OR summary LIKE 'ok,user_count=%')), 0)"
+        " LIMIT 1",
+        (_FORCE_SESSIONEND_ACTION, sid, sid),
+    ).fetchone()
+    return row is not None
+
+
 def _is_session_blocked(conn: sqlite3.Connection, sid: str) -> bool:
     """Latest session_block row wins. archive -> True, cleared/absent -> False.
-    Lets mm+ override a prior mm- by writing a cleared row."""
+    mm+ does not write this flag; archive blocks remain explicit."""
     row = conn.execute(
         "SELECT summary FROM audit_log"
         " WHERE action=? AND target_id=?"
@@ -897,15 +924,9 @@ def session_end() -> int:
             # (fires on 6h idle, not on every /model swap). Archive runs, marker
             # written, popen suppressed. Catchup honors the bridge_owns marker
             # until a later fail row (manual fire that failed) supersedes it.
-            # Exception: mm+ explicitly requests extraction — honor it.
+            # Exception: an explicit force flag requests extraction.
             if os.environ.get("MARROW_BRIDGE") == "1":
-                mm_plus = conn.execute(
-                    "SELECT 1 FROM audit_log WHERE target_id=?"
-                    " AND action='sessionend_extract'"
-                    " AND summary='reset:mm_plus' LIMIT 1",
-                    (sid,),
-                ).fetchone()
-                if not mm_plus:
+                if not _has_force_sessionend(conn, sid):
                     try:
                         _write_manual_skip_flag(
                             conn, sid, _STATUS_SKIP_BRIDGE_OWNS,
@@ -918,7 +939,7 @@ def session_end() -> int:
             skip_spawn = False
             try:
                 last_ok = _last_ok_user_count(conn, sid)
-                if last_ok is not None:
+                if last_ok is not None and not _has_force_sessionend(conn, sid):
                     current_user = conn.execute(
                         "SELECT COUNT(*) c FROM events"
                         " WHERE session_id=? AND role='user'",
@@ -970,13 +991,12 @@ def _looks_like_sid(arg: str) -> bool:
 
 
 def _inject_silent_ack(prefix: str) -> None:
-    """Tell the LLM this prompt is a control signal — reply minimally, no chatter."""
+    """Tell the LLM this prompt is a control signal."""
     user_name = config.persona()["user_name"]
     ctx = (
         f"## {prefix} control signal\n"
-        f"{user_name}发的 `{prefix}` 是 marrow skip/rerun 控制信号，不是对话。\n"
-        f"hook 已经处理 (manual_skip / sessionend rerun)。\n"
-        f"无需任何回话，只用一个极短动作或一个字回应。"
+        f"{user_name} sent `{prefix}` as a marrow control signal, not chat.\n"
+        "The hook already handled it. Reply with a very short acknowledgement."
     )
     json.dump(
         {"hookSpecificOutput": {
@@ -989,14 +1009,14 @@ def _inject_silent_ack(prefix: str) -> None:
 
 def _inject_locate_request(prefix: str, clue: str) -> None:
     """Write a UserPromptSubmit additionalContext asking the LLM to locate the sid."""
-    action = "mm+ <full-sid>" if prefix == "mm+" else "mm- <full-sid>"
+    action = f"{prefix} <full-sid>"
     user_name = config.persona()["user_name"]
     ctx = (
-        f"## {prefix} 定位请求\n"
-        f"{user_name}发了 `{prefix} <clue>`，clue 不是有效 sid 格式。请帮她定位目标 session：\n"
-        f"- clue 原文: {clue}\n"
-        f"- 建议查询: events / audit_log 表中匹配 timestamp / content / role 的 sid\n"
-        f"- 找到后用 `{action}` 重新触发，或调用 `mw sessionend rerun <sid>`"
+        f"## {prefix} locate request\n"
+        f"{user_name} sent `{prefix} <clue>`, but the clue is not a valid sid.\n"
+        f"- clue: {clue}\n"
+        "- Search events and audit_log for matching timestamp, content, or role.\n"
+        f"- Once found, use `{action}`."
     )
     json.dump(
         {"hookSpecificOutput": {
@@ -1030,23 +1050,119 @@ def _pre_archive_jsonl(conn: sqlite3.Connection, tpath: str | None) -> None:
         pass
 
 
+def _spawn_sessionend_async(sid: str) -> None:
+    log = config.DATA_DIR / "logs" / f"sessionend_async_{sid}.log"
+    popen_detach_lazy(
+        [sys.executable, "-m", "marrow.sessionend_async",
+         "--sid", sid, "--log-path", str(log)],
+        log_path=log,
+    )
+
+
+def _unrun_session_rows(conn: sqlite3.Connection, limit: int = 20) -> list[dict]:
+    rows = conn.execute(
+        "WITH known AS ("
+        " SELECT sid, title, channel, cwd, last_active FROM sessions"
+        " UNION ALL"
+        " SELECT target_id AS sid, '' AS title, '' AS channel, '' AS cwd,"
+        "        MAX(occurred_at) AS last_active"
+        " FROM audit_log"
+        " WHERE action='session_lifecycle:start' AND target_id IS NOT NULL"
+        " GROUP BY target_id"
+        ")"
+        " SELECT sid, MAX(title) AS title, MAX(channel) AS channel,"
+        "        MAX(cwd) AS cwd, MAX(last_active) AS last_active"
+        " FROM known"
+        " WHERE sid IS NOT NULL AND sid != ''"
+        " AND NOT EXISTS ("
+        "   SELECT 1 FROM audit_log a"
+        "   WHERE a.action='sessionend_extract' AND a.target_id=known.sid"
+        "   AND (a.summary='ok' OR a.summary LIKE 'ok,user_count=%')"
+        " )"
+        " GROUP BY sid"
+        " ORDER BY MAX(last_active) DESC"
+        " LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _inject_unrun_sessions(rows: list[dict]) -> None:
+    if rows:
+        lines = ["## mm! sessions without successful sessionend"]
+        for i, r in enumerate(rows, 1):
+            sid = r.get("sid") or ""
+            title = (r.get("title") or "").strip() or "(untitled)"
+            channel = (r.get("channel") or "-").strip() or "-"
+            last_active = (r.get("last_active") or "").strip()
+            tail = f" {last_active}" if last_active else ""
+            lines.append(f"{i}. [{channel}] {title} {sid}{tail}")
+        lines.append("Use `mm! <sid>` to run one immediately.")
+    else:
+        lines = ["## mm! sessions without successful sessionend", "No sessions found."]
+    json.dump(
+        {"hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": "\n".join(lines),
+        }},
+        sys.stdout,
+    )
+
+
 def _handle_mm_prefix(inp: dict) -> bool:
-    """Handle mm- / mm+ prefixes. Returns True if handled (skip further processing).
+    """Handle mm control prefixes. Returns True if handled.
 
     mm-: writes manual_skip audit row for current (or named) sid.
-    mm+ / mm-: three-branch on arg after prefix:
+    mm+: clears manual skip and flags current or named sid for sessionend.
+    mm!: lists unrun sessions or immediately spawns a named sid.
+    mm!!: pre-archives current jsonl and immediately spawns current sid.
+    mm- / mm+ / mm!: three-branch on arg after prefix:
       - empty          → current sid (existing behaviour)
       - UUID-like      → named sid
-      - natural-lang   → inject additionalContext to help LLM locate sid; no spawn
+      - natural-lang   → inject additionalContext to help LLM locate sid
     Fail-soft: any error is swallowed — hook must never block the user turn.
     """
-    prompt = (inp.get("prompt") or "").strip()
-    if not (prompt.startswith("mm-") or prompt.startswith("mm+")):
+    prompt = (inp.get("prompt") or "").strip().replace("！", "!")
+    if not prompt.startswith(("mm-", "mm+", "mm!")):
         return False
 
     sid = (inp.get("session_id") or "").strip()
-    prefix = prompt[:3]
-    rest = prompt[3:].strip()
+    if prompt.startswith("mm!!"):
+        prefix = "mm!!"
+        rest = prompt[4:].strip()
+    else:
+        prefix = prompt[:3]
+        rest = prompt[3:].strip()
+
+    if prefix == "mm!" and not rest:
+        try:
+            conn = storage.connect(config.db_path())
+            try:
+                _inject_unrun_sessions(_unrun_session_rows(conn))
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001
+            _inject_unrun_sessions([])
+        return True
+
+    if prefix == "mm!!":
+        if rest:
+            _inject_locate_request(prefix, rest)
+            return True
+        try:
+            if sid:
+                conn = storage.connect(config.db_path())
+                try:
+                    _write_force_sessionend_flag(conn, sid, _STATUS_MM_IMMEDIATE_CURRENT)
+                    tpath = inp.get("transcript_path") or _locate_jsonl(sid)
+                    _pre_archive_jsonl(conn, tpath)
+                finally:
+                    conn.close()
+                _spawn_sessionend_async(sid)
+        except Exception:  # noqa: BLE001
+            pass
+        _inject_silent_ack("mm!!")
+        return True
 
     # Natural-language branch — hand off to main LLM, no DB writes, no spawn.
     if rest and not _looks_like_sid(rest):
@@ -1067,41 +1183,23 @@ def _handle_mm_prefix(inp: dict) -> bool:
                     # will skip transcript.clean + archive_events, leaving the
                     # events table with zero rows for this session.
                     _write_session_block_flag(conn, target_sid, _STATUS_BLOCK_ARCHIVE)
-            else:  # mm+
+            elif prefix == "mm+":
                 if target_sid:
-                    # Force-clear any done marker so sessionend_async reruns.
-                    conn.execute(
-                        "INSERT INTO audit_log"
-                        " (target_table, target_id, action, summary)"
-                        " VALUES ('events', ?, 'sessionend_extract', 'reset:mm_plus')",
-                        (target_sid,),
-                    )
-                    conn.commit()
-                    # Last-wins: clear any prior mm- flags so session_end runs
-                    # archive_events normally and sessionend_async runs the LLM
-                    # pipeline. Without this, mm- would permanently win.
                     _write_manual_skip_flag(conn, target_sid, _STATUS_SKIP_CLEARED)
-                    _write_session_block_flag(conn, target_sid, _STATUS_BLOCK_CLEARED)
-                    # Active-session pre-archive: events table is empty until
-                    # SessionEnd fires. Archive now so sessionend_async finds rows.
-                    if target_sid == sid:
-                        tpath = inp.get("transcript_path") or _locate_jsonl(target_sid)
-                        _pre_archive_jsonl(conn, tpath)
+                    _write_force_sessionend_flag(conn, target_sid, _STATUS_MM_PLUS_FLAG)
+            elif prefix == "mm!":
+                if target_sid:
+                    _write_force_sessionend_flag(conn, target_sid, _STATUS_MM_IMMEDIATE)
                     conn.close()
                     conn = None
-                    log = config.DATA_DIR / "logs" / f"sessionend_async_{target_sid}.log"
-                    popen_detach_lazy(
-                        [sys.executable, "-m", "marrow.sessionend_async",
-                         "--sid", target_sid, "--log-path", str(log)],
-                        log_path=log,
-                    )
+                    _spawn_sessionend_async(target_sid)
         finally:
             if conn is not None:
                 conn.close()
     except Exception:  # noqa: BLE001 — never block prompt
         pass
-    if prefix == "mm-":
-        _inject_silent_ack("mm-")
+    if prefix in {"mm-", "mm+", "mm!"}:
+        _inject_silent_ack(prefix)
     return True
 
 
@@ -1155,7 +1253,7 @@ def _render_hit_block(rank: int, h: dict, rank_caps: list[int]) -> list[str]:
 def user_prompt_submit() -> int:
     """Inject top-K recall hits as UserPromptSubmit additionalContext.
 
-    Also handles mm- (manual skip) and mm+ (sessionend rerun) prefixes.
+    Also handles mm controls before recall.
     Config flag: [recall] vector = true (default on). Set false to disable.
     Fusion weights come from [recall] in config; recall.recall_fusion blends
     vec + bm25 + recency + affect. Fail-soft: any error falls through to a
@@ -1163,7 +1261,7 @@ def user_prompt_submit() -> int:
     """
     inp = _read_input()
 
-    # mm- / mm+ control plane — check before recall, independent of recall config.
+    # mm control plane — check before recall, independent of recall config.
     if isinstance(inp, dict) and _handle_mm_prefix(inp):
         return 0  # no additionalContext injection for control prompts
 

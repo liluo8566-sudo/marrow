@@ -401,7 +401,9 @@ def _embed_pending_lane(
     ids = [r["id"] for r in rows]
     _media_tag = re.compile(r'\s*<(?:image|file)\s+path="[^"]*?"[^>]*>\s*')
     texts = [_media_tag.sub(" ", r["text"] or "").strip() for r in rows]
-    vecs = emb.embed(texts)
+    _CHUNK = 50
+    chunks = [texts[i:i + _CHUNK] for i in range(0, len(texts), _CHUNK)]
+    vecs = np.concatenate([emb.embed(c) for c in chunks], axis=0)
     written = 0
     vt = cfg["vec_table"]
     mt = cfg["meta_table"]

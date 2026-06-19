@@ -221,7 +221,7 @@ def test_classify_user_archived_skips(db_env):
 
 def test_classify_session_block_cleared_runs(db_env):
     """Latest-row semantics: session_block:archive followed by session_block:cleared
-    means mm+ unblocked the sid. Catchup must NOT skip — fall through normally
+    means the sid is no longer blocked. Catchup must NOT skip — fall through normally
     (here: dead-ppid + no end -> spawn)."""
     db, _ = db_env
     sid = "block-cleared-sid"

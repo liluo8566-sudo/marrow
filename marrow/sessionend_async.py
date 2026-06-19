@@ -31,7 +31,7 @@ from .popen_detach import _redirect_stdio_from_argv as _redirect_stdio
 _redirect_stdio()
 
 from . import config, repo, storage
-from .hooks import _is_manual_skip
+from .hooks import _FORCE_SESSIONEND_ACTION, _is_manual_skip
 from .llm import LLMClient, LLMError
 from .sessionend_prompts import TASK_AFFECT_DIGEST_PROMPT
 from .sessionend_writers import seg_affect, seg_digest, seg_task_cand
@@ -86,6 +86,20 @@ def _user_event_count(conn, sid: str) -> int:
     return row["c"] if row else 0
 
 
+def _has_force_sessionend(conn, sid: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM audit_log"
+        " WHERE action=? AND target_id=?"
+        " AND id > COALESCE("
+        "   (SELECT MAX(id) FROM audit_log"
+        "    WHERE action='sessionend_extract' AND target_id=?"
+        "    AND (summary='ok' OR summary LIKE 'ok,user_count=%')), 0)"
+        " LIMIT 1",
+        (_FORCE_SESSIONEND_ACTION, sid, sid),
+    ).fetchone()
+    return row is not None
+
+
 def _already_done(conn, sid: str) -> bool:
     """True iff this sid has already been fully covered.
 
@@ -94,10 +108,12 @@ def _already_done(conn, sid: str) -> bool:
     a legacy `summary='ok'` row (no user_count) is treated as fully covered
     to avoid needless re-runs on historical data.
 
-    Reset rows (reset:mm_plus, reset:stale_skip) posted after the last ok row
-    act as force-rerun signals — return False so the pipeline runs again.
+    Force rows posted after the last ok row act as rerun signals.
     """
-    # If the most recent sessionend_extract row is a reset:*, treat as not done.
+    if _has_force_sessionend(conn, sid):
+        return False
+
+    # Keep legacy CLI reset rows working for mw sessionend rerun.
     latest_row = conn.execute(
         "SELECT summary FROM audit_log"
         " WHERE action='sessionend_extract' AND target_id=?"
@@ -132,12 +148,7 @@ def _already_done(conn, sid: str) -> bool:
 
 
 def _has_mm_plus_reset(conn, sid: str) -> bool:
-    """True if reset:mm_plus exists after the last ok row for this sid.
-
-    Previous implementation only checked the single latest non-start row,
-    which broke when an intermediate fail:no_events row landed between the
-    reset:mm_plus marker and the actual extraction attempt.
-    """
+    """Legacy reset:mm_plus support for mw sessionend rerun."""
     row = conn.execute(
         "SELECT 1 FROM audit_log"
         " WHERE action='sessionend_extract' AND target_id=?"
@@ -391,7 +402,8 @@ def main(argv: list[str] | None = None) -> int:
                 pass
 
             count = _user_event_count(conn, sid)
-            if count <= threshold and not _has_mm_plus_reset(conn, sid):
+            force_run = _has_force_sessionend(conn, sid) or _has_mm_plus_reset(conn, sid)
+            if count <= threshold and not force_run:
                 _write_final_audit(conn, sid, f"{_SUMMARY_SKIP},user_count={count}")
                 return 0
 

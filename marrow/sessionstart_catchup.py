@@ -213,9 +213,8 @@ def _classify(conn, sid: str, live_ppids: set[int]) -> Literal["spawn", "skip"]:
         return "skip"
 
     # P2-P3: latest-row semantics mirror hooks._is_session_blocked /
-    # _is_manual_skip. A `cleared` / `skip_cleared` row means mm+ has unblocked
-    # the sid and it should be processed normally — so we cannot treat the
-    # mere existence of these actions as terminal.
+    # _is_manual_skip. A `cleared` / `skip_cleared` row means the latest state
+    # is not terminal, so we cannot treat mere existence as terminal.
     block_latest = conn.execute(
         "SELECT summary FROM audit_log"
         " WHERE action='session_block' AND target_id=?"
