@@ -1643,15 +1643,12 @@ def pretool_use() -> int:
                     pass
 
         _literal = "[Path] Use paths with /, not bare filenames."
-        _context_parts: list[str] = []
 
         def _emit(text: str) -> None:
-            _context_parts.append(text)
-            full = "\n".join(_context_parts)
             print(json.dumps({
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
-                    "additionalContext": full,
+                    "additionalContext": text,
                 }
             }))
 
@@ -1677,21 +1674,6 @@ def pretool_use() -> int:
                     tokens = tokens[:_i]
                     break
             tokens_no_flags = [t for t in tokens if t and not t.startswith("-")]
-            tokens_no_env = [t for t in tokens_no_flags if "=" not in t]
-            if (len(tokens_no_env) >= 2
-                    and tokens_no_env[0] == "codex"
-                    and tokens_no_env[1] == "exec"):
-                try:
-                    _r = subprocess.run(
-                        ["git", "status", "--porcelain"],
-                        capture_output=True, text=True, timeout=5, check=False,
-                    )
-                    _dirty = [l for l in _r.stdout.splitlines() if l.strip()]
-                    if _dirty:
-                        _fl = "\n".join(f"  {l}" for l in _dirty[:20])
-                        _context_parts.append(f"[Codex Guard] {len(_dirty)} uncommitted files in working tree — commit or stash unrelated changes before dispatch:\n{_fl}")
-                except Exception:
-                    pass
             if tokens_no_flags and tokens_no_flags[0] in _PLACEMENT_BASH_OPS:
                 is_placement = True
                 op = tokens_no_flags[0]
