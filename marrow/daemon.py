@@ -344,6 +344,47 @@ def book_message(text: str, message_type: str = "encourage") -> str:
         return f"Failed to push message: {e}"
 
 
+def _book_get(path: str):
+    import json as _json
+    import urllib.request
+    try:
+        resp = urllib.request.urlopen(f"http://localhost:3210{path}", timeout=5)
+        return _json.loads(resp.read())
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def book_list() -> list[dict]:
+    """List all books on the shared-reading shelf with progress."""
+    return _book_get("/api/books")
+
+
+@mcp.tool()
+def book_page(book_id: str, page: int = 1, size: int = 30) -> dict:
+    """Read a page of book content (paragraphs). Returns {paragraphs, totalPages}."""
+    return _book_get(f"/api/books/{book_id}/page/{page}?size={size}")
+
+
+@mcp.tool()
+def book_progress(book_id: str) -> dict:
+    """Get current reading progress for a book."""
+    return _book_get(f"/api/books/{book_id}/progress")
+
+
+@mcp.tool()
+def book_chapters(book_id: str) -> list[dict]:
+    """List all chapters of a book with paragraph ranges."""
+    return _book_get(f"/api/books/{book_id}/chapters")
+
+
+@mcp.tool()
+def book_annotations(book_id: str, chapter_id: str = "") -> list[dict]:
+    """Read annotations (both frost and leith) for a book, optionally filtered by chapter."""
+    q = f"?chapter={chapter_id}" if chapter_id else ""
+    return _book_get(f"/api/books/{book_id}/annotations{q}")
+
+
 def main() -> None:
     storage.init_db(_DB).close()
     mcp.run()
