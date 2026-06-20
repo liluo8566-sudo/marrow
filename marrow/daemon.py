@@ -305,6 +305,26 @@ def book_retention(text: str) -> str:
         return f"Failed to push retention: {e}"
 
 
+@mcp.tool()
+def book_annotate(book_id: str, paragraph_id: str, text: str, chapter_id: str = "") -> str:
+    """Write an annotation (as Leith) to a paragraph in the shared-reading book server."""
+    import json as _json
+    import urllib.request
+    data = _json.dumps({"paragraphId": paragraph_id, "chapterId": chapter_id, "text": text}).encode()
+    req = urllib.request.Request(
+        f"http://localhost:3210/api/books/{book_id}/annotations/ai",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=5)
+        result = _json.loads(resp.read())
+        return f"Annotation written: {result.get('id', 'ok')}"
+    except Exception as e:
+        return f"Failed to write annotation: {e}"
+
+
 def main() -> None:
     storage.init_db(_DB).close()
     mcp.run()
