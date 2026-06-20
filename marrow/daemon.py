@@ -325,6 +325,25 @@ def book_annotate(book_id: str, paragraph_id: str, text: str, chapter_id: str = 
         return f"Failed to write annotation: {e}"
 
 
+@mcp.tool()
+def book_message(text: str, message_type: str = "encourage") -> str:
+    """Push a message to the shared-reading book reader frontend (encourage/health reminder)."""
+    import json as _json
+    import urllib.request
+    data = _json.dumps({"text": text, "type": message_type}).encode()
+    req = urllib.request.Request(
+        "http://localhost:3210/api/message-push",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        urllib.request.urlopen(req, timeout=5)
+        return "Message pushed to reader frontend."
+    except Exception as e:
+        return f"Failed to push message: {e}"
+
+
 def main() -> None:
     storage.init_db(_DB).close()
     mcp.run()
