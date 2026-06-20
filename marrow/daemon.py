@@ -286,6 +286,25 @@ def alert_list() -> list[dict]:
         conn.close()
 
 
+@mcp.tool()
+def book_retention(text: str) -> str:
+    """Push retention text to the shared-reading book server frontend (exit ceremony)."""
+    import json as _json
+    import urllib.request
+    data = _json.dumps({"text": text}).encode()
+    req = urllib.request.Request(
+        "http://localhost:3210/api/retention-push",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        urllib.request.urlopen(req, timeout=5)
+        return "Retention message pushed to reader frontend."
+    except Exception as e:
+        return f"Failed to push retention: {e}"
+
+
 def main() -> None:
     storage.init_db(_DB).close()
     mcp.run()
