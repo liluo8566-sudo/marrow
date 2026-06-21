@@ -286,6 +286,77 @@ def alert_list() -> list[dict]:
         conn.close()
 
 
+@mcp.tool()
+def purge(targets: list[str]) -> dict:
+    """Purge DB tables and refresh dashboard. Use when user asks to clear/delete events, digests, affect, or timeline data.
+    Targets: 'events' (events+FTS+vec+tombstones), 'digests' (session_digests+FTS), 'affect', 'tl_line' (diary.tl_line only).
+    Backs up DB first. Clears dashboard block before DB to prevent reconcile write-back."""
+    import re, shutil, subprocess
+    from datetime import datetime, timezone
+
+    valid = {"events", "digests", "affect", "tl_line"}
+    bad = set(targets) - valid
+    if bad:
+        return {"ok": False, "error": f"unknown targets: {bad}. valid: {valid}"}
+
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    backup = f"/tmp/marrow-backup-purge-{ts}.db"
+    shutil.copy2(str(_DB), backup)
+
+    dash = Path.home() / "Desktop" / "NY" / "dashboard.md"
+    if dash.exists():
+        text = dash.read_text(encoding="utf-8")
+        clear_tl = any(t in targets for t in ("events", "digests", "tl_line"))
+        if clear_tl:
+            text = re.sub(
+                r"(<!-- id:dashboard\.timeline -->)\n## Timeline\n.*?(?=\n<!-- id:)",
+                r"\1\n## Timeline\n_none_\n", text, flags=re.DOTALL)
+        if "affect" in targets:
+            text = re.sub(
+                r"(<!-- id:dashboard\.affect -->)\n## Affect\n.*?(?=\n<!-- marrow:top:end)",
+                r"\1\n## Affect\n### Today\n_none_\n### This Week\n_none_\n", text, flags=re.DOTALL)
+        dash.write_text(text, encoding="utf-8")
+
+    conn = storage.connect(_DB)
+    try:
+        if "events" in targets:
+            triggers = conn.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type='trigger' AND tbl_name='events'"
+            ).fetchall()
+            for t in triggers:
+                conn.execute(f"DROP TRIGGER IF EXISTS {t['name']}")
+            conn.execute("DELETE FROM events")
+            conn.execute("DELETE FROM event_tombstones")
+            conn.execute("INSERT INTO events_fts(events_fts) VALUES('rebuild')")
+            conn.execute("DELETE FROM events_vec")
+            for t in triggers:
+                conn.execute(t["sql"])
+
+        if "digests" in targets:
+            triggers = conn.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type='trigger' AND tbl_name='session_digests'"
+            ).fetchall()
+            for t in triggers:
+                conn.execute(f"DROP TRIGGER IF EXISTS {t['name']}")
+            conn.execute("DELETE FROM session_digests")
+            conn.execute("INSERT INTO session_digests_fts(session_digests_fts) VALUES('rebuild')")
+            for t in triggers:
+                conn.execute(t["sql"])
+
+        if "affect" in targets:
+            conn.execute("DELETE FROM affect")
+
+        if "tl_line" in targets:
+            conn.execute("UPDATE diary SET tl_line = NULL")
+
+        conn.commit()
+    finally:
+        conn.close()
+
+    subprocess.run(["mw", "refresh", "--all"], capture_output=True, text=True)
+    return {"ok": True, "purged": targets, "backup": backup}
+
+
 def main() -> None:
     storage.init_db(_DB).close()
     mcp.run()
