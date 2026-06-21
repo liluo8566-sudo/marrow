@@ -102,8 +102,7 @@ Three runtimes:
 - `atlas` — seed (INSERT OR IGNORE per root) → `atlas:atlas_sweep_fs` depth-walk stubs/deletes → `atlas:reconcile_atlas` md headings back to DB; retract logic drops stub-only rows outside seed coverage; out-of-root purge guard. Canonical render ~/Desktop/NY/db-pages/atlas.md only.
 
 ### 5.4 mw CLI + MCP tools (`cli.py` entry `~/.local/bin/mw`, `daemon.py` MCP)
-- CLI: mutation (set/rm/done/pin/add-alert/alerts-clear, no refresh) · `resolve <id>` (only mutation w/ auto-refresh) · session mgmt · display (show/ls/atlas/doctor) · system (refresh/sessionend-rerun/drift/watcher/install). Command hints for AI live in MCP tool descriptions (`daemon.py`), not dashboard render or hooks.
-- Reconciled blocks (alerts, tasks, affect, timeline) write md back to DB on refresh. DB-wins direction missing for dashboard top blocks (only subpage reconcile_inserter has it via 831ca1b) — direct DB mutations get overwritten by stale md.
+- CLI: mutation (set/rm/done/pin/add-alert/alerts-clear, no refresh) · `resolve <id>` (only mutation w/ auto-refresh) · session mgmt · display (show/ls/atlas/doctor) · system (refresh/sessionend-rerun/drift/watcher/install). Command hints for AI live in MCP tool descriptions (`daemon.py`).
 
 ### 5.5 write arbitration
 - Dashboard writers: watcher (observe-only) · sync_loop (timed) · sessionend-tail (one-shot). Both renderers run reconcile first; a race = two atomic writes, second wins, nothing lost. sync_loop guards USER_ACTIVE_WINDOW; sessionend-tail doesn't (session over). flock on every md write.
