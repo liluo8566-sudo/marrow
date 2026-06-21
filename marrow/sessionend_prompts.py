@@ -185,8 +185,8 @@ fragments. 2 lines ONLY when the session spans two unrelated projects.
   Length (TL+fact): hard cap 60 words — compress ruthlessly.
 
 LIFE: (casual sessions ONLY — for task sessions output exactly: LIFE: N/A)
-  One line per life detail explicitly mentioned in the transcript: \
-food/drink, sights, places, errands, body state, small moods.
+  One line per life detail: focus on what user did or what they did together \
+    e.g. study together, hangout, errands, chat topics, thoughts, mood... \
   Each line MUST start with `HH:MM ` — copy the timestamp from the \
 transcript line where that detail appears (timestamps are at line starts: \
 `[HH:MM] [{user_name}|{assistant_name}] ...`). Copy, never invent; if unsure use the nearest \
