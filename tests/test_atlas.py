@@ -98,7 +98,7 @@ def test_atlas_depth_default_0(conn):
 
 
 def test_schema_version_current(conn):
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 22
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 23
 
 
 # ---------------------------------------------------------------------------

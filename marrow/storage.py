@@ -13,7 +13,7 @@ import sqlite_vec
 
 from . import config
 
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 
 # Phase 1 first-class tables + Phase 2 affect/entities (DECISIONS Phase 2).
 # The retired emotions/people/preferences/dir placeholders stay absent.
@@ -219,6 +219,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   cwd TEXT,
   created_at TEXT,
   last_active TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  ended_at TEXT,
   title TEXT NOT NULL DEFAULT '',
   effort TEXT DEFAULT ''
 );
@@ -531,6 +532,7 @@ def init_db(path: str | None = None) -> sqlite3.Connection:
         _migrate_to_v20(conn)
         _migrate_to_v21(conn)
         _migrate_to_v22(conn)
+        _migrate_to_v23(conn)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     return conn
 
@@ -976,6 +978,18 @@ def _migrate_to_v22(conn: sqlite3.Connection) -> None:
         "UPDATE stickers SET updated_at = created_at WHERE updated_at IS NULL"
     )
     conn.execute("PRAGMA user_version=22")
+
+
+def _migrate_to_v23(conn: sqlite3.Connection) -> None:
+    """v23: sessions.ended_at — mark session lifecycle end for housekeep."""
+    v = conn.execute("PRAGMA user_version").fetchone()[0]
+    if v >= 23:
+        return
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(sessions)")}
+    if "ended_at" not in cols:
+        conn.execute("ALTER TABLE sessions ADD COLUMN ended_at TEXT")
+    conn.execute("UPDATE sessions SET ended_at = last_active WHERE ended_at IS NULL")
+    conn.execute("PRAGMA user_version=23")
 
 
 def _migrate_to_v14(conn: sqlite3.Connection) -> None:

@@ -580,8 +580,7 @@ def _git_housekeep_block(
                 if dirty:
                     rows = conn.execute(
                         "SELECT sid FROM sessions "
-                        "WHERE cwd = ? AND sid != ? "
-                        "AND last_active > strftime('%Y-%m-%dT%H:%M:%SZ','now', '-15 minutes')",
+                        "WHERE cwd = ? AND sid != ? AND ended_at IS NULL",
                         (cwd, current_sid or ""),
                     ).fetchall()
                     if rows:
@@ -852,6 +851,13 @@ def session_end() -> int:
                 except OSError:
                     pass
                 return 0
+
+        if early_sid:
+            conn.execute(
+                "UPDATE sessions SET ended_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE sid = ?",
+                (early_sid,),
+            )
+            conn.commit()
 
         # Worktree-session gate: cc instances launched inside a NON-primary git
         # worktree are task-isolated runs; their dialogue must not enter marrow.
