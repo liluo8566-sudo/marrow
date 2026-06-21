@@ -203,7 +203,7 @@ def _active_chain_uuids(records: list[dict]) -> set[str]:
     return chain
 
 
-def clean(jsonl_path: str, *, skip_headless_check: bool = False) -> list[dict]:
+def clean(jsonl_path: str, *, skip_headless_check: bool = False, channel: str = "cli") -> list[dict]:
     rows: list[dict] = []
     if not skip_headless_check and is_headless(jsonl_path):
         return rows  # spawned claude -p (lint/digest): not a real session
@@ -246,6 +246,6 @@ def clean(jsonl_path: str, *, skip_headless_check: bool = False) -> list[dict]:
             "timestamp": o.get("timestamp", ""),
             "role": msg.get("role") or o.get("type"),
             "content": text,
-            "channel": "cli",
+            "channel": channel,
         })
     return rows

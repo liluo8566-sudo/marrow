@@ -900,7 +900,7 @@ def session_end() -> int:
             return 0
 
         is_bridge = os.environ.get("MARROW_BRIDGE") == "1"
-        rows = transcript.clean(tpath, skip_headless_check=is_bridge)
+        rows = transcript.clean(tpath, skip_headless_check=is_bridge, channel=os.environ.get("MARROW_CHANNEL") or "cli")
         if rows:
             repo.archive_events(conn, rows)
 
@@ -1053,14 +1053,14 @@ def _locate_jsonl(sid: str) -> str | None:
     return str(max(matches, key=lambda p: p.stat().st_mtime))
 
 
-def _pre_archive_jsonl(conn: sqlite3.Connection, tpath: str | None) -> None:
+def _pre_archive_jsonl(conn: sqlite3.Connection, tpath: str | None, channel: str = "cli") -> None:
     """Archive events from an active-session jsonl. Fail-soft — never raises."""
     if not tpath:
         return
     try:
         if transcript.is_headless(tpath):
             return
-        rows = transcript.clean(tpath)
+        rows = transcript.clean(tpath, channel=channel)
         if rows:
             repo.archive_events(conn, rows)
     except Exception:  # noqa: BLE001
@@ -1172,7 +1172,7 @@ def _handle_mm_prefix(inp: dict) -> bool:
                 try:
                     _write_force_sessionend_flag(conn, sid, _STATUS_MM_IMMEDIATE_CURRENT)
                     tpath = inp.get("transcript_path") or _locate_jsonl(sid)
-                    _pre_archive_jsonl(conn, tpath)
+                    _pre_archive_jsonl(conn, tpath, channel=os.environ.get("MARROW_CHANNEL") or "cli")
                 finally:
                     conn.close()
                 _spawn_sessionend_async(sid)

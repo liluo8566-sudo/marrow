@@ -1,5 +1,5 @@
 """LLM provider client. Callers pass intent (role + body + tier); provider,
-flags, model, channel are config. One chain: default only (2.5c P8 ollama strip).
+flags, model, channel are config. One chain: default only (fallback/emergency removed).
 
 claude_cli isolation is built in and non-negotiable: a pipeline call must
 never inherit persona / user MCP / output-style.
@@ -79,7 +79,7 @@ class LLMClient:
         self.cfg = cfg or config.load()
         llm = self.cfg.get("llm", {})
         self.chain = [
-            nm for k in ("default", "fallback", "emergency")
+            nm for k in ("default",)
             if (nm := llm.get(k))
         ]
         self.specs = llm
@@ -156,7 +156,10 @@ class LLMClient:
             pgid = p.pid
         stdout_pipe = p.stdout
 
+        _timed_out = [False]
+
         def _timeout_kill() -> None:
+            _timed_out[0] = True
             _kill_group(pgid, signal.SIGKILL)
             try:
                 stdout_pipe.close()
@@ -191,6 +194,8 @@ class LLMClient:
                     _kill_group(pgid, signal.SIGKILL)
             else:
                 _kill_group(pgid, signal.SIGKILL)
+        if _timed_out[0]:
+            raise LLMError(f"claude_cli timeout after {timeout}s")
         if not lines:
             err = (p.stderr.read() or "").strip()[:200]
             raise LLMError(f"claude_cli stream: no output ({err})")
