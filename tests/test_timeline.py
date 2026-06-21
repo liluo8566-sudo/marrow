@@ -702,14 +702,52 @@ def test_24h_first_life_line_sorts_by_own_display_time():
     )
 
     assert lines == [
-        "20:10 晚上聊天",
+        "20:10 晚上聊天 <!-- tl:s-early-first -->",
         "12:00 中午任务 <!-- tl:s-midday -->",
-        "04:30 清晨醒来 <!-- tl:s-early-first -->",
+        "04:30 清晨醒来",
         "--- 06-12 ---",
         "22:00 前夜任务 <!-- tl:s-prev-evening -->",
     ]
     assert lines.count("--- 06-12 ---") == 1
     assert not any(line == "--- 06-13 ---" for line in lines)
+
+
+def test_24h_per_line_clipping_filters_old_entries():
+    """Life lines older than from_utc are clipped; anchor moves to first visible."""
+    from zoneinfo import ZoneInfo
+    melb = ZoneInfo("Australia/Melbourne")
+
+    def local_iso(year, month, day, hour, minute):
+        return _dt.datetime(
+            year, month, day, hour, minute, tzinfo=melb
+        ).astimezone(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Session started 06-20 14:00 AEST, life lines span to 06-21 10:00
+    sess_ts = local_iso(2026, 6, 20, 14, 0)
+    # from_utc = 06-20 16:00 AEST → 06:00 UTC — clips the 14:00 entry
+    from_utc = local_iso(2026, 6, 20, 16, 0)
+
+    lines = timeline._render_24h(
+        [
+            {
+                "sid": "s-crossday",
+                "ts": sess_ts,
+                "kind": "casual",
+                "tl_line": "跨天session",
+                "text": "body",
+                "life_lines": "14:00 (中文写括号)开始上班\n02:00 凌晨休息\n10:00 下班",
+            },
+        ],
+        current_sid=None,
+        from_utc=from_utc,
+    )
+
+    texts = [l for l in lines if not l.startswith("---")]
+    assert not any("14:00" in l for l in texts), "14:00 entry should be clipped (>24h)"
+    assert any("02:00" in l for l in texts), "02:00 should remain"
+    assert any("10:00" in l for l in texts), "10:00 should remain"
+    anchor_lines = [l for l in texts if "<!-- tl:s-crossday" in l]
+    assert len(anchor_lines) == 1, "exactly one anchor for the session"
 
 
 # ── Bug 2: no double 6AM cutoff ───────────────────────────────────────────────

@@ -488,78 +488,73 @@ def _render_open_episodes(episodes: list[dict]) -> list[str]:
 def _render_24h(digests: list[dict],
                 current_sid: str | None,
                 affect_by_sid: dict[str, list[dict]] | None = None,
-                manual_events: list[dict] | None = None) -> list[str]:
+                manual_events: list[dict] | None = None,
+                from_utc: str = "") -> list[str]:
     """Flat film-strip newest→oldest, cap 15.
 
-    Casual sessions: each LIFE line is stamped with its own HH:MM (parsed
-    from the leading HH:MM prefix written by the model); prefix-less lines
-    (legacy rows) fall back to session end time.  TL line uses session
-    end time.  Task sessions: single TL line at session end time.
-
-    Sort key and day-divider attribution use the per-line time where
-    available so lines spanning 08:00-20:00 land at their own hours.
-    Day crossings get --- MM-DD --- divider.
-
-    Bug 3 fix: first rendered line of each session with affect rows carries
-    a 【tone】 tag: e.g. "17:46【释怀】老婆亲手送buddy退役 <!-- tl:... -->".
+    Individual life lines are clipped to the [from_utc, now) window so
+    cross-day sessions don't leak entries older than 24h.  Anchors are
+    placed on the first *visible* line per session after clipping.
     """
     if affect_by_sid is None:
         affect_by_sid = {}
 
-    # Each flat_entry: (sort_key_str, disp_date, rendered_line, is_first_of_session)
-    flat_entries: list[tuple[str, _dt.date, str, bool]] = []
+    # (sort_key, disp_date, rendered_text_no_anchor, sid)
+    flat_entries: list[tuple[str, _dt.date, str, str]] = []
 
     for sd in digests:
-        if sd["sid"] == current_sid:
+        sid = sd["sid"]
+        if sid == current_sid:
             continue
         ts = sd.get("ts") or ""
-        sess_date = _local_date_from_utc(ts)
         sess_hhmm = _hhmm_melb(ts)
         kind = (sd.get("kind") or "casual").lower()
         tl = _tl_or_fallback(sd)
         life_raw = sd.get("life_lines") or ""
         life_items = [x.strip() for x in life_raw.splitlines() if x.strip()]
-        anchor = _tl_anchor_sid(sd["sid"])
 
-        # Bug 3: compute tone tag for this session if affect rows exist
-        sess_affect = affect_by_sid.get(sd["sid"], [])
+        sess_affect = affect_by_sid.get(sid, [])
         tone_tag = f"【{_tone_from_rows(sess_affect)}】" if sess_affect else ""
 
         if kind == "task" or not life_items:
-            # Single line: TL at session start time
-            rendered = f"{sess_hhmm}{tone_tag} {tl} {anchor}"
-            flat_entries.append((ts, sess_date, rendered, True))
+            rendered = f"{sess_hhmm}{tone_tag} {tl}"
+            flat_entries.append((ts, _local_date_from_utc(ts), rendered, sid))
         else:
-            # Casual with LIFE items — one rendered line per item.
-            # Use per-session LIFE scan for correct UTC sort key and diary
-            # date (fixes Bug 1 + Bug 2: no more double 6AM shift or wrong
-            # date-prefix on sort key).
             line_dates = _life_lines_utc_and_dates(life_raw, ts)
             for idx, (item, (sort_key, line_date)) in enumerate(
                 zip(life_items, line_dates)
             ):
                 line_hhmm, text = _life_line_hhmm(item, sess_hhmm)
-                if idx == 0:
-                    # Bug 3: tone tag on first line only
-                    rendered = f"{line_hhmm}{tone_tag} {text} {anchor}"
-                else:
-                    rendered = f"{line_hhmm} {text}"
-                flat_entries.append((sort_key, line_date, rendered, idx == 0))
+                prefix = f"{line_hhmm}{tone_tag}" if idx == 0 else line_hhmm
+                rendered = f"{prefix} {text}"
+                flat_entries.append((sort_key, line_date, rendered, sid))
 
-    # Inject manual events (channel='manual') into the film-strip
     for ev in (manual_events or []):
         hhmm = _hhmm_melb(ev["timestamp"])
-        anchor = f"<!-- tl:e:{ev['id']} -->"
-        rendered = f"{hhmm} {ev['content']} {anchor}"
-        flat_entries.append((ev["timestamp"], _local_date_from_utc(ev["timestamp"]), rendered, False))
+        evt_anchor = f" <!-- tl:e:{ev['id']} -->"
+        rendered = f"{hhmm} {ev.get('content') or ''}{evt_anchor}"
+        flat_entries.append((ev["timestamp"], _local_date_from_utc(ev["timestamp"]), rendered, ""))
+
+    # Clip entries older than the 24h boundary
+    if from_utc:
+        flat_entries = [e for e in flat_entries if e[0] >= from_utc]
 
     # Newest first
     flat_entries.sort(key=lambda e: e[0], reverse=True)
 
+    # Assign anchors to first visible line per session
+    seen_sids: set[str] = set()
+    anchored: list[tuple[str, _dt.date, str, str]] = []
+    for sk, dd, text, sid in flat_entries:
+        if sid and sid not in seen_sids:
+            text = f"{text} {_tl_anchor_sid(sid)}"
+            seen_sids.add(sid)
+        anchored.append((sk, dd, text, sid))
+
     # Interleave day dividers and flatten; cap _24H_CAP
     lines: list[str] = []
     prev_cal_date: _dt.date | None = None
-    for _sort_key, disp_date, rendered_line, _is_first in flat_entries:
+    for _sort_key, _disp_date, rendered_line, _sid in anchored:
         if len(lines) >= _24H_CAP:
             break
         cal_date = _calendar_date_from_utc(_sort_key)
@@ -705,7 +700,8 @@ def render_timeline(conn: sqlite3.Connection) -> str:
     digests_24h = _query_digests_range(conn, t_24h, now_utc_iso)
     affect_by_sid_24h = _query_affect_by_session(conn, t_24h, now_utc_iso)
     manual_24h = _query_manual_events_24h(conn, t_24h, now_utc_iso)
-    lines_24h = _render_24h(digests_24h, current_sid, affect_by_sid_24h, manual_24h)
+    lines_24h = _render_24h(digests_24h, current_sid, affect_by_sid_24h, manual_24h,
+                            from_utc=t_24h)
 
     # Overflow: 24h sessions truncated by cap → spill into zone (b)
     rendered_sids = set(_TL_TRAIL_SID_RE.findall("\n".join(lines_24h)))
