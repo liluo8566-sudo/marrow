@@ -535,8 +535,9 @@ def _render_24h(digests: list[dict],
     if affect_by_sid is None:
         affect_by_sid = {}
 
-    # (sort_key, disp_date, rendered_text_no_anchor, sid)
+    # (sort_key, disp_date, rendered_text_plain, sid)
     flat_entries: list[tuple[str, _dt.date, str, str]] = []
+    session_tones: dict[str, str] = {}
 
     for sd in digests:
         sid = sd["sid"]
@@ -550,10 +551,11 @@ def _render_24h(digests: list[dict],
         life_items = [x.strip() for x in life_raw.splitlines() if x.strip()]
 
         sess_affect = affect_by_sid.get(sid, [])
-        tone_tag = f"【{_tone_from_rows(sess_affect)}】" if sess_affect else ""
+        if sess_affect:
+            session_tones[sid] = f"【{_tone_from_rows(sess_affect)}】"
 
         if kind == "task" or not life_items:
-            rendered = f"{sess_hhmm}{tone_tag} {tl}"
+            rendered = f"{sess_hhmm} {tl}"
             flat_entries.append((ts, _local_date_from_utc(ts), rendered, sid))
         else:
             line_dates = _life_lines_utc_and_dates(life_raw, ts)
@@ -561,8 +563,7 @@ def _render_24h(digests: list[dict],
                 zip(life_items, line_dates)
             ):
                 line_hhmm, text = _life_line_hhmm(item, sess_hhmm)
-                prefix = f"{line_hhmm}{tone_tag}" if idx == 0 else line_hhmm
-                rendered = f"{prefix} {text}"
+                rendered = f"{line_hhmm} {text}"
                 flat_entries.append((sort_key, line_date, rendered, sid))
 
     for ev in (manual_events or []):
@@ -578,11 +579,14 @@ def _render_24h(digests: list[dict],
     # Newest first
     flat_entries.sort(key=lambda e: e[0], reverse=True)
 
-    # Assign anchors to first visible line per session
+    # Assign tone tags + anchors to first visible line per session
     seen_sids: set[str] = set()
     anchored: list[tuple[str, _dt.date, str, str]] = []
     for sk, dd, text, sid in flat_entries:
         if sid and sid not in seen_sids:
+            tone = session_tones.get(sid, "")
+            hhmm_end = text.index(" ") if " " in text else len(text)
+            text = text[:hhmm_end] + tone + text[hhmm_end:]
             text = f"{text} {_tl_anchor_sid(sid)}"
             seen_sids.add(sid)
         anchored.append((sk, dd, text, sid))
