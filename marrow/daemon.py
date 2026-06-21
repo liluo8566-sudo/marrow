@@ -368,6 +368,9 @@ def _do_delete(targets, before, after, last):
                     conn.execute("DELETE FROM event_tombstones")
                     conn.execute("INSERT INTO events_fts(events_fts) VALUES('rebuild')")
                     conn.execute("DELETE FROM events_vec")
+                    conn.execute(
+                        "DELETE FROM audit_log WHERE action='sessionend_extract'"
+                    )
                     for t in triggers:
                         conn.execute(t["sql"])
                 elif tgt == "digests":
