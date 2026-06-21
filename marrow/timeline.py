@@ -238,17 +238,16 @@ def _life_line_utc_and_date(item: str, session_utc_iso: str,
         sess_dt = sess_dt.replace(tzinfo=_dt.timezone.utc)
     sess_local = sess_dt.astimezone(_TZ)
 
-    # Build candidate on the session's CALENDAR date (not diary date).
-    # A line's HH:MM is always on the same calendar day as the session —
-    # models write local wall-clock times relative to the session day.
-    # The only "crossing" that matters for diary attribution is the 6AM
-    # cutoff: a 00:30 line on a session-day where the session was at 23:00
-    # means early morning of that same calendar day → diary date = day before.
+    # Build candidate on the session's CALENDAR date.
+    # Cross-day sessions: if the LIFE line's HH:MM is earlier than the
+    # session start's local HH:MM, the line happened after midnight —
+    # advance to the next calendar day.
     cal_date = sess_local.date()
+    if h < sess_local.hour or (h == sess_local.hour and mi < sess_local.minute):
+        cal_date += _dt.timedelta(days=1)
     candidate = _dt.datetime(cal_date.year, cal_date.month, cal_date.day,
                              h, mi, 0, tzinfo=_TZ)
 
-    # Single 6AM diary cutoff (no midnight-next-day shift needed here).
     if candidate.hour < _CUTOFF_H:
         diary_date = (candidate - _dt.timedelta(days=1)).date()
     else:
@@ -303,13 +302,12 @@ def _query_open_episodes(conn: sqlite3.Connection,
 
 def _query_digests_range(conn: sqlite3.Connection,
                          from_utc: str, to_utc: str) -> list[dict]:
-    """session_digests whose SESSION (last event) falls in [from, to).
+    """session_digests whose SESSION start falls in [from, to).
 
-    Window/sort key is the session's last event time, NOT digest write time
-    (`ts`) — catchup backfills write digests hours or days late. `ts` keeps
-    a wide pre-filter so the events JOIN stays cheap; backfill lag beyond
-    7d falls out of the timeline anyway. Returned dicts carry `ts` = the
-    session's last event timestamp (closest to session end).
+    Window/sort key is the session's first event time — cross-day sessions
+    belong to the day they started.  `sd.ts` keeps a wide pre-filter so the
+    events JOIN stays cheap; backfill lag beyond 7d falls out anyway.
+    Returned `ts` = first event timestamp (session start).
     """
     ts_floor = (
         _dt.datetime.fromisoformat(from_utc.replace("Z", "+00:00"))
@@ -317,12 +315,12 @@ def _query_digests_range(conn: sqlite3.Connection,
     ).strftime("%Y-%m-%dT%H:%M:%SZ")
     rows = conn.execute(
         "SELECT sd.sid, sd.date, sd.text, sd.kind, sd.tl_line, sd.life_lines,"
-        " COALESCE(MAX(e.timestamp), sd.ts) AS ts"
+        " COALESCE(MIN(e.timestamp), sd.ts) AS ts"
         " FROM session_digests sd LEFT JOIN events e ON e.session_id = sd.sid"
         " WHERE sd.ts >= ? AND sd.tl_hidden = 0"
         " GROUP BY sd.sid"
-        " HAVING COALESCE(MAX(e.timestamp), sd.ts) >= ?"
-        " AND COALESCE(MAX(e.timestamp), sd.ts) < ?"
+        " HAVING COALESCE(MIN(e.timestamp), sd.ts) >= ?"
+        " AND COALESCE(MIN(e.timestamp), sd.ts) < ?"
         " ORDER BY 7 ASC",
         (ts_floor, from_utc, to_utc),
     ).fetchall()
