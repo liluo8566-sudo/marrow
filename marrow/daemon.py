@@ -299,13 +299,7 @@ def _time_where(col, before, after):
     return "", []
 
 
-@mcp.tool()
-def data_delete(targets: list[str], before: str = "", after: str = "", last: int = 0) -> dict:
-    """Delete events, digests, affect, or timeline (tl_line) data from marrow DB.
-    Use when user asks to delete/clear/remove events, session digests, affect entries, or timeline data.
-    Targets: 'events' (events+FTS+vec+tombstones), 'digests' (session_digests+FTS), 'affect', 'tl_line' (diary.tl_line only).
-    Optional filters (mutually exclusive): before/after (ISO datetime or YYYY-MM-DD) for time range; last (int) to delete the N most recent rows.
-    Omit all filters to delete everything. Backs up DB first. Clears dashboard md block before DB delete to prevent reconcile write-back."""
+def _do_delete(targets, before, after, last):
     import re, shutil, subprocess
     from datetime import datetime, timezone
 
@@ -406,6 +400,38 @@ def data_delete(targets: list[str], before: str = "", after: str = "", last: int
     if counts:
         result["counts"] = counts
     return result
+
+
+@mcp.tool()
+def event_delete(before: str = "", after: str = "", last: int = 0) -> dict:
+    """Delete events from DB (events + FTS + vec + tombstones). Use when user asks to delete/clear/remove events.
+    Optional: before/after (ISO datetime or YYYY-MM-DD) for time range; last (int) to delete N most recent. Omit all to delete everything."""
+    return _do_delete(["events"], before, after, last)
+
+@mcp.tool()
+def digest_delete(before: str = "", after: str = "", last: int = 0) -> dict:
+    """Delete session digests from DB (session_digests + FTS). Use when user asks to delete/clear/remove digests or session summaries.
+    Optional: before/after (ISO datetime or YYYY-MM-DD) for time range; last (int) to delete N most recent. Omit all to delete everything."""
+    return _do_delete(["digests"], before, after, last)
+
+@mcp.tool()
+def affect_delete(before: str = "", after: str = "", last: int = 0) -> dict:
+    """Delete affect entries from DB. Use when user asks to delete/clear/remove affect or emotion data.
+    Optional: before/after (ISO datetime or YYYY-MM-DD) for time range; last (int) to delete N most recent. Omit all to delete everything."""
+    return _do_delete(["affect"], before, after, last)
+
+@mcp.tool()
+def timeline_delete(before: str = "", after: str = "", last: int = 0) -> dict:
+    """Delete timeline data (diary.tl_line) from DB. Use when user asks to delete/clear/remove timeline lines.
+    Optional: before/after (ISO datetime or YYYY-MM-DD) for time range; last (int) to delete N most recent. Omit all to delete everything."""
+    return _do_delete(["tl_line"], before, after, last)
+
+@mcp.tool()
+def db_clear(targets: list[str], before: str = "", after: str = "", last: int = 0) -> dict:
+    """Delete multiple data types from marrow DB at once. Use when user asks to clear all data or multiple tables.
+    Targets: 'events', 'digests', 'affect', 'tl_line'. Pass all four to wipe everything.
+    Optional: before/after (ISO datetime or YYYY-MM-DD) for time range; last (int) to delete N most recent. Omit all to delete everything."""
+    return _do_delete(targets, before, after, last)
 
 
 def main() -> None:
