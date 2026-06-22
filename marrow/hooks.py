@@ -886,6 +886,22 @@ def session_end() -> int:
     early_sid = (inp.get("session_id") or "").strip()
     db = config.db_path()
     conn = storage.connect(db)
+
+    def _write_lifecycle_end(sid: str, summary: str) -> None:
+        with conn:
+            conn.execute(
+                "INSERT INTO audit_log"
+                " (target_table, target_id, action, summary)"
+                " VALUES ('events', ?, 'session_lifecycle:end', ?)",
+                (sid, summary),
+            )
+            conn.execute(
+                "UPDATE sessions"
+                " SET ended_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')"
+                " WHERE sid = ?",
+                (sid,),
+            )
+
     try:
         # Regen/rewind suppress: bridge wrote this flag before closing cc
         # so the intermediate SessionEnd skips archive entirely.
@@ -898,24 +914,11 @@ def session_end() -> int:
                     pass
                 return 0
 
-        if early_sid:
-            conn.execute(
-                "UPDATE sessions SET ended_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE sid = ?",
-                (early_sid,),
-            )
-            conn.commit()
-
         is_subagent = bool(tpath and "/tasks/" in tpath)
         if is_subagent:
             if early_sid:
                 try:
-                    with conn:
-                        conn.execute(
-                            "INSERT INTO audit_log"
-                            " (target_table, target_id, action, summary)"
-                            " VALUES ('events', ?, 'session_lifecycle:end', 'subagent=1')",
-                            (early_sid,),
-                        )
+                    _write_lifecycle_end(early_sid, "subagent=1")
                 except Exception:  # noqa: BLE001 — never block session_end
                     pass
             return 0
@@ -923,13 +926,7 @@ def session_end() -> int:
         if transcript.is_headless(tpath):
             if early_sid:
                 try:
-                    with conn:
-                        conn.execute(
-                            "INSERT INTO audit_log"
-                            " (target_table, target_id, action, summary)"
-                            " VALUES ('events', ?, 'session_lifecycle:end', 'headless=1')",
-                            (early_sid,),
-                        )
+                    _write_lifecycle_end(early_sid, "headless=1")
                 except Exception:  # noqa: BLE001 — never block session_end
                     pass
             return 0
@@ -950,13 +947,7 @@ def session_end() -> int:
         if is_worktree:
             if early_sid:
                 try:
-                    with conn:
-                        conn.execute(
-                            "INSERT INTO audit_log"
-                            " (target_table, target_id, action, summary)"
-                            " VALUES ('events', ?, 'session_lifecycle:end', 'worktree=1')",
-                            (early_sid,),
-                        )
+                    _write_lifecycle_end(early_sid, "worktree=1")
                 except Exception:  # noqa: BLE001 — never block session_end
                     pass
             return 0
@@ -967,13 +958,7 @@ def session_end() -> int:
         # write lifecycle:end so catchup doesn't flag this as silent_death.
         if early_sid and _is_session_blocked(conn, early_sid):
             try:
-                with conn:
-                    conn.execute(
-                        "INSERT INTO audit_log"
-                        " (target_table, target_id, action, summary)"
-                        " VALUES ('events', ?, 'session_lifecycle:end', 'mm_minus_blocked')",
-                        (early_sid,),
-                    )
+                _write_lifecycle_end(early_sid, "mm_minus_blocked")
             except Exception:  # noqa: BLE001 — never block session_end
                 pass
             _wipe_recall_seen(early_sid)
@@ -1004,13 +989,7 @@ def session_end() -> int:
         )
         if sid:
             try:
-                with conn:
-                    conn.execute(
-                        "INSERT INTO audit_log"
-                        " (target_table, target_id, action, summary)"
-                        " VALUES ('events', ?, 'session_lifecycle:end', '')",
-                        (sid,),
-                    )
+                _write_lifecycle_end(sid, "")
             except Exception:  # noqa: BLE001
                 pass
             # Drop per-session recall dedup state — next window starts clean.
