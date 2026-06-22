@@ -346,7 +346,6 @@ def _do_delete(targets, before, after, last, sids=None):
                 else:
                     text = text.replace(rendered_m.group(0), "")
             dash.write_text(text, encoding="utf-8")
-        subprocess.run(["mw", "refresh", "--all"], capture_output=True, text=True)
         return {"ok": True, "purged_sids": sids, "backup": backup}
 
     if not (time_filtered or last):
