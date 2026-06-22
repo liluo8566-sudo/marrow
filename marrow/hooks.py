@@ -881,8 +881,6 @@ def session_end() -> int:
     tpath = inp.get("transcript_path")
     if not tpath:
         return 0
-    if transcript.is_headless(tpath) and os.environ.get("MARROW_BRIDGE") != "1":
-        return 0  # spawned claude -p fires SessionEnd too; not our session
 
     cwd = inp.get("cwd") or ""
     early_sid = (inp.get("session_id") or "").strip()
@@ -906,6 +904,35 @@ def session_end() -> int:
                 (early_sid,),
             )
             conn.commit()
+
+        is_subagent = bool(tpath and "/tasks/" in tpath)
+        if is_subagent:
+            if early_sid:
+                try:
+                    with conn:
+                        conn.execute(
+                            "INSERT INTO audit_log"
+                            " (target_table, target_id, action, summary)"
+                            " VALUES ('events', ?, 'session_lifecycle:end', 'subagent=1')",
+                            (early_sid,),
+                        )
+                except Exception:  # noqa: BLE001 — never block session_end
+                    pass
+            return 0
+
+        if transcript.is_headless(tpath):
+            if early_sid:
+                try:
+                    with conn:
+                        conn.execute(
+                            "INSERT INTO audit_log"
+                            " (target_table, target_id, action, summary)"
+                            " VALUES ('events', ?, 'session_lifecycle:end', 'headless=1')",
+                            (early_sid,),
+                        )
+                except Exception:  # noqa: BLE001 — never block session_end
+                    pass
+            return 0
 
         # Worktree-session gate: cc instances launched inside a NON-primary git
         # worktree are task-isolated runs; their dialogue must not enter marrow.

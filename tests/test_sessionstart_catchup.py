@@ -275,6 +275,33 @@ def test_classify_mm_minus_blocked_end_marker_skips(db_env):
     assert _classify(db, sid, set()) == "skip"
 
 
+def test_classify_headless_end_marker_skips(db_env):
+    """Headless close path writes lifecycle:end summary='headless=1'. This is
+    a completed close path with no extract by design."""
+    db, _ = db_env
+    sid = "headless-end-sid"
+    old_ts = _ago_ts(60 * 60)
+    _insert_lifecycle(db, sid, "session_lifecycle:start",
+                      "ppid=99005,source=cc,started_at=1000", occurred_at=old_ts)
+    _insert_lifecycle(db, sid, "session_lifecycle:end", "headless=1",
+                      occurred_at=_ago_ts(30 * 60))
+    assert _classify(db, sid, set()) == "skip"
+
+
+def test_classify_subagent_end_marker_skips(db_env):
+    """Task-tool close path writes lifecycle:end summary='subagent=1'. This is
+    a completed close path with no extract by design."""
+    db, _ = db_env
+    sid = "subagent-end-sid"
+    old_ts = _ago_ts(60 * 60)
+    _insert_lifecycle(db, sid, "session_lifecycle:start",
+                      "ppid=99006,source=cc,started_at=1000", occurred_at=old_ts)
+    _insert_lifecycle(db, sid, "session_lifecycle:end", "subagent=1",
+                      occurred_at=_ago_ts(30 * 60))
+    _insert_user_events(db, sid, 5)
+    assert _classify(db, sid, set()) == "skip"
+
+
 def test_classify_inflight_extract_start_skips(db_env):
     """sessionend_extract:start row newer than end_row means sessionend_async
     is currently running (LLM tail can exceed 5min grace). Catchup must NOT

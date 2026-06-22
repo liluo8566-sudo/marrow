@@ -4,11 +4,9 @@ Contract: a CC .jsonl session log -> event rows ready for repo.archive_events.
 Keep human dialogue (user + assistant text) verbatim; drop tool/thinking/
 system/attachment/meta/sidechain noise. Deterministic, no LLM.
 
-is_headless: True iff the set of assistant .message.model
-(type=="assistant", excluding "<synthetic>") is non-empty AND every model
-prefix-matches some config [transcript].worker_models entry. Empty model
-set -> backstop on first user/queue-operation content head vs known spawn
-prompt heads. Conservative: no match -> not headless (keep).
+is_headless: True iff the first user/queue-operation content head matches a
+known spawn prompt head. Assistant model names are ignored; conservative:
+no prompt-head match -> not headless (keep).
 """
 from __future__ import annotations
 
@@ -89,9 +87,9 @@ def test_skips_malformed_lines(tmp_path):
     assert [r["content"] for r in transcript.clean(str(p))] == ["ok"]
 
 
-# ── is_headless(): assistant-model-set predicate ────────────────────────────
+# ── is_headless(): spawn prompt-head predicate ───────────────────────────────
 
-def test_all_haiku_assistant_is_headless(tmp_path):
+def test_spawn_prompt_head_is_headless_even_with_haiku_assistant(tmp_path):
     jl = _w(tmp_path / "h.jsonl", [
         _user("Compress this file per the rules. Output ONLY"),
         _asst("claude-haiku-4-5-20251001"),
@@ -101,17 +99,27 @@ def test_all_haiku_assistant_is_headless(tmp_path):
     assert transcript.clean(jl) == []
 
 
-def test_all_sonnet_assistant_is_headless(tmp_path):
+def test_sonnet_assistant_with_normal_user_content_is_not_headless(tmp_path):
     jl = _w(tmp_path / "s.jsonl", [
         _user("你是褚屿忱，你要以第一人称写一篇日记"),
         _asst("claude-sonnet-4-6"),
     ])
-    assert transcript.is_headless(jl) is True
-    assert transcript.clean(jl) == []
+    assert transcript.is_headless(jl) is False
+    assert [r["content"] for r in transcript.clean(jl)] == [
+        "你是褚屿忱，你要以第一人称写一篇日记", "reply"]
 
 
-def test_mixed_worker_and_opus_is_not_headless(tmp_path):
-    # real session: opus present alongside a worker model -> keep
+def test_haiku_assistant_with_normal_user_content_is_not_headless(tmp_path):
+    jl = _w(tmp_path / "h-real.jsonl", [
+        _user("real human prompt"),
+        _asst("claude-haiku-4-5-20251001"),
+    ])
+    assert transcript.is_headless(jl) is False
+    assert [r["content"] for r in transcript.clean(jl)] == [
+        "real human prompt", "reply"]
+
+
+def test_mixed_assistant_models_with_normal_user_content_is_not_headless(tmp_path):
     jl = _w(tmp_path / "m.jsonl", [
         _user("real human prompt"),
         _asst("claude-haiku-4-5-20251001", text="cheap aside"),
@@ -134,7 +142,7 @@ def test_all_opus_is_not_headless(tmp_path):
 
 
 def test_synthetic_model_is_dropped_from_set(tmp_path):
-    # <synthetic> excluded; remaining set is all-haiku -> headless
+    # Models are ignored; the first user prompt-head is the headless signal.
     jl = _w(tmp_path / "syn.jsonl", [
         _user("Compress NEW per the rules. Output ONLY"),
         _asst("<synthetic>", text="injected"),
@@ -144,7 +152,7 @@ def test_synthetic_model_is_dropped_from_set(tmp_path):
 
 
 def test_only_synthetic_model_falls_back_to_backstop(tmp_path):
-    # set empties to {} after dropping <synthetic> -> backstop on prompt head
+    # Models are ignored; the first user prompt-head is the headless signal.
     jl = _w(tmp_path / "syn2.jsonl", [
         _user("You are a ruthless markdown compressor for instruction"),
         _asst("<synthetic>", text="injected"),

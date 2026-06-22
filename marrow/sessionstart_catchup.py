@@ -12,7 +12,8 @@ followed by a 7-state table:
   P1. bridge owns sessionend timing  -> skip
   P2. session_block latest = archive -> skip (Lumi archived; cleared = run)
   P3. manual_skip latest = skip      -> skip (manual_skip; skip_cleared = run)
-  P4. end_row.summary in {worktree=1, mm_minus_blocked} -> skip (alt close path)
+  P4. end_row.summary in {worktree=1, mm_minus_blocked, headless=1,
+      subagent=1} -> skip (alt close path)
   P5. sessionend_extract:start row newer than end_row -> skip (in-flight)
 
   1. ppid live (start marker ppid in live_cc_ppids) -> skip (active session)
@@ -255,8 +256,14 @@ def _classify(conn, sid: str, live_ppids: set[int]) -> Literal["spawn", "skip"]:
     ).fetchone()
 
     # P4: alternate close paths leave a typed end-marker summary. There is
-    # nothing left to catch up for worktree / mm_minus sessions.
-    if end_row and (end_row["summary"] or "") in ("worktree=1", "mm_minus_blocked"):
+    # nothing left to catch up for worktree / mm_minus / headless / subagent
+    # sessions.
+    if end_row and (end_row["summary"] or "") in (
+        "worktree=1",
+        "mm_minus_blocked",
+        "headless=1",
+        "subagent=1",
+    ):
         return "skip"
 
     # P5: in-flight guard — skip ONLY when all three hold:

@@ -505,6 +505,99 @@ def test_session_end_writes_lifecycle_end_marker(env, monkeypatch, tmp_path):
     assert row is not None, "lifecycle:end row not written"
 
 
+def test_session_end_headless_writes_lifecycle_end_and_ended_at(
+    env, monkeypatch, tmp_path
+):
+    """Headless SessionEnd exits early, but still leaves a terminal marker."""
+    db, _, _ = env
+    jl = tmp_path / "headless.jsonl"
+    jl.write_text(json.dumps({
+        "type": "user", "sessionId": "headless-sid",
+        "timestamp": "2026-05-25T10:00:00Z",
+        "message": {
+            "role": "user",
+            "content": "Compress this file per the rules. Output ONLY",
+        },
+    }))
+    conn = storage.connect(db)
+    with conn:
+        conn.execute("INSERT INTO sessions (sid) VALUES ('headless-sid')")
+    conn.close()
+
+    _stdin(monkeypatch, {
+        "session_id": "headless-sid",
+        "transcript_path": str(jl),
+    })
+    with patch("marrow.hooks.popen_detach_lazy") as popen:
+        rc = hooks.main(["session_end"])
+
+    assert rc == 0
+    assert not popen.called
+    conn = storage.connect(db)
+    try:
+        sess = conn.execute(
+            "SELECT ended_at FROM sessions WHERE sid='headless-sid'"
+        ).fetchone()
+        row = conn.execute(
+            "SELECT summary FROM audit_log"
+            " WHERE action='session_lifecycle:end'"
+            " AND target_id='headless-sid'"
+            " ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        n = conn.execute("SELECT COUNT(*) c FROM events").fetchone()["c"]
+    finally:
+        conn.close()
+    assert sess is not None and sess["ended_at"]
+    assert row is not None and row["summary"] == "headless=1"
+    assert n == 0
+
+
+def test_session_end_subagent_writes_lifecycle_end_and_ended_at(
+    env, monkeypatch, tmp_path
+):
+    """Task-tool transcripts under /tasks/ skip archive/extract cleanly."""
+    db, _, _ = env
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    jl = tasks_dir / "subagent.jsonl"
+    jl.write_text(json.dumps({
+        "type": "user", "sessionId": "subagent-sid",
+        "timestamp": "2026-05-25T10:00:00Z",
+        "message": {"role": "user", "content": "normal subagent work"},
+    }))
+    conn = storage.connect(db)
+    with conn:
+        conn.execute("INSERT INTO sessions (sid) VALUES ('subagent-sid')")
+    conn.close()
+
+    _stdin(monkeypatch, {
+        "session_id": "subagent-sid",
+        "transcript_path": str(jl),
+    })
+    with patch("marrow.hooks.popen_detach_lazy") as popen:
+        rc = hooks.main(["session_end"])
+
+    assert rc == 0
+    assert not popen.called
+    conn = storage.connect(db)
+    try:
+        sess = conn.execute(
+            "SELECT ended_at FROM sessions WHERE sid='subagent-sid'"
+        ).fetchone()
+        row = conn.execute(
+            "SELECT summary FROM audit_log"
+            " WHERE action='session_lifecycle:end'"
+            " AND target_id='subagent-sid'"
+            " ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        n = conn.execute("SELECT COUNT(*) c FROM events").fetchone()["c"]
+    finally:
+        conn.close()
+    assert sess is not None and sess["ended_at"]
+    assert row is not None and row["summary"] == "subagent=1"
+    assert n == 0
+
+
 def test_session_end_skips_popen_when_already_covered(env, monkeypatch, tmp_path):
     """session_end with ok,user_count=10 and 10 events -> popen_detach NOT called.
 

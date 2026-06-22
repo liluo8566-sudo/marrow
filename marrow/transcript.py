@@ -9,13 +9,6 @@ from __future__ import annotations
 import json
 import re
 
-from . import config
-
-# Fallback if config.toml omits [transcript].worker_models (e.g. a live
-# config predating this key). Mirrors config.default.toml. Used by the
-# headless-detection signal in is_headless() below.
-_DEFAULT_WORKER_MODELS = ["claude-haiku-4-5", "claude-sonnet-4-6"]
-
 # Empty-model backstop: a spawn that exited before any assistant flush has
 # no model signal. Its first user / queue-operation content head matches a
 # Marrow-pipeline or prompt-lint spawn prompt; a real interrupted session
@@ -109,14 +102,6 @@ def strip_wx_boilerplate(text: str) -> str:
     return text.strip()
 
 
-def worker_models() -> list[str]:
-    try:
-        w = config.load().get("transcript", {}).get("worker_models")
-    except Exception:
-        w = None
-    return list(w) if w else list(_DEFAULT_WORKER_MODELS)
-
-
 def _raw_content_str(content) -> str:
     if isinstance(content, str):
         return content
@@ -128,11 +113,10 @@ def _raw_content_str(content) -> str:
 
 
 def is_headless(jsonl_path: str) -> bool:
-    """True iff assistant model-set ⊆ worker_models (prefix-match), or
-    (empty set) the first user/queue-op content head is a known spawn
-    prompt. Conservative: no match -> not headless (keep)."""
-    workers = worker_models()
-    models: set[str] = set()
+    """True iff the first user/queue-op content head is a known spawn prompt.
+
+    Conservative: no match -> not headless (keep).
+    """
     first_head = ""
     try:
         fh = open(jsonl_path, encoding="utf-8")
@@ -148,16 +132,10 @@ def is_headless(jsonl_path: str) -> bool:
             except json.JSONDecodeError:
                 continue
             t = o.get("type")
-            if t == "assistant":
-                m = (o.get("message") or {}).get("model")
-                if m and m != "<synthetic>":
-                    models.add(m)
-            elif not first_head and t in ("user", "queue-operation"):
+            if not first_head and t in ("user", "queue-operation"):
                 msg = o.get("message") or {}
                 first_head = _raw_content_str(
                     msg.get("content") if msg else o.get("content")).strip()
-    if models:
-        return all(any(m.startswith(w) for w in workers) for m in models)
     return any(first_head.startswith(h) for h in _SPAWN_HEADS)
 
 
