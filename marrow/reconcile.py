@@ -1497,10 +1497,9 @@ def _strip_tl_anchor(line: str) -> str:
 
 
 def _extract_tl_text(line: str) -> str:
-    """Strip prefixes (HH:MM【tone】 / AM/PM/ND / MM-DD Day 【tone】) and anchor."""
+    """Strip prefixes (HH:MM / AM/PM/ND / MM-DD Day) and anchor — preserves 【tone】."""
     s = _strip_tl_anchor(line)
     s = _TL_HHMM_RE.sub("", s)
-    s = _TL_TONE_RE.sub("", s)
     s = _TL_PERIOD_RE.sub("", s)
     s = _TL_DAY_RE.sub("", s)
     return s.strip()
@@ -1572,7 +1571,7 @@ def reconcile_timeline(conn: sqlite3.Connection,
       `<!-- tl:e:N -->` → events.content for manual event id N (edit)
       `<!-- tl-rendered:s=...;d=...;e=... -->` → trail marker; absent sid/date/evt = hidden
 
-    Tone/label segments are display-only — only the text portion is written.
+    Tone segments (【...】) in tl_line are preserved through reconcile.
     Lines starting with `+ ` → insert as manual events (channel='manual').
     """
     rpt = ReconcileReport()
