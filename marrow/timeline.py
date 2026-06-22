@@ -6,8 +6,7 @@ Two outlets:
 
 Format (FINAL spec, plan 4A-3):
   未解: <desc> [label] <!-- tl:ep:<id> -->  — open affect episodes, 7d expiry, top of block
-  Last 24h: flat HH:MM film-strip newest→oldest, cap 15
-    - session's first line carries 【tone】
+  Last 24h: flat HH:MM film-strip newest→oldest, cap 20
     - LIFE lines (casual) + TL line (task)
     - day crossings: --- MM-DD --- divider
   Today-1 overflow + today-2: per-day **MM-DD Day 【tone】** + AM/PM/ND periods
@@ -37,7 +36,7 @@ _MELB_TZ = ZoneInfo("Australia/Melbourne")
 _LIFE_TS_RE = _re.compile(r"^(\d{2}:\d{2})\s+(.*)", _re.DOTALL)
 _CUTOFF_H = 6          # 6AM local day boundary
 _BUDGET = 4000         # soft char budget (safety net; zone caps control sizing)
-_24H_CAP = 15          # max film-strip lines
+_24H_CAP = 20          # max film-strip lines
 _OPEN_EXPIRY_DAYS = 7  # open episodes older than this are hidden
 _TL_FALLBACK_CHARS = 60  # tl_line NULL → truncated body text
 
@@ -478,16 +477,13 @@ def _render_open_episodes(episodes: list[dict]) -> list[str]:
 
 def _render_24h(digests: list[dict],
                 current_sid: str | None,
-                affect_by_sid: dict[str, list[dict]] | None = None,
                 manual_events: list[dict] | None = None,
                 from_utc: str | None = None,
                 to_utc: str | None = None,
                 event_spans: dict[str, tuple[str | None, str | None]] | None = None,
-                exclude_full_session_sids: set[str] | None = None
+                exclude_full_session_sids: set[str] | None = None,
                 ) -> tuple[list[str], list[dict]]:
     """Flat 24h film-strip, newest first, filtered per rendered line."""
-    if affect_by_sid is None:
-        affect_by_sid = {}
     if event_spans is None:
         event_spans = {}
     if exclude_full_session_sids is None:
@@ -587,6 +583,8 @@ def _render_24h(digests: list[dict],
         else:
             for idx, item in enumerate(life_items):
                 line_hhmm, text = _life_line_hhmm(item, sess_hhmm)
+                if _re.match(r"^\d{2}:\d{2}\s", item):
+                    text = item
                 for ts_iso in _life_line_window_times(
                     item, ts, event_spans.get(sd["sid"])
                 ):
@@ -614,28 +612,23 @@ def _render_24h(digests: list[dict],
 
     lines: list[str] = []
     anchored_sids: set[str] = set()
-    prev_date: _dt.date | None = None
-    for entry in shown:
-        cal_date = entry["local_date"]
-        if prev_date is not None and cal_date != prev_date:
-            lines.append(f"--- {cal_date.strftime('%m-%d')} ---")
-        prev_date = cal_date
+    for cal_date in sorted({entry["local_date"] for entry in shown}, reverse=True):
+        lines.append(f"--- {cal_date.strftime('%m-%d')} ---")
+        for entry in (e for e in shown if e["local_date"] == cal_date):
+            hhmm = entry["hhmm"]
+            text = entry["text"]
+            sid = entry.get("sid")
+            if sid is None:
+                lines.append(f"{hhmm} {text} <!-- tl:e:{entry['event_id']} -->")
+                continue
 
-        hhmm = entry["hhmm"]
-        text = entry["text"]
-        sid = entry.get("sid")
-        if sid is None:
-            lines.append(f"{hhmm} {text} <!-- tl:e:{entry['event_id']} -->")
-            continue
-
-        tone_tag = ""
-        if sid not in anchored_sids:
-            anchored_sids.add(sid)
-            sess_affect = affect_by_sid.get(sid, [])
-            if sess_affect:
-                tone_tag = f"【{_tone_from_rows(sess_affect)}】"
-        anchor = f" {_tl_anchor_sid(sid)}"
-        lines.append(f"{hhmm}{tone_tag} {text}{anchor}")
+            if sid not in anchored_sids:
+                anchored_sids.add(sid)
+            anchor = f" {_tl_anchor_sid(sid)}"
+            if _re.match(r"^\d{2}:\d{2}\s", text):
+                lines.append(f"{text}{anchor}")
+            else:
+                lines.append(f"{hhmm} {text}{anchor}")
 
     overflow_by_sid: dict[str, dict] = {}
     for entry in dropped:
@@ -762,6 +755,13 @@ def render_timeline(conn: sqlite3.Connection) -> str:
     """
     now_utc = _dt.datetime.now(_dt.timezone.utc)
     now_utc_iso = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    now_melb = now_utc.astimezone(_TZ)
+    yesterday_start_utc = _dt.datetime.combine(
+        (now_melb - _dt.timedelta(days=1)).date(),
+        _dt.time.min,
+        tzinfo=_TZ,
+    ).astimezone(_dt.timezone.utc)
+    yesterday_start_utc_iso = _utc_iso(yesterday_start_utc)
 
     # Time boundaries (UTC ISO strings)
     t_24h = (now_utc - _dt.timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -772,7 +772,6 @@ def render_timeline(conn: sqlite3.Connection) -> str:
     current_sid = _query_current_sid(conn)
 
     # Melbourne diary-date for "today" (6AM boundary)
-    now_melb = now_utc.astimezone(_TZ)
     today_melb = (now_melb if now_melb.hour >= _CUTOFF_H
                   else now_melb - _dt.timedelta(days=1)).date()
 
@@ -811,16 +810,15 @@ def render_timeline(conn: sqlite3.Connection) -> str:
     }
 
     # ── last 24h ─────────────────────────────────────────────────────────────
-    digests_24h = _query_digests_range(conn, t_24h, now_utc_iso)
+    digests_24h = _query_digests_range(conn, yesterday_start_utc_iso, now_utc_iso)
     event_spans_24h = {
         d["sid"]: _query_session_event_span(conn, d["sid"])
         for d in digests_24h
     }
-    affect_by_sid_24h = _query_affect_by_session(conn, t_24h, now_utc_iso)
-    manual_24h = _query_manual_events_24h(conn, t_24h, now_utc_iso)
+    manual_24h = _query_manual_events_24h(conn, yesterday_start_utc_iso, now_utc_iso)
     lines_24h, overflow_24h = _render_24h(
-        digests_24h, current_sid, affect_by_sid_24h, manual_24h,
-        from_utc=t_24h, to_utc=now_utc_iso,
+        digests_24h, current_sid, manual_24h,
+        from_utc=yesterday_start_utc_iso, to_utc=now_utc_iso,
         event_spans=event_spans_24h,
         exclude_full_session_sids=zone_b_event_sids,
     )

@@ -3,7 +3,7 @@
 Covers:
 - ND attribution (00-05 belongs to previous diary day)
 - Day dividers in 24h film-strip
-- 24h cap (15 lines)
+- 24h cap (20 lines)
 - 2472h period/day bucketing, empty period hidden
 - Day 4-7 zone + Week header
 - Trim order: day lines → period lines → 24h farthest
@@ -152,13 +152,13 @@ def test_24h_cross_day_stale_sd_date_clips_per_life_line(conn, monkeypatch):
     result = timeline.render_timeline(conn)
     assert "one-hour sleep before night shift" in result
     assert "tea after the shift <!-- tl:b2f76aa9 -->" in result
-    assert "clipped before window" not in result
+    assert "clipped before window" in result
     assert result.index("tea after the shift <!-- tl:b2f76aa9 -->") < result.index(
         "one-hour sleep before night shift"
     )
 
 
-def test_24h_tone_tag_first_visible_life_line_only():
+def test_24h_inline_tone_text_is_not_appended_from_affect():
     lines, overflow = timeline._render_24h(
         [
             {
@@ -171,18 +171,43 @@ def test_24h_tone_tag_first_visible_life_line_only():
             }
         ],
         current_sid=None,
-        affect_by_sid={"s-tone-life": [{"valence": 0.8, "arousal": 0.3, "importance": 3}]},
         from_utc="2026-06-21T16:30:00Z",
         to_utc="2026-06-22T16:30:00Z",
     )
     assert overflow == []
-    assert lines[0].startswith("18:00【")
-    assert "<!-- tl:s-tone-life -->" in lines[0]
-    assert lines[1] == "14:00 early line <!-- tl:s-tone-life -->"
+    assert lines == [
+        "--- 06-22 ---",
+        "18:00 later line <!-- tl:s-tone-life -->",
+        "14:00 early line <!-- tl:s-tone-life -->",
+    ]
+
+
+def test_24h_life_line_with_model_timestamp_not_double_prefixed():
+    lines, overflow = timeline._render_24h(
+        [
+            {
+                "sid": "s-double-ts",
+                "ts": _local_iso(2026, 6, 22, 1, 54),
+                "kind": "casual",
+                "tl_line": "fallback",
+                "text": "body",
+                "life_lines": "01:25 【委屈】过敏难受",
+            }
+        ],
+        current_sid=None,
+        from_utc="2026-06-21T00:00:00Z",
+        to_utc="2026-06-22T16:30:00Z",
+    )
+    assert overflow == []
+    assert lines == [
+        "--- 06-22 ---",
+        "01:25 【委屈】过敏难受 <!-- tl:s-double-ts -->",
+    ]
+    assert "01:54" not in lines[1]
 
 
 def test_24h_cap_reports_overflow_line_indexes():
-    life = "\n".join(f"{h:02d}:00 line {h}" for h in range(4, 24))
+    life = "\n".join(f"{h:02d}:00 line {h}" for h in range(24))
     lines, overflow = timeline._render_24h(
         [
             {
@@ -200,8 +225,9 @@ def test_24h_cap_reports_overflow_line_indexes():
     )
     content_lines = [ln for ln in lines if not ln.startswith("---")]
     assert len(content_lines) == timeline._24H_CAP
-    assert "23:00 line 23 <!-- tl:s-cap -->" in lines[0]
-    assert overflow == [{"sid": "s-cap", "dropped_count": 5, "line_indexes": [4, 3, 2, 1, 0]}]
+    assert lines[0] == "--- 06-22 ---"
+    assert "23:00 line 23 <!-- tl:s-cap -->" in lines[1]
+    assert overflow == [{"sid": "s-cap", "dropped_count": 4, "line_indexes": [3, 2, 1, 0]}]
 
 
 def test_24h_manual_events_interleave():
@@ -231,6 +257,7 @@ def test_24h_manual_events_interleave():
     )
     assert overflow == []
     assert lines == [
+        "--- 06-22 ---",
         "12:00 task twelve <!-- tl:s-12 -->",
         "11:00 manual note <!-- tl:e:42 -->",
         "10:00 task ten <!-- tl:s-10 -->",
@@ -263,6 +290,7 @@ def test_24h_calendar_divider_between_local_dates():
     )
     assert overflow == []
     assert lines == [
+        "--- 06-22 ---",
         "00:30 early 22 <!-- tl:s-2200 -->",
         "--- 06-21 ---",
         "23:30 late 21 <!-- tl:s-2130 -->",
@@ -582,8 +610,8 @@ def test_life_lines_no_prefix_fallback_to_session_time(conn):
     assert sess_hhmm in result
 
 
-def test_life_lines_diary_only_crossing_no_divider(conn):
-    """LIFE lines crossing the diary cutoff do not force a calendar divider."""
+def test_life_lines_calendar_crossing_get_dividers(conn):
+    """LIFE lines crossing calendar dates get one divider per local date."""
     from zoneinfo import ZoneInfo
     melb = ZoneInfo("Australia/Melbourne")
     now_melb = _dt.datetime.now(melb)
@@ -594,19 +622,12 @@ def test_life_lines_diary_only_crossing_no_divider(conn):
         sess_local -= _dt.timedelta(days=1)
     ts = sess_local.astimezone(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    # Check both timestamps are within 24h
-    now_utc = _dt.datetime.now(_dt.timezone.utc)
-    ts_dt = _dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
-    if (now_utc - ts_dt).total_seconds() > 24 * 3600:
-        import pytest as _pt
-        _pt.skip("session outside 24h window at this time of day")
-
     # One LIFE line at 23:30 (same diary day) and one at 00:30 (prev diary day)
     life = "23:30 看了个电影\n00:30 睡前喝了热水"
     _digest(conn, "s-midnight", ts, kind="casual", tl="夜聊", life=life)
     result = timeline.render_timeline(conn)
 
-    assert "---" not in result
+    assert "---" in result
 
 
 def test_life_line_hhmm_helper_parses_prefix():
@@ -653,7 +674,7 @@ def test_prompt_life_hhmm_rule():
     from marrow.sessionend_prompts import TASK_AFFECT_DIGEST_PROMPT
     assert "HH:MM" in TASK_AFFECT_DIGEST_PROMPT
     # Example in ===DIGEST=== block should show a timestamped LIFE line
-    assert "21:40 买了b5精华" in TASK_AFFECT_DIGEST_PROMPT
+    assert "21:40" in TASK_AFFECT_DIGEST_PROMPT
 
 
 # ── catchup backfill: window keyed on session start, not digest write ────────
@@ -712,6 +733,7 @@ def test_life_lines_resolve_against_event_span_midnight_crossing():
     )
     assert overflow == []
     assert lines == [
+        "--- 06-21 ---",
         "08:59 morning wrap <!-- tl:b2f76aa9 -->",
         "04:50 late snack <!-- tl:b2f76aa9 -->",
         "02:39 after midnight note <!-- tl:b2f76aa9 -->",
@@ -738,7 +760,8 @@ def test_life_lines_render_reconcile_anchor_on_every_line():
         to_utc="2026-06-22T16:30:00Z",
     )
     assert overflow == []
-    assert all("<!-- tl:s-every-line -->" in line for line in lines)
+    content_lines = [line for line in lines if not line.startswith("---")]
+    assert all("<!-- tl:s-every-line -->" in line for line in content_lines)
 
 
 def test_zone_b_includes_session_by_max_event_ts(conn, monkeypatch):
@@ -837,6 +860,7 @@ def test_24h_first_life_line_sorts_by_own_display_time():
 
     assert overflow == []
     assert lines == [
+        "--- 06-13 ---",
         "20:10 晚上聊天 <!-- tl:s-early-first -->",
         "12:00 中午任务 <!-- tl:s-midday -->",
         "04:30 清晨醒来 <!-- tl:s-early-first -->",
@@ -844,7 +868,7 @@ def test_24h_first_life_line_sorts_by_own_display_time():
         "22:00 前夜任务 <!-- tl:s-prev-evening -->",
     ]
     assert lines.count("--- 06-12 ---") == 1
-    assert not any(line == "--- 06-13 ---" for line in lines)
+    assert lines.count("--- 06-13 ---") == 1
 
 
 # ── Bug 2: no double 6AM cutoff ───────────────────────────────────────────────
@@ -877,8 +901,8 @@ def test_life_line_utc_and_date_no_double_cutoff():
 
 # ── Bug 3: tone tag on first 24h film-strip line ──────────────────────────────
 
-def test_24h_tone_tag_on_first_line_with_affect(conn):
-    """First rendered line of a session with affect rows carries 【tone】 tag."""
+def test_24h_line_with_affect_still_renders(conn):
+    """A session with affect rows still renders without appending a tone tag."""
     from zoneinfo import ZoneInfo
     melb = ZoneInfo("Australia/Melbourne")
     now_melb = _dt.datetime.now(melb)
@@ -898,10 +922,8 @@ def test_24h_tone_tag_on_first_line_with_affect(conn):
     conn.commit()
 
     result = timeline.render_timeline(conn)
-    # The session's line must contain 【...】 tone tag
     lines = [l for l in result.splitlines() if "今天完成了任务" in l]
     assert lines, "session TL must appear"
-    assert "【" in lines[0], f"tone tag missing from first line: {lines[0]!r}"
 
 
 def test_24h_no_tone_tag_without_affect(conn):
@@ -916,14 +938,35 @@ def test_24h_no_tone_tag_without_affect(conn):
 
 # ── Bug 4: zone windows — no duplication, correct day ranges ──────────────────
 
-def test_zone_b_does_not_overlap_zone_a(conn):
-    """A session 25h ago must appear in zone (b), not zone (a)."""
-    _digest(conn, "s-25h", _utc(25), kind="task", tl="昨天的事")
+def test_zone_a_starts_at_yesterday_calendar_midnight(conn, monkeypatch):
+    """Zone A includes yesterday after 00:00 local, even beyond 24h."""
+    from zoneinfo import ZoneInfo
+    melb = ZoneInfo("Australia/Melbourne")
+    _freeze_timeline_now(
+        monkeypatch,
+        _dt.datetime(2026, 6, 23, 3, 30, tzinfo=melb),
+    )
+    _digest(
+        conn,
+        "s-after-midnight",
+        _local_iso(2026, 6, 22, 0, 1),
+        kind="task",
+        tl="昨天零点后",
+    )
+    _digest(
+        conn,
+        "s-before-midnight",
+        _local_iso(2026, 6, 21, 23, 59),
+        kind="task",
+        tl="昨天零点前",
+    )
     result = timeline.render_timeline(conn)
     if "**" in result:
         zone_a = result.split("**")[0]
-        assert "昨天的事" not in zone_a, "25h-old session must not appear in 24h strip"
-    assert "昨天的事" in result
+    else:
+        zone_a = result
+    assert "昨天零点后" in zone_a
+    assert "昨天零点前" not in zone_a
 
 
 def test_zone_c_covers_four_days(conn):
