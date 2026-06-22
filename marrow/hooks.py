@@ -1241,28 +1241,6 @@ def _handle_mm_prefix(inp: dict) -> bool:
                     _write_force_sessionend_flag(conn, sid, _STATUS_MM_IMMEDIATE_CURRENT)
                     tpath = inp.get("transcript_path") or _locate_jsonl(sid)
                     _pre_archive_jsonl(conn, tpath, channel=os.environ.get("MARROW_CHANNEL") or "cli")
-                    row = conn.execute(
-                        "SELECT 1 FROM audit_log"
-                        " WHERE target_table='events'"
-                        " AND target_id=?"
-                        " AND action='session_lifecycle:end'"
-                        " LIMIT 1",
-                        (sid,),
-                    ).fetchone()
-                    if not row:
-                        with conn:
-                            conn.execute(
-                                "INSERT INTO audit_log"
-                                " (target_table, target_id, action, summary)"
-                                " VALUES ('events', ?, 'session_lifecycle:end', 'mm_bang')",
-                                (sid,),
-                            )
-                            conn.execute(
-                                "UPDATE sessions"
-                                " SET ended_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')"
-                                " WHERE sid = ? AND (ended_at IS NULL OR ended_at = '')",
-                                (sid,),
-                            )
                 finally:
                     conn.close()
                 _spawn_sessionend_async(sid)
@@ -1297,28 +1275,6 @@ def _handle_mm_prefix(inp: dict) -> bool:
             elif prefix == "mm!":
                 if target_sid:
                     _write_force_sessionend_flag(conn, target_sid, _STATUS_MM_IMMEDIATE)
-                    row = conn.execute(
-                        "SELECT 1 FROM audit_log"
-                        " WHERE target_table='events'"
-                        " AND target_id=?"
-                        " AND action='session_lifecycle:end'"
-                        " LIMIT 1",
-                        (target_sid,),
-                    ).fetchone()
-                    if not row:
-                        with conn:
-                            conn.execute(
-                                "INSERT INTO audit_log"
-                                " (target_table, target_id, action, summary)"
-                                " VALUES ('events', ?, 'session_lifecycle:end', 'mm_bang')",
-                                (target_sid,),
-                            )
-                            conn.execute(
-                                "UPDATE sessions"
-                                " SET ended_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')"
-                                " WHERE sid = ? AND (ended_at IS NULL OR ended_at = '')",
-                                (target_sid,),
-                            )
                     conn.close()
                     conn = None
                     _spawn_sessionend_async(target_sid)
