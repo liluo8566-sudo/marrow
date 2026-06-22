@@ -299,7 +299,7 @@ def _time_where(col, before, after):
     return "", []
 
 
-def _do_delete(targets, before, after, last):
+def _do_delete(targets, before, after, last, sids=None):
     import re, shutil, subprocess
     from datetime import datetime, timezone
 
@@ -311,6 +311,10 @@ def _do_delete(targets, before, after, last):
     time_filtered = bool(before or after)
     if time_filtered and last:
         return {"ok": False, "error": "before/after and last are mutually exclusive"}
+    if sids and (time_filtered or last):
+        return {"ok": False, "error": "sids and before/after/last are mutually exclusive"}
+    if sids and set(targets) - {"digests"}:
+        return {"ok": False, "error": "sids only works with target 'digests'"}
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     backup = f"/tmp/marrow-backup-purge-{ts}.db"
@@ -320,8 +324,33 @@ def _do_delete(targets, before, after, last):
     _table = {"events": "events", "digests": "session_digests", "affect": "affect", "tl_line": "diary"}
     _pk = {"events": "id", "digests": "rowid", "affect": "id", "tl_line": "date"}
 
+    if sids:
+        conn = storage.connect(_DB)
+        try:
+            placeholders = ",".join("?" * len(sids))
+            conn.execute(f"DELETE FROM session_digests WHERE sid IN ({placeholders})", sids)
+            conn.commit()
+        finally:
+            conn.close()
+        dash = Path.home() / "Desktop" / "NY" / "DASHBOARD.md"
+        if dash.exists():
+            text = dash.read_text(encoding="utf-8")
+            for sid in sids:
+                text = re.sub(rf"[^\n]*<!-- tl:{re.escape(sid)} -->\n?", "", text)
+            rendered_m = re.search(r"<!-- tl-rendered:s=([^ ]+) -->", text)
+            if rendered_m:
+                old_ids = rendered_m.group(1).split(",")
+                new_ids = [s for s in old_ids if s not in sids]
+                if new_ids:
+                    text = text.replace(rendered_m.group(0), f"<!-- tl-rendered:s={','.join(new_ids)} -->")
+                else:
+                    text = text.replace(rendered_m.group(0), "")
+            dash.write_text(text, encoding="utf-8")
+        subprocess.run(["mw", "refresh", "--all"], capture_output=True, text=True)
+        return {"ok": True, "purged_sids": sids, "backup": backup}
+
     if not (time_filtered or last):
-        dash = Path.home() / "Desktop" / "NY" / "dashboard.md"
+        dash = Path.home() / "Desktop" / "NY" / "DASHBOARD.md"
         if dash.exists():
             text = dash.read_text(encoding="utf-8")
             clear_tl = any(t in targets for t in ("events", "digests", "tl_line"))
@@ -421,12 +450,12 @@ def _do_delete(targets, before, after, last):
 
 
 @mcp.tool()
-def db_clear(targets: list[str], before: str = "", after: str = "", last: int = 0) -> dict:
+def db_clear(targets: list[str], before: str = "", after: str = "", last: int = 0, sids: list[str] | None = None) -> dict:
     """Delete events, digests, affect, or timeline data from marrow DB. Use when user asks to delete/clear/remove any DB data.
     Targets: 'events' (events+FTS+vec+tombstones), 'digests' (session_digests+FTS), 'affect', 'tl_line' (diary.tl_line).
-    Optional: before/after (ISO datetime or YYYY-MM-DD) for time range; last (int) to delete N most recent. Omit all to delete everything.
+    Filters (mutually exclusive): before/after (ISO datetime or YYYY-MM-DD) for time range; last (int) to delete N most recent; sids (list of session IDs, digests only). Omit all filters to delete everything.
     Backs up DB first. Handles FTS triggers and dashboard md block automatically."""
-    return _do_delete(targets, before, after, last)
+    return _do_delete(targets, before, after, last, sids=sids)
 
 
 def main() -> None:
