@@ -345,6 +345,11 @@ def reconcile_milestones(conn: sqlite3.Connection,
                 seen.add(new_id)
 
         # deletes: db rows whose ids are not present in md
+        md_mtime_iso = (
+            _dt.datetime.fromtimestamp(md_path.stat().st_mtime,
+                                       tz=_dt.timezone.utc).isoformat()
+            if md_path.exists() else None
+        )
         for rid in list(db_rows.keys()):
             if rid in seen:
                 continue
@@ -353,6 +358,17 @@ def reconcile_milestones(conn: sqlite3.Connection,
             # returned early on missing file; require at least one parsed row.
             if not md_rows:
                 continue
+            # mtime gate: skip rows inserted/updated after md was last
+            # written — they haven't been rendered yet, so absence from
+            # md does not mean "user deleted".
+            if md_mtime_iso:
+                ts = conn.execute(
+                    "SELECT COALESCE(updated_at, created_at) AS ts"
+                    " FROM milestones WHERE id=?", (rid,)
+                ).fetchone()
+                row_ts = ts["ts"] if ts else None
+                if not row_ts or row_ts > md_mtime_iso:
+                    continue
             conn.execute("DELETE FROM milestones WHERE id=?", (rid,))
             _audit(conn, rid, "delete", "md-reconcile: removed from md")
             rpt.deleted += 1
