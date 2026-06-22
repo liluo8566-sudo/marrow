@@ -147,10 +147,12 @@ class LLMClient:
             cmd.extend(["--effort", effort])
         msg = json.dumps({"type": "user", "message": {
             "role": "user", "content": prompt}})
+        env = {**os.environ, "MARROW_PIPELINE": "1"}
         try:
             p = subprocess.Popen(
                 cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, text=True, start_new_session=True)
+                stderr=subprocess.PIPE, text=True, start_new_session=True,
+                env=env)
         except OSError as e:
             raise LLMError(f"claude_cli spawn failed: {e}") from e
         try:
@@ -214,10 +216,11 @@ class LLMClient:
         if effort:
             cmd.extend(["--effort", effort])
         timeout = spec.get("timeout_s", 120)
+        env = {**os.environ, "MARROW_PIPELINE": "1"}
         try:
             p = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, start_new_session=True)
+                text=True, start_new_session=True, env=env)
         except OSError as e:
             raise LLMError(f"claude_cli spawn failed: {e}") from e
         try:

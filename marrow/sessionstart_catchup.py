@@ -256,13 +256,14 @@ def _classify(conn, sid: str, live_ppids: set[int]) -> Literal["spawn", "skip"]:
     ).fetchone()
 
     # P4: alternate close paths leave a typed end-marker summary. There is
-    # nothing left to catch up for worktree / mm_minus / headless / subagent
-    # sessions.
+    # nothing left to catch up for worktree / mm_minus / headless / subagent /
+    # pipeline sessions.
     if end_row and (end_row["summary"] or "") in (
         "worktree=1",
         "mm_minus_blocked",
         "headless=1",
         "subagent=1",
+        "pipeline=1",
     ):
         return "skip"
 

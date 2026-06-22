@@ -914,6 +914,14 @@ def session_end() -> int:
                     pass
                 return 0
 
+        if os.environ.get("MARROW_PIPELINE") == "1":
+            if early_sid:
+                try:
+                    _write_lifecycle_end(early_sid, "pipeline=1")
+                except Exception:  # noqa: BLE001
+                    pass
+            return 0
+
         is_subagent = bool(tpath and "/tasks/" in tpath)
         if is_subagent:
             if early_sid:
