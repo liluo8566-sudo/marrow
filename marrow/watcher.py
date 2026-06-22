@@ -39,7 +39,7 @@ _LOG_NAME = "watcher.log"
 
 
 def _logs_dir() -> Path:
-    d = Path(config.DATA_DIR) / "logs"
+    d = Path(config.DATA_DIR) / "logs" / "watcher"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
