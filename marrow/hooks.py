@@ -456,10 +456,9 @@ def _maybe_fire_title_summarize(sid: str) -> None:
     except Exception:  # noqa: BLE001
         return
     try:
-        log_path = Path(config.DATA_DIR) / "logs" / "title_summarize.log"
         popen_detach(
             [sys.executable, "-m", "marrow.title", "--sid", sid],
-            log_path,
+            log_path=Path(os.devnull),
         )
     except Exception:  # noqa: BLE001 — fire-and-forget
         pass
@@ -736,7 +735,12 @@ def _read_input() -> dict:
 
 def session_start() -> int:
     try:
-        log = config.DATA_DIR / "logs" / "sessionstart_catchup.log"
+        from datetime import date as _date
+        catchup_dir = config.DATA_DIR / "logs" / "catchup"
+        catchup_dir.mkdir(parents=True, exist_ok=True)
+        log = catchup_dir / f"catchup.{_date.today():%Y-%m-%d}.log"
+        for old in sorted(catchup_dir.glob("catchup.*.log"))[:-14]:
+            old.unlink(missing_ok=True)
         popen_detach([sys.executable, "-m", "marrow.sessionstart_catchup"], log_path=log)
     except Exception as e:
         try:
