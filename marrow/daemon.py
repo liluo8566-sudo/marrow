@@ -332,7 +332,7 @@ def _do_delete(targets, before, after, last, sids=None):
             conn.commit()
         finally:
             conn.close()
-        dash = Path.home() / "Desktop" / "NY" / "DASHBOARD.md"
+        dash = Path.home() / "Desktop" / "NY" / "dashboard.md"
         if dash.exists():
             text = dash.read_text(encoding="utf-8")
             for sid in sids:
@@ -350,7 +350,7 @@ def _do_delete(targets, before, after, last, sids=None):
         return {"ok": True, "purged_sids": sids, "backup": backup}
 
     if not (time_filtered or last):
-        dash = Path.home() / "Desktop" / "NY" / "DASHBOARD.md"
+        dash = Path.home() / "Desktop" / "NY" / "dashboard.md"
         if dash.exists():
             text = dash.read_text(encoding="utf-8")
             clear_tl = any(t in targets for t in ("events", "digests", "tl_line"))
