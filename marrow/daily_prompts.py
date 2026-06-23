@@ -137,10 +137,14 @@ def render_daily_cand_prompt() -> str:
     user_terms = " / ".join(config.all_user_terms())
     asst_terms = " / ".join(config.all_assistant_terms())
     exclude = ", ".join(p.get("meme_exclude_terms", [])) or "(none)"
+    user_aliases = " / ".join(p.get("user_aliases", [])) or "(none)"
+    asst_aliases = " / ".join(p.get("assistant_aliases", [])) or "(none)"
     return DAILY_CAND_PROMPT.format(
         user_name=p["user_name"],
         assistant_name=p["assistant_name"],
         user_terms=user_terms,
+        user_aliases=user_aliases,
         assistant_terms=asst_terms,
+        assistant_aliases=asst_aliases,
         meme_exclude_terms=exclude,
     )
