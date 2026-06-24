@@ -103,3 +103,51 @@ FACTS:
         assert "user made progress" in row["text"]
     finally:
         conn.close()
+
+
+def test_mid_session_watermark_written_when_affect_fails(tmp_path, monkeypatch):
+    """Watermark must be written even if affect writer fails, as long as digest succeeds."""
+    db = str(tmp_path / "partial-fail.db")
+    conn = storage.init_db(db)
+    sid = "sid-partial"
+    try:
+        with conn:
+            for event_id in range(1, 4):
+                _insert_event(conn, event_id, sid, "user", f"old {event_id}")
+            for event_id in range(4, 8):
+                _insert_event(conn, event_id, sid, "user", f"new {event_id}")
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "db_path", lambda: db)
+    raw = """===DIGEST===
+KIND: casual
+TL: partial failure anchor
+LIFE:
+- affect writer failed
+VOICE:
+- steady
+FACTS:
+- digest still wrote
+===END==="""
+
+    with patch("marrow.sessionend_async.LLMClient") as mock_client, \
+            patch("marrow.dashboard.write_dashboard"), \
+            patch("marrow.recall.embed_pending"), \
+            patch("marrow.sessionend_async.seg_affect", side_effect=RuntimeError("affect boom")):
+        mock_client.return_value.call.return_value = raw
+        rc = sessionend_async.main(
+            ["--sid", sid, "--after-event-id", "3", "--segment-seq", "1"]
+        )
+
+    # partial failure -> rc should still be 0
+    assert rc == 0
+    conn = storage.connect(db)
+    try:
+        wm = storage.get_latest_watermark(conn, sid)
+        assert wm is not None, "watermark must be written when digest succeeds despite affect failure"
+        assert wm["segment_seq"] == 1
+        assert wm["last_event_id"] == 7
+    finally:
+        conn.close()

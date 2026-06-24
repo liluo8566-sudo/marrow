@@ -568,18 +568,20 @@ def _run_extraction(conn, sid: str, date: str,
     if not failures:
         _write_final_audit(conn, sid, f"{_OK_PREFIX}{count}")
         rc = 0
-        if segment_seq > 0:
-            max_ev = conn.execute(
-                "SELECT MAX(id) FROM events WHERE session_id=?", (sid,)
-            ).fetchone()[0]
-            if max_ev is not None:
-                storage.insert_watermark(conn, sid, segment_seq, max_ev, count)
     elif len(failures) >= len(all_writers):
         _write_final_audit(conn, sid, "fail:all")
         rc = 1
     else:
         _write_final_audit(conn, sid, f"partial:{','.join(sorted(set(failures)))}")
         rc = 0
+
+    # Write watermark when digest succeeded — prevents re-extraction on partial failure
+    if segment_seq > 0 and "digest" not in failures:
+        max_ev = conn.execute(
+            "SELECT MAX(id) FROM events WHERE session_id=?", (sid,)
+        ).fetchone()[0]
+        if max_ev is not None:
+            storage.insert_watermark(conn, sid, segment_seq, max_ev, count)
 
     # ── tail: slow side-effects (fail-soft; cc can't kill us here) ───────────
     db = config.db_path()
