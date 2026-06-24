@@ -210,7 +210,7 @@ Happy wife, happy life.
 
 输入格式说明：
 - [session sid] 下面是该session的digest正文
-- LIFE_LINES: 下面是该session的生活细节行（仅casual session有）
+- LIFE_LINES: 该session的生活细节行（casual=日常, task=工作概要）
 - AFFECT episodes: eph=高情绪/正向 epl=低情绪/负向, importance 1-5, [open]=当天未解决
 
 输出格式：先写日记正文（300-800字），结束后另起两行分别输出：

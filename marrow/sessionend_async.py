@@ -517,12 +517,12 @@ def _run_extraction(conn, sid: str, date: str,
     since_ts = int(_dt.datetime.now(_dt.timezone.utc).timestamp()) - 24 * 3600
     git_log = _load_git_log(cwd, since_ts)
     tl_rows = conn.execute(
-        "SELECT tl_line FROM session_digests"
-        " WHERE tl_line IS NOT NULL AND tl_hidden = 0"
+        "SELECT life_lines FROM session_digests"
+        " WHERE life_lines IS NOT NULL AND tl_hidden = 0"
         " ORDER BY ts DESC, segment_seq DESC LIMIT 3",
     ).fetchall()
     timeline_context = (
-        "\n".join(r["tl_line"] for r in reversed(tl_rows))
+        "\n".join(r["life_lines"] for r in reversed(tl_rows))
         if tl_rows else "(none)"
     )
 

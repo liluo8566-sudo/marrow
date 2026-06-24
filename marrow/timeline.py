@@ -692,10 +692,6 @@ def render_timeline(conn: sqlite3.Connection) -> str:
 
     current_sid = _query_current_sid(conn)
 
-    # Melbourne diary-date for "today" (6AM boundary)
-    today_melb = (now_melb if now_melb.hour >= _CUTOFF_H
-                  else now_melb - _dt.timedelta(days=1)).date()
-
     # ── open episodes ────────────────────────────────────────────────────────
     open_eps = _query_open_episodes(conn, t_7d)
     open_lines = _render_open_episodes(open_eps)
@@ -713,8 +709,9 @@ def render_timeline(conn: sqlite3.Connection) -> str:
         event_spans=event_spans_24h,
     )
 
-    # ── zone B: diary overview for today-2 to today-4 ────────────────────────
-    zone_b_dates = [today_melb - _dt.timedelta(days=d) for d in range(2, 5)]
+    # ── zone B: 3 diary days before zone A start ──────────────────────────────
+    zone_a_start_date = (now_melb - _dt.timedelta(days=1)).date()
+    zone_b_dates = [zone_a_start_date - _dt.timedelta(days=d) for d in range(1, 4)]
     diary_data = _query_diary_zone_b(conn, zone_b_dates)
 
     # Affect for week trend
