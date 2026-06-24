@@ -303,7 +303,7 @@ def _do_delete(targets, before, after, last, sids=None):
     import re, shutil, subprocess
     from datetime import datetime, timezone
 
-    valid = {"events", "digests", "affect", "tl_line"}
+    valid = {"events", "digests", "affect"}
     bad = set(targets) - valid
     if bad:
         return {"ok": False, "error": f"unknown targets: {bad}. valid: {valid}"}
@@ -320,9 +320,9 @@ def _do_delete(targets, before, after, last, sids=None):
     backup = f"/tmp/marrow-backup-purge-{ts}.db"
     shutil.copy2(str(_DB), backup)
 
-    _ts_col = {"events": "timestamp", "digests": "ts", "affect": "created_at", "tl_line": "date"}
-    _table = {"events": "events", "digests": "session_digests", "affect": "affect", "tl_line": "diary"}
-    _pk = {"events": "id", "digests": "rowid", "affect": "id", "tl_line": "date"}
+    _ts_col = {"events": "timestamp", "digests": "ts", "affect": "created_at"}
+    _table = {"events": "events", "digests": "session_digests", "affect": "affect"}
+    _pk = {"events": "id", "digests": "rowid", "affect": "id"}
 
     if sids:
         conn = storage.connect(_DB)
@@ -353,7 +353,7 @@ def _do_delete(targets, before, after, last, sids=None):
         dash = Path.home() / "Desktop" / "NY" / "dashboard.md"
         if dash.exists():
             text = dash.read_text(encoding="utf-8")
-            clear_tl = any(t in targets for t in ("events", "digests", "tl_line"))
+            clear_tl = any(t in targets for t in ("events", "digests"))
             if clear_tl:
                 text = re.sub(
                     r"(<!-- id:dashboard\.timeline -->)\n## Timeline\n.*?(?=\n<!-- id:)",
@@ -370,12 +370,7 @@ def _do_delete(targets, before, after, last, sids=None):
         for tgt in targets:
             tbl, col, pk = _table[tgt], _ts_col[tgt], _pk[tgt]
 
-            if last and tgt == "tl_line":
-                conn.execute(
-                    f"UPDATE diary SET tl_line = NULL WHERE {pk} IN "
-                    f"(SELECT {pk} FROM {tbl} WHERE tl_line IS NOT NULL ORDER BY {col} DESC LIMIT ?)", [last])
-                counts[tgt] = last
-            elif last:
+            if last:
                 if tgt == "events":
                     sids = [r[0] for r in conn.execute(
                         f"SELECT DISTINCT session_id FROM events WHERE {pk} IN "
@@ -393,10 +388,7 @@ def _do_delete(targets, before, after, last, sids=None):
                 if tgt == "events":
                     sids = [r[0] for r in conn.execute(
                         "SELECT DISTINCT session_id FROM events" + where, params).fetchall()]
-                if tgt == "tl_line":
-                    conn.execute("UPDATE diary SET tl_line = NULL" + where, params)
-                else:
-                    conn.execute(f"DELETE FROM {tbl}" + where, params)
+                conn.execute(f"DELETE FROM {tbl}" + where, params)
                 if tgt == "events" and sids:
                     conn.executemany(
                         "DELETE FROM audit_log WHERE action='sessionend_extract' AND target_id=?",
@@ -429,8 +421,6 @@ def _do_delete(targets, before, after, last, sids=None):
                         conn.execute(t["sql"])
                 elif tgt == "affect":
                     conn.execute("DELETE FROM affect")
-                elif tgt == "tl_line":
-                    conn.execute("UPDATE diary SET tl_line = NULL")
 
         conn.commit()
     finally:
@@ -451,8 +441,8 @@ def _do_delete(targets, before, after, last, sids=None):
 
 @mcp.tool()
 def db_clear(targets: list[str], before: str = "", after: str = "", last: int = 0, sids: list[str] | None = None) -> dict:
-    """Delete events, digests, affect, or timeline data from marrow DB. Use when user asks to delete/clear/remove any DB data.
-    Targets: 'events' (events+FTS+vec+tombstones), 'digests' (session_digests+FTS), 'affect', 'tl_line' (diary.tl_line).
+    """Delete events, digests, or affect data from marrow DB. Use when user asks to delete/clear/remove any DB data.
+    Targets: 'events' (events+FTS+vec+tombstones), 'digests' (session_digests+FTS), 'affect'.
     Filters (mutually exclusive): before/after (ISO datetime or YYYY-MM-DD) for time range; last (int) to delete N most recent; sids (list of session IDs, digests only). Omit all filters to delete everything.
     Backs up DB first. Handles FTS triggers and dashboard md block automatically."""
     return _do_delete(targets, before, after, last, sids=sids)

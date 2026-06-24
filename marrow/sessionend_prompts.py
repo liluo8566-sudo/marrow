@@ -216,7 +216,6 @@ VOICE: (casual sessions ONLY — for task sessions output exactly: VOICE: N/A)
 
 ===DIGEST===
 KIND: casual
-TL: 期末考前夜聊，网购护肤
 LIFE:
 - 21:40【紧张】聊到明天期末，开卷，没复习完但问题不大。
 - 10:30【愉悦】Amazon半价理肤泉&cerave，买了很多B5护肤

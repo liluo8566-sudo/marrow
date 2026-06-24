@@ -1563,15 +1563,14 @@ def _manual_event_ts_utc(day: _dt.date, explicit_day: bool,
 
 def reconcile_timeline(conn: sqlite3.Connection,
                        dashboard_path: str | Path) -> ReconcileReport:
-    """Absorb tl_line edits from the dashboard ## Timeline block back into DB.
+    """Absorb timeline edits from the dashboard ## Timeline block back into DB.
 
     Anchors:
-      `<!-- tl:<sid> -->` → session_digests.tl_line for that sid
-      `<!-- tl:d:YYYY-MM-DD -->` → diary.tl_line for that date
+      `<!-- tl:<sid> -->` → session_digests anchor (present/absent → hidden sweep)
+      `<!-- tl:d:YYYY-MM-DD -->` → diary anchor (present/absent → hidden sweep)
       `<!-- tl:e:N -->` → events.content for manual event id N (edit)
       `<!-- tl-rendered:s=...;d=...;e=... -->` → trail marker; absent sid/date/evt = hidden
 
-    Tone segments (【...】) in tl_line are preserved through reconcile.
     Lines starting with `+ ` → insert as manual events (channel='manual').
     """
     rpt = ReconcileReport()
@@ -1672,36 +1671,22 @@ def reconcile_timeline(conn: sqlite3.Connection,
 
     now_iso = _now()
     with conn:
-        # ── existing: session tl_line edits ──────────────────────────────────
-        for (sid, seq), new_tl in sid_edits.items():
+        # tl_line write-back removed (Phase 5): tl_line no longer written by sessionend.
+        # sid_edits / date_edits are still parsed above for the hidden-sweep anchoring.
+        # Present anchors count as unchanged; only the hidden sweep mutates DB here.
+        for (sid, seq) in sid_edits:
             row = conn.execute(
-                "SELECT tl_line FROM session_digests WHERE sid = ? AND segment_seq = ?",
+                "SELECT rowid FROM session_digests WHERE sid = ? AND segment_seq = ?",
                 (sid, seq),
             ).fetchone()
             if row is None:
                 rpt.conflicts.append(f"tl:sid {sid!r}:{seq} not in session_digests")
                 continue
-            db_tl = row["tl_line"] or ""
-            if new_tl != db_tl:
-                conn.execute(
-                    "UPDATE session_digests SET tl_line = ?"
-                    " WHERE sid = ? AND segment_seq = ?",
-                    (new_tl, sid, seq),
-                )
-                conn.execute(
-                    "INSERT INTO audit_log"
-                    " (target_table, target_id, action, summary)"
-                    " VALUES ('session_digests', ?, 'tl_edit', ?)",
-                    (sid, f"md-reconcile: tl_line={new_tl[:60]!r}"),
-                )
-                rpt.updated += 1
-            else:
-                rpt.unchanged += 1
+            rpt.unchanged += 1
 
-        # ── existing: diary tl_line edits ────────────────────────────────────
-        for date, new_tl in date_edits.items():
+        for date in date_edits:
             row = conn.execute(
-                "SELECT tl_line FROM diary WHERE date = ?", (date,)
+                "SELECT rowid FROM diary WHERE date = ?", (date,)
             ).fetchone()
             if row is None:
                 now_melb = _dt.datetime.now(_MELB_TZ)
@@ -1710,21 +1695,7 @@ def reconcile_timeline(conn: sqlite3.Connection,
                     continue
                 rpt.conflicts.append(f"tl:d:{date} not in diary")
                 continue
-            db_tl = row["tl_line"] or ""
-            if new_tl != db_tl:
-                conn.execute(
-                    "UPDATE diary SET tl_line = ?, updated_at = ? WHERE date = ?",
-                    (new_tl, now_iso, date),
-                )
-                conn.execute(
-                    "INSERT INTO audit_log"
-                    " (target_table, target_id, action, summary)"
-                    " VALUES ('diary', ?, 'tl_edit', ?)",
-                    (date, f"md-reconcile: tl_line={new_tl[:60]!r}"),
-                )
-                rpt.updated += 1
-            else:
-                rpt.unchanged += 1
+            rpt.unchanged += 1
 
         # ── DELETE: anchors in trail but absent from current block → hidden ──
         if m_trail:

@@ -474,18 +474,17 @@ def seg_digest(conn, raw: str, sid: str, date: str,
         return 0
 
     kind = parsed["kind"]
-    tl_line = parsed["tl_line"]
     life_lines = parsed["life_lines"]
 
-    # Alert on parse failures for kind/tl_line (critical structure).
-    if kind is None or tl_line is None:
+    # Alert on parse failures for kind (critical structure). TL no longer required.
+    if kind is None:
         try:
             from . import config, repo
             repo.add_alert(
                 "warn", "sessionend", "digest_parse_partial",
                 source="sessionend_writers.py", db=config.db_path(),
                 message=(
-                    f"digest parse: kind={kind!r} tl_line={tl_line!r}"
+                    f"digest parse: kind={kind!r}"
                     f" for sid={sid[:8]} — columns set NULL, body kept"
                 ),
             )
@@ -496,9 +495,9 @@ def seg_digest(conn, raw: str, sid: str, date: str,
     with conn:
         conn.execute(
             "INSERT OR REPLACE INTO session_digests"
-            " (sid, segment_seq, date, text, ts, kind, tl_line, life_lines)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (sid, segment_seq, date, body, ts_now, kind, tl_line, life_lines),
+            " (sid, segment_seq, date, text, ts, kind, life_lines)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (sid, segment_seq, date, body, ts_now, kind, life_lines),
         )
     if raw_llm is not None:
         try:
