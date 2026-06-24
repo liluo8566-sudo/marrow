@@ -90,5 +90,5 @@ def test_no_regression_watcher_logs(tmp_path, monkeypatch):
     from marrow import config, watcher
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     d = watcher._logs_dir()
-    assert d == tmp_path / "logs"
+    assert d == tmp_path / "logs" / "watcher"
     assert d.is_dir()

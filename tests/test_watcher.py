@@ -188,7 +188,7 @@ def test_logs_dir_created(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     d = watcher._logs_dir()
     assert d.exists() and d.is_dir()
-    assert d == tmp_path / "logs"
+    assert d == tmp_path / "logs" / "watcher"
 
 
 # ── outcome 3 — watchdog end-to-end round-trip ────────────────────────────

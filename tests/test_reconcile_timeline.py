@@ -225,8 +225,8 @@ def test_reconcile_tl_stub_day_line_no_writeback(conn, dash_path):
     assert row["tl_line"] is None
 
 
-def test_reconcile_tl_tone_tagged_line_strips_tag(conn, dash_path):
-    """HH:MM【tone】 prefix is display-only — stripped before write-back."""
+def test_reconcile_tl_tone_tagged_line_preserves_tag(conn, dash_path):
+    """HH:MM prefix is display-only; 【tone】 tag is preserved in write-back."""
     sid = "sid-tone"
     _insert_digest(conn, sid, tl="原始TL")
     dash_path.write_text(
@@ -236,20 +236,20 @@ def test_reconcile_tl_tone_tagged_line_strips_tag(conn, dash_path):
     row = conn.execute(
         "SELECT tl_line FROM session_digests WHERE sid=?", (sid,)
     ).fetchone()
-    assert row["tl_line"] == "用户改的TL"
+    assert row["tl_line"] == "【释怀】 用户改的TL"
 
 
-def test_reconcile_tl_tone_only_line_no_writeback(conn, dash_path):
-    """HH:MM【tone】-only line strips to empty → tl_line untouched."""
+def test_reconcile_tl_tone_only_line_writes_tag(conn, dash_path):
+    """HH:MM prefix is display-only; 【tone】-only line writes the tag."""
     sid = "sid-tone-only"
     _insert_digest(conn, sid, tl="原始TL")
     dash_path.write_text(f"## Timeline\n17:46【释怀】 <!-- tl:{sid} -->")
     rpt = reconcile_timeline(conn, dash_path)
-    assert rpt.updated == 0
+    assert rpt.updated == 1
     row = conn.execute(
         "SELECT tl_line FROM session_digests WHERE sid=?", (sid,)
     ).fetchone()
-    assert row["tl_line"] == "原始TL"
+    assert row["tl_line"] == "【释怀】"
 
 
 # ── deleted line = no-op ─────────────────────────────────────────────────────
@@ -528,7 +528,9 @@ def test_add_plus_line_yearless_context_uses_recent_past_year(
 def test_manual_event_appears_in_render(conn, dash_path):
     from marrow import timeline
     import datetime as _dt
-    ts_utc = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ts_utc = (
+        _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=5)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
     conn.execute(
         "INSERT INTO events (session_id, timestamp, role, content, channel)"
         " VALUES ('manual:aabbccdd', ?, 'user', '手动笔记测试', 'manual')",

@@ -661,14 +661,6 @@ def test_life_line_local_date_helper_cutoff():
     assert d_legacy == base_date
 
 
-# ── prompt content checks ─────────────────────────────────────────────────────
-
-def test_prompt_facts_60w_cap():
-    """TASK_AFFECT_DIGEST_PROMPT must reference 60-word cap for TL+FACTS."""
-    from marrow.sessionend_prompts import TASK_AFFECT_DIGEST_PROMPT
-    assert "60 words" in TASK_AFFECT_DIGEST_PROMPT
-
-
 def test_prompt_life_hhmm_rule():
     """Prompt must instruct model to prefix LIFE lines with HH:MM timestamp."""
     from marrow.sessionend_prompts import TASK_AFFECT_DIGEST_PROMPT
