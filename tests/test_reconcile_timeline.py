@@ -57,10 +57,11 @@ def _insert_digest(
     return ts
 
 
-def _insert_diary(conn, date: str, tl: str | None = "日记TL") -> None:
+def _insert_diary(conn, date: str, tl: str | None = "日记TL",
+                   tone: str | None = None) -> None:
     conn.execute(
-        "INSERT INTO diary (date, content, tl_line) VALUES (?, 'body', ?)",
-        (date, tl),
+        "INSERT INTO diary (date, content, tl_line, tone) VALUES (?, 'body', ?, ?)",
+        (date, tl, tone),
     )
     conn.commit()
 
@@ -215,7 +216,7 @@ def test_reconcile_tl_diary_unknown_date(conn, dash_path):
 def test_reconcile_tl_stub_day_line_no_writeback(conn, dash_path):
     """Prefix-only stub day line (NULL tl_line) strips to empty → no write-back."""
     date = "2026-06-07"
-    _insert_diary(conn, date, tl=None)
+    _insert_diary(conn, date, tl=None, tone="平淡")
     dash_path.write_text(
         f"## Timeline\n06-07 Day 【平淡】 <!-- tl:d:{date} -->"
     )

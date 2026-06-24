@@ -1309,6 +1309,7 @@ def reconcile_affect(conn: sqlite3.Connection,
                 if md_mtime_iso and row_created > md_mtime_iso:
                     rpt.unchanged += 1
                     continue
+                updates.append(("updated_at", _now()))
                 set_clause = ", ".join(f"{c}=?" for c, _ in updates)
                 params = [v for _, v in updates] + [aid]
                 conn.execute(
@@ -1697,7 +1698,7 @@ def reconcile_timeline(conn: sqlite3.Connection,
             if tone_m:
                 tone_edits[date] = tone_m.group(1)
 
-    if not sid_edits and not date_edits and not date_overview_edits and not m_trail and not plus_lines and not evt_edits and not trail_eps and not trail_sid_seqs:
+    if not sid_edits and not date_edits and not date_overview_edits and not tone_edits and not m_trail and not plus_lines and not evt_edits and not trail_eps and not trail_sid_seqs:
         return rpt
 
     now_iso = _now()
