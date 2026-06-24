@@ -151,9 +151,9 @@ def test_24h_cross_day_stale_sd_date_clips_per_life_line(conn, monkeypatch):
     )
     result = timeline.render_timeline(conn)
     assert "one-hour sleep before night shift" in result
-    assert "tea after the shift <!-- tl:b2f76aa9 -->" in result
+    assert "tea after the shift <!-- tl:b2f76aa9:0:2 -->" in result
     assert "clipped before window" in result
-    assert result.index("tea after the shift <!-- tl:b2f76aa9 -->") < result.index(
+    assert result.index("tea after the shift <!-- tl:b2f76aa9:0:2 -->") < result.index(
         "one-hour sleep before night shift"
     )
 
@@ -177,8 +177,8 @@ def test_24h_inline_tone_text_is_not_appended_from_affect():
     assert overflow == []
     assert lines == [
         "**06-22 Mon**",
-        "18:00 later line <!-- tl:s-tone-life -->",
-        "14:00 early line <!-- tl:s-tone-life -->",
+        "18:00 later line <!-- tl:s-tone-life:0:1 -->",
+        "14:00 early line <!-- tl:s-tone-life:0:0 -->",
     ]
 
 
@@ -201,7 +201,7 @@ def test_24h_life_line_with_model_timestamp_not_double_prefixed():
     assert overflow == []
     assert lines == [
         "**06-22 Mon**",
-        "01:25 【委屈】过敏难受 <!-- tl:s-double-ts -->",
+        "01:25 【委屈】过敏难受 <!-- tl:s-double-ts:0:0 -->",
     ]
     assert "01:54" not in lines[1]
 
@@ -226,7 +226,7 @@ def test_24h_cap_reports_overflow_line_indexes():
     content_lines = [ln for ln in lines if not ln.startswith("**")]
     assert len(content_lines) == timeline._24H_CAP
     assert lines[0] == "**06-22 Mon**"
-    assert "23:00 line 23 <!-- tl:s-cap -->" in lines[1]
+    assert "23:00 line 23 <!-- tl:s-cap:0:23 -->" in lines[1]
     assert overflow == [{"sid": "s-cap", "dropped_count": 4, "line_indexes": [3, 2, 1, 0]}]
 
 
@@ -256,9 +256,9 @@ def test_24h_manual_events_interleave():
     assert overflow == []
     assert lines == [
         "**06-22 Mon**",
-        "12:00 午后闲聊 <!-- tl:s-12 -->",
+        "12:00 午后闲聊 <!-- tl:s-12:0:0 -->",
         "11:00 manual note <!-- tl:e:42 -->",
-        "10:00 聊了会天 <!-- tl:s-10 -->",
+        "10:00 聊了会天 <!-- tl:s-10:0:0 -->",
     ]
 
 
@@ -287,9 +287,9 @@ def test_24h_calendar_divider_between_local_dates():
     assert overflow == []
     assert lines == [
         "**06-22 Mon**",
-        "00:30 凌晨聊天 <!-- tl:s-2200 -->",
+        "00:30 凌晨聊天 <!-- tl:s-2200:0:0 -->",
         "**06-21 Sun**",
-        "23:30 深夜散步 <!-- tl:s-2130 -->",
+        "23:30 深夜散步 <!-- tl:s-2130:0:0 -->",
     ]
 
 
@@ -649,12 +649,12 @@ def test_life_lines_resolve_against_event_span_midnight_crossing():
     assert overflow == []
     assert lines == [
         "**06-21 Sun**",
-        "08:59 morning wrap <!-- tl:b2f76aa9 -->",
-        "04:50 late snack <!-- tl:b2f76aa9 -->",
-        "02:39 after midnight note <!-- tl:b2f76aa9 -->",
+        "08:59 morning wrap <!-- tl:b2f76aa9:0:4 -->",
+        "04:50 late snack <!-- tl:b2f76aa9:0:3 -->",
+        "02:39 after midnight note <!-- tl:b2f76aa9:0:2 -->",
         "**06-20 Sat**",
-        "14:33 leaving for shift <!-- tl:b2f76aa9 -->",
-        "14:22 nap before shift <!-- tl:b2f76aa9 -->",
+        "14:33 leaving for shift <!-- tl:b2f76aa9:0:1 -->",
+        "14:22 nap before shift <!-- tl:b2f76aa9:0:0 -->",
     ]
 
 
@@ -676,7 +676,7 @@ def test_life_lines_render_reconcile_anchor_on_every_line():
     )
     assert overflow == []
     content_lines = [line for line in lines if not line.startswith("**")]
-    assert all("<!-- tl:s-every-line -->" in line for line in content_lines)
+    assert all("<!-- tl:s-every-line:0:" in line for line in content_lines)
 
 
 def test_zone_b_includes_session_by_max_event_ts(conn, monkeypatch):
@@ -775,11 +775,11 @@ def test_24h_first_life_line_sorts_by_own_display_time():
     assert overflow == []
     assert lines == [
         "**06-13 Sat**",
-        "20:10 晚上聊天 <!-- tl:s-early-first -->",
-        "12:00 中午任务 <!-- tl:s-midday -->",
-        "04:30 清晨醒来 <!-- tl:s-early-first -->",
+        "20:10 晚上聊天 <!-- tl:s-early-first:0:1 -->",
+        "12:00 中午任务 <!-- tl:s-midday:0:0 -->",
+        "04:30 清晨醒来 <!-- tl:s-early-first:0:0 -->",
         "**06-12 Fri**",
-        "22:00 前夜任务 <!-- tl:s-prev-evening -->",
+        "22:00 前夜任务 <!-- tl:s-prev-evening:0:0 -->",
     ]
     assert lines.count("**06-12 Fri**") == 1
     assert lines.count("**06-13 Sat**") == 1
