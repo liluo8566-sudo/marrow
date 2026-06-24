@@ -10,7 +10,7 @@ Per day, two sonnet calls:
   1. DAILY_CAND_PROMPT on aggregated session_digests → 3 marker blocks
      (ENTITY_CAND / MILESTONE_CAND / MEMES_CAND). Idempotent — gated on
      has_diary like the diary write itself.
-  2. DIARY_PROMPT on the same aggregate + affect_live → diary prose.
+  2. Diary prompt (daily_prompts.py) on the same aggregate + affect_live → diary prose.
 
 Reads `affect_live` + DIGEST text (session_digests table) for the target
 date. Writes diary row + candidate inserts in one daily run.
