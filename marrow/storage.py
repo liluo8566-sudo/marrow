@@ -13,7 +13,7 @@ import sqlite_vec
 
 from . import config
 
-SCHEMA_VERSION = 25
+SCHEMA_VERSION = 26
 
 # Phase 1 first-class tables + Phase 2 affect/entities (DECISIONS Phase 2).
 # The retired emotions/people/preferences/dir placeholders stay absent.
@@ -545,6 +545,7 @@ def init_db(path: str | None = None) -> sqlite3.Connection:
         _migrate_to_v23(conn)
         _migrate_to_v24(conn)
         _migrate_to_v25(conn)
+        _migrate_to_v26(conn)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     return conn
 
@@ -588,7 +589,8 @@ def _migrate_to_v2(conn: sqlite3.Connection) -> None:
         "  sid TEXT PRIMARY KEY,"
         "  date TEXT NOT NULL,"
         "  text TEXT NOT NULL,"
-        "  ts TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))"
+        "  ts TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),"
+        "  updated_at TEXT"
         ")"
     )
     conn.execute(
@@ -1033,6 +1035,7 @@ CREATE TABLE session_digests (
   date TEXT NOT NULL,
   text TEXT NOT NULL,
   ts TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  updated_at TEXT,
   kind TEXT,
   tl_line TEXT,
   life_lines TEXT,
@@ -1040,8 +1043,8 @@ CREATE TABLE session_digests (
   PRIMARY KEY (sid, segment_seq)
 );
 INSERT INTO session_digests
-  (sid, segment_seq, date, text, ts, kind, tl_line, life_lines, tl_hidden)
-SELECT sid, 0, date, text, ts, kind, tl_line, life_lines, tl_hidden
+  (sid, segment_seq, date, text, ts, updated_at, kind, tl_line, life_lines, tl_hidden)
+SELECT sid, 0, date, text, ts, NULL, kind, tl_line, life_lines, tl_hidden
 FROM session_digests_old;
 DROP TABLE session_digests_old;
 CREATE INDEX IF NOT EXISTS idx_session_digests_date ON session_digests(date);
@@ -1097,13 +1100,7 @@ END;
 
 
 def _migrate_to_v25(conn: sqlite3.Connection) -> None:
-    """v25: diary.tone + diary.overview — replace tl_line with structured fields.
-
-    tone: 2-char CN mood label for the day.
-    overview: 100-150 char single-paragraph day summary.
-    tl_line remains in schema for backward compatibility (existing rows).
-    Idempotent — duplicate ALTER swallowed; user_version short-circuits.
-    """
+    """v25: diary overview fields + session_digests.updated_at."""
     v = conn.execute("PRAGMA user_version").fetchone()[0]
     if v >= 25:
         return
@@ -1112,6 +1109,23 @@ def _migrate_to_v25(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE diary ADD COLUMN {col}")
         except sqlite3.OperationalError:
             pass
+    try:
+        conn.execute("ALTER TABLE session_digests ADD COLUMN updated_at TEXT")
+    except sqlite3.OperationalError:
+        pass
+    conn.execute("PRAGMA user_version=25")
+
+
+def _migrate_to_v26(conn: sqlite3.Connection) -> None:
+    """v26: ensure session_digests.updated_at for databases already at v25."""
+    v = conn.execute("PRAGMA user_version").fetchone()[0]
+    if v >= 26:
+        return
+    try:
+        conn.execute("ALTER TABLE session_digests ADD COLUMN updated_at TEXT")
+    except sqlite3.OperationalError:
+        pass
+    conn.execute("PRAGMA user_version=26")
 
 
 def get_latest_watermark(conn, sid):
