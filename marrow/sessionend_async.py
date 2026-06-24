@@ -78,11 +78,18 @@ def _to_local_date(utc_iso: str) -> str:
     return local.date().isoformat()
 
 
-def _user_event_count(conn, sid: str) -> int:
-    row = conn.execute(
-        "SELECT COUNT(*) c FROM events WHERE session_id = ? AND role = 'user'",
-        (sid,),
-    ).fetchone()
+def _user_event_count(conn, sid: str, after_event_id: int | None = None) -> int:
+    if after_event_id is not None:
+        row = conn.execute(
+            "SELECT COUNT(*) c FROM events"
+            " WHERE session_id = ? AND role = 'user' AND id > ?",
+            (sid, after_event_id),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT COUNT(*) c FROM events WHERE session_id = ? AND role = 'user'",
+            (sid,),
+        ).fetchone()
     return row["c"] if row else 0
 
 
@@ -193,15 +200,23 @@ def _drop_stale_skip(conn, sid: str, threshold: int) -> bool:
     return True
 
 
-def _session_events_text(conn, sid: str) -> tuple[str, str]:
+def _session_events_text(conn, sid: str,
+                         after_event_id: int | None = None) -> tuple[str, str]:
     """Return (raw events block, session date). Empty session -> ('', today).
     Transcript fence lives inside the prompt body (sessionend_prompts), so
     we only emit the role-tagged content here."""
-    rows = conn.execute(
-        "SELECT timestamp, role, content FROM events"
-        " WHERE session_id=? ORDER BY timestamp, id",
-        (sid,),
-    ).fetchall()
+    if after_event_id is not None:
+        rows = conn.execute(
+            "SELECT timestamp, role, content FROM events"
+            " WHERE session_id=? AND id > ? ORDER BY timestamp, id",
+            (sid, after_event_id),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT timestamp, role, content FROM events"
+            " WHERE session_id=? ORDER BY timestamp, id",
+            (sid,),
+        ).fetchall()
     if not rows:
         return "", _dt.date.today().isoformat()
     _p = config.persona()
@@ -326,6 +341,8 @@ def main(argv: list[str] | None = None) -> int:
     sid: str | None = None
     cwd: str = ""
     log_path: str = ""
+    after_event_id: int | None = None
+    segment_seq = 0
     i = 0
     while i < len(args):
         if args[i] == "--sid" and i + 1 < len(args):
@@ -336,6 +353,12 @@ def main(argv: list[str] | None = None) -> int:
             i += 2
         elif args[i] == "--log-path" and i + 1 < len(args):
             log_path = args[i + 1]
+            i += 2
+        elif args[i] == "--after-event-id" and i + 1 < len(args):
+            after_event_id = int(args[i + 1])
+            i += 2
+        elif args[i] == "--segment-seq" and i + 1 < len(args):
+            segment_seq = int(args[i + 1])
             i += 2
         else:
             i += 1
@@ -401,7 +424,7 @@ def main(argv: list[str] | None = None) -> int:
             except Exception:  # noqa: BLE001 — never block extraction on audit
                 pass
 
-            count = _user_event_count(conn, sid)
+            count = _user_event_count(conn, sid, after_event_id)
             if count == 0:
                 _write_final_audit(conn, sid, f"{_SUMMARY_SKIP},user_count=0")
                 return 0
@@ -410,12 +433,13 @@ def main(argv: list[str] | None = None) -> int:
                 _write_final_audit(conn, sid, f"{_SUMMARY_SKIP},user_count={count}")
                 return 0
 
-            events_text, date = _session_events_text(conn, sid)
+            events_text, date = _session_events_text(conn, sid, after_event_id)
             if not events_text:
                 _write_final_audit(conn, sid, "fail:no_events")
                 return 1
 
-            return _run_extraction(conn, sid, date, events_text, cfg, count, cwd)
+            return _run_extraction(conn, sid, date, events_text, cfg, count,
+                                   cwd, segment_seq)
         except Exception as e:  # noqa: BLE001
             try:
                 _write_final_audit(conn, sid, f"fail:{type(e).__name__}: {e}"[:220])
@@ -482,7 +506,7 @@ def _collect_run_failures(conn, sid: str) -> list[str]:
 
 def _run_extraction(conn, sid: str, date: str,
                     events_text: str, cfg: dict, count: int,
-                    cwd: str = "") -> int:
+                    cwd: str = "", segment_seq: int = 0) -> int:
     """Single sonnet call: TASK_AFFECT_DIGEST_PROMPT emits all segments.
     dashboard + embed_pending run at tail (fail-soft).
     """
@@ -523,7 +547,8 @@ def _run_extraction(conn, sid: str, date: str,
     _run_writer(conn, sid, "affect",
                 lambda: seg_affect(conn, raw, sid, date))
     _run_writer(conn, sid, "digest",
-                lambda: seg_digest(conn, raw, sid, date, raw_llm=raw),
+                lambda: seg_digest(conn, raw, sid, date, raw_llm=raw,
+                                   segment_seq=segment_seq),
                 zero_is_fail=True)
 
     # ── final audit ───────────────────────────────────────────────────────────
@@ -533,6 +558,12 @@ def _run_extraction(conn, sid: str, date: str,
     if not failures:
         _write_final_audit(conn, sid, f"{_OK_PREFIX}{count}")
         rc = 0
+        if segment_seq > 0:
+            max_ev = conn.execute(
+                "SELECT MAX(id) FROM events WHERE session_id=?", (sid,)
+            ).fetchone()[0]
+            if max_ev is not None:
+                storage.insert_watermark(conn, sid, segment_seq, max_ev, count)
     elif len(failures) >= len(all_writers):
         _write_final_audit(conn, sid, "fail:all")
         rc = 1

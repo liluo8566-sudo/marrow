@@ -444,7 +444,7 @@ def _prune_digest_logs() -> None:
 
 
 def seg_digest(conn, raw: str, sid: str, date: str,
-               raw_llm: str | None = None) -> int:
+               raw_llm: str | None = None, segment_seq: int = 0) -> int:
     """Persist DIGEST text into session_digests. INSERT OR REPLACE on sid.
 
     Parses KIND/TL/LIFE from the structured DIGEST block and writes the new
@@ -484,9 +484,9 @@ def seg_digest(conn, raw: str, sid: str, date: str,
     with conn:
         conn.execute(
             "INSERT OR REPLACE INTO session_digests"
-            " (sid, date, text, ts, kind, tl_line, life_lines)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (sid, date, body, ts_now, kind, tl_line, life_lines),
+            " (sid, segment_seq, date, text, ts, kind, tl_line, life_lines)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (sid, segment_seq, date, body, ts_now, kind, tl_line, life_lines),
         )
     if raw_llm is not None:
         try:

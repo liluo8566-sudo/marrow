@@ -140,10 +140,18 @@ def test_reconcile_deletes_when_row_removed(db, tmp_path):
     state = tmp_path / "state"
     md = _render_to_md(db, folder, state)
     text = md.read_text()
-    # Strip the "First meeting" row.
-    new_lines = [
-        ln for ln in text.splitlines() if "First meeting" not in ln
-    ]
+    # Strip the full "First meeting" block.
+    new_lines = []
+    skip_next = False
+    for ln in text.splitlines():
+        if skip_next:
+            skip_next = False
+            continue
+        if "First meeting" in ln:
+            skip_next = True
+            continue
+        new_lines.append(ln)
+    time.sleep(1.1)
     md.write_text("\n".join(new_lines) + "\n")
 
     conn = storage.connect(db)
@@ -368,6 +376,7 @@ def test_reconcile_deletes_h5_block(db, tmp_path):
         if drop:
             continue
         out.append(ln)
+    time.sleep(1.1)
     md.write_text("\n".join(out) + "\n")
     conn = storage.connect(db)
     try:
