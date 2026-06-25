@@ -206,7 +206,7 @@ def test_24h_life_line_with_model_timestamp_not_double_prefixed():
     assert "01:54" not in lines[1]
 
 
-def test_24h_cap_reports_overflow_line_indexes():
+def test_24h_renders_all_no_truncation():
     life = "\n".join(f"{h:02d}:00 line {h}" for h in range(24))
     lines, overflow = timeline._render_24h(
         [
@@ -224,10 +224,10 @@ def test_24h_cap_reports_overflow_line_indexes():
         to_utc="2026-06-22T14:00:00Z",
     )
     content_lines = [ln for ln in lines if not ln.startswith("**")]
-    assert len(content_lines) == timeline._24H_CAP
+    assert len(content_lines) == 24
     assert lines[0] == "**06-22 Mon**"
     assert "23:00 line 23 <!-- tl:s-cap:0:23 -->" in lines[1]
-    assert overflow == [{"sid": "s-cap", "dropped_count": 4, "line_indexes": [3, 2, 1, 0]}]
+    assert overflow == []
 
 
 def test_24h_manual_events_interleave():

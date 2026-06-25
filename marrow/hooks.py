@@ -848,7 +848,7 @@ def session_start() -> int:
                 parts.append(alert_block)
 
             from . import timeline as _timeline_mod
-            backdrop = _timeline_mod.render_timeline(conn)
+            backdrop = _timeline_mod.render_timeline(conn, inject_cap=_timeline_mod._INJECT_CAP)
             if backdrop:
                 parts.append(backdrop)
 

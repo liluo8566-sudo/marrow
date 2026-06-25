@@ -36,7 +36,7 @@ _MELB_TZ = ZoneInfo("Australia/Melbourne")
 _LIFE_TS_RE = _re.compile(r"^(\d{2}:\d{2})(?:\s+|(?=【))(.*)", _re.DOTALL)
 _CUTOFF_H = 6          # 6AM local day boundary
 _BUDGET = 4000         # soft char budget (safety net; zone caps control sizing)
-_24H_CAP = 20          # max film-strip lines
+_INJECT_CAP = 20       # max film-strip lines injected into context
 _OPEN_EXPIRY_DAYS = 7  # open episodes older than this are hidden
 
 
@@ -582,13 +582,11 @@ def _render_24h(digests: list[dict],
         })
 
     entries.sort(key=lambda e: e["ts"], reverse=True)
-    shown = entries[:_24H_CAP]
-    dropped = entries[_24H_CAP:]
 
     lines: list[str] = []
-    for cal_date in sorted({entry["local_date"] for entry in shown}, reverse=True):
+    for cal_date in sorted({entry["local_date"] for entry in entries}, reverse=True):
         lines.append(f"**{cal_date.strftime('%m-%d')} {cal_date.strftime('%a')}**")
-        for entry in (e for e in shown if e["local_date"] == cal_date):
+        for entry in (e for e in entries if e["local_date"] == cal_date):
             hhmm = entry["hhmm"]
             text = entry["text"]
             sid = entry.get("sid")
@@ -603,18 +601,7 @@ def _render_24h(digests: list[dict],
             else:
                 lines.append(f"{hhmm} {text}{anchor}")
 
-    overflow_by_sid: dict[str, dict] = {}
-    for entry in dropped:
-        sid = entry.get("sid")
-        if sid is None:
-            continue
-        item = overflow_by_sid.setdefault(
-            sid, {"sid": sid, "dropped_count": 0, "line_indexes": []}
-        )
-        item["dropped_count"] += 1
-        item["line_indexes"].append(entry["line_index"])
-
-    return lines, list(overflow_by_sid.values())
+    return lines, []
 
 
 def _render_zone_b(diary_data: dict[str, dict],
@@ -645,11 +632,13 @@ def _render_zone_b(diary_data: dict[str, dict],
 
 # ── main render ──────────────────────────────────────────────────────────────
 
-def render_timeline(conn: sqlite3.Connection) -> str:
+def render_timeline(conn: sqlite3.Connection,
+                    inject_cap: int | None = None) -> str:
     """Render the ## Timeline block.
 
     Uses UTC boundaries for DB queries; Melbourne local for display.
     Never naive datetime. Returns empty string if DB is empty/cold.
+    When inject_cap is set, Zone A is truncated to that many entries.
     """
     now_utc = _dt.datetime.now(_dt.timezone.utc)
     now_utc_iso = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -684,6 +673,8 @@ def render_timeline(conn: sqlite3.Connection) -> str:
         from_utc=yesterday_start_utc_iso, to_utc=now_utc_iso,
         event_spans=event_spans_24h,
     )
+    if inject_cap is not None:
+        lines_24h = lines_24h[:inject_cap]
 
     # ── zone B: 3 diary days before zone A start ──────────────────────────────
     zone_a_start_date = (now_melb - _dt.timedelta(days=1)).date()
