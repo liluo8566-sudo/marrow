@@ -333,8 +333,8 @@ def _parse_digest_block(raw: str) -> dict:
         block = raw.replace("===END===", "").strip()
 
     kind: str | None = None
-    tl_line: str | None = None
     life_parts: list[str] = []
+    facts_parts: list[str] = []
     life_section = False
     voice_section = False
     facts_section = False
@@ -349,8 +349,6 @@ def _parse_digest_block(raw: str) -> dict:
             if label == "KIND":
                 cand = value.lower()
                 kind = cand if cand in _VALID_KINDS else None
-            elif label == "TL":
-                tl_line = value if value else None
             elif label == "LIFE":
                 life_section = True
                 # Inline value on the same line (e.g. "LIFE: N/A")
@@ -367,6 +365,12 @@ def _parse_digest_block(raw: str) -> dict:
                 body_lines.append(line)
             elif label == "FACTS":
                 facts_section = True
+                if value.upper() == "N/A" or not value:
+                    facts_parts = []
+                else:
+                    item = value.lstrip("-").strip()
+                    if item:
+                        facts_parts.append(item)
                 body_lines.append(line)
         else:
             stripped = line.strip()
@@ -377,18 +381,22 @@ def _parse_digest_block(raw: str) -> dict:
                         life_parts.append(item)
                 body_lines.append(line)
             elif voice_section or facts_section:
+                if facts_section and stripped and stripped.upper() != "N/A":
+                    item = stripped.lstrip("-").strip()
+                    if item:
+                        facts_parts.append(item)
                 body_lines.append(line)
             elif stripped:
                 body_lines.append(line)
 
+    all_parts = life_parts or facts_parts
     life_lines: str | None = None
-    if life_parts:
-        life_lines = "\n".join(life_parts)
+    if all_parts:
+        life_lines = "\n".join(all_parts)
 
     body = "\n".join(body_lines).strip()
     return {
         "kind": kind,
-        "tl_line": tl_line,
         "life_lines": life_lines,
         "body": body,
     }
@@ -444,7 +452,7 @@ def _prune_digest_logs() -> None:
 
 
 def seg_digest(conn, raw: str, sid: str, date: str,
-               raw_llm: str | None = None) -> int:
+               raw_llm: str | None = None, segment_seq: int = 0) -> int:
     """Persist DIGEST text into session_digests. INSERT OR REPLACE on sid.
 
     Parses KIND/TL/LIFE from the structured DIGEST block and writes the new
@@ -462,18 +470,17 @@ def seg_digest(conn, raw: str, sid: str, date: str,
         return 0
 
     kind = parsed["kind"]
-    tl_line = parsed["tl_line"]
     life_lines = parsed["life_lines"]
 
-    # Alert on parse failures for kind/tl_line (critical structure).
-    if kind is None or tl_line is None:
+    # Alert on parse failures for kind (critical structure). TL no longer required.
+    if kind is None:
         try:
             from . import config, repo
             repo.add_alert(
                 "warn", "sessionend", "digest_parse_partial",
                 source="sessionend_writers.py", db=config.db_path(),
                 message=(
-                    f"digest parse: kind={kind!r} tl_line={tl_line!r}"
+                    f"digest parse: kind={kind!r}"
                     f" for sid={sid[:8]} — columns set NULL, body kept"
                 ),
             )
@@ -484,9 +491,9 @@ def seg_digest(conn, raw: str, sid: str, date: str,
     with conn:
         conn.execute(
             "INSERT OR REPLACE INTO session_digests"
-            " (sid, date, text, ts, kind, tl_line, life_lines)"
+            " (sid, segment_seq, date, text, ts, kind, life_lines)"
             " VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (sid, date, body, ts_now, kind, tl_line, life_lines),
+            (sid, segment_seq, date, body, ts_now, kind, life_lines),
         )
     if raw_llm is not None:
         try:

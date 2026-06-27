@@ -21,7 +21,7 @@ from marrow import recall as rm, repo, storage
 @pytest.fixture()
 def bug0_db(tmp_path):
     conn = storage.init_db(str(tmp_path / "bug0.db"))
-    base_date = dt.datetime(2026, 5, 19, 10, 0, 0, tzinfo=dt.timezone.utc)
+    base_date = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=5)
 
     # 12 events mentioning (李小云).
     lxy_ids: list[int] = []

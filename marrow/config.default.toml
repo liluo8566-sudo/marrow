@@ -120,6 +120,14 @@ skip_turn_threshold = 3
 # Tail embed batch size for sessionend_async. 0 = skip embed_pending.
 embed_batch = 200
 
+[sessionend_mid]
+scan_interval_min = 30
+elapsed_hours = 4
+turn_threshold_time = 10
+turn_threshold_abs = 30
+min_hours = 2
+min_turns = 5
+
 [memes_dedup]
 # Cosine similarity threshold for the bge-m3 dedup check against existing
 # milestones.title / entities_live.name / active memes.key. Hits ≥ this score

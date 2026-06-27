@@ -12,7 +12,8 @@ followed by a 7-state table:
   P1. bridge owns sessionend timing  -> skip
   P2. session_block latest = archive -> skip (Lumi archived; cleared = run)
   P3. manual_skip latest = skip      -> skip (manual_skip; skip_cleared = run)
-  P4. end_row.summary in {worktree=1, mm_minus_blocked} -> skip (alt close path)
+  P4. end_row.summary in {worktree=1, mm_minus_blocked, headless=1,
+      subagent=1} -> skip (alt close path)
   P5. sessionend_extract:start row newer than end_row -> skip (in-flight)
 
   1. ppid live (start marker ppid in live_cc_ppids) -> skip (active session)
@@ -213,9 +214,8 @@ def _classify(conn, sid: str, live_ppids: set[int]) -> Literal["spawn", "skip"]:
         return "skip"
 
     # P2-P3: latest-row semantics mirror hooks._is_session_blocked /
-    # _is_manual_skip. A `cleared` / `skip_cleared` row means mm+ has unblocked
-    # the sid and it should be processed normally — so we cannot treat the
-    # mere existence of these actions as terminal.
+    # _is_manual_skip. A `cleared` / `skip_cleared` row means the latest state
+    # is not terminal, so we cannot treat mere existence as terminal.
     block_latest = conn.execute(
         "SELECT summary FROM audit_log"
         " WHERE action='session_block' AND target_id=?"
@@ -256,8 +256,15 @@ def _classify(conn, sid: str, live_ppids: set[int]) -> Literal["spawn", "skip"]:
     ).fetchone()
 
     # P4: alternate close paths leave a typed end-marker summary. There is
-    # nothing left to catch up for worktree / mm_minus sessions.
-    if end_row and (end_row["summary"] or "") in ("worktree=1", "mm_minus_blocked"):
+    # nothing left to catch up for worktree / mm_minus / headless / subagent /
+    # pipeline sessions.
+    if end_row and (end_row["summary"] or "") in (
+        "worktree=1",
+        "mm_minus_blocked",
+        "headless=1",
+        "subagent=1",
+        "pipeline=1",
+    ):
         return "skip"
 
     # P5: in-flight guard — skip ONLY when all three hold:
@@ -290,6 +297,23 @@ def _classify(conn, sid: str, live_ppids: set[int]) -> Literal["spawn", "skip"]:
                 ).fetchone()
                 if terminal is None or not _is_terminal_summary(terminal["summary"]):
                     return "skip"  # genuinely in-flight
+
+    # P6: retry cap — stop if consecutive fail/partial rows since last terminal success
+    # exceed RETRY_LIMIT. Prevents infinite retry loops on sessions that can never
+    # produce events (e.g. mm+ reset on zero-event session).
+    fail_count_row = conn.execute(
+        "SELECT COUNT(*) c FROM audit_log"
+        " WHERE action='sessionend_extract' AND target_id=?"
+        " AND (summary LIKE 'fail:%' OR summary LIKE 'partial:%')"
+        " AND id > COALESCE("
+        "   (SELECT MAX(id) FROM audit_log"
+        "    WHERE action='sessionend_extract' AND target_id=?"
+        "    AND (summary='ok' OR summary LIKE 'ok,user_count=%'"
+        "         OR summary LIKE 'skip:%')), 0)",
+        (sid, sid),
+    ).fetchone()
+    if fail_count_row and fail_count_row["c"] >= RETRY_LIMIT:
+        return "skip"
 
     # Fetch most recent terminal row for this sid. `skip:short_session[,user_count=N]`
     # counts as terminal: short sessions need no LLM digest, and the embedded

@@ -883,19 +883,25 @@ def reconcile_diary(conn: sqlite3.Connection,
 
     # Load DB rows for dates present in md.
     db_rows: dict[str, str] = {}
+    db_updated_at: dict[str, str | None] = {}
     if md_dates:
         placeholders = ",".join("?" for _ in md_dates)
         for row in conn.execute(
-            f"SELECT date, content FROM diary WHERE date IN ({placeholders})",
+            f"SELECT date, content, updated_at FROM diary WHERE date IN ({placeholders})",
             list(md_dates),
         ).fetchall():
             db_rows[row["date"]] = row["content"] or ""
+            db_updated_at[row["date"]] = row["updated_at"]
 
     updates: list[tuple[str, str]] = []
     for date, md_content in blocks.items():
         if date not in db_rows:
             continue
         if md_content != (db_rows[date] or "").strip():
+            # Skip if DB row was written after the md snapshot (DB wins).
+            row_ua = db_updated_at.get(date)
+            if md_mtime_iso and row_ua and row_ua > md_mtime_iso:
+                continue
             updates.append((date, md_content))
 
     if updates:

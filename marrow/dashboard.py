@@ -26,7 +26,6 @@ from . import repo, top_sections
 from ._atomic import atomic_write as _atomic_write
 from .md_index import MdIndex
 from .reconcile import (reconcile_affect, reconcile_alerts,
-                        reconcile_milestone_candidates,
                         reconcile_tasks, reconcile_timeline,
                         emit_conflict_alerts)
 
@@ -149,16 +148,6 @@ def write_dashboard(path: str, conn, *, state_dir: str,
     # Reconcile md edits BEFORE render so Lumi's ✅/❌ + tick/untick flow back.
     # Fail-soft: a reconcile error must never block dashboard refresh.
     if os.path.exists(path):
-        try:
-            _rpt = reconcile_milestone_candidates(conn, Path(path))
-            emit_conflict_alerts(_rpt, "dashboard:milestone_candidates", db=db)
-        except Exception as e:
-            repo.add_alert(
-                "warn", "dashboard",
-                "dashboard_reconcile:milestone_candidates",
-                source="dashboard.py", db=db,
-                message=f"candidate reconcile failed: {e}; falling through to render",
-            )
         try:
             _rpt = reconcile_tasks(conn, Path(path))
             emit_conflict_alerts(_rpt, "dashboard:tasks", db=db)

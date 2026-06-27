@@ -48,7 +48,6 @@ File: `marrow/config.default.toml` → `[llm]` + `[llm.<name>]`
 
 - `default` / `emergency` — provider names (chain falls back on failure)
 - `[llm.claude_cli]` — uses cc subscription (no API key)
-- `[llm.ollama]` — local fallback (set `model = "<your-ollama-model>"`)
 - `[tiers]` — cheap / mid / top model ids; callers pass tiers, not ids
 
 ## 5. Channel / bridge

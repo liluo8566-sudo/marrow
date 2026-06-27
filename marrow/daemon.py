@@ -383,6 +383,166 @@ def book_annotations(book_id: str, chapter_id: str = "") -> list[dict]:
     """Read annotations (both frost and leith) for a book, optionally filtered by chapter."""
     q = f"?chapter={chapter_id}" if chapter_id else ""
     return _book_get(f"/api/books/{book_id}/annotations{q}")
+def _time_where(col, before, after):
+    clauses, params = [], []
+    if before:
+        clauses.append(f"{col} < ?")
+        params.append(before)
+    if after:
+        clauses.append(f"{col} >= ?")
+        params.append(after)
+    if clauses:
+        return " WHERE " + " AND ".join(clauses), params
+    return "", []
+
+
+def _do_delete(targets, before, after, last, sids=None):
+    import re, shutil, subprocess
+    from datetime import datetime, timezone
+
+    valid = {"events", "digests", "affect"}
+    bad = set(targets) - valid
+    if bad:
+        return {"ok": False, "error": f"unknown targets: {bad}. valid: {valid}"}
+
+    time_filtered = bool(before or after)
+    if time_filtered and last:
+        return {"ok": False, "error": "before/after and last are mutually exclusive"}
+    if sids and (time_filtered or last):
+        return {"ok": False, "error": "sids and before/after/last are mutually exclusive"}
+    if sids and set(targets) - {"digests"}:
+        return {"ok": False, "error": "sids only works with target 'digests'"}
+
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    backup = f"/tmp/marrow-backup-purge-{ts}.db"
+    shutil.copy2(str(_DB), backup)
+
+    _ts_col = {"events": "timestamp", "digests": "ts", "affect": "created_at"}
+    _table = {"events": "events", "digests": "session_digests", "affect": "affect"}
+    _pk = {"events": "id", "digests": "rowid", "affect": "id"}
+
+    if sids:
+        conn = storage.connect(_DB)
+        try:
+            placeholders = ",".join("?" * len(sids))
+            conn.execute(f"DELETE FROM session_digests WHERE sid IN ({placeholders})", sids)
+            conn.commit()
+        finally:
+            conn.close()
+        dash = Path.home() / "Desktop" / "NY" / "dashboard.md"
+        if dash.exists():
+            text = dash.read_text(encoding="utf-8")
+            for sid in sids:
+                text = re.sub(rf"[^\n]*<!-- tl:{re.escape(sid)} -->\n?", "", text)
+            rendered_m = re.search(r"<!-- tl-rendered:s=([^ ]+) -->", text)
+            if rendered_m:
+                old_ids = rendered_m.group(1).split(",")
+                new_ids = [s for s in old_ids if s not in sids]
+                if new_ids:
+                    text = text.replace(rendered_m.group(0), f"<!-- tl-rendered:s={','.join(new_ids)} -->")
+                else:
+                    text = text.replace(rendered_m.group(0), "")
+            dash.write_text(text, encoding="utf-8")
+        subprocess.run(["mw", "refresh", "--all"], capture_output=True, text=True)
+        return {"ok": True, "purged_sids": sids, "backup": backup}
+
+    if not (time_filtered or last):
+        dash = Path.home() / "Desktop" / "NY" / "dashboard.md"
+        if dash.exists():
+            text = dash.read_text(encoding="utf-8")
+            clear_tl = any(t in targets for t in ("events", "digests"))
+            if clear_tl:
+                text = re.sub(
+                    r"(<!-- id:dashboard\.timeline -->)\n## Timeline\n.*?(?=\n<!-- id:)",
+                    r"\1\n## Timeline\n_none_\n", text, flags=re.DOTALL)
+            if "affect" in targets:
+                text = re.sub(
+                    r"(<!-- id:dashboard\.affect -->)\n## Affect\n.*?(?=\n<!-- marrow:top:end)",
+                    r"\1\n## Affect\n### Today\n_none_\n### This Week\n_none_\n", text, flags=re.DOTALL)
+            dash.write_text(text, encoding="utf-8")
+
+    conn = storage.connect(_DB)
+    counts = {}
+    try:
+        for tgt in targets:
+            tbl, col, pk = _table[tgt], _ts_col[tgt], _pk[tgt]
+
+            if last:
+                if tgt == "events":
+                    sids = [r[0] for r in conn.execute(
+                        f"SELECT DISTINCT session_id FROM events WHERE {pk} IN "
+                        f"(SELECT {pk} FROM events ORDER BY {col} DESC LIMIT ?)", [last]).fetchall()]
+                conn.execute(
+                    f"DELETE FROM {tbl} WHERE {pk} IN "
+                    f"(SELECT {pk} FROM {tbl} ORDER BY {col} DESC LIMIT ?)", [last])
+                if tgt == "events" and sids:
+                    conn.executemany(
+                        "DELETE FROM audit_log WHERE action='sessionend_extract' AND target_id=?",
+                        [(s,) for s in sids])
+                counts[tgt] = last
+            elif time_filtered:
+                where, params = _time_where(col, before, after)
+                if tgt == "events":
+                    sids = [r[0] for r in conn.execute(
+                        "SELECT DISTINCT session_id FROM events" + where, params).fetchall()]
+                conn.execute(f"DELETE FROM {tbl}" + where, params)
+                if tgt == "events" and sids:
+                    conn.executemany(
+                        "DELETE FROM audit_log WHERE action='sessionend_extract' AND target_id=?",
+                        [(s,) for s in sids])
+            else:
+                if tgt == "events":
+                    triggers = conn.execute(
+                        "SELECT name, sql FROM sqlite_master WHERE type='trigger' AND tbl_name='events'"
+                    ).fetchall()
+                    for t in triggers:
+                        conn.execute(f"DROP TRIGGER IF EXISTS {t['name']}")
+                    conn.execute("DELETE FROM events")
+                    conn.execute("DELETE FROM event_tombstones")
+                    conn.execute("INSERT INTO events_fts(events_fts) VALUES('rebuild')")
+                    conn.execute("DELETE FROM events_vec")
+                    conn.execute(
+                        "DELETE FROM audit_log WHERE action='sessionend_extract'"
+                    )
+                    for t in triggers:
+                        conn.execute(t["sql"])
+                elif tgt == "digests":
+                    triggers = conn.execute(
+                        "SELECT name, sql FROM sqlite_master WHERE type='trigger' AND tbl_name='session_digests'"
+                    ).fetchall()
+                    for t in triggers:
+                        conn.execute(f"DROP TRIGGER IF EXISTS {t['name']}")
+                    conn.execute("DELETE FROM session_digests")
+                    conn.execute("INSERT INTO session_digests_fts(session_digests_fts) VALUES('rebuild')")
+                    for t in triggers:
+                        conn.execute(t["sql"])
+                elif tgt == "affect":
+                    conn.execute("DELETE FROM affect")
+
+        conn.commit()
+    finally:
+        conn.close()
+
+    subprocess.run(["mw", "refresh", "--all"], capture_output=True, text=True)
+    result = {"ok": True, "purged": targets, "backup": backup}
+    if before:
+        result["before"] = before
+    if after:
+        result["after"] = after
+    if last:
+        result["last"] = last
+    if counts:
+        result["counts"] = counts
+    return result
+
+
+@mcp.tool()
+def db_clear(targets: list[str], before: str = "", after: str = "", last: int = 0, sids: list[str] | None = None) -> dict:
+    """Delete events, digests, or affect data from marrow DB. Use when user asks to delete/clear/remove any DB data.
+    Targets: 'events' (events+FTS+vec+tombstones), 'digests' (session_digests+FTS), 'affect'.
+    Filters (mutually exclusive): before/after (ISO datetime or YYYY-MM-DD) for time range; last (int) to delete N most recent; sids (list of session IDs, digests only). Omit all filters to delete everything.
+    Backs up DB first. Handles FTS triggers and dashboard md block automatically."""
+    return _do_delete(targets, before, after, last, sids=sids)
 
 
 def main() -> None:

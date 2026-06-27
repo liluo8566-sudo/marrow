@@ -1181,3 +1181,67 @@ def test_bare_hyphenated_word_not_split(tmp_path):
 
     assert row is not None
     assert row["fact"] is None
+
+
+# ── mtime gate: UPDATE pass spares DB rows newer than md snapshot ─────────────
+
+def test_diary_update_skipped_when_db_newer_than_md(tmp_path):
+    """DB row updated_at > md mtime → md content is stale, UPDATE skipped."""
+    import os
+    import time as _time
+
+    db_path = _db(tmp_path)
+    conn = _conn(db_path)
+
+    future_ts = "2099-01-01T00:00:00Z"
+    with conn:
+        conn.execute(
+            "INSERT INTO diary(date,content,updated_at) VALUES('2026-06-20','db content',?)",
+            (future_ts,),
+        )
+
+    md = _make_diary_md(tmp_path, [
+        {"date": "2026-06-20", "content": "md content differs"},
+    ])
+    # Backdate md so its mtime is older than the DB updated_at.
+    old_t = _time.time() - 3600
+    os.utime(md, (old_t, old_t))
+
+    rpt = reconcile_diary(conn, md)
+    row = conn.execute(
+        "SELECT content FROM diary WHERE date='2026-06-20'"
+    ).fetchone()
+    conn.close()
+
+    assert rpt.updated == 0
+    assert row["content"] == "db content"
+
+
+def test_diary_update_applied_when_db_older_than_md(tmp_path):
+    """DB row updated_at < md mtime → md edit is authoritative, UPDATE applied."""
+    import os
+    import time as _time
+
+    db_path = _db(tmp_path)
+    conn = _conn(db_path)
+
+    old_ts = "2000-01-01T00:00:00Z"
+    with conn:
+        conn.execute(
+            "INSERT INTO diary(date,content,updated_at) VALUES('2026-06-20','old db content',?)",
+            (old_ts,),
+        )
+
+    md = _make_diary_md(tmp_path, [
+        {"date": "2026-06-20", "content": "edited in md"},
+    ])
+    # md mtime defaults to now — newer than old_ts, so md wins.
+
+    rpt = reconcile_diary(conn, md)
+    row = conn.execute(
+        "SELECT content FROM diary WHERE date='2026-06-20'"
+    ).fetchone()
+    conn.close()
+
+    assert rpt.updated == 1
+    assert row["content"] == "edited in md"

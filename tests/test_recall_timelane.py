@@ -27,6 +27,14 @@ from marrow.timecue import melb_day_range, parse_time_cue
 _MELB = ZoneInfo("Australia/Melbourne")
 
 
+def _recent_melb_event(day_offset: int = 0) -> tuple[str, str]:
+    local = datetime.now(_MELB).replace(
+        hour=15, minute=0, second=0, microsecond=0
+    ) + timedelta(days=day_offset)
+    ts = local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return local.date().isoformat(), ts
+
+
 # ── fixtures ──────────────────────────────────────────────────────────────────
 
 @pytest.fixture()
@@ -134,7 +142,7 @@ def test_diary_filtered_by_window(db):
     _e = _dt.fromisoformat(until.replace("Z", "+00:00"))
     dates: set[str] = set()
     _cur = _s
-    while _cur < _e:
+    while _cur <= _e:
         dates.add(timeutil.utc_iso_to_local_date(_cur.strftime("%Y-%m-%dT%H:%M:%SZ")))
         _cur += _td(days=1)
     assert "2026-06-09" in dates
@@ -219,10 +227,12 @@ def test_daemon_empty_query_returns_digests(db):
 
 
 def test_recall_with_config_threads_window(db):
-    _make_event(db, "uniqueword999 at the cafe", "s1", "2026-06-09T05:00:00Z")
-    _make_event(db, "uniqueword999 at the cafe", "s2", "2026-06-07T05:00:00Z")
+    day, in_ts = _recent_melb_event()
+    _, out_ts = _recent_melb_event(-2)
+    _make_event(db, "uniqueword999 at the cafe", "s1", in_ts)
+    _make_event(db, "uniqueword999 at the cafe", "s2", out_ts)
 
-    since, until = melb_day_range("2026-06-09")
+    since, until = melb_day_range(day)
     with patch("marrow.recall._ensure_embedder", return_value=None):
         hits = rm.recall_with_config(db, "uniqueword999",
                                      since=since, until=until,
@@ -238,10 +248,11 @@ def test_hooks_windowed_hits_come_first(db, tmp_path):
     """Windowed hits take top injection slots before semantic hits."""
     from marrow import hooks, config as cfg
 
-    _make_event(db, "uniqueterm888 walked the dog", "sw1", "2026-06-09T05:00:00Z")
+    day, in_ts = _recent_melb_event()
+    _make_event(db, "uniqueterm888 walked the dog", "sw1", in_ts)
     _make_event(db, "unrelated old content extra", "so1", "2026-04-01T05:00:00Z")
 
-    since, until = melb_day_range("2026-06-09")
+    since, until = melb_day_range(day)
 
     # Simulate what the hook does: windowed hits should come before semantic
     with patch("marrow.recall._ensure_embedder", return_value=None):

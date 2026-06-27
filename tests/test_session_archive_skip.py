@@ -3,7 +3,7 @@
 Feature: session_archive_skip_manual
 - mm- prefix: UserPromptSubmit writes audit_log manual_skip/skip row for sid
 - sessionend_async respects skip flag, bypasses LLM + diary
-- mm+ prefix / mw sessionend rerun: force-overwrite done marker, rerun pipeline
+- mm+ prefix: clears manual skip and marks the sid for sessionend
 - resume: session_start detects prior lifecycle:start row, clears any skip
 - auto 3-turn skip is unchanged
 """
@@ -111,10 +111,10 @@ def test_skip_blocks_sessionend_llm(env, monkeypatch):
         f"expected skip:manual in audit_log, got: {summaries!r}")
 
 
-# ── Test 3: mm+ reruns sid ────────────────────────────────────────────────────
+# ── Test 3: mm+ flags sid ────────────────────────────────────────────────────
 
-def test_mm_plus_reruns_sid(env, monkeypatch, tmp_path):
-    """mm+ <uuid> -> force-clears done marker, sessionend_async runs end-to-end (LLM called + write)."""
+def test_mm_plus_flags_sid_for_sessionend(env, monkeypatch, tmp_path):
+    """mm+ <uuid> clears manual skip and sets force_sessionend."""
     db, data_tmp = env
     sid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
     _insert_events(db, sid, count=10)
@@ -139,27 +139,21 @@ def test_mm_plus_reruns_sid(env, monkeypatch, tmp_path):
         rc = hooks.main(["user_prompt_submit"])
     assert rc == 0
 
-    # popen must have been called with sessionend_async --sid <sid>.
-    async_calls = [c for c in spawned if "sessionend_async" in " ".join(c)]
-    assert len(async_calls) == 1, f"expected 1 sessionend_async spawn, got: {spawned}"
-    assert "--sid" in async_calls[0]
-    idx = async_calls[0].index("--sid") + 1
-    assert async_calls[0][idx] == sid
+    assert spawned == []
 
-    # reset:mm_plus row must exist in audit_log.
-    reset_rows = _audit_rows(db, sid, action="sessionend_extract")
-    reset_summaries = [r["summary"] for r in reset_rows]
-    assert "reset:mm_plus" in reset_summaries, (
-        f"expected reset:mm_plus row, got: {reset_summaries!r}")
+    force_rows = _audit_rows(db, sid, action="force_sessionend")
+    assert [r["summary"] for r in force_rows] == ["mm_plus_flag"]
+    skip_rows = _audit_rows(db, sid, action="manual_skip")
+    assert [r["summary"] for r in skip_rows] == ["skip_cleared"]
 
-    # After reset, sessionend_async should call LLM (ok row was overridden by reset row).
+    # The force flag overrides the prior ok row when sessionend_async runs later.
     llm_called = []
     with patch("marrow.sessionend_async.LLMClient") as MockClient:
         MockClient.return_value.call.return_value = "echo done"
         from marrow import sessionend_async
         rc2 = sessionend_async.main(["--sid", sid])
     assert rc2 == 0
-    assert MockClient.return_value.call.called, "LLM must be called after mm+ rerun"
+    assert MockClient.return_value.call.called, "LLM must be called after force flag"
 
 
 # ── Test 4: resume clears skip, sessionend runs normally ─────────────────────
@@ -298,13 +292,10 @@ def test_mm_minus_blocks_session_end_archive(env, monkeypatch, tmp_path):
     assert lifecycle[0]["summary"] == "mm_minus_blocked"
 
 
-# ── Test 7: mm+ after mm- reverts the block (last-wins) ──────────────────────
+# ── Test 7: mm+ after mm- keeps archive block ────────────────────────────────
 
-def test_mm_plus_clears_prior_mm_minus_block(env, monkeypatch, tmp_path):
-    """Last-wins: mm- then mm+ on the same sid must let session_end run the
-    normal archive path. mm+ writes skip_cleared + block cleared so neither
-    gate fires.
-    """
+def test_mm_plus_after_mm_minus_keeps_archive_block(env, monkeypatch, tmp_path):
+    """mm+ clears manual skip but does not undo mm-'s archive block."""
     db, _ = env
     (tmp_path / "logs").mkdir(exist_ok=True)
     sid = "test-mm-minus-then-plus"
@@ -314,20 +305,20 @@ def test_mm_plus_clears_prior_mm_minus_block(env, monkeypatch, tmp_path):
     assert hooks.main(["user_prompt_submit"]) == 0
     assert hooks._is_session_blocked(storage.connect(db), sid) is True
 
-    # Step 2: mm+ on the same sid (popen mocked, no real subprocess).
+    # Step 2: mm+ on the same sid.
     _stdin(monkeypatch, {"prompt": "mm+", "session_id": sid})
     with patch("marrow.hooks.popen_detach_lazy"):
         assert hooks.main(["user_prompt_submit"]) == 0
 
-    # Both gates now cleared (latest row wins).
+    # manual_skip is clear, but session_block remains archived.
     conn = storage.connect(db)
     try:
-        assert hooks._is_session_blocked(conn, sid) is False
+        assert hooks._is_session_blocked(conn, sid) is True
         assert hooks._is_manual_skip(conn, sid) is False
     finally:
         conn.close()
 
-    # Step 3: session_end now runs the normal archive path.
+    # Step 3: session_end remains blocked from archive ingestion.
     tpath = tmp_path / "fake.jsonl"
     tpath.write_text("")
     _stdin(monkeypatch, {
@@ -341,8 +332,10 @@ def test_mm_plus_clears_prior_mm_minus_block(env, monkeypatch, tmp_path):
                       return_value=[{"session_id": sid,
                                      "timestamp": "2026-06-02T21:00:00Z",
                                      "role": "user", "content": "hi"}]) as mclean, \
-         patch.object(hooks.repo, "archive_events") as march:
+         patch.object(hooks.repo, "archive_events") as march, \
+         patch.object(hooks, "popen_detach_lazy") as mpop:
         rc = hooks.session_end()
     assert rc == 0
-    mclean.assert_called_once()
-    march.assert_called_once()  # archive ran — not blocked
+    mclean.assert_not_called()
+    march.assert_not_called()
+    mpop.assert_not_called()

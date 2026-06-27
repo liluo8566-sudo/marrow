@@ -1,15 +1,15 @@
 """Tests for _handle_mm_prefix three-branch logic in hooks.py.
 
 Covers:
-  - mm+ empty arg        → current sid spawn (existing behaviour)
-  - mm+ UUID arg         → named sid spawn
+  - mm+ empty arg        → current sid force flag
+  - mm+ UUID arg         → named sid force flag
   - mm+ natural-language → no audit write, no spawn, stdout has injection JSON
   - mm- natural-language → same handoff
   - mm- empty            → current sid manual_skip (existing behaviour)
   - mm- UUID arg         → named sid manual_skip
-  - mm+ current sid      → pre-archives jsonl before spawn
-  - mm+ named sid        → skips archive (other sid's session)
-  - mm+ missing jsonl    → fails silently, spawn still fires
+  - mm! empty            → lists sessions without successful sessionend
+  - mm! UUID             → immediate named sid spawn
+  - mm!! current sid     → pre-archives jsonl before spawn
 """
 from __future__ import annotations
 
@@ -66,10 +66,10 @@ def test_looks_like_sid_rejects_empty():
     assert hooks._looks_like_sid("") is False
 
 
-# ── mm+ empty → current sid spawn ────────────────────────────────────────────
+# ── mm+ empty → current sid force flag ───────────────────────────────────────
 
-def test_mm_plus_empty_spawns_current_sid(env, monkeypatch, capsys):
-    """mm+ with no arg after prefix runs sessionend_async for the current sid."""
+def test_mm_plus_empty_flags_current_sid(env, monkeypatch, capsys):
+    """mm+ with no arg clears manual skip and flags current sid for sessionend."""
     db, tmp_path = env
     (tmp_path / "logs").mkdir(exist_ok=True)
     _stdin(monkeypatch, {"prompt": "mm+", "session_id": "cur-sid-001"})
@@ -78,25 +78,26 @@ def test_mm_plus_empty_spawns_current_sid(env, monkeypatch, capsys):
                side_effect=lambda a, log_path: popen_calls.append(a)):
         rc = hooks.main(["user_prompt_submit"])
     assert rc == 0
-    assert capsys.readouterr().out == ""  # no recall injection for mm+ prompts
-    assert any("sessionend_async" in " ".join(c) for c in popen_calls)
-    # Audit row written for current sid
+    assert "mm+ control signal" in capsys.readouterr().out
+    assert popen_calls == []
     conn = storage.connect(db)
     try:
-        row = conn.execute(
-            "SELECT summary FROM audit_log"
-            " WHERE target_id='cur-sid-001' AND action='sessionend_extract' LIMIT 1"
-        ).fetchone()
+        rows = conn.execute(
+            "SELECT action, summary FROM audit_log"
+            " WHERE target_id='cur-sid-001' ORDER BY id"
+        ).fetchall()
     finally:
         conn.close()
-    assert row is not None
-    assert row["summary"] == "reset:mm_plus"
+    assert [(r["action"], r["summary"]) for r in rows] == [
+        ("manual_skip", "skip_cleared"),
+        ("force_sessionend", "mm_plus_flag"),
+    ]
 
 
-# ── mm+ UUID → named sid spawn ────────────────────────────────────────────────
+# ── mm+ UUID → named sid force flag ──────────────────────────────────────────
 
-def test_mm_plus_uuid_spawns_named_sid(env, monkeypatch, capsys):
-    """mm+ <uuid> runs sessionend_async for the given sid, not current."""
+def test_mm_plus_uuid_flags_named_sid(env, monkeypatch, capsys):
+    """mm+ <uuid> flags the given sid, not current."""
     db, tmp_path = env
     (tmp_path / "logs").mkdir(exist_ok=True)
     named_sid = "7f1473ca-a8ab-4207-a8a8-57418d3a2c5b"
@@ -106,21 +107,81 @@ def test_mm_plus_uuid_spawns_named_sid(env, monkeypatch, capsys):
                side_effect=lambda a, log_path: popen_calls.append(a)):
         rc = hooks.main(["user_prompt_submit"])
     assert rc == 0
-    assert capsys.readouterr().out == ""
-    assert any("sessionend_async" in " ".join(c) for c in popen_calls)
-    # The popen call must reference the named sid, not current
-    spawned_args = [c for c in popen_calls if "sessionend_async" in " ".join(c)]
-    assert any(named_sid in " ".join(c) for c in spawned_args)
-    # Audit row for named sid
+    assert "mm+ control signal" in capsys.readouterr().out
+    assert popen_calls == []
     conn = storage.connect(db)
     try:
+        rows = conn.execute(
+            "SELECT action, summary FROM audit_log"
+            " WHERE target_id=? ORDER BY id",
+            (named_sid,),
+        ).fetchall()
+    finally:
+        conn.close()
+    assert [(r["action"], r["summary"]) for r in rows] == [
+        ("manual_skip", "skip_cleared"),
+        ("force_sessionend", "mm_plus_flag"),
+    ]
+
+
+def test_mm_plus_force_flag_survives_context_manager_rollback(env, monkeypatch, capsys):
+    """force_sessionend is written after a rolled-back earlier context."""
+    db, tmp_path = env
+    (tmp_path / "logs").mkdir(exist_ok=True)
+    named_sid = "7f1473ca-a8ab-4207-a8a8-57418d3a2c5b"
+    real_connect = storage.connect
+
+    class RollbackFirstContext:
+        def __init__(self, conn):
+            self._conn = conn
+            self._rollback_next = True
+
+        def __enter__(self):
+            self._conn.__enter__()
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            if self._rollback_next and exc_type is None:
+                self._rollback_next = False
+                self._conn.rollback()
+                return False
+            return self._conn.__exit__(exc_type, exc, tb)
+
+        def execute(self, *args, **kwargs):
+            return self._conn.execute(*args, **kwargs)
+
+        def commit(self):
+            return self._conn.commit()
+
+        def close(self):
+            return self._conn.close()
+
+    monkeypatch.setattr(
+        storage, "connect",
+        lambda path=None: RollbackFirstContext(real_connect(path)),
+    )
+    _stdin(monkeypatch, {"prompt": f"mm+ {named_sid}", "session_id": "other-sid"})
+    popen_calls = []
+    with patch("marrow.hooks.popen_detach_lazy",
+               side_effect=lambda a, log_path: popen_calls.append(a)):
+        rc = hooks.main(["user_prompt_submit"])
+
+    assert rc == 0
+    assert "mm+ control signal" in capsys.readouterr().out
+    assert popen_calls == []
+
+    conn = real_connect(db)
+    try:
         row = conn.execute(
-            "SELECT 1 FROM audit_log"
-            f" WHERE target_id='{named_sid}' AND action='sessionend_extract' LIMIT 1"
+            "SELECT summary FROM audit_log"
+            " WHERE target_id=? AND action='force_sessionend'"
+            " ORDER BY id DESC LIMIT 1",
+            (named_sid,),
         ).fetchone()
     finally:
         conn.close()
     assert row is not None
+    assert row["summary"] == "mm_plus_flag"
 
 
 # ── mm+ natural language → inject + no spawn ─────────────────────────────────
@@ -153,7 +214,7 @@ def test_mm_plus_natural_language_injects_context(env, monkeypatch, capsys):
     ctx = data["hookSpecificOutput"]["additionalContext"]
     assert data["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
     assert "mm+" in ctx
-    assert "定位请求" in ctx
+    assert "locate request" in ctx
     # Clue text appears (first line, stripped)
     assert "我来试试看" in ctx
 
@@ -184,7 +245,7 @@ def test_mm_minus_natural_language_injects_context(env, monkeypatch, capsys):
     data = json.loads(out)
     ctx = data["hookSpecificOutput"]["additionalContext"]
     assert "mm-" in ctx
-    assert "定位请求" in ctx
+    assert "locate request" in ctx
     assert clue in ctx
 
 
@@ -234,7 +295,7 @@ def test_mm_minus_uuid_skips_named_sid(env, monkeypatch, capsys):
     assert row["summary"] == "skip"
 
 
-# ── mm+ active session → pre-archive events before spawn ─────────────────────
+# ── mm! / mm!! immediate sessionend controls ─────────────────────────────────
 
 def _make_jsonl(path, sid: str, n_turns: int = 5) -> None:
     """Write a minimal non-headless jsonl with n_turns user turns."""
@@ -249,8 +310,60 @@ def _make_jsonl(path, sid: str, n_turns: int = 5) -> None:
     path.write_text("\n".join(lines))
 
 
-def test_mm_plus_active_session_archives_events_before_spawn(env, monkeypatch, capsys):
-    """mm+ on current sid pre-archives jsonl; events table has rows after hook."""
+def test_mm_bang_lists_unrun_sessions(env, monkeypatch, capsys):
+    db, _ = env
+    conn = storage.connect(db)
+    with conn:
+        conn.execute(
+            "INSERT INTO sessions (sid, title, channel)"
+            " VALUES ('sid-ok', 'Done', 'cli')"
+        )
+        conn.execute(
+            "INSERT INTO sessions (sid, title, channel)"
+            " VALUES ('sid-missing', 'Needs run', 'wx')"
+        )
+        conn.execute(
+            "INSERT INTO audit_log (target_table, target_id, action, summary)"
+            " VALUES ('events', 'sid-ok', 'sessionend_extract', 'ok,user_count=4')"
+        )
+    conn.close()
+
+    _stdin(monkeypatch, {"prompt": "mm！", "session_id": "cur"})
+    rc = hooks.main(["user_prompt_submit"])
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    ctx = data["hookSpecificOutput"]["additionalContext"]
+    assert "sid-missing" in ctx
+    assert "sid-ok" not in ctx
+
+
+def test_mm_bang_uuid_spawns_named_sid(env, monkeypatch, capsys):
+    db, tmp_path = env
+    (tmp_path / "logs").mkdir(exist_ok=True)
+    named_sid = "7f1473ca-a8ab-4207-a8a8-57418d3a2c5b"
+    _stdin(monkeypatch, {"prompt": f"mm! {named_sid}", "session_id": "other-sid"})
+    popen_calls = []
+    with patch("marrow.hooks.popen_detach_lazy",
+               side_effect=lambda a, log_path: popen_calls.append(a)):
+        rc = hooks.main(["user_prompt_submit"])
+    assert rc == 0
+    assert "mm! control signal" in capsys.readouterr().out
+    spawned = [c for c in popen_calls if "sessionend_async" in " ".join(c)]
+    assert any(named_sid in " ".join(c) for c in spawned)
+    conn = storage.connect(db)
+    try:
+        row = conn.execute(
+            "SELECT summary FROM audit_log"
+            " WHERE target_id=? AND action='force_sessionend'",
+            (named_sid,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["summary"] == "mm_immediate"
+
+
+def test_mm_bang_bang_active_session_archives_events_before_spawn(env, monkeypatch, capsys):
+    """mm!! on current sid pre-archives jsonl; events table has rows after hook."""
     db, tmp_path = env
     (tmp_path / "logs").mkdir(exist_ok=True)
     sid = "aabbccdd-1111-2222-3333-444455556666"
@@ -258,7 +371,7 @@ def test_mm_plus_active_session_archives_events_before_spawn(env, monkeypatch, c
     _make_jsonl(jl, sid, n_turns=5)
 
     _stdin(monkeypatch, {
-        "prompt": "mm+",
+        "prompt": "mm！！",
         "session_id": sid,
         "transcript_path": str(jl),
     })
@@ -267,8 +380,8 @@ def test_mm_plus_active_session_archives_events_before_spawn(env, monkeypatch, c
                side_effect=lambda a, log_path: popen_calls.append(a)):
         rc = hooks.main(["user_prompt_submit"])
     assert rc == 0
+    assert "mm!! control signal" in capsys.readouterr().out
 
-    # Spawn fired
     assert any("sessionend_async" in " ".join(c) for c in popen_calls)
     spawned = [c for c in popen_calls if "sessionend_async" in " ".join(c)]
     assert any(sid in " ".join(c) for c in spawned)
@@ -284,8 +397,8 @@ def test_mm_plus_active_session_archives_events_before_spawn(env, monkeypatch, c
     assert n == 5
 
 
-def test_mm_plus_named_sid_skips_archive(env, monkeypatch, capsys):
-    """mm+ <other-uuid> does NOT archive current session's jsonl."""
+def test_mm_bang_named_sid_skips_archive(env, monkeypatch, capsys):
+    """mm! <other-uuid> does NOT archive current session's jsonl."""
     db, tmp_path = env
     (tmp_path / "logs").mkdir(exist_ok=True)
     current_sid = "c0ffee00-0000-0000-0000-000000000000"
@@ -294,7 +407,7 @@ def test_mm_plus_named_sid_skips_archive(env, monkeypatch, capsys):
     _make_jsonl(jl, current_sid, n_turns=3)
 
     _stdin(monkeypatch, {
-        "prompt": f"mm+ {other_sid}",
+        "prompt": f"mm! {other_sid}",
         "session_id": current_sid,
         "transcript_path": str(jl),
     })
@@ -332,7 +445,7 @@ def test_mm_plus_named_sid_skips_archive(env, monkeypatch, capsys):
     assert n == 0
 
 
-def test_mm_plus_jsonl_missing_still_spawns(env, monkeypatch, capsys):
+def test_mm_bang_bang_jsonl_missing_still_spawns(env, monkeypatch, capsys):
     """Non-existent transcript_path silently skipped; spawn still fires."""
     db, tmp_path = env
     (tmp_path / "logs").mkdir(exist_ok=True)
@@ -340,7 +453,7 @@ def test_mm_plus_jsonl_missing_still_spawns(env, monkeypatch, capsys):
     nonexistent = str(tmp_path / "no_such_file.jsonl")
 
     _stdin(monkeypatch, {
-        "prompt": "mm+",
+        "prompt": "mm!!",
         "session_id": sid,
         "transcript_path": nonexistent,
     })

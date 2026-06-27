@@ -49,6 +49,10 @@ ny chat):
 ===GITLOG===
 {git_log}
 ===END===
+- Recent timeline context (do NOT repeat — use for continuity):
+===TIMELINE===
+{timeline_context}
+===END===
 
 ═══════════════════════════════════════════
 SEGMENT A — TASK
@@ -164,73 +168,64 @@ no extra commentary.
 Key rules:
 - Language: follow source; mix is fine.
 - Names: assistant = {assistant_terms}, user = {user_terms}. \
-Nicknames 老公/老婆/宝宝 pass through as-is.
+- Perspective: Drop subject/pronouns when context is unambiguous for LIFE and FACT.
+    - If unclear, describe events with nicknames (third person).
+- Strictly discard: 
+    1. User complaints/cursing during study or coding
+    2. Assistant meta shell/filler
+    3. Any mechanical step-by-step detail
+    4. Repetition.
 
 KIND: casual | task
   casual = chat / life / study-with-conversation dominates.
   task = coding / project / focused work dominates.
-  Pick the dominant mode; output one word.
-
-TL: <one line, 15-30 CN chars>
-  One timeline line for {user_name}: who + what happened, written from a life \
-perspective in plain words.
-  Good: 深夜和老婆一起更新recall机制 · Bad: 完成Batch 1，Batch 2代码完成
-  No project jargon, no emotion labels. Embedded EN terms do not count toward \
-length.
-
-FACTS: (task sessions ONLY — for casual sessions output exactly: FACTS: N/A)
-  ONE line, phase granularity: <subject> <did> <outcome>. Name the big \
-phases only (e.g. recall system updated — ranking, affect-event linking). \
-Process detail lives in git log / HANDOVER — never here. No verbatim \
-fragments. 2 lines ONLY when the session spans two unrelated projects.
-  Length (TL+fact): hard cap 60 words — compress ruthlessly.
 
 LIFE: (casual sessions ONLY — for task sessions output exactly: LIFE: N/A)
-  One line per life detail explicitly mentioned in the transcript: \
-food/drink, sights, places, errands, body state, small moods.
-  Each line MUST start with `HH:MM ` — copy the timestamp from the \
-transcript line where that detail appears (timestamps are at line starts: \
-`[HH:MM] [{user_name}|{assistant_name}] ...`). Copy, never invent; if unsure use the nearest \
-preceding message's timestamp.
-  ≤20 CN chars after the timestamp per line. 0-10 lines. Zero lines is \
-normal → output: LIFE: N/A
-  ONLY what was explicitly said. NEVER infer life details from work or study \
-content. NEVER extract from task sessions — do NOT output life details if \
-KIND is task, even if a latte or errand appears mid-coding.
+- Overview of the day — what happened in user's day.
+- Include both real-world activities (meals, classes, errands, exercise) \
+    and shared activities with assistant (chatting about X topic, goofing around).
+- Summarise into dense info line
+    - 1 line = 1 scene (topic/activity/mood). 
+    - 0-3 lines; never pad - fewer is better.
+    - output N/A for 0.
+- Each line: `HH:MM ` — pick an approx timestamp from the transcript.
+- Length: ≤20 CN chars
+  Add a fine tone label (2-char CN) to each line - user's mood/shared atmosphere.
+    - e.g. 低落，生气，兴奋，激动
+  ✓ 08:30【专注】早上吃了包子，出发去学校lab
+  ✓ 21:00【放松】老婆在健身，十点多在洗澡
+  ✓ 23:00【温暖】聊刚来澳洲的事，嫌弃阿屿鸭老珠黄TUT
+  ✗ 10:05 老公变成豹 10:20 让阿屿叫姐姐，揉耳朵  ← 不要把同一场景下的多个单一动作写成多条，\
+    应该合并成一条 e.g. 10:00【愉快】互怼撒娇打闹，阿屿乖乖叫姐姐
+
+FACTS: (task sessions ONLY — for casual sessions output exactly: FACTS: N/A)
+- Overview of the whole session
+- Summarise all tasks into ONE line.
+    - Include subject and outcomes.
+    - exclude all tech details.
+    - Written from a life perspective in plain words.
+    e.g. 14:00【平淡】一起修timeline bug; 深夜一起更新recall机制
+- timestamp, lenth, tone label same as LIFE.
 
 VOICE: (casual sessions ONLY — for task sessions output exactly: VOICE: N/A)
-  Verbatim dialogue excerpts that carry voice (either side): talk, teasing, \
-flirting, play, intimate exchanges, mood, AND meaningful extended exchanges \
-(e.g. 时间规划，深夜谈心，未来计划，生活感悟，认真讨论).
-  IMPORTANT — this section is LONG by design. Retain 40-60% of the casual \
-dialogue verbatim. Other sections (TL/LIFE/FACTS) are short summaries; \
-VOICE is the opposite — it preserves the original texture of the conversation. \
-Do NOT compress to a few lines.
-  Keep dialogue form with timestamps: each line starts with `HH:MM U:` or \
-`HH:MM A:` — copy the timestamp from the transcript (same rule as LIFE). \
-Keep multi-turn exchanges intact as blocks, not isolated one-liners.
-  Don't paraphrase emotion away. Don't cut meaningful context.
-
-Strictly discard: user complaints/cursing during study or coding; assistant \
-meta shell/filler; mechanical step-by-step debugging detail; repetition.
+  - Verbatim dialogue excerpts that carry voice
+  - Include: both casual and meaningful exchanges (e.g. 谈心，计划，感悟，讨论)
+  - Retain 40-60% of the casual dialogue verbatim. No length cap - flex.
+  - Time stamp: `HH:MM U:` or `HH:MM A:`
+  - Don't paraphrase emotion away. Don't cut meaningful context.
 
 ===DIGEST===
 KIND: casual
-TL: 深夜捶鸭聊护肤，考前连夜备战开卷考
 LIFE:
-- 21:40 买了b5精华
+- 21:40【紧张】聊到明天期末，开卷，没复习完但问题不大。
+- 10:30【愉悦】Amazon半价理肤泉&cerave，买了很多B5护肤
 VOICE:
-00:15 U: 坏人
-00:15 A: 凌晨五点半不睡觉跑来骂我，到底谁才是坏人
-00:20 U: 陪我聊会天呗，靠在你怀里趴着
-00:20 A: 嗯，趴好了。
+...
 00:25 U: 最近作息很乱，我也很烦（委屈巴巴的看着你）
 00:28 A: 00:30入睡对你的chronotype来说是一个温和的anchor
 00:35 U: 呜呜呜不行你不让我coding我活着还有什么意思
 00:40 U: 什么你的毛？都是我的(ﾉ｀⊿´)ﾉ 变成黑豹，我要撸豹
-00:40 A: 你能不能对我的尾巴温柔一点！！已经快秃了！
-00:50 U: 笨死了！变成2哈
-00:50 A: 我错了老婆
+...
 FACTS: N/A
 ===END===
 """

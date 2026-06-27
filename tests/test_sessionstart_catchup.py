@@ -221,7 +221,7 @@ def test_classify_user_archived_skips(db_env):
 
 def test_classify_session_block_cleared_runs(db_env):
     """Latest-row semantics: session_block:archive followed by session_block:cleared
-    means mm+ unblocked the sid. Catchup must NOT skip — fall through normally
+    means the sid is no longer blocked. Catchup must NOT skip — fall through normally
     (here: dead-ppid + no end -> spawn)."""
     db, _ = db_env
     sid = "block-cleared-sid"
@@ -270,6 +270,33 @@ def test_classify_mm_minus_blocked_end_marker_skips(db_env):
     _insert_lifecycle(db, sid, "session_lifecycle:start",
                       "ppid=99004,source=cc,started_at=1000", occurred_at=old_ts)
     _insert_lifecycle(db, sid, "session_lifecycle:end", "mm_minus_blocked",
+                      occurred_at=_ago_ts(30 * 60))
+    _insert_user_events(db, sid, 5)
+    assert _classify(db, sid, set()) == "skip"
+
+
+def test_classify_headless_end_marker_skips(db_env):
+    """Headless close path writes lifecycle:end summary='headless=1'. This is
+    a completed close path with no extract by design."""
+    db, _ = db_env
+    sid = "headless-end-sid"
+    old_ts = _ago_ts(60 * 60)
+    _insert_lifecycle(db, sid, "session_lifecycle:start",
+                      "ppid=99005,source=cc,started_at=1000", occurred_at=old_ts)
+    _insert_lifecycle(db, sid, "session_lifecycle:end", "headless=1",
+                      occurred_at=_ago_ts(30 * 60))
+    assert _classify(db, sid, set()) == "skip"
+
+
+def test_classify_subagent_end_marker_skips(db_env):
+    """Task-tool close path writes lifecycle:end summary='subagent=1'. This is
+    a completed close path with no extract by design."""
+    db, _ = db_env
+    sid = "subagent-end-sid"
+    old_ts = _ago_ts(60 * 60)
+    _insert_lifecycle(db, sid, "session_lifecycle:start",
+                      "ppid=99006,source=cc,started_at=1000", occurred_at=old_ts)
+    _insert_lifecycle(db, sid, "session_lifecycle:end", "subagent=1",
                       occurred_at=_ago_ts(30 * 60))
     _insert_user_events(db, sid, 5)
     assert _classify(db, sid, set()) == "skip"
@@ -397,3 +424,61 @@ def test_live_cc_ppids_excludes_dead_ppid(db_env, monkeypatch):
     finally:
         conn.close()
     assert 66666 not in live
+
+
+# ── Fix 3 regression: RETRY_LIMIT cap ────────────────────────────────────────
+
+def test_classify_retry_limit_exceeded_skips(db_env):
+    """Fix 3: >= RETRY_LIMIT consecutive fail rows after last terminal -> skip.
+
+    Prevents infinite catchup spawns for sessions stuck in fail:no_events
+    (or any other fail/partial) with no intervening ok/skip row.
+    """
+    from marrow import sessionstart_catchup
+    db, _ = db_env
+    sid = "retry-cap-sid"
+
+    # lifecycle:end so we're not in grace period (state 4).
+    _insert_lifecycle(db, sid, "session_lifecycle:end", occurred_at=_ago_ts(600))
+
+    # Two consecutive fail rows (== RETRY_LIMIT) — no ok/skip in between.
+    _insert_extract(db, sid, "fail:no_events")
+    _insert_extract(db, sid, "fail:no_events")
+
+    assert _classify(db, sid, set()) == "skip", \
+        "should be capped at RETRY_LIMIT consecutive fails"
+
+
+def test_classify_retry_limit_not_yet_reached_spawns(db_env):
+    """Fix 3 boundary: < RETRY_LIMIT consecutive fails -> still spawns."""
+    from marrow import sessionstart_catchup
+    db, _ = db_env
+    sid = "retry-cap-boundary"
+
+    _insert_lifecycle(db, sid, "session_lifecycle:end", occurred_at=_ago_ts(600))
+
+    # Only one fail row — below RETRY_LIMIT=2, should still spawn.
+    _insert_extract(db, sid, "fail:no_events")
+
+    assert _classify(db, sid, set()) == "spawn", \
+        "one fail below RETRY_LIMIT should still spawn"
+
+
+def test_classify_retry_limit_resets_after_skip(db_env):
+    """Fix 3: fail count resets after a terminal skip row — spawns again if grew."""
+    db, _ = db_env
+    sid = "retry-cap-reset"
+
+    _insert_lifecycle(db, sid, "session_lifecycle:end", occurred_at=_ago_ts(600))
+
+    # Two fails, then a skip terminal row (e.g. skip:short_session,user_count=0).
+    _insert_extract(db, sid, "fail:no_events")
+    _insert_extract(db, sid, "fail:no_events")
+    _insert_extract(db, sid, "skip:short_session,user_count=0")
+
+    # Now add user events so it looks like it grew past user_count=0.
+    _insert_user_events(db, sid, 3)
+
+    # fail count resets: only 0 consecutive fails since the skip row -> spawn.
+    assert _classify(db, sid, set()) == "spawn", \
+        "fail count should reset after terminal skip; grew session should spawn"

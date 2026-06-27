@@ -102,6 +102,42 @@ def test_session_end_with_bridge_env_skips_popen(env, monkeypatch, tmp_path):
     assert _audit_latest(db, sid, "manual_skip") == "bridge_owns"
 
 
+def test_session_end_with_bridge_env_force_flag_spawns(env, monkeypatch, tmp_path):
+    """MARROW_BRIDGE=1 with force_sessionend: archive runs and popen fires."""
+    db, _ = env
+    sid = "bridge-force-sid"
+    tpath = tmp_path / "fake.jsonl"
+    tpath.write_text("")
+    conn = storage.connect(db)
+    with conn:
+        conn.execute(
+            "INSERT INTO audit_log (target_table, target_id, action, summary)"
+            " VALUES ('events', ?, 'force_sessionend', 'mm_plus_flag')",
+            (sid,),
+        )
+    conn.close()
+    _stdin(monkeypatch, {
+        "session_id": sid,
+        "cwd": str(tmp_path),
+        "transcript_path": str(tpath),
+    })
+    monkeypatch.setenv("MARROW_BRIDGE", "1")
+
+    fake_rows = [{"session_id": sid, "role": "user", "content": "hi",
+                  "timestamp": "2026-06-02T00:00:00Z",
+                  "source_hash": "h-force"}]
+    with patch.object(hooks.transcript, "clean", return_value=fake_rows), \
+         patch.object(hooks.repo, "archive_events"), \
+         patch.object(hooks.transcript, "is_headless", return_value=False), \
+         patch.object(hooks, "_is_worktree_session", return_value=False), \
+         patch.object(hooks, "popen_detach_lazy") as mpop:
+        rc = session_end()
+
+    assert rc == 0
+    mpop.assert_called_once()
+    assert _audit_latest(db, sid, "manual_skip") is None
+
+
 # ── SessionEnd: env absent ───────────────────────────────────────────────────
 
 def test_session_end_without_env_spawns_popen(env, monkeypatch, tmp_path):

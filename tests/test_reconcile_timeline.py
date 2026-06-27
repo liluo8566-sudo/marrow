@@ -1,8 +1,8 @@
-"""Tests for reconcile_timeline — tl_line write-back and aff deletion semantics.
+"""Tests for reconcile_timeline — anchor presence/hidden sweep and aff deletion semantics.
 
 Covers:
-- Edit session tl_line via <!-- tl:sid --> anchor → session_digests updated
-- Edit diary tl_line via <!-- tl:d:YYYY-MM-DD --> anchor → diary updated
+- Present session anchor → unchanged count (no tl_line write-back since Phase 5)
+- Present diary anchor → unchanged count (no tl_line write-back since Phase 5)
 - Delete a tl line → no-op (deleted line = no-op, next render restores)
 - Unchanged text → unchanged count, no DB write
 - Unknown sid → conflict reported
@@ -43,12 +43,15 @@ def _now_utc() -> str:
     return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _insert_digest(conn, sid: str, tl: str | None = "原始TL") -> str:
+def _insert_digest(
+    conn, sid: str, tl: str | None = "原始TL", segment_seq: int = 0
+) -> str:
     ts = _now_utc()
     conn.execute(
-        "INSERT INTO session_digests (sid, date, ts, text, kind, tl_line)"
-        " VALUES (?, ?, ?, 'body', 'casual', ?)",
-        (sid, ts[:10], ts, tl),
+        "INSERT INTO session_digests"
+        " (sid, segment_seq, date, ts, text, kind, tl_line)"
+        " VALUES (?, ?, ?, ?, 'body', 'casual', ?)",
+        (sid, segment_seq, ts[:10], ts, tl),
     )
     conn.commit()
     return ts
@@ -84,24 +87,67 @@ def _freeze_reconcile_now(monkeypatch, melb_dt: _dt.datetime) -> None:
     monkeypatch.setattr(reconcile_mod, "_now", lambda: utc_iso)
 
 
-# ── session tl write-back ─────────────────────────────────────────────────────
+# ── session anchor presence (tl_line write-back removed in Phase 5) ───────────
 
-def test_reconcile_tl_session_edit(conn, dash_path):
-    """Editing tl text in md writes back to session_digests.tl_line."""
+def test_reconcile_tl_session_anchor_present_counts_unchanged(conn, dash_path):
+    """Present session anchor → unchanged count; tl_line not mutated (Phase 5)."""
     sid = "sid-edit-1"
     _insert_digest(conn, sid, tl="原始TL")
     dash_path.write_text(_make_timeline_block(sid, "用户修改的TL"))
 
     rpt = reconcile_timeline(conn, dash_path)
-    assert rpt.updated >= 1
+    assert rpt.updated == 0
+    assert rpt.unchanged >= 1
     row = conn.execute(
         "SELECT tl_line FROM session_digests WHERE sid=?", (sid,)
     ).fetchone()
-    assert row["tl_line"] == "用户修改的TL"
+    assert row["tl_line"] == "原始TL"  # unchanged — write-back removed
+
+
+def test_reconcile_tl_session_edit_composite_marker(conn, dash_path):
+    """Present <!-- tl:sid:1 --> anchor → unchanged count; no tl_line mutation."""
+    sid = "sid-edit-segment"
+    _insert_digest(conn, sid, tl="seq0", segment_seq=0)
+    _insert_digest(conn, sid, tl="seq1", segment_seq=1)
+    dash_path.write_text(
+        "## Timeline\n14:00 segment edit <!-- tl:sid-edit-segment:1 -->"
+    )
+
+    rpt = reconcile_timeline(conn, dash_path)
+
+    assert rpt.updated == 0
+    rows = conn.execute(
+        "SELECT segment_seq, tl_line FROM session_digests"
+        " WHERE sid=? ORDER BY segment_seq",
+        (sid,),
+    ).fetchall()
+    assert [(r["segment_seq"], r["tl_line"]) for r in rows] == [
+        (0, "seq0"),
+        (1, "seq1"),
+    ]
+
+
+def test_reconcile_tl_session_edit_legacy_marker_uses_seq_zero(conn, dash_path):
+    """Present <!-- tl:sid --> anchor → unchanged count; backward-compat lookup still works."""
+    sid = "sid-edit-legacy"
+    _insert_digest(conn, sid, tl="seq0", segment_seq=0)
+    dash_path.write_text(
+        "## Timeline\n14:00 legacy edit <!-- tl:sid-edit-legacy -->"
+    )
+
+    rpt = reconcile_timeline(conn, dash_path)
+
+    assert rpt.updated == 0
+    assert rpt.unchanged >= 1
+    row = conn.execute(
+        "SELECT tl_line FROM session_digests WHERE sid=? AND segment_seq=0",
+        (sid,),
+    ).fetchone()
+    assert row["tl_line"] == "seq0"  # unchanged
 
 
 def test_reconcile_tl_session_unchanged(conn, dash_path):
-    """Unchanged tl text → no DB update, unchanged counter incremented."""
+    """Present anchor → unchanged counter incremented, no DB update."""
     sid = "sid-unchanged"
     _insert_digest(conn, sid, tl="原始TL")
     dash_path.write_text(_make_timeline_block(sid, "原始TL"))
@@ -120,8 +166,8 @@ def test_reconcile_tl_unknown_sid(conn, dash_path):
     assert any("nonexistent-sid" in c for c in rpt.conflicts)
 
 
-def test_reconcile_tl_audit_row_written(conn, dash_path):
-    """An audit_log row is written for each tl_line update."""
+def test_reconcile_tl_audit_row_not_written(conn, dash_path):
+    """No audit_log row for tl_edit since write-back is removed (Phase 5)."""
     sid = "sid-audit"
     _insert_digest(conn, sid, tl="旧的TL")
     dash_path.write_text(_make_timeline_block(sid, "新的TL"))
@@ -131,14 +177,13 @@ def test_reconcile_tl_audit_row_written(conn, dash_path):
         "SELECT summary FROM audit_log WHERE action='tl_edit' AND target_id=?",
         (sid,),
     ).fetchone()
-    assert row is not None
-    assert "新的TL" in row["summary"]
+    assert row is None
 
 
-# ── diary tl write-back ───────────────────────────────────────────────────────
+# ── diary anchor presence (tl_line write-back removed in Phase 5) ────────────
 
 def test_reconcile_tl_diary_edit(conn, dash_path):
-    """Editing diary tl_line in md writes back to diary.tl_line."""
+    """Present diary anchor → unchanged count; diary.tl_line not mutated (Phase 5)."""
     date = "2026-06-07"
     sid = "sid-diary-test"
     _insert_digest(conn, sid)
@@ -148,11 +193,12 @@ def test_reconcile_tl_diary_edit(conn, dash_path):
     )
 
     rpt = reconcile_timeline(conn, dash_path)
-    assert rpt.updated >= 1
+    assert rpt.updated == 0
+    assert rpt.unchanged >= 1
     row = conn.execute(
         "SELECT tl_line FROM diary WHERE date=?", (date,)
     ).fetchone()
-    assert row["tl_line"] == "新日记TL"
+    assert row["tl_line"] == "原始日记TL"  # unchanged — write-back removed
 
 
 def test_reconcile_tl_diary_unknown_date(conn, dash_path):
@@ -181,31 +227,33 @@ def test_reconcile_tl_stub_day_line_no_writeback(conn, dash_path):
     assert row["tl_line"] is None
 
 
-def test_reconcile_tl_tone_tagged_line_strips_tag(conn, dash_path):
-    """HH:MM【tone】 prefix is display-only — stripped before write-back."""
+def test_reconcile_tl_tone_tagged_line_no_writeback(conn, dash_path):
+    """Tone-tagged anchor counts as unchanged; tl_line not mutated (Phase 5)."""
     sid = "sid-tone"
     _insert_digest(conn, sid, tl="原始TL")
     dash_path.write_text(
         f"## Timeline\n17:46【释怀】 用户改的TL <!-- tl:{sid} -->"
     )
-    reconcile_timeline(conn, dash_path)
-    row = conn.execute(
-        "SELECT tl_line FROM session_digests WHERE sid=?", (sid,)
-    ).fetchone()
-    assert row["tl_line"] == "用户改的TL"
-
-
-def test_reconcile_tl_tone_only_line_no_writeback(conn, dash_path):
-    """HH:MM【tone】-only line strips to empty → tl_line untouched."""
-    sid = "sid-tone-only"
-    _insert_digest(conn, sid, tl="原始TL")
-    dash_path.write_text(f"## Timeline\n17:46【释怀】 <!-- tl:{sid} -->")
     rpt = reconcile_timeline(conn, dash_path)
     assert rpt.updated == 0
     row = conn.execute(
         "SELECT tl_line FROM session_digests WHERE sid=?", (sid,)
     ).fetchone()
-    assert row["tl_line"] == "原始TL"
+    assert row["tl_line"] == "原始TL"  # unchanged
+
+
+def test_reconcile_tl_tone_only_line_no_writeback(conn, dash_path):
+    """Tone-only anchor counts as unchanged; tl_line not mutated (Phase 5)."""
+    sid = "sid-tone-only"
+    _insert_digest(conn, sid, tl="原始TL")
+    dash_path.write_text(f"## Timeline\n17:46【释怀】 <!-- tl:{sid} -->")
+    rpt = reconcile_timeline(conn, dash_path)
+    assert rpt.updated == 0
+    assert rpt.unchanged >= 1
+    row = conn.execute(
+        "SELECT tl_line FROM session_digests WHERE sid=?", (sid,)
+    ).fetchone()
+    assert row["tl_line"] == "原始TL"  # unchanged
 
 
 # ── deleted line = no-op ─────────────────────────────────────────────────────
@@ -484,7 +532,9 @@ def test_add_plus_line_yearless_context_uses_recent_past_year(
 def test_manual_event_appears_in_render(conn, dash_path):
     from marrow import timeline
     import datetime as _dt
-    ts_utc = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ts_utc = (
+        _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=5)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
     conn.execute(
         "INSERT INTO events (session_id, timestamp, role, content, channel)"
         " VALUES ('manual:aabbccdd', ?, 'user', '手动笔记测试', 'manual')",
@@ -555,8 +605,8 @@ def test_trail_marker_present_in_render(conn):
     # Insert 5s in the past so it falls within the 24h window (strict < now)
     ts_utc = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
     conn.execute(
-        "INSERT INTO session_digests (sid, date, ts, text, kind, tl_line)"
-        " VALUES ('sid-trail', ?, ?, 'body', 'casual', 'TL行')",
+        "INSERT INTO session_digests (sid, date, ts, text, kind, life_lines)"
+        " VALUES ('sid-trail', ?, ?, 'body', 'casual', '聊了些事')",
         (ts_utc[:10], ts_utc),
     )
     conn.commit()

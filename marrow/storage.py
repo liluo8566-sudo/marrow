@@ -13,7 +13,7 @@ import sqlite_vec
 
 from . import config
 
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 26
 
 # Phase 1 first-class tables + Phase 2 affect/entities (DECISIONS Phase 2).
 # The retired emotions/people/preferences/dir placeholders stay absent.
@@ -101,6 +101,8 @@ CREATE TABLE IF NOT EXISTS diary (
   mood TEXT,
   session_ids TEXT,
   tl_line TEXT,
+  tone TEXT,
+  overview TEXT,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
@@ -219,11 +221,20 @@ CREATE TABLE IF NOT EXISTS sessions (
   cwd TEXT,
   created_at TEXT,
   last_active TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  ended_at TEXT,
   title TEXT NOT NULL DEFAULT '',
   effort TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_last_active
   ON sessions(last_active DESC);
+CREATE TABLE IF NOT EXISTS session_watermarks (
+  sid TEXT NOT NULL,
+  segment_seq INTEGER NOT NULL,
+  last_event_id INTEGER NOT NULL,
+  last_turn_idx INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  PRIMARY KEY (sid, segment_seq)
+);
 """
 
 # superseded_by IS NULL = the current row. Recall/backdrop read the live view.
@@ -531,6 +542,10 @@ def init_db(path: str | None = None) -> sqlite3.Connection:
         _migrate_to_v20(conn)
         _migrate_to_v21(conn)
         _migrate_to_v22(conn)
+        _migrate_to_v23(conn)
+        _migrate_to_v24(conn)
+        _migrate_to_v25(conn)
+        _migrate_to_v26(conn)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     return conn
 
@@ -574,7 +589,8 @@ def _migrate_to_v2(conn: sqlite3.Connection) -> None:
         "  sid TEXT PRIMARY KEY,"
         "  date TEXT NOT NULL,"
         "  text TEXT NOT NULL,"
-        "  ts TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))"
+        "  ts TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),"
+        "  updated_at TEXT"
         ")"
     )
     conn.execute(
@@ -976,6 +992,161 @@ def _migrate_to_v22(conn: sqlite3.Connection) -> None:
         "UPDATE stickers SET updated_at = created_at WHERE updated_at IS NULL"
     )
     conn.execute("PRAGMA user_version=22")
+
+
+def _migrate_to_v23(conn: sqlite3.Connection) -> None:
+    """v23: sessions.ended_at — mark session lifecycle end for housekeep."""
+    v = conn.execute("PRAGMA user_version").fetchone()[0]
+    if v >= 23:
+        return
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(sessions)")}
+    if "ended_at" not in cols:
+        conn.execute("ALTER TABLE sessions ADD COLUMN ended_at TEXT")
+    conn.execute("UPDATE sessions SET ended_at = last_active WHERE ended_at IS NULL")
+    conn.execute("PRAGMA user_version=23")
+
+
+def _migrate_to_v24(conn: sqlite3.Connection) -> None:
+    """v24: mid-session watermarks and segmented session digests."""
+    v = conn.execute("PRAGMA user_version").fetchone()[0]
+    if v >= 24:
+        return
+    conn.executescript("""
+CREATE TABLE IF NOT EXISTS session_watermarks (
+  sid TEXT NOT NULL,
+  segment_seq INTEGER NOT NULL,
+  last_event_id INTEGER NOT NULL,
+  last_turn_idx INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  PRIMARY KEY (sid, segment_seq)
+);
+    """)
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(session_digests)")}
+    if "segment_seq" not in cols:
+        conn.executescript("""
+DROP TRIGGER IF EXISTS session_digests_ai;
+DROP TRIGGER IF EXISTS session_digests_ad;
+DROP TRIGGER IF EXISTS session_digests_au;
+DROP TABLE IF EXISTS session_digests_fts;
+ALTER TABLE session_digests RENAME TO session_digests_old;
+CREATE TABLE session_digests (
+  sid TEXT NOT NULL,
+  segment_seq INTEGER NOT NULL DEFAULT 0,
+  date TEXT NOT NULL,
+  text TEXT NOT NULL,
+  ts TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  updated_at TEXT,
+  kind TEXT,
+  tl_line TEXT,
+  life_lines TEXT,
+  tl_hidden INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (sid, segment_seq)
+);
+INSERT INTO session_digests
+  (sid, segment_seq, date, text, ts, updated_at, kind, tl_line, life_lines, tl_hidden)
+SELECT sid, 0, date, text, ts, NULL, kind, tl_line, life_lines, tl_hidden
+FROM session_digests_old;
+DROP TABLE session_digests_old;
+CREATE INDEX IF NOT EXISTS idx_session_digests_date ON session_digests(date);
+CREATE VIRTUAL TABLE IF NOT EXISTS session_digests_fts USING fts5(
+  body, tokenize='trigram'
+);
+CREATE TRIGGER IF NOT EXISTS session_digests_ai AFTER INSERT ON session_digests BEGIN
+  INSERT INTO session_digests_fts(rowid, body) VALUES (new.rowid,
+    TRIM(COALESCE(new.tl_line,'') || ' ' || COALESCE(new.life_lines,''))
+  );
+END;
+CREATE TRIGGER IF NOT EXISTS session_digests_ad AFTER DELETE ON session_digests BEGIN
+  DELETE FROM session_digests_fts WHERE rowid = old.rowid;
+END;
+CREATE TRIGGER IF NOT EXISTS session_digests_au AFTER UPDATE ON session_digests BEGIN
+  DELETE FROM session_digests_fts WHERE rowid = old.rowid;
+  INSERT INTO session_digests_fts(rowid, body) VALUES (new.rowid,
+    TRIM(COALESCE(new.tl_line,'') || ' ' || COALESCE(new.life_lines,''))
+  );
+END;
+    """)
+    else:
+        conn.executescript("""
+DROP TRIGGER IF EXISTS session_digests_ai;
+DROP TRIGGER IF EXISTS session_digests_ad;
+DROP TRIGGER IF EXISTS session_digests_au;
+DROP TABLE IF EXISTS session_digests_fts;
+CREATE VIRTUAL TABLE IF NOT EXISTS session_digests_fts USING fts5(
+  body, tokenize='trigram'
+);
+CREATE TRIGGER IF NOT EXISTS session_digests_ai AFTER INSERT ON session_digests BEGIN
+  INSERT INTO session_digests_fts(rowid, body) VALUES (new.rowid,
+    TRIM(COALESCE(new.tl_line,'') || ' ' || COALESCE(new.life_lines,''))
+  );
+END;
+CREATE TRIGGER IF NOT EXISTS session_digests_ad AFTER DELETE ON session_digests BEGIN
+  DELETE FROM session_digests_fts WHERE rowid = old.rowid;
+END;
+CREATE TRIGGER IF NOT EXISTS session_digests_au AFTER UPDATE ON session_digests BEGIN
+  DELETE FROM session_digests_fts WHERE rowid = old.rowid;
+  INSERT INTO session_digests_fts(rowid, body) VALUES (new.rowid,
+    TRIM(COALESCE(new.tl_line,'') || ' ' || COALESCE(new.life_lines,''))
+  );
+END;
+        """)
+    conn.execute(
+        "INSERT INTO session_digests_fts(rowid, body) "
+        "SELECT rowid, TRIM(COALESCE(tl_line,'') || ' ' || COALESCE(life_lines,'')) "
+        "FROM session_digests "
+        "WHERE tl_line IS NOT NULL OR life_lines IS NOT NULL"
+    )
+    conn.execute("PRAGMA user_version=24")
+
+
+def _migrate_to_v25(conn: sqlite3.Connection) -> None:
+    """v25: diary overview fields + session_digests.updated_at."""
+    v = conn.execute("PRAGMA user_version").fetchone()[0]
+    if v >= 25:
+        return
+    for col in ("tone TEXT", "overview TEXT"):
+        try:
+            conn.execute(f"ALTER TABLE diary ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass
+    try:
+        conn.execute("ALTER TABLE session_digests ADD COLUMN updated_at TEXT")
+    except sqlite3.OperationalError:
+        pass
+    conn.execute("PRAGMA user_version=25")
+
+
+def _migrate_to_v26(conn: sqlite3.Connection) -> None:
+    """v26: ensure session_digests.updated_at for databases already at v25."""
+    v = conn.execute("PRAGMA user_version").fetchone()[0]
+    if v >= 26:
+        return
+    try:
+        conn.execute("ALTER TABLE session_digests ADD COLUMN updated_at TEXT")
+    except sqlite3.OperationalError:
+        pass
+    conn.execute("PRAGMA user_version=26")
+
+
+def get_latest_watermark(conn, sid):
+    """Return latest watermark row as dict for sid, or None."""
+    row = conn.execute(
+        "SELECT segment_seq, last_event_id, last_turn_idx, created_at"
+        " FROM session_watermarks WHERE sid=? ORDER BY segment_seq DESC LIMIT 1",
+        (sid,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def insert_watermark(conn, sid, segment_seq, last_event_id, last_turn_idx=0):
+    """Insert a new watermark row. Caller must ensure segment_seq is correct."""
+    with conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO session_watermarks"
+            " (sid, segment_seq, last_event_id, last_turn_idx)"
+            " VALUES (?, ?, ?, ?)",
+            (sid, segment_seq, last_event_id, last_turn_idx),
+        )
 
 
 def _migrate_to_v14(conn: sqlite3.Connection) -> None:

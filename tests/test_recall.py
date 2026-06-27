@@ -240,7 +240,9 @@ def test_recall_fusion_empty_query(db):
 
 
 def test_recall_fusion_fts_hit(db):
-    _make_event(db, "hello marrow world")
+    now = rm.datetime.datetime.now(rm.datetime.timezone.utc)
+    _make_event(db, "hello marrow world",
+                timestamp=now.strftime("%Y-%m-%dT%H:%M:%SZ"))
     with patch.object(rm, "_ensure_embedder", return_value=None):
         results = rm.recall_fusion(db, "marrow")
     assert len(results) == 1

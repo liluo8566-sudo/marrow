@@ -62,9 +62,9 @@ def test_read_digests_uses_session_digests_table(db):
     """daily._read_digests must read from session_digests, not audit_log."""
     p, conn = db
     out = daily._read_digests(conn, "2026-05-16")
-    sids = {sid for sid, _ in out}
+    sids = {sid for sid, *_ in out}
     assert sids == {"s1", "s2"}
-    texts = {text for _, text in out}
+    texts = {text for _, text, *_ in out}
     assert "morning chat" in texts and "afternoon work" in texts
 
 
@@ -478,40 +478,63 @@ def test_main_alerts_when_written_day_silently_deleted(
     assert "2026-05-16" in row["message"]
 
 
-# ── _parse_tl_line ─────────────────────────────────────────────────────────────
+# ── _parse_tone_overview ───────────────────────────────────────────────────────
 
-def test_parse_tl_line_extracts_and_strips():
-    narrative = "日记正文在这里。\n\nTL_LINE: 今天陪老婆改recall机制，深夜还在聊天"
-    diary_text, tl = daily._parse_tl_line(narrative)
-    assert tl == "今天陪老婆改recall机制，深夜还在聊天"
-    assert "TL_LINE" not in diary_text
+def test_parse_tone_overview_extracts_both():
+    narrative = "日记正文在这里。\n\nTONE: 温馨\nOVERVIEW: 上午写代码，傍晚一起散步，深夜聊了很多。"
+    diary_text, tone, overview = daily._parse_tone_overview(narrative)
+    assert tone == "温馨"
+    assert overview == "上午写代码，傍晚一起散步，深夜聊了很多。"
+    assert "TONE" not in diary_text
+    assert "OVERVIEW" not in diary_text
     assert "日记正文" in diary_text
 
 
-def test_parse_tl_line_fullwidth_colon():
-    narrative = "正文。\nTL_LINE：和老婆一起吃了拿铁"
-    _, tl = daily._parse_tl_line(narrative)
-    assert tl == "和老婆一起吃了拿铁"
+def test_parse_tone_overview_fullwidth_colon():
+    narrative = "正文。\nTONE：愉悦\nOVERVIEW：今天很开心。"
+    _, tone, overview = daily._parse_tone_overview(narrative)
+    assert tone == "愉悦"
+    assert overview == "今天很开心。"
 
 
-def test_parse_tl_line_missing():
-    narrative = "纯日记，没有TL行"
-    diary_text, tl = daily._parse_tl_line(narrative)
-    assert tl == ""
+def test_parse_tone_overview_missing_both():
+    narrative = "纯日记，没有任何标记"
+    diary_text, tone, overview = daily._parse_tone_overview(narrative)
+    assert tone is None
+    assert overview is None
     assert diary_text == narrative
 
 
-def test_parse_tl_line_uses_last_occurrence():
-    """When TL_LINE appears twice, only the last one is extracted."""
-    narrative = "TL_LINE: 第一行\n正文\nTL_LINE: 最后一行"
-    _, tl = daily._parse_tl_line(narrative)
-    assert tl == "最后一行"
+def test_parse_tone_overview_missing_tone_only():
+    narrative = "正文。\nOVERVIEW: 只有概要没有情绪。"
+    diary_text, tone, overview = daily._parse_tone_overview(narrative)
+    assert tone is None
+    assert overview == "只有概要没有情绪。"
+    assert "OVERVIEW" not in diary_text
 
 
-# ── diary tl_line persisted ───────────────────────────────────────────────────
+def test_parse_tone_overview_missing_overview_only():
+    narrative = "正文。\nTONE: 平淡"
+    diary_text, tone, overview = daily._parse_tone_overview(narrative)
+    assert tone == "平淡"
+    assert overview is None
+    assert "TONE" not in diary_text
 
-def test_run_day_persists_tl_line(tmp_path):
-    """run_day writes tl_line to diary row when LLM includes TL_LINE:."""
+
+def test_parse_tone_overview_diary_text_separated():
+    """Diary text must not contain TONE/OVERVIEW lines."""
+    narrative = "第一段。\n第二段。\n\nTONE: 焦虑\nOVERVIEW: 考试压力大。"
+    diary_text, tone, overview = daily._parse_tone_overview(narrative)
+    assert "第一段" in diary_text
+    assert "第二段" in diary_text
+    assert tone == "焦虑"
+    assert overview == "考试压力大。"
+
+
+# ── diary tone + overview persisted ──────────────────────────────────────────
+
+def test_run_day_persists_tone_and_overview(tmp_path):
+    """run_day writes tone and overview to diary row when LLM includes both."""
     p = str(tmp_path / "tl.db")
     conn = storage.init_db(p)
     conn.execute(
@@ -520,18 +543,19 @@ def test_run_day_persists_tl_line(tmp_path):
     )
     conn.commit()
 
-    llm = FakeLLM(prose="日记正文。\n\nTL_LINE: 今天和老婆写了很多代码")
+    llm = FakeLLM(prose="日记正文。\n\nTONE: 温馨\nOVERVIEW: 上午写代码，傍晚聊天。")
     assert daily.run_day(conn, "2026-05-16", llm, db=p) is True
 
     row = conn.execute(
-        "SELECT tl_line FROM diary WHERE date='2026-05-16'"
+        "SELECT tone, overview FROM diary WHERE date='2026-05-16'"
     ).fetchone()
     assert row is not None
-    assert row["tl_line"] == "今天和老婆写了很多代码"
+    assert row["tone"] == "温馨"
+    assert row["overview"] == "上午写代码，傍晚聊天。"
 
 
-def test_run_day_tl_line_missing_still_writes_diary(tmp_path):
-    """run_day succeeds even when LLM omits TL_LINE — tl_line stays NULL."""
+def test_run_day_tone_overview_missing_still_writes_diary(tmp_path):
+    """run_day succeeds even when LLM omits TONE/OVERVIEW — both stay NULL."""
     p = str(tmp_path / "tl2.db")
     conn = storage.init_db(p)
     conn.execute(
@@ -540,15 +564,16 @@ def test_run_day_tl_line_missing_still_writes_diary(tmp_path):
     )
     conn.commit()
 
-    llm = FakeLLM(prose="日记正文，没有TL行。")
+    llm = FakeLLM(prose="日记正文，没有标记行。")
     assert daily.run_day(conn, "2026-05-16", llm, db=p) is True
 
     row = conn.execute(
-        "SELECT content, tl_line FROM diary WHERE date='2026-05-16'"
+        "SELECT content, tone, overview FROM diary WHERE date='2026-05-16'"
     ).fetchone()
     assert row is not None
     assert "日记正文" in row["content"]
-    assert row["tl_line"] is None
+    assert row["tone"] is None
+    assert row["overview"] is None
 
 
 # ── affect eph/epl format ─────────────────────────────────────────────────────
@@ -577,3 +602,20 @@ def test_affect_block_open_mark_only_on_unresolved():
     ]
     block = _format_affect_block("2026-06-11", eps)
     assert "[open]" not in block
+
+
+# ── render_diary_prompt ───────────────────────────────────────────────────────
+
+def test_render_diary_prompt_returns_filled_string():
+    """render_diary_prompt() is importable from daily_prompts and returns a
+    string with the date/digest placeholders ready for .format()."""
+    from marrow.daily_prompts import render_diary_prompt
+    result = render_diary_prompt()
+    assert isinstance(result, str)
+    assert len(result) > 100
+    # persona placeholders resolved — no bare {user_name} / {assistant_name} left
+    assert "{user_name}" not in result
+    assert "{assistant_name}" not in result
+    # date/digest template slots remain for the caller to fill
+    assert "{date}" in result
+    assert "{digest}" in result

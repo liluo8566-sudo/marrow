@@ -198,6 +198,13 @@ def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def _md_mtime_iso(path) -> str | None:
+    try:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(path.stat().st_mtime))
+    except OSError:
+        return None
+
+
 def _audit(conn, mid: int | str, action: str, summary: str) -> None:
     conn.execute(
         "INSERT INTO audit_log (target_table, target_id, action, summary) "
@@ -257,7 +264,7 @@ def reconcile_milestones(conn: sqlite3.Connection,
     # writes them, dashboard renders them, Lumi promotes via pinned=1.
     db_rows = {
         r["id"]: dict(r) for r in conn.execute(
-            "SELECT id, scope, date, title, description, theme, pinned "
+            "SELECT id, scope, date, title, description, theme, pinned, updated_at "
             "FROM milestones WHERE pinned=1"
         ).fetchall()
     }
@@ -267,6 +274,8 @@ def reconcile_milestones(conn: sqlite3.Connection,
     # INSERT lands. bare_line=True means the source line was plain text (not
     # H5) and needs a full-line replacement to canonical H5 form.
     line_anchor_writes: list[tuple[int, int, bool]] = []
+
+    md_mtime_iso = _md_mtime_iso(md_path)
 
     with conn:
         # inserts + updates
@@ -286,6 +295,11 @@ def reconcile_milestones(conn: sqlite3.Connection,
                     or (cur["theme"] or None) != row["theme"]
                 )
                 if changed:
+                    row_updated = db_rows[rid].get("updated_at") or ""
+                    if md_mtime_iso and row_updated > md_mtime_iso:
+                        rpt.unchanged += 1
+                        seen.add(rid)
+                        continue
                     h = _hash(row)
                     conn.execute(
                         "UPDATE milestones SET "
@@ -353,6 +367,17 @@ def reconcile_milestones(conn: sqlite3.Connection,
             # returned early on missing file; require at least one parsed row.
             if not md_rows:
                 continue
+            # mtime gate: skip rows inserted/updated after md was last
+            # written — they haven't been rendered yet, so absence from
+            # md does not mean "user deleted".
+            if md_mtime_iso:
+                ts = conn.execute(
+                    "SELECT COALESCE(updated_at, created_at) AS ts"
+                    " FROM milestones WHERE id=?", (rid,)
+                ).fetchone()
+                row_ts = ts["ts"] if ts else None
+                if not row_ts or row_ts > md_mtime_iso:
+                    continue
             conn.execute("DELETE FROM milestones WHERE id=?", (rid,))
             _audit(conn, rid, "delete", "md-reconcile: removed from md")
             rpt.deleted += 1
@@ -783,11 +808,13 @@ def reconcile_tasks(conn: sqlite3.Connection,
     db_rows: dict[int, dict] = {}
     if all_ids:
         for row in conn.execute(
-            f"SELECT id, status, title, next_step FROM tasks "
+            f"SELECT id, status, title, next_step, created_at, updated_at FROM tasks "
             f"WHERE id IN ({placeholders})",
             list(all_ids),
         ).fetchall():
             db_rows[row["id"]] = dict(row)
+
+    md_mtime_iso = _md_mtime_iso(dashboard_path)
 
     with conn:
         # tick / untick / title-edit anchored rows
@@ -839,6 +866,10 @@ def reconcile_tasks(conn: sqlite3.Connection,
             title_changed = bool(md_title) and md_title != db_title
             ns_changed = md_next_step != db_next_step
             if title_changed or ns_changed:
+                row_updated = row.get("updated_at") or ""
+                if md_mtime_iso and row_updated > md_mtime_iso:
+                    rpt.unchanged += 1
+                    continue
                 sets = []
                 params: list = []
                 if title_changed:
@@ -875,6 +906,8 @@ def reconcile_tasks(conn: sqlite3.Connection,
             row = db_rows.get(tid)
             if row is None:
                 continue  # already gone
+            if md_mtime_iso and (row.get("created_at") or "") > md_mtime_iso:
+                continue
             current = row["status"]
             if current == "archived":
                 continue  # already terminal
@@ -1205,13 +1238,7 @@ def reconcile_affect(conn: sqlite3.Connection,
     # md mtime gates the "deleted-from-md → resolved" path so newly-written
     # affect rows (created after the current md snapshot) are not mistaken
     # for user deletions.
-    md_mtime_iso: str | None = None
-    try:
-        md_mtime_iso = time.strftime(
-            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(dashboard_path.stat().st_mtime)
-        )
-    except OSError:
-        pass
+    md_mtime_iso = _md_mtime_iso(dashboard_path)
 
     all_ids = set(ep_segs) | set(pending_lines)
 
@@ -1219,7 +1246,7 @@ def reconcile_affect(conn: sqlite3.Connection,
     if all_ids:
         placeholders = ",".join("?" for _ in all_ids)
         for row in conn.execute(
-            f"SELECT id, label, description FROM affect "
+            f"SELECT id, label, description, created_at FROM affect "
             f"WHERE id IN ({placeholders})",
             list(all_ids),
         ).fetchall():
@@ -1278,6 +1305,10 @@ def reconcile_affect(conn: sqlite3.Connection,
             if new_desc is not None and new_desc != (db_desc or ""):
                 updates.append(("description", new_desc))
             if updates:
+                row_created = row.get("created_at") or ""
+                if md_mtime_iso and row_created > md_mtime_iso:
+                    rpt.unchanged += 1
+                    continue
                 set_clause = ", ".join(f"{c}=?" for c, _ in updates)
                 params = [v for _, v in updates] + [aid]
                 conn.execute(
@@ -1396,21 +1427,7 @@ def reconcile_alerts(conn: sqlite3.Connection,
         except ValueError:
             continue
 
-    # Safety: zero anchors in the Alerts block means either first-render
-    # against legacy md (no anchors yet) OR user wiped the entire block.
-    # These are indistinguishable, so refuse to mass-resolve. Lumi uses
-    # `mw resolve <id>` for nuke; this path handles the per-row case.
-    if not md_ids:
-        return rpt
-
-    md_mtime_iso: str | None = None
-    try:
-        md_mtime_iso = time.strftime(
-            "%Y-%m-%dT%H:%M:%SZ",
-            time.gmtime(dashboard_path.stat().st_mtime),
-        )
-    except OSError:
-        pass
+    md_mtime_iso = _md_mtime_iso(dashboard_path)
 
     sql = "SELECT id FROM alerts WHERE resolved=0"
     params: list = []
@@ -1418,6 +1435,22 @@ def reconcile_alerts(conn: sqlite3.Connection,
         sql += " AND created_at <= ?"
         params.append(md_mtime_iso)
     db_unresolved = {r[0] for r in conn.execute(sql, params).fetchall()}
+
+    has_sentinel = "<!-- alert-block-anchored -->" in block
+    if not md_ids:
+        if not has_sentinel or not db_unresolved:
+            return rpt
+        now_iso = _now()
+        with conn:
+            for aid in db_unresolved:
+                conn.execute(
+                    "UPDATE alerts SET resolved=1, "
+                    "resolved_at=COALESCE(resolved_at, ?) "
+                    "WHERE id=? AND resolved=0",
+                    (now_iso, aid),
+                )
+                rpt.deleted += 1
+        return rpt
 
     deleted = db_unresolved - md_ids
     if not deleted:
@@ -1439,10 +1472,11 @@ def reconcile_alerts(conn: sqlite3.Connection,
 
 _TIMELINE_H2 = "## Timeline"
 # Matches `<!-- tl:<sid> -->` (session) and `<!-- tl:d:YYYY-MM-DD -->` (diary).
-_TL_SID_RE  = re.compile(r"<!--\s*tl:(?!d:|e:|ep:)(?P<sid>\S+?)\s*-->")
+_TL_SID_RE  = re.compile(r"<!--\s*tl:(?!d:|e:|ep:)(?P<sid>[^:\s>]+)(?::(?P<seq>\d+))?(?::(?P<ln>\d+))?\s*-->")
 _TL_DATE_RE = re.compile(r"<!--\s*tl:d:(?P<date>\d{4}-\d{2}-\d{2})\s*-->")
 # Strip anchors from a line to get the user-editable text.
 _TL_ANCHOR_RE = re.compile(r"\s*<!--\s*tl:[^>]+-->\s*$")
+_TL_MD_DATE_HEADER_RE = re.compile(r"^\*\*\d{2}-\d{2}\s+\w+(?:\s+【[^】]*】)?\*\*\s*")
 # Strip leading prefixes from timeline lines before extracting editable text.
 # \s* (not \s+) so prefix-only stub lines strip to empty → no write-back.
 _TL_HHMM_RE   = re.compile(r"^\d{2}:\d{2}\s*")
@@ -1461,7 +1495,7 @@ _TL_PLUS_RE   = re.compile(
 )
 _TL_DAY_DIVIDER_RE = re.compile(r"^-+\s*(?P<mmdd>\d{2}-\d{2})\s*-+\s*$")
 _TL_DAY_HEADER_RE = re.compile(
-    r"^\**(?P<mmdd>\d{2}-\d{2})\s+Day\b"
+    r"^\**(?P<mmdd>\d{2}-\d{2})\s+\w"
 )
 _TZ_MELB      = _MELB_TZ
 _TL_PERIOD_HOUR = {"AM": 9, "PM": 15, "ND": 21}
@@ -1471,11 +1505,14 @@ def _strip_tl_anchor(line: str) -> str:
     return _TL_ANCHOR_RE.sub("", line).rstrip()
 
 
+def _strip_tl_date_header(line: str) -> str:
+    return _TL_MD_DATE_HEADER_RE.sub("", line).strip()
+
+
 def _extract_tl_text(line: str) -> str:
-    """Strip prefixes (HH:MM【tone】 / AM/PM/ND / MM-DD Day 【tone】) and anchor."""
+    """Strip prefixes (HH:MM / AM/PM/ND / MM-DD Day) and anchor — preserves 【tone】."""
     s = _strip_tl_anchor(line)
     s = _TL_HHMM_RE.sub("", s)
-    s = _TL_TONE_RE.sub("", s)
     s = _TL_PERIOD_RE.sub("", s)
     s = _TL_DAY_RE.sub("", s)
     return s.strip()
@@ -1539,15 +1576,14 @@ def _manual_event_ts_utc(day: _dt.date, explicit_day: bool,
 
 def reconcile_timeline(conn: sqlite3.Connection,
                        dashboard_path: str | Path) -> ReconcileReport:
-    """Absorb tl_line edits from the dashboard ## Timeline block back into DB.
+    """Absorb timeline edits from the dashboard ## Timeline block back into DB.
 
     Anchors:
-      `<!-- tl:<sid> -->` → session_digests.tl_line for that sid
-      `<!-- tl:d:YYYY-MM-DD -->` → diary.tl_line for that date
+      `<!-- tl:<sid> -->` → session_digests anchor (present/absent → hidden sweep)
+      `<!-- tl:d:YYYY-MM-DD -->` → diary anchor (present/absent → hidden sweep)
       `<!-- tl:e:N -->` → events.content for manual event id N (edit)
       `<!-- tl-rendered:s=...;d=...;e=... -->` → trail marker; absent sid/date/evt = hidden
 
-    Tone/label segments are display-only — only the text portion is written.
     Lines starting with `+ ` → insert as manual events (channel='manual').
     """
     rpt = ReconcileReport()
@@ -1555,6 +1591,7 @@ def reconcile_timeline(conn: sqlite3.Connection,
     if not dashboard_path.exists():
         return rpt
     text = dashboard_path.read_text(encoding="utf-8")
+    md_mtime_iso = _md_mtime_iso(dashboard_path)
     start = text.find(_TIMELINE_H2)
     if start == -1:
         return rpt
@@ -1563,7 +1600,7 @@ def reconcile_timeline(conn: sqlite3.Connection,
     block = after_h2[: next_h2.start()] if next_h2 else after_h2
 
     # Parse trail marker first — tells us what was rendered last time
-    trail_sids:  set[str] = set()
+    trail_sid_seqs: set[tuple[str, int]] = set()
     trail_dates: set[str] = set()
     trail_evts:  set[int] = set()
     trail_eps:   set[int] = set()
@@ -1572,7 +1609,17 @@ def reconcile_timeline(conn: sqlite3.Connection,
         for segment in m_trail.group("payload").split(";"):
             segment = segment.strip()
             if segment.startswith("s="):
-                trail_sids.update(x.strip() for x in segment[2:].split(",") if x.strip())
+                for x in segment[2:].split(","):
+                    x = x.strip()
+                    if not x:
+                        continue
+                    parts = x.split(":")
+                    if len(parts) >= 3:
+                        trail_sid_seqs.add((parts[0].strip(), int(parts[1].strip())))
+                    elif len(parts) == 2:
+                        trail_sid_seqs.add((parts[0].strip(), int(parts[1].strip())))
+                    else:
+                        trail_sid_seqs.add((parts[0].strip(), 0))
             elif segment.startswith("d="):
                 trail_dates.update(x.strip() for x in segment[2:].split(",") if x.strip())
             elif segment.startswith("ep="):
@@ -1580,10 +1627,11 @@ def reconcile_timeline(conn: sqlite3.Connection,
             elif segment.startswith("e="):
                 trail_evts.update(int(x.strip()) for x in segment[2:].split(",") if x.strip())
 
-    sid_edits:    dict[str, str] = {}
-    date_edits:   dict[str, str] = {}
-    present_sids:  set[str] = set()
-    present_dates: set[str] = set()
+    sid_edits:      dict[tuple[str, int, int | None], str] = {}
+    date_edits:     dict[str, str] = {}
+    date_overview_edits: dict[str, str] = {}
+    present_sid_seqs: set[tuple[str, int]] = set()
+    present_dates:  set[str] = set()
     present_evts:  set[int] = set()
     present_eps:   set[int] = set()
     plus_lines:    list[tuple[_dt.date, bool, str]] = []
@@ -1591,12 +1639,16 @@ def reconcile_timeline(conn: sqlite3.Connection,
     now_melb = _tl_now_melb()
     current_day = now_melb.date()
     current_day_explicit = False
+    pending_overview_date: str | None = None
 
     for raw in block.splitlines():
         line = raw.rstrip()
         # Skip the trail marker line itself
         if _TL_TRAIL_RE.search(line):
             continue
+        if pending_overview_date and line.strip() and "<!--" not in line:
+            date_overview_edits[pending_overview_date] = line.strip()
+            pending_overview_date = None
         day_context = _timeline_day_context(line, now_melb.date())
         if day_context is not None:
             current_day = day_context
@@ -1625,52 +1677,67 @@ def reconcile_timeline(conn: sqlite3.Connection,
         m_sid = _TL_SID_RE.search(line)
         if m_sid:
             sid = m_sid.group("sid")
-            present_sids.add(sid)
-            text_part = _extract_tl_text(line)
+            seq = int(m_sid.group("seq")) if m_sid.group("seq") else 0
+            ln = int(m_sid.group("ln")) if m_sid.group("ln") else None
+            present_sid_seqs.add((sid, seq))
+            text_part = _strip_tl_date_header(_strip_tl_anchor(line))
             if text_part:
-                sid_edits[sid] = text_part
+                sid_edits[(sid, seq, ln)] = text_part
             continue
         m_date = _TL_DATE_RE.search(line)
         if m_date:
             date = m_date.group("date")
             present_dates.add(date)
+            pending_overview_date = date
             text_part = _extract_tl_text(line)
             if text_part:
                 date_edits[date] = text_part
 
-    if not sid_edits and not date_edits and not m_trail and not plus_lines and not evt_edits and not trail_eps:
+    if not sid_edits and not date_edits and not date_overview_edits and not m_trail and not plus_lines and not evt_edits and not trail_eps and not trail_sid_seqs:
         return rpt
 
     now_iso = _now()
     with conn:
-        # ── existing: session tl_line edits ──────────────────────────────────
-        for sid, new_tl in sid_edits.items():
+        for (sid, seq, ln), new_text in sid_edits.items():
             row = conn.execute(
-                "SELECT tl_line FROM session_digests WHERE sid = ?", (sid,)
+                "SELECT life_lines, COALESCE(updated_at, ts) AS mts"
+                " FROM session_digests WHERE sid = ? AND segment_seq = ?",
+                (sid, seq),
             ).fetchone()
             if row is None:
-                rpt.conflicts.append(f"tl:sid {sid!r} not in session_digests")
+                rpt.conflicts.append(f"tl:sid {sid!r}:{seq} not in session_digests")
                 continue
-            db_tl = row["tl_line"] or ""
-            if new_tl != db_tl:
-                conn.execute(
-                    "UPDATE session_digests SET tl_line = ? WHERE sid = ?",
-                    (new_tl, sid),
-                )
-                conn.execute(
-                    "INSERT INTO audit_log"
-                    " (target_table, target_id, action, summary)"
-                    " VALUES ('session_digests', ?, 'tl_edit', ?)",
-                    (sid, f"md-reconcile: tl_line={new_tl[:60]!r}"),
-                )
-                rpt.updated += 1
-            else:
+            if md_mtime_iso and (row["mts"] or "") > md_mtime_iso:
                 rpt.unchanged += 1
+                continue
+            if ln is None:
+                rpt.unchanged += 1
+                continue
+            life_lines = (row["life_lines"] or "").splitlines()
+            if ln < 0 or ln >= len(life_lines):
+                rpt.conflicts.append(
+                    f"tl:sid {sid!r}:{seq}:{ln} life_lines index out of range"
+                )
+                continue
+            if life_lines[ln] == new_text:
+                rpt.unchanged += 1
+                continue
+            life_lines[ln] = new_text
+            conn.execute(
+                "UPDATE session_digests SET life_lines=?, updated_at=?"
+                " WHERE sid=? AND segment_seq=?",
+                ("\n".join(life_lines), now_iso, sid, seq),
+            )
+            conn.execute(
+                "INSERT INTO audit_log (target_table, target_id, action, summary)"
+                " VALUES ('session_digests', ?, 'tl_edit', ?)",
+                (f"{sid}:{seq}:{ln}", f"md-reconcile: life_lines[{ln}]={new_text[:60]!r}"),
+            )
+            rpt.updated += 1
 
-        # ── existing: diary tl_line edits ────────────────────────────────────
-        for date, new_tl in date_edits.items():
+        for date in date_edits:
             row = conn.execute(
-                "SELECT tl_line FROM diary WHERE date = ?", (date,)
+                "SELECT rowid FROM diary WHERE date = ?", (date,)
             ).fetchone()
             if row is None:
                 now_melb = _dt.datetime.now(_MELB_TZ)
@@ -1679,31 +1746,48 @@ def reconcile_timeline(conn: sqlite3.Connection,
                     continue
                 rpt.conflicts.append(f"tl:d:{date} not in diary")
                 continue
-            db_tl = row["tl_line"] or ""
-            if new_tl != db_tl:
-                conn.execute(
-                    "UPDATE diary SET tl_line = ?, updated_at = ? WHERE date = ?",
-                    (new_tl, now_iso, date),
-                )
-                conn.execute(
-                    "INSERT INTO audit_log"
-                    " (target_table, target_id, action, summary)"
-                    " VALUES ('diary', ?, 'tl_edit', ?)",
-                    (date, f"md-reconcile: tl_line={new_tl[:60]!r}"),
-                )
-                rpt.updated += 1
-            else:
+            rpt.unchanged += 1
+
+        for date, overview in date_overview_edits.items():
+            row = conn.execute(
+                "SELECT overview, COALESCE(updated_at, date) AS mts"
+                " FROM diary WHERE date = ?",
+                (date,),
+            ).fetchone()
+            if row is None:
+                now_melb = _dt.datetime.now(_MELB_TZ)
+                diary_cutoff = (now_melb - _dt.timedelta(hours=7)).date().isoformat()
+                if date >= diary_cutoff:
+                    continue
+                rpt.conflicts.append(f"tl:d:{date} not in diary")
+                continue
+            if md_mtime_iso and (row["mts"] or "") > md_mtime_iso:
                 rpt.unchanged += 1
+                continue
+            if (row["overview"] or "") == overview:
+                rpt.unchanged += 1
+                continue
+            conn.execute(
+                "UPDATE diary SET overview=?, updated_at=? WHERE date=?",
+                (overview, now_iso, date),
+            )
+            conn.execute(
+                "INSERT INTO audit_log (target_table, target_id, action, summary)"
+                " VALUES ('diary', ?, 'overview_edit', ?)",
+                (date, f"md-reconcile: overview={overview[:60]!r}"),
+            )
+            rpt.updated += 1
 
         # ── DELETE: anchors in trail but absent from current block → hidden ──
         if m_trail:
-            for sid in trail_sids - present_sids:
+            for (sid, seq) in trail_sid_seqs - present_sid_seqs:
                 conn.execute(
-                    "UPDATE session_digests SET tl_hidden=1 WHERE sid=?", (sid,))
+                    "UPDATE session_digests SET tl_hidden=1 WHERE sid=? AND segment_seq=?",
+                    (sid, seq))
                 conn.execute(
                     "INSERT INTO audit_log (target_table, target_id, action, summary)"
                     " VALUES ('session_digests', ?, 'tl_delete', 'user deleted tl line')",
-                    (sid,))
+                    (f"{sid}:{seq}",))
                 rpt.updated += 1
             for date in trail_dates - present_dates:
                 conn.execute(

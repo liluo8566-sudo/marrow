@@ -1,5 +1,5 @@
 """LLM provider client. Callers pass intent (role + body + tier); provider,
-flags, model, channel are config. One chain: default only (2.5c P8 ollama strip).
+flags, model, channel are config. One chain: default only (fallback/emergency removed).
 
 claude_cli isolation is built in and non-negotiable: a pipeline call must
 never inherit persona / user MCP / output-style.
@@ -79,7 +79,7 @@ class LLMClient:
         self.cfg = cfg or config.load()
         llm = self.cfg.get("llm", {})
         self.chain = [
-            nm for k in ("default", "fallback", "emergency")
+            nm for k in ("default",)
             if (nm := llm.get(k))
         ]
         self.specs = llm
@@ -139,15 +139,20 @@ class LLMClient:
 
     def _run_claude_stream(self, spec: dict, model: str, prompt: str) -> str:
         timeout = spec.get("timeout_s", 120)
+        effort = spec.get("effort")
         cmd = [_claude_bin(), "--output-format", "stream-json",
                "--input-format", "stream-json", "--verbose",
                "--model", model, *_ISOLATION]
+        if effort:
+            cmd.extend(["--effort", effort])
         msg = json.dumps({"type": "user", "message": {
             "role": "user", "content": prompt}})
+        env = {**os.environ, "MARROW_PIPELINE": "1"}
         try:
             p = subprocess.Popen(
                 cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, text=True, start_new_session=True)
+                stderr=subprocess.PIPE, text=True, start_new_session=True,
+                env=env)
         except OSError as e:
             raise LLMError(f"claude_cli spawn failed: {e}") from e
         try:
@@ -156,7 +161,10 @@ class LLMClient:
             pgid = p.pid
         stdout_pipe = p.stdout
 
+        _timed_out = [False]
+
         def _timeout_kill() -> None:
+            _timed_out[0] = True
             _kill_group(pgid, signal.SIGKILL)
             try:
                 stdout_pipe.close()
@@ -191,6 +199,8 @@ class LLMClient:
                     _kill_group(pgid, signal.SIGKILL)
             else:
                 _kill_group(pgid, signal.SIGKILL)
+        if _timed_out[0]:
+            raise LLMError(f"claude_cli timeout after {timeout}s")
         if not lines:
             err = (p.stderr.read() or "").strip()[:200]
             raise LLMError(f"claude_cli stream: no output ({err})")
@@ -200,13 +210,17 @@ class LLMClient:
         return result
 
     def _run_claude_p(self, spec: dict, model: str, prompt: str) -> str:
+        effort = spec.get("effort")
         cmd = [_claude_bin(), "-p", prompt, "--model", model,
                *_ISOLATION, "--output-format", "json"]
+        if effort:
+            cmd.extend(["--effort", effort])
         timeout = spec.get("timeout_s", 120)
+        env = {**os.environ, "MARROW_PIPELINE": "1"}
         try:
             p = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, start_new_session=True)
+                text=True, start_new_session=True, env=env)
         except OSError as e:
             raise LLMError(f"claude_cli spawn failed: {e}") from e
         try:

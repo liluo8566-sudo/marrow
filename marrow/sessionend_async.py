@@ -31,7 +31,7 @@ from .popen_detach import _redirect_stdio_from_argv as _redirect_stdio
 _redirect_stdio()
 
 from . import config, repo, storage
-from .hooks import _is_manual_skip
+from .hooks import _FORCE_SESSIONEND_ACTION, _is_manual_skip
 from .llm import LLMClient, LLMError
 from .sessionend_prompts import TASK_AFFECT_DIGEST_PROMPT
 from .sessionend_writers import seg_affect, seg_digest, seg_task_cand
@@ -78,12 +78,33 @@ def _to_local_date(utc_iso: str) -> str:
     return local.date().isoformat()
 
 
-def _user_event_count(conn, sid: str) -> int:
-    row = conn.execute(
-        "SELECT COUNT(*) c FROM events WHERE session_id = ? AND role = 'user'",
-        (sid,),
-    ).fetchone()
+def _user_event_count(conn, sid: str, after_event_id: int | None = None) -> int:
+    if after_event_id is not None:
+        row = conn.execute(
+            "SELECT COUNT(*) c FROM events"
+            " WHERE session_id = ? AND role = 'user' AND id > ?",
+            (sid, after_event_id),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT COUNT(*) c FROM events WHERE session_id = ? AND role = 'user'",
+            (sid,),
+        ).fetchone()
     return row["c"] if row else 0
+
+
+def _has_force_sessionend(conn, sid: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM audit_log"
+        " WHERE action=? AND target_id=?"
+        " AND id > COALESCE("
+        "   (SELECT MAX(id) FROM audit_log"
+        "    WHERE action='sessionend_extract' AND target_id=?"
+        "    AND (summary='ok' OR summary LIKE 'ok,user_count=%')), 0)"
+        " LIMIT 1",
+        (_FORCE_SESSIONEND_ACTION, sid, sid),
+    ).fetchone()
+    return row is not None
 
 
 def _already_done(conn, sid: str) -> bool:
@@ -94,10 +115,12 @@ def _already_done(conn, sid: str) -> bool:
     a legacy `summary='ok'` row (no user_count) is treated as fully covered
     to avoid needless re-runs on historical data.
 
-    Reset rows (reset:mm_plus, reset:stale_skip) posted after the last ok row
-    act as force-rerun signals — return False so the pipeline runs again.
+    Force rows posted after the last ok row act as rerun signals.
     """
-    # If the most recent sessionend_extract row is a reset:*, treat as not done.
+    if _has_force_sessionend(conn, sid):
+        return False
+
+    # Keep legacy CLI reset rows working for mw sessionend rerun.
     latest_row = conn.execute(
         "SELECT summary FROM audit_log"
         " WHERE action='sessionend_extract' AND target_id=?"
@@ -111,7 +134,7 @@ def _already_done(conn, sid: str) -> bool:
     ok_row = conn.execute(
         "SELECT summary FROM audit_log"
         " WHERE action='sessionend_extract' AND target_id=?"
-        " AND summary LIKE 'ok,user_count=%'"
+        " AND (summary LIKE 'ok,user_count=%' OR summary LIKE 'skip:short_session%')"
         " ORDER BY id DESC LIMIT 1",
         (sid,),
     ).fetchone()
@@ -132,17 +155,19 @@ def _already_done(conn, sid: str) -> bool:
 
 
 def _has_mm_plus_reset(conn, sid: str) -> bool:
-    """True iff latest non-start sessionend_extract row for sid is reset:mm_plus."""
-    # Skip the 'start' row stamped at line 296; the marker is consumed once
-    # _run_extraction writes a fresh ok,user_count=N row over it.
+    """Legacy reset:mm_plus support for mw sessionend rerun."""
     row = conn.execute(
-        "SELECT summary FROM audit_log"
+        "SELECT 1 FROM audit_log"
         " WHERE action='sessionend_extract' AND target_id=?"
-        " AND summary != ?"
-        " ORDER BY id DESC LIMIT 1",
-        (sid, _SUMMARY_START),
+        " AND summary='reset:mm_plus'"
+        " AND id > COALESCE("
+        "   (SELECT MAX(id) FROM audit_log"
+        "    WHERE action='sessionend_extract' AND target_id=?"
+        "    AND summary LIKE 'ok,%'), 0)"
+        " LIMIT 1",
+        (sid, sid),
     ).fetchone()
-    return bool(row and row["summary"] == "reset:mm_plus")
+    return row is not None
 
 
 def _drop_stale_skip(conn, sid: str, threshold: int) -> bool:
@@ -175,15 +200,23 @@ def _drop_stale_skip(conn, sid: str, threshold: int) -> bool:
     return True
 
 
-def _session_events_text(conn, sid: str) -> tuple[str, str]:
+def _session_events_text(conn, sid: str,
+                         after_event_id: int | None = None) -> tuple[str, str]:
     """Return (raw events block, session date). Empty session -> ('', today).
     Transcript fence lives inside the prompt body (sessionend_prompts), so
     we only emit the role-tagged content here."""
-    rows = conn.execute(
-        "SELECT timestamp, role, content FROM events"
-        " WHERE session_id=? ORDER BY timestamp, id",
-        (sid,),
-    ).fetchall()
+    if after_event_id is not None:
+        rows = conn.execute(
+            "SELECT timestamp, role, content FROM events"
+            " WHERE session_id=? AND id > ? ORDER BY timestamp, id",
+            (sid, after_event_id),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT timestamp, role, content FROM events"
+            " WHERE session_id=? ORDER BY timestamp, id",
+            (sid,),
+        ).fetchall()
     if not rows:
         return "", _dt.date.today().isoformat()
     _p = config.persona()
@@ -308,6 +341,8 @@ def main(argv: list[str] | None = None) -> int:
     sid: str | None = None
     cwd: str = ""
     log_path: str = ""
+    after_event_id: int | None = None
+    segment_seq = 0
     i = 0
     while i < len(args):
         if args[i] == "--sid" and i + 1 < len(args):
@@ -318,6 +353,12 @@ def main(argv: list[str] | None = None) -> int:
             i += 2
         elif args[i] == "--log-path" and i + 1 < len(args):
             log_path = args[i + 1]
+            i += 2
+        elif args[i] == "--after-event-id" and i + 1 < len(args):
+            after_event_id = int(args[i + 1])
+            i += 2
+        elif args[i] == "--segment-seq" and i + 1 < len(args):
+            segment_seq = int(args[i + 1])
             i += 2
         else:
             i += 1
@@ -333,16 +374,30 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
         cfg = config.load()
+        db = config.db_path()
         global _LOCK_FD
         lock_path = config.DATA_DIR / "sessionend.lock"
         _LOCK_FD = lock_path.open("a+")
         try:
             fcntl.flock(_LOCK_FD, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
+            try:
+                _conn = storage.connect(db)
+                try:
+                    with _conn:
+                        _conn.execute(
+                            "INSERT INTO audit_log"
+                            " (target_table, target_id, action, summary)"
+                            " VALUES ('events', ?, 'sessionend_extract', 'skip:locked')",
+                            (sid,),
+                        )
+                finally:
+                    _conn.close()
+            except Exception:
+                pass
             return 0
 
         threshold = cfg.get("sessionend", {}).get("skip_turn_threshold", 3)
-        db = config.db_path()
         conn = storage.connect(db)
         try:
             if _already_done(conn, sid):
@@ -369,20 +424,25 @@ def main(argv: list[str] | None = None) -> int:
             except Exception:  # noqa: BLE001 — never block extraction on audit
                 pass
 
-            count = _user_event_count(conn, sid)
-            if count <= threshold and not _has_mm_plus_reset(conn, sid):
+            count = _user_event_count(conn, sid, after_event_id)
+            if count == 0:
+                _write_final_audit(conn, sid, f"{_SUMMARY_SKIP},user_count=0")
+                return 0
+            force_run = _has_force_sessionend(conn, sid) or _has_mm_plus_reset(conn, sid)
+            if count <= threshold and not force_run:
                 _write_final_audit(conn, sid, f"{_SUMMARY_SKIP},user_count={count}")
                 return 0
 
-            events_text, date = _session_events_text(conn, sid)
+            events_text, date = _session_events_text(conn, sid, after_event_id)
             if not events_text:
                 _write_final_audit(conn, sid, "fail:no_events")
                 return 1
 
-            return _run_extraction(conn, sid, date, events_text, cfg, count, cwd)
+            return _run_extraction(conn, sid, date, events_text, cfg, count,
+                                   cwd, segment_seq)
         except Exception as e:  # noqa: BLE001
             try:
-                _write_final_audit(conn, sid, f"fail:{type(e).__name__}")
+                _write_final_audit(conn, sid, f"fail:{type(e).__name__}: {e}"[:220])
             except Exception:
                 pass
             return 1
@@ -417,7 +477,7 @@ def _run_writer(conn, sid: str, name: str, writer, *, zero_is_fail: bool = False
         return n
     except Exception as e:  # noqa: BLE001
         try:
-            _write_segment_audit(conn, sid, name, f"fail:{type(e).__name__}")
+            _write_segment_audit(conn, sid, name, f"fail:{type(e).__name__}: {e}"[:200])
         except Exception:  # noqa: BLE001
             pass
         return None
@@ -446,7 +506,7 @@ def _collect_run_failures(conn, sid: str) -> list[str]:
 
 def _run_extraction(conn, sid: str, date: str,
                     events_text: str, cfg: dict, count: int,
-                    cwd: str = "") -> int:
+                    cwd: str = "", segment_seq: int = 0) -> int:
     """Single sonnet call: TASK_AFFECT_DIGEST_PROMPT emits all segments.
     dashboard + embed_pending run at tail (fail-soft).
     """
@@ -456,6 +516,15 @@ def _run_extraction(conn, sid: str, date: str,
     active_tasks = _load_active_tasks_for_sonnet(conn)
     since_ts = int(_dt.datetime.now(_dt.timezone.utc).timestamp()) - 24 * 3600
     git_log = _load_git_log(cwd, since_ts)
+    tl_rows = conn.execute(
+        "SELECT life_lines FROM session_digests"
+        " WHERE life_lines IS NOT NULL AND tl_hidden = 0"
+        " ORDER BY ts DESC, segment_seq DESC LIMIT 3",
+    ).fetchall()
+    timeline_context = (
+        "\n".join(r["life_lines"] for r in reversed(tl_rows))
+        if tl_rows else "(none)"
+    )
 
     # ── single call: all segments (sonnet mid) ────────────────────────────────
     raw, call_err = "", None
@@ -468,6 +537,7 @@ def _run_extraction(conn, sid: str, date: str,
             body=TASK_AFFECT_DIGEST_PROMPT.format(
                 sid=sid, events=events_text,
                 active_tasks=active_tasks, git_log=git_log,
+                timeline_context=timeline_context,
                 user_name=persona["user_name"],
                 assistant_name=persona["assistant_name"],
                 user_terms=user_terms,
@@ -475,7 +545,7 @@ def _run_extraction(conn, sid: str, date: str,
             tier="mid",
         )
     except (LLMError, ValueError, RuntimeError) as e:
-        call_err = type(e).__name__
+        call_err = f"{type(e).__name__}: {e}"[:200]
 
     if call_err:
         _write_segment_audit(conn, sid, "llm_call", f"fail:{call_err}")
@@ -487,7 +557,8 @@ def _run_extraction(conn, sid: str, date: str,
     _run_writer(conn, sid, "affect",
                 lambda: seg_affect(conn, raw, sid, date))
     _run_writer(conn, sid, "digest",
-                lambda: seg_digest(conn, raw, sid, date, raw_llm=raw),
+                lambda: seg_digest(conn, raw, sid, date, raw_llm=raw,
+                                   segment_seq=segment_seq),
                 zero_is_fail=True)
 
     # ── final audit ───────────────────────────────────────────────────────────
@@ -503,6 +574,14 @@ def _run_extraction(conn, sid: str, date: str,
     else:
         _write_final_audit(conn, sid, f"partial:{','.join(sorted(set(failures)))}")
         rc = 0
+
+    # Write watermark when digest succeeded — prevents re-extraction on partial failure
+    if segment_seq > 0 and "digest" not in failures:
+        max_ev = conn.execute(
+            "SELECT MAX(id) FROM events WHERE session_id=?", (sid,)
+        ).fetchone()[0]
+        if max_ev is not None:
+            storage.insert_watermark(conn, sid, segment_seq, max_ev, count)
 
     # ── tail: slow side-effects (fail-soft; cc can't kill us here) ───────────
     db = config.db_path()

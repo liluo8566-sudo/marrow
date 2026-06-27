@@ -156,6 +156,24 @@ def test_sessionend_async_idempotent(db_env):
     assert len(rows) == 1  # no duplicate row added
 
 
+def test_sessionend_async_writes_skip_locked_when_flock_busy(db_env, monkeypatch):
+    """Lock contention exits 0 but leaves an audit trail for catchup visibility."""
+    db, _ = db_env
+    sid = "locked-sid"
+    from marrow import sessionend_async
+
+    def locked(*_args, **_kwargs):
+        raise BlockingIOError
+
+    monkeypatch.setattr(sessionend_async.fcntl, "flock", locked)
+    rc = sessionend_async.main(["--sid", sid])
+
+    assert rc == 0
+    rows = _audit_rows(db, sid)
+    assert len(rows) == 1
+    assert rows[0]["summary"] == "skip:locked"
+
+
 def test_sessionend_async_clears_stale_skip_when_events_grew(db_env):
     """Silent-death regression: cc fires session_end mid-flush, only a partial
     slice of events on disk → sessionend_async writes skip:short_session. Then
@@ -238,7 +256,7 @@ def test_sessionend_async_writes_fail_audit_on_exception(db_env):
     assert rc == 1
     rows = _audit_rows(db, "test-fail")
     assert rows[0]["summary"] == "start"
-    assert rows[-1]["summary"] == "fail:llm=RuntimeError"
+    assert rows[-1]["summary"] == "fail:llm=RuntimeError: boom"
 
 
 def _write_extract_row(db: str, sid: str, summary: str) -> None:
@@ -1605,3 +1623,65 @@ def test_fallback_drain_replays_and_truncates(tmp_path, monkeypatch):
     finally:
         fresh.close()
     assert row is not None, "drained alert must land in DB"
+
+
+# ── Fix 1 regression: force_run with 0 events must skip, not fail ────────────
+
+def test_sessionend_zero_events_with_force_flag_skips(db_env, monkeypatch):
+    """Fix 1: force_run=True but 0 user events -> skip:short_session,user_count=0.
+
+    Session 9f11d4ed had a reset:mm_plus audit row (force_run=True via
+    _has_mm_plus_reset) but zero events, causing infinite fail:no_events retries.
+    The count==0 guard must fire before force_run is even evaluated.
+    """
+    db, tmp_path = db_env
+    sid = "zero-events-force"
+
+    # Write a reset:mm_plus row so _has_mm_plus_reset returns True.
+    conn = storage.connect(db)
+    with conn:
+        conn.execute(
+            "INSERT INTO audit_log (target_table, target_id, action, summary)"
+            " VALUES ('events', ?, 'sessionend_extract', 'reset:mm_plus')",
+            (sid,),
+        )
+    conn.close()
+
+    # No events inserted — count == 0.
+    call_count = []
+
+    def boom(*a, **kw):
+        call_count.append(1)
+        raise AssertionError("LLMClient must not be called with zero events")
+
+    with patch("marrow.sessionend_async.LLMClient") as MockClient:
+        MockClient.return_value.call.side_effect = boom
+        from marrow import sessionend_async
+        rc = sessionend_async.main(["--sid", sid])
+
+    assert rc == 0, "should exit 0 (skip), not 1 (fail)"
+    rows = _audit_rows(db, sid)
+    summaries = [r["summary"] for r in rows]
+    assert any(s == "skip:short_session,user_count=0" for s in summaries), \
+        f"expected skip:short_session,user_count=0 in {summaries}"
+    assert not any(s.startswith("fail:") for s in summaries), \
+        f"unexpected fail row in {summaries}"
+    assert not call_count
+
+
+def test_parse_digest_block_facts_to_life_lines():
+    from marrow.sessionend_writers import _parse_digest_block
+    raw = (
+        "===DIGEST===\n"
+        "KIND: task\n"
+        "TL: 修了timeline bug\n"
+        "LIFE: N/A\n"
+        "VOICE: N/A\n"
+        "FACTS:\n"
+        "- 14:00【平淡】一起修timeline bug\n"
+        "===END==="
+    )
+    result = _parse_digest_block(raw)
+    assert result["kind"] == "task"
+    assert result["life_lines"] is not None
+    assert "14:00【平淡】一起修timeline bug" in result["life_lines"]

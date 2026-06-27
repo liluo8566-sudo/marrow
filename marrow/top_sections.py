@@ -92,10 +92,7 @@ def render_alerts(conn: sqlite3.Connection) -> str:
         "ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'warn' THEN 1 "
         "ELSE 2 END, created_at ASC"
     ).fetchall()
-    lines = ["## Alerts"]
-    # Each row carries `<!-- id:alert.N -->` so reconcile_alerts can map a
-    # deleted bullet back to the row to resolve. Lumi's md-side delete IS
-    # the resolve gesture.
+    lines = ["## Alerts", "<!-- alert-block-anchored -->"]
     if rows:
         lines.append("<!-- resolve: mw resolve alerts <id> (auto-refreshes dashboard) -->")
         lines += [f"- {r[1]}: {r[2]} <!-- id:alert.{r[0]} -->" for r in rows]
@@ -466,7 +463,7 @@ DASHBOARD_BLOCK_IDS = (
 # Blocks whose user edits are absorbed into the DB by a reconcile pass before
 # render — safe to overwrite the block body with fresh DB-driven content.
 # alerts: reconcile_alerts treats a deleted bullet as `resolved=1`.
-# timeline: reconcile_timeline writes tl_line edits back to session_digests/diary.
+# timeline: reconcile_timeline tracks hidden/visible via tl_hidden flag.
 RECONCILED_BLOCK_IDS = frozenset({
     "dashboard.alerts",
     "dashboard.tasks",

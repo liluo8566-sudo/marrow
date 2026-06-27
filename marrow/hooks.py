@@ -7,13 +7,13 @@ SessionStart additionalContext, side effects for SessionEnd).
 
   session_start      -> inject open tasks + alerts + affect backdrop; clear skip on resume
   session_end        -> clean transcript, archive events, regen dashboard top
-  user_prompt_submit -> mm-/mm+ skip control + recall fallback
+  user_prompt_submit -> mm controls + recall fallback
 
 PreToolUse is the global prompt-guard.py (scope already covers
 ~/CC-Lab/marrow/), not duplicated here.
 
 mm- prefix: writes audit_log manual_skip row; sessionend_async skips LLM pipeline.
-mm+ prefix: immediately reruns sessionend_async for current (or named) sid.
+mm+ prefix: clears manual skip and flags the sid for sessionend.
 resume detection: session_start fires on cc resume with same sid; if skip row exists,
   write skip_cleared row so sessionend_async runs normally.
 """
@@ -220,6 +220,10 @@ _STATUS_SKIP_BRIDGE_OWNS = "bridge_owns"
 _SESSION_BLOCK_ACTION = "session_block"
 _STATUS_BLOCK_ARCHIVE = "archive"
 _STATUS_BLOCK_CLEARED = "cleared"
+_FORCE_SESSIONEND_ACTION = "force_sessionend"
+_STATUS_MM_PLUS_FLAG = "mm_plus_flag"
+_STATUS_MM_IMMEDIATE = "mm_immediate"
+_STATUS_MM_IMMEDIATE_CURRENT = "mm_immediate_current"
 
 
 def _write_manual_skip_flag(conn: sqlite3.Connection, sid: str, status: str) -> None:
@@ -242,9 +246,32 @@ def _write_session_block_flag(conn: sqlite3.Connection, sid: str, status: str) -
         )
 
 
+def _write_force_sessionend_flag(conn: sqlite3.Connection, sid: str, status: str) -> None:
+    with conn:
+        conn.execute(
+            "INSERT INTO audit_log (target_table, target_id, action, summary)"
+            " VALUES ('events', ?, ?, ?)",
+            (sid, _FORCE_SESSIONEND_ACTION, status),
+        )
+
+
+def _has_force_sessionend(conn: sqlite3.Connection, sid: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM audit_log"
+        " WHERE action=? AND target_id=?"
+        " AND id > COALESCE("
+        "   (SELECT MAX(id) FROM audit_log"
+        "    WHERE action='sessionend_extract' AND target_id=?"
+        "    AND (summary='ok' OR summary LIKE 'ok,user_count=%')), 0)"
+        " LIMIT 1",
+        (_FORCE_SESSIONEND_ACTION, sid, sid),
+    ).fetchone()
+    return row is not None
+
+
 def _is_session_blocked(conn: sqlite3.Connection, sid: str) -> bool:
     """Latest session_block row wins. archive -> True, cleared/absent -> False.
-    Lets mm+ override a prior mm- by writing a cleared row."""
+    mm+ does not write this flag; archive blocks remain explicit."""
     row = conn.execute(
         "SELECT summary FROM audit_log"
         " WHERE action=? AND target_id=?"
@@ -429,10 +456,9 @@ def _maybe_fire_title_summarize(sid: str) -> None:
     except Exception:  # noqa: BLE001
         return
     try:
-        log_path = Path(config.DATA_DIR) / "logs" / "title_summarize.log"
         popen_detach(
             [sys.executable, "-m", "marrow.title", "--sid", sid],
-            log_path,
+            log_path=Path(os.devnull),
         )
     except Exception:  # noqa: BLE001 — fire-and-forget
         pass
@@ -542,44 +568,58 @@ def _git_housekeep_block(
         except Exception:
             pass
 
-        # Part B: project cwd uncommitted check + conditional commit
+        # Part B: project cwd — commit submodules first, then top-level
         try:
             if cwd and Path(cwd).is_dir():
+                # B1: recurse into nested git repos and commit dirty ones
+                cwd_p = Path(cwd)
+                nested = [d for d in cwd_p.iterdir()
+                          if d.is_dir() and (d / ".git").exists()]
+                for sm_abs_p in nested:
+                    sm_path = sm_abs_p.name
+                    sm_abs = str(sm_abs_p)
+                    sr = subprocess.run(
+                        ["git", "-C", sm_abs, "status", "--porcelain"],
+                        capture_output=True, text=True, timeout=5, check=False,
+                    )
+                    sm_dirty = [l for l in sr.stdout.splitlines() if l.strip()]
+                    if sm_dirty:
+                        subprocess.run(
+                            ["git", "-C", sm_abs, "add", "-A"],
+                            capture_output=True, text=True, timeout=5, check=False,
+                        )
+                        subprocess.run(
+                            ["git", "-C", sm_abs, "commit",
+                             "-m", f"auto: session-start housekeep ({len(sm_dirty)} files)"],
+                            capture_output=True, text=True, timeout=5, check=False,
+                        )
+                        lines.append(f"{sm_path}: committed {len(sm_dirty)} files")
+
+                # B2: top-level commit (picks up updated submodule pointers + own files)
                 r = subprocess.run(
                     ["git", "-C", cwd, "status", "--porcelain"],
                     capture_output=True, text=True, timeout=5, check=False,
                 )
                 dirty = [l for l in r.stdout.splitlines() if l.strip()]
                 if dirty:
-                    rows = conn.execute(
-                        "SELECT sid FROM sessions "
-                        "WHERE cwd = ? AND sid != ? "
-                        "AND last_active > datetime('now', '-15 minutes')",
-                        (cwd, current_sid or ""),
-                    ).fetchall()
-                    if rows:
-                        lines.append(
-                            f"cwd: {len(dirty)} uncommitted files, parallel session active — skipped"
-                        )
-                    else:
-                        file_names = [l[3:].strip() for l in dirty]
-                        file_list = ", ".join(file_names)
-                        if len(file_list) > 120:
-                            file_list = file_list[:117] + "..."
-                        subprocess.run(
-                            ["git", "-C", cwd, "add", "-A"],
-                            capture_output=True, text=True, timeout=5, check=False,
-                        )
-                        subprocess.run(
-                            ["git", "-C", cwd, "commit",
-                             "-m", f"auto: session-start housekeep ({len(dirty)} files)"],
-                            capture_output=True, text=True, timeout=5, check=False,
-                        )
-                        lines.append(f"cwd: committed {len(dirty)} files ({file_list})")
+                    file_names = [l[3:].strip() for l in dirty]
+                    file_list = ", ".join(file_names)
+                    if len(file_list) > 120:
+                        file_list = file_list[:117] + "..."
+                    subprocess.run(
+                        ["git", "-C", cwd, "add", "-A"],
+                        capture_output=True, text=True, timeout=5, check=False,
+                    )
+                    subprocess.run(
+                        ["git", "-C", cwd, "commit",
+                         "-m", f"auto: session-start housekeep ({len(dirty)} files)"],
+                        capture_output=True, text=True, timeout=5, check=False,
+                    )
+                    lines.append(f"cwd: committed {len(dirty)} files ({file_list})")
         except Exception:
             pass
 
-        # Part C: stale worktree report
+        # Part C: stale worktree detection + cleanup
         try:
             if cwd and Path(cwd).is_dir():
                 r = subprocess.run(
@@ -591,10 +631,47 @@ def _git_housekeep_block(
                     for l in r.stdout.splitlines()
                     if l.startswith("worktree ")
                 ]
-                secondary = wt_paths[1:]  # first = primary, skip
+                secondary = wt_paths[1:]
                 if secondary:
-                    names = ", ".join(Path(p).name for p in secondary)
-                    lines.append(f"{len(secondary)} worktree(s): {names}")
+                    now = time.time()
+                    stale, fresh = [], []
+                    for p in secondary:
+                        pp = Path(p)
+                        if not pp.is_dir():
+                            continue
+                        age_h = (now - pp.stat().st_mtime) / 3600
+                        name = pp.name
+                        if age_h >= 24:
+                            has_changes = bool(subprocess.run(
+                                ["git", "-C", p, "status", "--porcelain"],
+                                capture_output=True, text=True, timeout=5, check=False,
+                            ).stdout.strip())
+                            if has_changes:
+                                stale.append(f"{name} ({age_h:.0f}h, has uncommitted changes)")
+                            else:
+                                branch = subprocess.run(
+                                    ["git", "-C", p, "rev-parse", "--abbrev-ref", "HEAD"],
+                                    capture_output=True, text=True, timeout=5, check=False,
+                                ).stdout.strip()
+                                subprocess.run(
+                                    ["git", "-C", cwd, "worktree", "remove", p],
+                                    capture_output=True, text=True, timeout=10, check=False,
+                                )
+                                if branch and branch != "HEAD":
+                                    subprocess.run(
+                                        ["git", "-C", cwd, "branch", "-d", branch],
+                                        capture_output=True, text=True, timeout=5, check=False,
+                                    )
+                                stale.append(f"{name} ({age_h:.0f}h, clean — removed)")
+                        else:
+                            fresh.append(name)
+                    parts = []
+                    if stale:
+                        parts.append("stale wt: " + "; ".join(stale))
+                    if fresh:
+                        parts.append(f"{len(fresh)} active wt: " + ", ".join(fresh))
+                    if parts:
+                        lines.append(" · ".join(parts))
         except Exception:
             pass
 
@@ -658,7 +735,12 @@ def _read_input() -> dict:
 
 def session_start() -> int:
     try:
-        log = config.DATA_DIR / "logs" / "sessionstart_catchup.log"
+        from datetime import date as _date
+        catchup_dir = config.DATA_DIR / "logs" / "catchup"
+        catchup_dir.mkdir(parents=True, exist_ok=True)
+        log = catchup_dir / f"catchup.{_date.today():%Y-%m-%d}.log"
+        for old in sorted(catchup_dir.glob("catchup.*.log"))[:-14]:
+            old.unlink(missing_ok=True)
         popen_detach([sys.executable, "-m", "marrow.sessionstart_catchup"], log_path=log)
     except Exception as e:
         try:
@@ -803,14 +885,64 @@ def session_end() -> int:
     tpath = inp.get("transcript_path")
     if not tpath:
         return 0
-    if transcript.is_headless(tpath):
-        return 0  # spawned claude -p fires SessionEnd too; not our session
 
     cwd = inp.get("cwd") or ""
     early_sid = (inp.get("session_id") or "").strip()
     db = config.db_path()
     conn = storage.connect(db)
+
+    def _write_lifecycle_end(sid: str, summary: str) -> None:
+        with conn:
+            conn.execute(
+                "INSERT INTO audit_log"
+                " (target_table, target_id, action, summary)"
+                " VALUES ('events', ?, 'session_lifecycle:end', ?)",
+                (sid, summary),
+            )
+            conn.execute(
+                "UPDATE sessions"
+                " SET ended_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')"
+                " WHERE sid = ?",
+                (sid,),
+            )
+
     try:
+        # Regen/rewind suppress: bridge wrote this flag before closing cc
+        # so the intermediate SessionEnd skips archive entirely.
+        if early_sid:
+            _suppress = config.DATA_DIR / f".regen_suppress_{early_sid}"
+            if _suppress.exists():
+                try:
+                    _suppress.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return 0
+
+        if os.environ.get("MARROW_PIPELINE") == "1":
+            if early_sid:
+                try:
+                    _write_lifecycle_end(early_sid, "pipeline=1")
+                except Exception:  # noqa: BLE001
+                    pass
+            return 0
+
+        is_subagent = bool(tpath and "/tasks/" in tpath)
+        if is_subagent:
+            if early_sid:
+                try:
+                    _write_lifecycle_end(early_sid, "subagent=1")
+                except Exception:  # noqa: BLE001 — never block session_end
+                    pass
+            return 0
+
+        if transcript.is_headless(tpath):
+            if early_sid:
+                try:
+                    _write_lifecycle_end(early_sid, "headless=1")
+                except Exception:  # noqa: BLE001 — never block session_end
+                    pass
+            return 0
+
         # Worktree-session gate: cc instances launched inside a NON-primary git
         # worktree are task-isolated runs; their dialogue must not enter marrow.
         # Skip archive_events + LLM spawn entirely. Still write lifecycle:end so
@@ -827,13 +959,7 @@ def session_end() -> int:
         if is_worktree:
             if early_sid:
                 try:
-                    with conn:
-                        conn.execute(
-                            "INSERT INTO audit_log"
-                            " (target_table, target_id, action, summary)"
-                            " VALUES ('events', ?, 'session_lifecycle:end', 'worktree=1')",
-                            (early_sid,),
-                        )
+                    _write_lifecycle_end(early_sid, "worktree=1")
                 except Exception:  # noqa: BLE001 — never block session_end
                     pass
             return 0
@@ -844,20 +970,15 @@ def session_end() -> int:
         # write lifecycle:end so catchup doesn't flag this as silent_death.
         if early_sid and _is_session_blocked(conn, early_sid):
             try:
-                with conn:
-                    conn.execute(
-                        "INSERT INTO audit_log"
-                        " (target_table, target_id, action, summary)"
-                        " VALUES ('events', ?, 'session_lifecycle:end', 'mm_minus_blocked')",
-                        (early_sid,),
-                    )
+                _write_lifecycle_end(early_sid, "mm_minus_blocked")
             except Exception:  # noqa: BLE001 — never block session_end
                 pass
             _wipe_recall_seen(early_sid)
             _wipe_sticker_nudge(early_sid)
             return 0
 
-        rows = transcript.clean(tpath)
+        is_bridge = os.environ.get("MARROW_BRIDGE") == "1"
+        rows = transcript.clean(tpath, skip_headless_check=is_bridge, channel=os.environ.get("MARROW_CHANNEL") or "cli")
         if rows:
             repo.archive_events(conn, rows)
 
@@ -880,13 +1001,7 @@ def session_end() -> int:
         )
         if sid:
             try:
-                with conn:
-                    conn.execute(
-                        "INSERT INTO audit_log"
-                        " (target_table, target_id, action, summary)"
-                        " VALUES ('events', ?, 'session_lifecycle:end', '')",
-                        (sid,),
-                    )
+                _write_lifecycle_end(sid, "")
             except Exception:  # noqa: BLE001
                 pass
             # Drop per-session recall dedup state — next window starts clean.
@@ -897,18 +1012,22 @@ def session_end() -> int:
             # (fires on 6h idle, not on every /model swap). Archive runs, marker
             # written, popen suppressed. Catchup honors the bridge_owns marker
             # until a later fail row (manual fire that failed) supersedes it.
+            # Exception: an explicit force flag requests extraction.
             if os.environ.get("MARROW_BRIDGE") == "1":
-                try:
-                    _write_manual_skip_flag(conn, sid, _STATUS_SKIP_BRIDGE_OWNS)
-                except Exception:  # noqa: BLE001
-                    pass
-                return 0
+                if not _has_force_sessionend(conn, sid):
+                    try:
+                        _write_manual_skip_flag(
+                            conn, sid, _STATUS_SKIP_BRIDGE_OWNS,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return 0
 
             # Idempotent gate: skip popen if events haven't grown since last ok.
             skip_spawn = False
             try:
                 last_ok = _last_ok_user_count(conn, sid)
-                if last_ok is not None:
+                if last_ok is not None and not _has_force_sessionend(conn, sid):
                     current_user = conn.execute(
                         "SELECT COUNT(*) c FROM events"
                         " WHERE session_id=? AND role='user'",
@@ -920,17 +1039,12 @@ def session_end() -> int:
                 pass
 
             if not skip_spawn:
-                log = config.DATA_DIR / "logs" / f"sessionend_async_{sid}.log"
-                # cwd lets sessionend_async locate the repo for git_log evidence.
-                # Absent (study / ny chat) → "" → _load_git_log returns "".
                 cwd = inp.get("cwd") or ""
                 try:
-                    # _lazy variant: child opens log on first write only,
-                    # so silent paths (skip / already_done) leave no file.
-                    popen_detach_lazy(
-                        [sys.executable, "-m", "marrow.sessionend_async",
-                         "--sid", sid, "--cwd", cwd, "--log-path", str(log)],
-                        log_path=log,
+                    wm = storage.get_latest_watermark(conn, sid)
+                    after_eid = wm["last_event_id"] if wm else None
+                    _spawn_sessionend_async(
+                        sid, after_event_id=after_eid, segment_seq=0, cwd=cwd,
                     )
                 except Exception as e:  # noqa: BLE001
                     try:
@@ -959,14 +1073,20 @@ def _looks_like_sid(arg: str) -> bool:
     return bool(_SID_RE.match(arg.strip())) if arg and " " not in arg else False
 
 
+_MM_ACK = {
+    "mm-": "本窗口跳过DB",
+    "mm+": "本窗口加入DB",
+    "mm!": "补跑中",
+    "mm!!": "补跑中",
+}
+
+
 def _inject_silent_ack(prefix: str) -> None:
-    """Tell the LLM this prompt is a control signal — reply minimally, no chatter."""
-    user_name = config.persona()["user_name"]
+    """Tell the LLM this prompt is a control signal."""
+    ack = _MM_ACK.get(prefix, prefix)
     ctx = (
         f"## {prefix} control signal\n"
-        f"{user_name}发的 `{prefix}` 是 marrow skip/rerun 控制信号，不是对话。\n"
-        f"hook 已经处理 (manual_skip / sessionend rerun)。\n"
-        f"无需任何回话，只用一个极短动作或一个字回应。"
+        f"Hook handled. Reply with exactly: {ack}"
     )
     json.dump(
         {"hookSpecificOutput": {
@@ -979,14 +1099,14 @@ def _inject_silent_ack(prefix: str) -> None:
 
 def _inject_locate_request(prefix: str, clue: str) -> None:
     """Write a UserPromptSubmit additionalContext asking the LLM to locate the sid."""
-    action = "mm+ <full-sid>" if prefix == "mm+" else "mm- <full-sid>"
+    action = f"{prefix} <full-sid>"
     user_name = config.persona()["user_name"]
     ctx = (
-        f"## {prefix} 定位请求\n"
-        f"{user_name}发了 `{prefix} <clue>`，clue 不是有效 sid 格式。请帮她定位目标 session：\n"
-        f"- clue 原文: {clue}\n"
-        f"- 建议查询: events / audit_log 表中匹配 timestamp / content / role 的 sid\n"
-        f"- 找到后用 `{action}` 重新触发，或调用 `mw sessionend rerun <sid>`"
+        f"## {prefix} locate request\n"
+        f"{user_name} sent `{prefix} <clue>`, but the clue is not a valid sid.\n"
+        f"- clue: {clue}\n"
+        "- Search events and audit_log for matching timestamp, content, or role.\n"
+        f"- Once found, use `{action}`."
     )
     json.dump(
         {"hookSpecificOutput": {
@@ -1000,43 +1120,229 @@ def _inject_locate_request(prefix: str, clue: str) -> None:
 def _locate_jsonl(sid: str) -> str | None:
     """Glob ~/.claude/projects/**/<sid>.jsonl; return most-recent match or None."""
     import pathlib
-    matches = list(pathlib.Path.home().glob(f".claude/projects/**/{sid}.jsonl"))
+    projects_dir = pathlib.Path.home() / ".claude" / "projects"
+    matches = list(projects_dir.glob(f"**/{sid}.jsonl"))
     if not matches:
         return None
     return str(max(matches, key=lambda p: p.stat().st_mtime))
 
 
-def _pre_archive_jsonl(conn: sqlite3.Connection, tpath: str | None) -> None:
+def _pre_archive_jsonl(conn: sqlite3.Connection, tpath: str | None, channel: str = "cli") -> None:
     """Archive events from an active-session jsonl. Fail-soft — never raises."""
     if not tpath:
         return
     try:
         if transcript.is_headless(tpath):
             return
-        rows = transcript.clean(tpath)
+        rows = transcript.clean(tpath, channel=channel)
         if rows:
             repo.archive_events(conn, rows)
     except Exception:  # noqa: BLE001
         pass
 
 
+def _spawn_sessionend_async(
+    sid: str,
+    *,
+    after_event_id: int | None = None,
+    segment_seq: int = 0,
+    cwd: str = "",
+) -> None:
+    log = config.DATA_DIR / "logs" / f"sessionend_async_{sid}.log"
+    cmd = [
+        sys.executable, "-m", "marrow.sessionend_async",
+        "--sid", sid, "--log-path", str(log),
+    ]
+    if cwd:
+        cmd.extend(["--cwd", cwd])
+    if after_event_id is not None:
+        cmd.extend(["--after-event-id", str(after_event_id)])
+    if segment_seq != 0:
+        cmd.extend(["--segment-seq", str(segment_seq)])
+    popen_detach_lazy(cmd, log_path=log)
+
+
+def _spawn_sessionend_after_watermark(
+    conn: sqlite3.Connection, sid: str, *, cwd: str = "",
+) -> None:
+    wm = storage.get_latest_watermark(conn, sid)
+    after_eid = wm["last_event_id"] if wm else None
+    _spawn_sessionend_async(sid, after_event_id=after_eid, segment_seq=0, cwd=cwd)
+
+
+def _classify_skip_reason(conn: sqlite3.Connection, sid: str) -> str:
+    """Return skip reason tag for a session without successful sessionend."""
+    has_start = conn.execute(
+        "SELECT 1 FROM audit_log"
+        " WHERE action='session_lifecycle:start' AND target_id=?"
+        " LIMIT 1",
+        (sid,),
+    ).fetchone()
+    has_end = conn.execute(
+        "SELECT 1 FROM audit_log"
+        " WHERE action='session_lifecycle:end' AND target_id=?"
+        " LIMIT 1",
+        (sid,),
+    ).fetchone()
+    if has_start and not has_end:
+        return "active"
+    block = conn.execute(
+        "SELECT summary FROM audit_log"
+        " WHERE action='session_block' AND target_id=?"
+        " ORDER BY id DESC LIMIT 1",
+        (sid,),
+    ).fetchone()
+    if block and (block["summary"] or "") == "archive":
+        return "mm-"
+    skip = conn.execute(
+        "SELECT 1 FROM audit_log"
+        " WHERE action='sessionend_extract' AND target_id=?"
+        " AND summary LIKE 'skip:short_session%'"
+        " LIMIT 1",
+        (sid,),
+    ).fetchone()
+    if skip:
+        return "short"
+    return "miss"
+
+
+def _unrun_session_rows(conn: sqlite3.Connection, limit: int = 20) -> list[dict]:
+    rows = conn.execute(
+        "WITH known AS ("
+        " SELECT sid, title, channel, cwd, last_active FROM sessions"
+        " UNION ALL"
+        " SELECT target_id AS sid, '' AS title, '' AS channel, '' AS cwd,"
+        "        MAX(occurred_at) AS last_active"
+        " FROM audit_log"
+        " WHERE action='session_lifecycle:start' AND target_id IS NOT NULL"
+        " GROUP BY target_id"
+        ")"
+        " SELECT sid, MAX(title) AS title, MAX(channel) AS channel,"
+        "        MAX(cwd) AS cwd, MAX(last_active) AS last_active"
+        " FROM known"
+        " WHERE sid IS NOT NULL AND sid != ''"
+        " AND NOT EXISTS ("
+        "   SELECT 1 FROM audit_log a"
+        "   WHERE a.action='sessionend_extract' AND a.target_id=known.sid"
+        "   AND (a.summary='ok' OR a.summary LIKE 'ok,user_count=%')"
+        " )"
+        " GROUP BY sid"
+        " ORDER BY MAX(last_active) DESC"
+        " LIMIT ?",
+        (limit,),
+    ).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["reason"] = _classify_skip_reason(conn, d["sid"])
+        result.append(d)
+    return result
+
+
+def _inject_unrun_sessions(rows: list[dict]) -> None:
+    if rows:
+        lines = ["## mm! sessions without successful sessionend"]
+        for i, r in enumerate(rows, 1):
+            sid = r.get("sid") or ""
+            title = (r.get("title") or "").strip() or "(untitled)"
+            channel = (r.get("channel") or "-").strip() or "-"
+            reason = r.get("reason") or "miss"
+            last_active = (r.get("last_active") or "").strip()
+            tail = f" {last_active}" if last_active else ""
+            lines.append(f"{i}. [{channel}|{reason}] {title} {sid}{tail}")
+        lines.append("Reasons: miss=漏跑 mm-=主动跳过 short=三轮以下 active=进行中")
+        lines.append("Use `mm! <sid>` to run one immediately.")
+    else:
+        lines = ["## mm! sessions without successful sessionend", "No sessions found."]
+    json.dump(
+        {"hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": "\n".join(lines),
+        }},
+        sys.stdout,
+    )
+
+
 def _handle_mm_prefix(inp: dict) -> bool:
-    """Handle mm- / mm+ prefixes. Returns True if handled (skip further processing).
+    """Handle mm control prefixes. Returns True if handled.
 
     mm-: writes manual_skip audit row for current (or named) sid.
-    mm+ / mm-: three-branch on arg after prefix:
+    mm+: clears manual skip and flags current or named sid for sessionend.
+    mm!: lists unrun sessions or immediately spawns a named sid.
+    mm!!: pre-archives current jsonl and immediately spawns current sid.
+    mm- / mm+ / mm!: three-branch on arg after prefix:
       - empty          → current sid (existing behaviour)
       - UUID-like      → named sid
-      - natural-lang   → inject additionalContext to help LLM locate sid; no spawn
+      - natural-lang   → inject additionalContext to help LLM locate sid
     Fail-soft: any error is swallowed — hook must never block the user turn.
     """
-    prompt = (inp.get("prompt") or "").strip()
-    if not (prompt.startswith("mm-") or prompt.startswith("mm+")):
+    prompt = (inp.get("prompt") or "").strip().replace("！", "!")
+    if not prompt.startswith(("mm-", "mm+", "mm!")):
         return False
 
     sid = (inp.get("session_id") or "").strip()
-    prefix = prompt[:3]
-    rest = prompt[3:].strip()
+    if prompt.startswith("mm!!"):
+        prefix = "mm!!"
+        rest = prompt[4:].strip()
+    else:
+        prefix = prompt[:3]
+        rest = prompt[3:].strip()
+
+    if prefix == "mm!" and not rest:
+        try:
+            conn = storage.connect(config.db_path())
+            try:
+                _inject_unrun_sessions(_unrun_session_rows(conn))
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001
+            _inject_unrun_sessions([])
+        return True
+
+    if prefix == "mm!!":
+        if rest:
+            _inject_locate_request(prefix, rest)
+            return True
+        try:
+            if sid:
+                conn = storage.connect(config.db_path())
+                try:
+                    _write_force_sessionend_flag(conn, sid, _STATUS_MM_IMMEDIATE_CURRENT)
+                    tpath = inp.get("transcript_path") or _locate_jsonl(sid)
+                    _pre_archive_jsonl(conn, tpath, channel=os.environ.get("MARROW_CHANNEL") or "cli")
+                    row = conn.execute(
+                        "SELECT 1 FROM audit_log"
+                        " WHERE target_table='events'"
+                        " AND target_id=?"
+                        " AND action='session_lifecycle:end'"
+                        " LIMIT 1",
+                        (sid,),
+                    ).fetchone()
+                    if not row:
+                        with conn:
+                            conn.execute(
+                                "INSERT INTO audit_log"
+                                " (target_table, target_id, action, summary)"
+                                " VALUES ('events', ?, 'session_lifecycle:end', 'mm_bang')",
+                                (sid,),
+                            )
+                            conn.execute(
+                                "UPDATE sessions"
+                                " SET ended_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')"
+                                " WHERE sid = ? AND (ended_at IS NULL OR ended_at = '')",
+                                (sid,),
+                            )
+                finally:
+                    conn.close()
+                conn = storage.connect(config.db_path())
+                try:
+                    _spawn_sessionend_after_watermark(conn, sid)
+                finally:
+                    conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+        _inject_silent_ack("mm!!")
+        return True
 
     # Natural-language branch — hand off to main LLM, no DB writes, no spawn.
     if rest and not _looks_like_sid(rest):
@@ -1057,41 +1363,45 @@ def _handle_mm_prefix(inp: dict) -> bool:
                     # will skip transcript.clean + archive_events, leaving the
                     # events table with zero rows for this session.
                     _write_session_block_flag(conn, target_sid, _STATUS_BLOCK_ARCHIVE)
-            else:  # mm+
+            elif prefix == "mm+":
                 if target_sid:
-                    # Force-clear any done marker so sessionend_async reruns.
-                    with conn:
-                        conn.execute(
-                            "INSERT INTO audit_log"
-                            " (target_table, target_id, action, summary)"
-                            " VALUES ('events', ?, 'sessionend_extract', 'reset:mm_plus')",
-                            (target_sid,),
-                        )
-                    # Last-wins: clear any prior mm- flags so session_end runs
-                    # archive_events normally and sessionend_async runs the LLM
-                    # pipeline. Without this, mm- would permanently win.
                     _write_manual_skip_flag(conn, target_sid, _STATUS_SKIP_CLEARED)
-                    _write_session_block_flag(conn, target_sid, _STATUS_BLOCK_CLEARED)
-                    # Active-session pre-archive: events table is empty until
-                    # SessionEnd fires. Archive now so sessionend_async finds rows.
-                    if target_sid == sid:
-                        tpath = inp.get("transcript_path") or _locate_jsonl(target_sid)
-                        _pre_archive_jsonl(conn, tpath)
+                    _write_force_sessionend_flag(conn, target_sid, _STATUS_MM_PLUS_FLAG)
+            elif prefix == "mm!":
+                if target_sid:
+                    _write_force_sessionend_flag(conn, target_sid, _STATUS_MM_IMMEDIATE)
+                    row = conn.execute(
+                        "SELECT 1 FROM audit_log"
+                        " WHERE target_table='events'"
+                        " AND target_id=?"
+                        " AND action='session_lifecycle:end'"
+                        " LIMIT 1",
+                        (target_sid,),
+                    ).fetchone()
+                    if not row:
+                        with conn:
+                            conn.execute(
+                                "INSERT INTO audit_log"
+                                " (target_table, target_id, action, summary)"
+                                " VALUES ('events', ?, 'session_lifecycle:end', 'mm_bang')",
+                                (target_sid,),
+                            )
+                            conn.execute(
+                                "UPDATE sessions"
+                                " SET ended_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')"
+                                " WHERE sid = ? AND (ended_at IS NULL OR ended_at = '')",
+                                (target_sid,),
+                            )
+                    _spawn_sessionend_after_watermark(conn, target_sid)
                     conn.close()
                     conn = None
-                    log = config.DATA_DIR / "logs" / f"sessionend_async_{target_sid}.log"
-                    popen_detach_lazy(
-                        [sys.executable, "-m", "marrow.sessionend_async",
-                         "--sid", target_sid, "--log-path", str(log)],
-                        log_path=log,
-                    )
         finally:
             if conn is not None:
                 conn.close()
     except Exception:  # noqa: BLE001 — never block prompt
         pass
-    if prefix == "mm-":
-        _inject_silent_ack("mm-")
+    if prefix in {"mm-", "mm+", "mm!"}:
+        _inject_silent_ack(prefix)
     return True
 
 
@@ -1145,7 +1455,7 @@ def _render_hit_block(rank: int, h: dict, rank_caps: list[int]) -> list[str]:
 def user_prompt_submit() -> int:
     """Inject top-K recall hits as UserPromptSubmit additionalContext.
 
-    Also handles mm- (manual skip) and mm+ (sessionend rerun) prefixes.
+    Also handles mm controls before recall.
     Config flag: [recall] vector = true (default on). Set false to disable.
     Fusion weights come from [recall] in config; recall.recall_fusion blends
     vec + bm25 + recency + affect. Fail-soft: any error falls through to a
@@ -1153,7 +1463,7 @@ def user_prompt_submit() -> int:
     """
     inp = _read_input()
 
-    # mm- / mm+ control plane — check before recall, independent of recall config.
+    # mm control plane — check before recall, independent of recall config.
     if isinstance(inp, dict) and _handle_mm_prefix(inp):
         return 0  # no additionalContext injection for control prompts
 
@@ -1520,8 +1830,6 @@ def pretool_use() -> int:
         _literal = "[Path] Use paths with /, not bare filenames."
 
         def _emit(text: str) -> None:
-            # PreToolUse JSON output -> additionalContext is the only stdout form
-            # cc injects into assistant context. Plain stdout only hits transcript.
             print(json.dumps({
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
