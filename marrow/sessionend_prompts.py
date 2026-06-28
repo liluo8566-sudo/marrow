@@ -205,7 +205,7 @@ FACTS: (task sessions ONLY — for casual sessions output exactly: FACTS: N/A)
     - exclude all details. e.g. ❌ 1247 测试通过， 删除210行孤儿路径，live验证通过。
     - Written from a life perspective in plain words.
     e.g. 14:00【平淡】一起修timeline bug; 深夜一起更新recall机制
-- timestamp, tone label same as LIFE.
+- Use {mid_time} as timestamp. Tone label same as LIFE.
 - Length strictly ≤20 CN chars
 
 VOICE: (casual sessions ONLY — for task sessions output exactly: VOICE: N/A)

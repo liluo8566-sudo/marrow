@@ -34,7 +34,7 @@ from . import config, repo, storage
 from .hooks import _FORCE_SESSIONEND_ACTION, _is_manual_skip
 from .llm import LLMClient, LLMError
 from .sessionend_prompts import TASK_AFFECT_DIGEST_PROMPT
-from .sessionend_writers import seg_affect, seg_digest, seg_task_cand
+from .sessionend_writers import _seg_digest_ts, seg_affect, seg_digest, seg_task_cand
 
 _TZ = config.get_tz()
 _CUTOFF_H = 6  # 6AM day boundary (per pipeline §6)
@@ -528,6 +528,7 @@ def _run_extraction(conn, sid: str, date: str,
     )
 
     # ── single call: all segments (sonnet mid) ────────────────────────────────
+    mid_hhmm = _local_hhmm(_seg_digest_ts(conn, sid, after_event_id))
     raw, call_err = "", None
     persona = config.persona()
     user_terms = " / ".join(config.all_user_terms())
@@ -542,7 +543,8 @@ def _run_extraction(conn, sid: str, date: str,
                 user_name=persona["user_name"],
                 assistant_name=persona["assistant_name"],
                 user_terms=user_terms,
-                assistant_terms=assistant_terms),
+                assistant_terms=assistant_terms,
+                mid_time=mid_hhmm),
             tier="mid",
         )
     except (LLMError, ValueError, RuntimeError) as e:
