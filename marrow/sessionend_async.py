@@ -93,6 +93,30 @@ def _user_event_count(conn, sid: str, after_event_id: int | None = None) -> int:
     return row["c"] if row else 0
 
 
+def _session_max_event_id(conn, sid: str) -> int | None:
+    row = conn.execute(
+        "SELECT MAX(id) AS max_event_id FROM events WHERE session_id = ?",
+        (sid,),
+    ).fetchone()
+    return row["max_event_id"] if row else None
+
+
+def _latest_watermark_event_id(conn, sid: str) -> int | None:
+    row = conn.execute(
+        "SELECT * FROM session_watermarks"
+        " WHERE sid = ? ORDER BY segment_seq DESC LIMIT 1",
+        (sid,),
+    ).fetchone()
+    if not row:
+        return None
+    keys = row.keys()
+    if "max_event_id" in keys:
+        return row["max_event_id"]
+    if "last_event_id" in keys:
+        return row["last_event_id"]
+    return None
+
+
 def _has_force_sessionend(conn, sid: str) -> bool:
     row = conn.execute(
         "SELECT 1 FROM audit_log"
@@ -129,6 +153,13 @@ def _already_done(conn, sid: str) -> bool:
     ).fetchone()
     if latest_row and latest_row["summary"].startswith("reset:"):
         return False
+
+    # Multi-segment mid_scan rows carry segment-local counts; use coverage by
+    # event id when a watermark exists.
+    latest_watermark_event_id = _latest_watermark_event_id(conn, sid)
+    if latest_watermark_event_id is not None:
+        max_event_id = _session_max_event_id(conn, sid)
+        return max_event_id is None or latest_watermark_event_id >= max_event_id
 
     # Check for new-style ok row with user_count.
     ok_row = conn.execute(
