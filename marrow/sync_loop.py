@@ -87,10 +87,12 @@ _ATLAS_SWEEP_TICK_S = float(os.environ.get("MARROW_ATLAS_SWEEP_TICK_S", "60.0"))
 # Tables that feed dashboard.md. No separate milestone_candidate or monitor
 # table exists in current schema; milestones covers candidates.
 _DASHBOARD_DB_SOURCES: list[tuple[str, str]] = [
-    ("affect",     "created_at"),
-    ("tasks",      "updated_at"),
-    ("milestones", "updated_at"),
-    ("alerts",     "created_at"),
+    ("affect",          "created_at"),
+    ("tasks",           "updated_at"),
+    ("milestones",      "updated_at"),
+    ("alerts",          "created_at"),
+    ("session_digests", "ts"),
+    ("diary",           "updated_at"),
 ]
 
 
@@ -364,7 +366,7 @@ def build_targets(folder: str,
         md_path=dashboard_path,
         db_mtime_fn=_dash_db_mtime,
         render_fn=_dash_render,
-        has_md_to_db=False,  # dashboard is db→md only
+        has_md_to_db=True,
     ))
 
     return targets
