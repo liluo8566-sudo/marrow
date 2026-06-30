@@ -184,11 +184,15 @@ LIFE: (casual sessions ONLY — for task sessions output exactly: LIFE: N/A)
 - Overview of the day — what happened in user's day.
 - Include both real-world activities (meals, classes, errands, exercise) \
     and shared activities with assistant (chatting about X topic, goofing around).
-- Summarise into dense info line
-    - 1 line = 1 scene (topic/activity/mood). 
-    - 0-3 lines; never pad - fewer is better.
+- Summarise into dense info line.
+    - No more than 3 lines - fewer is better.
     - output N/A for 0.
-- Each line: `HH:MM ` — pick an approx timestamp from the transcript.
+    - Homogeneous scenes (silly couple banter/cuddling/play with no actual topic):
+  merge into 1 line with time RANGE `HH:MM-HH:MM【tone】summary`.
+        - e.g. 09:30-13:00【愉悦】嫌豹胖互怼打闹撒娇，送动物园威胁，亲亲顺毛、
+    - Substantive scenes (topic/activity/mood change): 
+        split into its own line with single `HH:MM`. 
+- Pick approx. timestamp/range from the transcript.
 - Length: ≤20 CN chars
   Add a fine tone label (2-char CN) to each line - user's mood/shared atmosphere.
     - e.g. 低落，生气，兴奋，激动

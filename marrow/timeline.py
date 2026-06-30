@@ -33,7 +33,7 @@ from . import config as _config
 _TZ = _config.get_tz()
 _MELB_TZ = ZoneInfo("Australia/Melbourne")
 # Matches leading HH:MM in a LIFE line (e.g. "21:40 买了b5精华")
-_LIFE_TS_RE = _re.compile(r"^(\d{2}:\d{2})(?:\s+|(?=【))(.*)", _re.DOTALL)
+_LIFE_TS_RE = _re.compile(r"^(\d{2}:\d{2})(?:-\d{2}:\d{2})?(?:\s+|(?=【))(.*)", _re.DOTALL)
 _CUTOFF_H = 6          # 6AM local day boundary
 _BUDGET = 4000         # soft char budget (safety net; zone caps control sizing)
 _INJECT_CAP = 20       # max film-strip lines injected into context
@@ -558,7 +558,7 @@ def _render_24h(digests: list[dict],
         else:
             for idx, item in enumerate(life_items):
                 line_hhmm, text = _life_line_hhmm(item, sess_hhmm)
-                if _re.match(r"^\d{2}:\d{2}[\s【]", item):
+                if _re.match(r"^\d{2}:\d{2}(?:-\d{2}:\d{2})?[\s【]", item):
                     text = item
                 for ts_iso in _life_line_window_times(
                     item, ts, event_spans.get(sd["sid"])
@@ -596,7 +596,7 @@ def _render_24h(digests: list[dict],
 
             segment_seq = entry.get("segment_seq", 0)
             anchor = f" {_tl_anchor_sid(sid, segment_seq, line_index=entry['line_index'])}"
-            if _re.match(r"^\d{2}:\d{2}[\s【]", text):
+            if _re.match(r"^\d{2}:\d{2}(?:-\d{2}:\d{2})?[\s【]", text):
                 lines.append(f"{text}{anchor}")
             else:
                 lines.append(f"{hhmm} {text}{anchor}")
