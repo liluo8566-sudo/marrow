@@ -66,18 +66,28 @@ import re
 
 _REM_LIST_RE = re.compile(r"^\[.+\]$")
 _REM_ITEM_RE = re.compile(r"^  [❗🚩⚡]*\[?\d+\]")
+_NOTE_MAX_LINES = 3
 
 
-def _strip_rem_notes(text: str) -> str:
+def _trim_rem_notes(text: str) -> str:
     if not text:
         return text
     out: list[str] = []
+    note_lines = 0
     for line in text.splitlines():
-        if not line.strip():
+        if _REM_LIST_RE.match(line) or _REM_ITEM_RE.match(line):
+            note_lines = 0
+            out.append(line)
+        elif not line.strip():
+            note_lines = 0
             if out and out[-1].strip():
                 out.append(line)
-        elif _REM_LIST_RE.match(line) or _REM_ITEM_RE.match(line):
-            out.append(line)
+        else:
+            note_lines += 1
+            if note_lines <= _NOTE_MAX_LINES:
+                out.append(line)
+            elif note_lines == _NOTE_MAX_LINES + 1:
+                out.append("      ...")
     while out and not out[-1].strip():
         out.pop()
     return "\n".join(out)
@@ -95,8 +105,8 @@ def render_daily(cadence_bin: str | None = None) -> str:
     time_str = now.strftime("%H:%M")
 
     cal = _run_cadence(["cal", "read", today, "--human"], binary)
-    rem_today = _strip_rem_notes(_run_cadence(["rem", "read", "--today", "--human"], binary))
-    rem_overdue = _strip_rem_notes(_run_cadence(["rem", "read", "--overdue", "--human"], binary))
+    rem_today = _trim_rem_notes(_run_cadence(["rem", "read", "--today", "--human"], binary))
+    rem_overdue = _trim_rem_notes(_run_cadence(["rem", "read", "--overdue", "--human"], binary))
 
     if not cal and not rem_today and not rem_overdue:
         return ""
