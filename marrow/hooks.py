@@ -852,6 +852,14 @@ def session_start() -> int:
             if backdrop:
                 parts.append(backdrop)
 
+            try:
+                from . import schedule as _sched
+                sched_content, _ = _sched.refresh_daily()
+                if sched_content:
+                    parts.append(sched_content)
+            except Exception:
+                pass
+
             ctx = "\n\n".join(p for p in parts if p)
 
             try:
@@ -2047,7 +2055,16 @@ def turn_inject() -> int:
     except Exception:
         pass
 
-    ctx = f"# Context — {now_str}{delta}"
+    sched_ctx = ""
+    try:
+        from . import schedule as _sched
+        sched_inj = _sched.check_and_inject(sid)
+        if sched_inj:
+            sched_ctx = f"\n\n{sched_inj}"
+    except Exception:
+        pass
+
+    ctx = f"# Context — {now_str}{delta}{sched_ctx}"
     json.dump(
         {"hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
