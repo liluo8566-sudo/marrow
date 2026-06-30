@@ -83,7 +83,24 @@ def render_daily(cadence_bin: str | None = None) -> str:
     parts = [f"## Daily Schedule  {today} {day_name} | now {time_str}"]
 
     if cal:
-        parts.append(f"### Calendar\n{cal}")
+        lines = [l for l in cal.splitlines() if "[Scheduled Reminders]" not in l]
+        cleaned: list[str] = []
+        i = 0
+        while i < len(lines):
+            if i + 1 < len(lines) and lines[i + 1].strip().startswith("---"):
+                block = [lines[i], lines[i + 1]]
+                i += 2
+                while i < len(lines) and lines[i].strip() and not (i + 1 < len(lines) and lines[i + 1].strip().startswith("---")):
+                    block.append(lines[i])
+                    i += 1
+                if len(block) > 2:
+                    cleaned.extend(block)
+            else:
+                if lines[i].strip():
+                    cleaned.append(lines[i])
+                i += 1
+        if cleaned:
+            parts.append(f"### Calendar\n" + "\n".join(cleaned))
     if rem_today:
         parts.append(f"### Today's Reminders\n{rem_today}")
     if rem_overdue:
@@ -134,11 +151,11 @@ def compute_diff(old_content: str, new_content: str) -> str:
     parts: list[str] = []
     for line in sorted(removed):
         line = line.strip()
-        if line and not line.startswith("#") and not line.startswith("--"):
+        if line and not line.startswith("#") and not line.startswith("--") and "| now " not in line:
             parts.append(f"-{line[:60]}")
     for line in sorted(added):
         line = line.strip()
-        if line and not line.startswith("#") and not line.startswith("--"):
+        if line and not line.startswith("#") and not line.startswith("--") and "| now " not in line:
             parts.append(f"+{line[:60]}")
 
     if not parts:
@@ -150,7 +167,9 @@ def compute_diff(old_content: str, new_content: str) -> str:
 
 
 def _hash(content: str) -> str:
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+    import re
+    stable = re.sub(r"\| now \d{2}:\d{2}", "| now --:--", content)
+    return hashlib.sha256(stable.encode("utf-8")).hexdigest()[:16]
 
 
 def _snapshot_dir() -> Path:
