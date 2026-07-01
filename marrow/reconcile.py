@@ -1634,6 +1634,7 @@ def reconcile_timeline(conn: sqlite3.Connection,
     tone_edits:     dict[str, str] = {}
     present_sid_seqs: set[tuple[str, int]] = set()
     present_dates:  set[str] = set()
+    block_dates:    set[str] = set()   # ALL dates from day-context headers
     present_evts:  set[int] = set()
     present_eps:   set[int] = set()
     plus_lines:    list[tuple[_dt.date, bool, str]] = []
@@ -1655,6 +1656,7 @@ def reconcile_timeline(conn: sqlite3.Connection,
         if day_context is not None:
             current_day = day_context
             current_day_explicit = True
+            block_dates.add(day_context.isoformat())
         # Lines starting with `+ ` are manual add requests
         if _TL_PLUS_RE.match(line):
             plus_lines.append((current_day, current_day_explicit, line))
@@ -1702,6 +1704,7 @@ def reconcile_timeline(conn: sqlite3.Connection,
             and not tone_edits and not m_trail and not plus_lines
             and not evt_edits and not trail_eps and not trail_sid_seqs
             and not present_sid_seqs and not present_dates
+            and not block_dates
             and not present_evts and not present_eps):
         return rpt
 
@@ -1820,13 +1823,18 @@ def reconcile_timeline(conn: sqlite3.Connection,
         elif present_sid_seqs or present_dates or present_evts or present_eps:
             # Trail marker absent — reconstruct expected from DB,
             # scoped to dates observed in the MD block.
+            # block_dates covers ALL day-context headers (zone A bare
+            # headers + zone B tl:d: anchored); present_dates only has
+            # tl:d:-anchored dates. Use the union for session_digests/events
+            # scope so zone A deletions are also detected.
             expected_sid_seqs: set[tuple[str, int]] = set()
             expected_dates: set[str] = set()
             expected_evts: set[int] = set()
             expected_eps: set[int] = set()
-            if present_dates:
-                ph = ",".join("?" * len(present_dates))
-                dates_vals = tuple(sorted(present_dates))
+            scope_dates = block_dates | present_dates
+            if scope_dates:
+                ph = ",".join("?" * len(scope_dates))
+                dates_vals = tuple(sorted(scope_dates))
                 expected_sid_seqs = {
                     (r["sid"], r["segment_seq"])
                     for r in conn.execute(
@@ -1835,15 +1843,19 @@ def reconcile_timeline(conn: sqlite3.Connection,
                         dates_vals,
                     ).fetchall()
                 }
-                expected_dates = {
-                    r["date"]
-                    for r in conn.execute(
-                        "SELECT date FROM diary"
-                        f" WHERE tl_hidden=0 AND date IN ({ph})",
-                        dates_vals,
-                    ).fetchall()
-                }
-                min_d, max_d = min(present_dates), max(present_dates)
+                # Diary deletion detection: only tl:d:-anchored dates
+                if present_dates:
+                    ph_d = ",".join("?" * len(present_dates))
+                    dates_d = tuple(sorted(present_dates))
+                    expected_dates = {
+                        r["date"]
+                        for r in conn.execute(
+                            "SELECT date FROM diary"
+                            f" WHERE tl_hidden=0 AND date IN ({ph_d})",
+                            dates_d,
+                        ).fetchall()
+                    }
+                min_d, max_d = min(scope_dates), max(scope_dates)
                 from_utc = _dt.datetime.combine(
                     _dt.date.fromisoformat(min_d), _dt.time.min,
                     tzinfo=_TZ_MELB,
