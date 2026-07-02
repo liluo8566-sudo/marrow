@@ -95,6 +95,82 @@ def recall(
 
 
 @mcp.tool()
+def tl_add(
+    timerange: str,
+    body: str,
+    n_word: str | None = None,
+    n_intensity: int | None = None,
+    y_word: str | None = None,
+    y_intensity: int | None = None,
+    importance: int | None = None,
+    valence: float | None = None,
+    arousal: float | None = None,
+    description: str | None = None,
+    unresolved: int | None = None,
+    sid: str | None = None,
+) -> dict:
+    """Record a live timeline moment — a scene shift, emotional turn, or task
+    milestone — the instant it happens (never batch at session end). Writes one
+    events(channel='self') row + linked affect row.
+    Format: HH:mm-HH:mm 【N word·n | Y word·n】body. N = user affect, Y = yours.
+    timerange: 'HH:mm-HH:mm' span or single 'HH:mm' moment (Melbourne local).
+    body <=30 chars, plain scene not summary. At least one of n_word/y_word
+    (each <=6 chars); intensity n_/y_intensity 1-5 (default 3). importance 1-5
+    (default 2; 4+ only for milestones). valence/arousal only for words outside
+    the affect map. description/unresolved rare/optional."""
+    conn = storage.connect(_DB)
+    try:
+        from . import tl_writer
+        try:
+            return tl_writer.tl_add(
+                conn, timerange, body,
+                n_word=n_word, n_intensity=n_intensity,
+                y_word=y_word, y_intensity=y_intensity,
+                importance=importance, valence=valence, arousal=arousal,
+                description=description, unresolved=unresolved, sid=sid,
+            )
+        except tl_writer.TlError as exc:
+            return {"ok": False, "error": str(exc)}
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def tl_update(
+    event_id: int,
+    timerange: str | None = None,
+    body: str | None = None,
+    n_word: str | None = None,
+    n_intensity: int | None = None,
+    y_word: str | None = None,
+    y_intensity: int | None = None,
+    importance: int | None = None,
+    valence: float | None = None,
+    arousal: float | None = None,
+    description: str | None = None,
+    unresolved: int | None = None,
+) -> dict:
+    """Update a self timeline row (from tl_add) in place — extend its range or
+    revise body/affect as work progresses. Task sessions keep one row per
+    session and update it (hard step in /ho). Only the fields you pass change."""
+    conn = storage.connect(_DB)
+    try:
+        from . import tl_writer
+        try:
+            return tl_writer.tl_update(
+                conn, event_id, timerange=timerange, body=body,
+                n_word=n_word, n_intensity=n_intensity,
+                y_word=y_word, y_intensity=y_intensity,
+                importance=importance, valence=valence, arousal=arousal,
+                description=description, unresolved=unresolved,
+            )
+        except tl_writer.TlError as exc:
+            return {"ok": False, "error": str(exc)}
+    finally:
+        conn.close()
+
+
+@mcp.tool()
 def atlas_lookup(prefix: str) -> list[dict]:
     """Look up atlas rows by path prefix. Returns description/naming for matched dirs."""
     conn = storage.connect(_DB)

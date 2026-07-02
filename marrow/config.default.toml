@@ -182,3 +182,16 @@ bottom = ["study", "projects", "cheatsheet"]
 hidden = []
 
 [transcript]
+
+[affect]
+# Word -> valence/arousal default map for tl_add. Empty = bundled
+# marrow/data/affect_words.toml (seed pending review). Point at your own to
+# override with zero code change.
+words_file = ""
+
+[tl_nudge]
+# Per-session hint after N assistant turns with no tl_add call. DEFAULT OFF —
+# injection text pending user review. Enable + wire once approved.
+enabled = false
+threshold = 5
+text_file = ""

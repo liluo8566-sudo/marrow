@@ -419,6 +419,41 @@ def _query_manual_events_24h(conn: sqlite3.Connection,
 
 
 
+def _query_self_rows_24h(conn: sqlite3.Connection,
+                         from_utc: str, to_utc: str) -> list[dict]:
+    """Self timeline rows (channel='self', tl_add) in the 24h window.
+
+    Joins the linked affect row for the two-sided label. Returns one dict per
+    row with a pre-composed display line (HH:mm[-HH:mm] 【label】body).
+    """
+    rows = conn.execute(
+        "SELECT e.id AS id, e.ts_start AS ts_start, e.ts_end AS ts_end,"
+        " e.timestamp AS ts, e.content AS body,"
+        " (SELECT label FROM affect WHERE event_id = e.id"
+        "  ORDER BY id DESC LIMIT 1) AS label"
+        " FROM events e"
+        " WHERE e.channel='self' AND e.timestamp >= ? AND e.timestamp < ?"
+        " ORDER BY e.timestamp ASC",
+        (from_utc, to_utc),
+    ).fetchall()
+    out: list[dict] = []
+    for r in rows:
+        ts_start = r["ts_start"] or r["ts"]
+        hhmm = _hhmm_melb(ts_start)
+        end = r["ts_end"]
+        rng = f"{hhmm}-{_hhmm_melb(end)}" if end else hhmm
+        label = r["label"] or ""
+        body = (r["body"] or "").strip()
+        seg = f"【{label}】" if label else ""
+        out.append({
+            "id": r["id"],
+            "ts": ts_start,
+            "hhmm": hhmm,
+            "composed": f"{rng} {seg}{body}".rstrip(),
+        })
+    return out
+
+
 def _query_current_sid(conn: sqlite3.Connection) -> str | None:
     """Latest in-progress session id (lifecycle:start with no end).
     Used to exclude the current session from timeline."""
@@ -459,8 +494,13 @@ def _render_24h(digests: list[dict],
                 to_utc: str | None = None,
                 event_spans: dict[str, tuple[str | None, str | None]] | None = None,
                 exclude_full_session_sids: set[str] | None = None,
+                self_rows: list[dict] | None = None,
                 ) -> tuple[list[str], list[dict]]:
-    """Flat 24h film-strip, newest first, filtered per rendered line."""
+    """Flat 24h film-strip, newest first, filtered per rendered line.
+
+    self_rows (channel='self', tl_add) render PRIMARY with a tl:e anchor and
+    the 【N word·n | Y word·n】 format; life_lines are the history fallback.
+    """
     if event_spans is None:
         event_spans = {}
     if exclude_full_session_sids is None:
@@ -581,6 +621,22 @@ def _render_24h(digests: list[dict],
             "text": content,
         })
 
+    for sr in (self_rows or []):
+        ts_dt = _in_window(sr.get("ts") or "")
+        composed = (sr.get("composed") or "").strip()
+        if ts_dt is None or not composed:
+            continue
+        entries.append({
+            "ts": ts_dt,
+            "local_date": ts_dt.astimezone(_TZ).date(),
+            "sid": None,
+            "event_id": sr["id"],
+            "line_index": None,
+            "hhmm": sr.get("hhmm") or _hhmm_melb(sr.get("ts") or ""),
+            "text": composed,
+            "self_row": True,
+        })
+
     entries.sort(key=lambda e: e["ts"], reverse=True)
 
     lines: list[str] = []
@@ -591,7 +647,11 @@ def _render_24h(digests: list[dict],
             text = entry["text"]
             sid = entry.get("sid")
             if sid is None:
-                lines.append(f"{hhmm} {text} <!-- tl:e:{entry['event_id']} -->")
+                if entry.get("self_row"):
+                    # composed already carries HH:mm[-HH:mm] 【label】body
+                    lines.append(f"{text} <!-- tl:e:{entry['event_id']} -->")
+                else:
+                    lines.append(f"{hhmm} {text} <!-- tl:e:{entry['event_id']} -->")
                 continue
 
             segment_seq = entry.get("segment_seq", 0)
@@ -668,10 +728,12 @@ def render_timeline(conn: sqlite3.Connection,
         for d in digests_24h
     }
     manual_24h = _query_manual_events_24h(conn, yesterday_start_utc_iso, now_utc_iso)
+    self_24h = _query_self_rows_24h(conn, yesterday_start_utc_iso, now_utc_iso)
     lines_24h, _overflow_24h = _render_24h(
         digests_24h, current_sid, manual_24h,
         from_utc=yesterday_start_utc_iso, to_utc=now_utc_iso,
         event_spans=event_spans_24h,
+        self_rows=self_24h,
     )
     if inject_cap is not None:
         lines_24h = lines_24h[:inject_cap]

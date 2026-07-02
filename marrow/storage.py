@@ -13,7 +13,7 @@ import sqlite_vec
 
 from . import config
 
-SCHEMA_VERSION = 27
+SCHEMA_VERSION = 28
 
 # Phase 1 first-class tables + Phase 2 affect/entities (DECISIONS Phase 2).
 # The retired emotions/people/preferences/dir placeholders stay absent.
@@ -27,6 +27,8 @@ CREATE TABLE IF NOT EXISTS events (
   channel TEXT,
   compressed INTEGER NOT NULL DEFAULT 0,
   source_hash TEXT,
+  ts_start TEXT,
+  ts_end TEXT,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
 -- Deleted events: source_hash of rows Lumi purged. archive_events skips any
@@ -550,6 +552,7 @@ def init_db(path: str | None = None) -> sqlite3.Connection:
         _migrate_to_v25(conn)
         _migrate_to_v26(conn)
         _migrate_to_v27(conn)
+        _migrate_to_v28(conn)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     return conn
 
@@ -1143,6 +1146,22 @@ def _migrate_to_v27(conn: sqlite3.Connection) -> None:
         except sqlite3.OperationalError:
             pass
     conn.execute("PRAGMA user_version=27")
+
+
+def _migrate_to_v28(conn: sqlite3.Connection) -> None:
+    """v28: events.ts_start / ts_end — explicit timerange for channel='self'
+    (tl_add) rows. NULL for all other rows; timestamp stays the sort key.
+    Idempotent — duplicate ALTER swallowed; user_version short-circuits.
+    """
+    v = conn.execute("PRAGMA user_version").fetchone()[0]
+    if v >= 28:
+        return
+    for col in ("ts_start TEXT", "ts_end TEXT"):
+        try:
+            conn.execute(f"ALTER TABLE events ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass
+    conn.execute("PRAGMA user_version=28")
 
 
 def get_latest_watermark(conn, sid):

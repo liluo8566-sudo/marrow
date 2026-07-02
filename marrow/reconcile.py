@@ -1575,6 +1575,57 @@ def _manual_event_ts_utc(day: _dt.date, explicit_day: bool,
     return ts_melb.astimezone(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+_TL_SELF_RE = re.compile(
+    r"^(?P<rng>\d{2}:\d{2}(?:-\d{2}:\d{2})?)?\s*"
+    r"(?:【(?P<label>[^】]*)】)?\s*(?P<body>.*)$",
+    re.DOTALL,
+)
+
+
+def _reconcile_self_edit(conn, rpt, eid, raw_text, row, now_iso) -> None:
+    """Round-trip an edited self (tl_add) line back to events + affect.
+
+    Parses HH:mm[-HH:mm] 【label】body. body -> events.content; label ->
+    affect.label. valence/arousal are NOT re-derived from edited words here —
+    the stored fusion V/A is preserved (tl_update remains the path for that).
+    """
+    m = _TL_SELF_RE.match(raw_text.strip())
+    if not m:
+        rpt.unchanged += 1
+        return
+    body = (m.group("body") or "").strip()
+    label = m.group("label")
+    changed = False
+    if body and body != (row["content"] or ""):
+        conn.execute("UPDATE events SET content=? WHERE id=?", (body, eid))
+        try:
+            conn.execute("DELETE FROM events_vec WHERE rowid=?", (eid,))
+            conn.execute("DELETE FROM events_vec_meta WHERE rowid=?", (eid,))
+        except sqlite3.OperationalError:
+            pass
+        changed = True
+    if label is not None:
+        label = label.strip()
+        af = conn.execute(
+            "SELECT id, label FROM affect WHERE event_id=? ORDER BY id DESC LIMIT 1",
+            (eid,),
+        ).fetchone()
+        if af is not None and label != (af["label"] or ""):
+            conn.execute(
+                "UPDATE affect SET label=?, updated_at=? WHERE id=?",
+                (label, now_iso, af["id"]),
+            )
+            changed = True
+    if changed:
+        conn.execute(
+            "INSERT INTO audit_log (target_table, target_id, action, summary)"
+            " VALUES ('events', ?, 'tl_self_edit', ?)",
+            (str(eid), f"md-reconcile: body={body[:40]!r}"))
+        rpt.updated += 1
+    else:
+        rpt.unchanged += 1
+
+
 def reconcile_timeline(conn: sqlite3.Connection,
                        dashboard_path: str | Path) -> ReconcileReport:
     """Absorb timeline edits from the dashboard ## Timeline block back into DB.
@@ -1669,15 +1720,14 @@ def reconcile_timeline(conn: sqlite3.Connection,
         if m_ep:
             present_eps.add(int(m_ep.group("epid")))
             continue
-        # Manual event anchor
+        # Event anchor (tl:e) — manual events + self (tl_add) rows.
+        # Store the anchor-stripped line; prefix/label parsing is channel-aware
+        # and happens in the write phase.
         m_evt = _TL_EVT_RE.search(line)
         if m_evt:
             eid = int(m_evt.group("eid"))
             present_evts.add(eid)
-            # Extract editable text: strip the tl:e anchor + leading HH:MM prefix
             text_part = re.sub(r"\s*<!--\s*tl:e:\d+\s*-->\s*$", "", line).rstrip()
-            text_part = _TL_HHMM_RE.sub("", text_part)
-            text_part = _TL_PERIOD_RE.sub("", text_part).strip()
             if text_part:
                 evt_edits[eid] = text_part
             continue
@@ -1872,7 +1922,8 @@ def reconcile_timeline(conn: sqlite3.Connection,
                 expected_evts = {
                     r["id"]
                     for r in conn.execute(
-                        "SELECT id FROM events WHERE channel='manual'"
+                        "SELECT id FROM events"
+                        " WHERE channel IN ('manual','self')"
                         " AND timestamp >= ? AND timestamp < ?",
                         (from_utc, to_utc),
                     ).fetchall()
@@ -1959,23 +2010,30 @@ def reconcile_timeline(conn: sqlite3.Connection,
                 (date,))
             rpt.updated += 1
         for eid in expected_evts - present_evts:
-            if md_mtime_iso:
-                r = conn.execute(
-                    "SELECT created_at FROM events WHERE id=?", (eid,)
-                ).fetchone()
-                if r and (r["created_at"] or "") > md_mtime_iso:
-                    continue
+            erow = conn.execute(
+                "SELECT channel, created_at FROM events WHERE id=?", (eid,)
+            ).fetchone()
+            if erow is None or erow["channel"] not in ("manual", "self"):
+                continue
+            if md_mtime_iso and (erow["created_at"] or "") > md_mtime_iso:
+                continue
+            # Self rows carry a linked affect row — remove it first (FK is
+            # ON DELETE SET NULL, so it would otherwise orphan).
+            if erow["channel"] == "self":
+                conn.execute("DELETE FROM affect WHERE event_id=?", (eid,))
             conn.execute(
-                "DELETE FROM events WHERE id=? AND channel='manual'", (eid,))
+                "DELETE FROM events WHERE id=? AND channel IN ('manual','self')",
+                (eid,))
             try:
                 conn.execute("DELETE FROM events_vec WHERE rowid=?", (eid,))
                 conn.execute("DELETE FROM events_vec_meta WHERE rowid=?", (eid,))
             except sqlite3.OperationalError:
                 pass
+            _action = "tl_self_delete" if erow["channel"] == "self" else "tl_manual_delete"
             conn.execute(
                 "INSERT INTO audit_log (target_table, target_id, action, summary)"
-                " VALUES ('events', ?, 'tl_manual_delete', 'user deleted manual event')",
-                (str(eid),))
+                " VALUES ('events', ?, ?, 'user deleted timeline event')",
+                (str(eid), _action))
             rpt.updated += 1
         for epid in expected_eps - present_eps:
             if md_mtime_iso:
@@ -2021,17 +2079,24 @@ def reconcile_timeline(conn: sqlite3.Connection,
             )
             rpt.updated += 1
 
-        # ── EDIT: manual event content ────────────────────────────────────────
-        for eid, new_text in evt_edits.items():
+        # ── EDIT: event content (manual + self rows) ──────────────────────────
+        for eid, raw_text in evt_edits.items():
             row = conn.execute(
                 "SELECT content, channel FROM events WHERE id=?", (eid,)
             ).fetchone()
             if row is None:
                 rpt.conflicts.append(f"tl:e:{eid} not in events")
                 continue
+            if row["channel"] == "self":
+                _reconcile_self_edit(conn, rpt, eid, raw_text, row, now_iso)
+                continue
             if row["channel"] != "manual":
                 rpt.conflicts.append(
                     f"tl:e:{eid} not a manual event (channel={row['channel']!r})")
+                continue
+            new_text = _TL_PERIOD_RE.sub("", _TL_HHMM_RE.sub("", raw_text)).strip()
+            if not new_text:
+                rpt.unchanged += 1
                 continue
             if new_text != (row["content"] or ""):
                 conn.execute("UPDATE events SET content=? WHERE id=?", (new_text, eid))

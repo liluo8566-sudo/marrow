@@ -98,8 +98,20 @@ def _match_event_hint(conn, hint: str | None, sid: str) -> int | None:
     return None
 
 
+def _sid_has_self_rows(conn, sid: str) -> bool:
+    """Coexistence gate: a sid that authored tl_add rows (channel='self') owns
+    its timeline block — the sessionend affect/life_lines writers stand down."""
+    row = conn.execute(
+        "SELECT 1 FROM events WHERE session_id=? AND channel='self' LIMIT 1",
+        (sid,),
+    ).fetchone()
+    return row is not None
+
+
 def seg_affect(conn, raw: str, sid: str, date: str) -> int:
     """Insert affect rows with importance clamp + unresolved/reconcile linkage."""
+    if _sid_has_self_rows(conn, sid):
+        return 0
     items = candidates.extract_block(raw, "AFFECT")
     if not items:
         return 0
@@ -508,6 +520,10 @@ def seg_digest(conn, raw: str, sid: str, date: str,
 
     kind = parsed["kind"]
     life_lines = parsed["life_lines"]
+    # Coexistence gate: self rows own the timeline block for this sid — suppress
+    # life_lines so they don't double-render alongside tl_add rows.
+    if life_lines is not None and _sid_has_self_rows(conn, sid):
+        life_lines = None
 
     # Alert on parse failures for kind (critical structure). TL no longer required.
     if kind is None:
