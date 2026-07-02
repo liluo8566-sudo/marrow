@@ -13,6 +13,9 @@ venv/
 
 # Data lives in ~/.config/marrow/, never inside repo
 data/
+# ...except bundled package seed data (affect map, prompt text).
+!marrow/data/
+!marrow/data/**
 *.db
 *.db-journal
 *.db-wal

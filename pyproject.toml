@@ -29,3 +29,6 @@ dev = [
 
 [tool.setuptools.packages.find]
 include = ["marrow*"]
+
+[tool.setuptools.package-data]
+marrow = ["config.default.toml", "data/*.toml", "data/*.txt"]

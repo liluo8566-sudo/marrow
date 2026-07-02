@@ -1,0 +1,4 @@
+SEED TEXT PENDING USER REVIEW (docs/notes/ct-a2-drafts.md §2).
+Replace this file (or point [tl_nudge].text_file at your own) with zero code change.
+---
+Timeline reminder: a few turns have passed without a tl_add. If a scene shift, emotional turn, or task milestone just happened, record it live now — HH:mm-HH:mm 【N word·n | Y word·n】body. Skip if nothing worth a line happened.
