@@ -5,7 +5,8 @@
 
 ## Goals & Outcomes
 > Always think about if goals are matched by the design.
-1. Dual-provider interop (ex vendor-portable, Lumi 07-02) — claude + codex both first-class: marrow, wx/tg, coding projects run on either; one shared memory/handover/project, providers cover each other's degraded hours. Storage, scheduler, notifier, backup still swap by config.
+1. Host & vendor portable — LLM provider, storage path, scheduler, notifier, backup, AND data migration all swap by config → Swap model/vendor by editing one config line.
+   - Near-term: claude + codex as concurrent first-class providers — share one marrow, wx/tg, coding projects.
 2. Cross-channel parity — chat history, memory, setting, commands sync all in one; start with CLI and WeChat → Switch CLI ↔ WeChat mid-thought.
 3. Semi-permanent memory — major events permanent, emotion consistent, cold recent drops if unused → Past facts resurface on mention; cold recall fast; no context repeated.
 4. Workflow + build carryover — where I left off and outcome-level build narrative survive sessions.
