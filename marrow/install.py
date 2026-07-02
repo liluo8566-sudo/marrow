@@ -40,6 +40,9 @@ _MARROW_HOOKS: dict[str, list[dict]] = {
     "SessionEnd": [
         {"matcher": "", "command": "{venv} -m marrow.hooks session_end"},
     ],
+    "Stop": [
+        {"matcher": "", "command": "{venv} -m marrow.hooks stop"},
+    ],
     "UserPromptSubmit": [
         {"matcher": "", "command": "{venv} -m marrow.hooks user_prompt_submit"},
         {"matcher": "", "command": "{venv} -m marrow.hooks turn_inject"},

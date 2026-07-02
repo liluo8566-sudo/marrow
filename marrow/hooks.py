@@ -147,6 +147,56 @@ def _wipe_sticker_nudge(sid: str) -> None:
         pass
 
 
+# ── per-turn ingest cursor (Stop hook) ───────────────────────────────────────
+# Mirrors the recall_seen storage pattern: one small json per sid holding the
+# last-ingested tail uuid + byte offset, so a long session tail-reads instead
+# of re-parsing the whole transcript each turn.
+
+def _ct_cursor_path(sid: str) -> Path:
+    return config.DATA_DIR / "state" / "ct_cursor" / f"{sid}.json"
+
+
+def _load_ct_cursor(sid: str) -> dict | None:
+    if not sid:
+        return None
+    try:
+        d = json.loads(_ct_cursor_path(sid).read_text())
+        return d if isinstance(d, dict) else None
+    except Exception:
+        return None
+
+
+def _save_ct_cursor(sid: str, last_uuid: str | None, offset: int) -> None:
+    if not sid:
+        return
+    p = _ct_cursor_path(sid)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"last_uuid": last_uuid, "offset": offset}))
+    except Exception:
+        pass
+
+
+def _ensure_ct_activity(conn: sqlite3.Connection) -> None:
+    """Create ct_activity if absent. Cortex C1 collector reads (ts, sid, channel)."""
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS ct_activity ("
+        " id INTEGER PRIMARY KEY,"
+        " ts TEXT NOT NULL,"
+        " sid TEXT,"
+        " channel TEXT)"
+    )
+
+
+def _write_ct_activity(conn: sqlite3.Connection, sid: str, channel: str) -> None:
+    _ensure_ct_activity(conn)
+    with conn:
+        conn.execute(
+            "INSERT INTO ct_activity (ts, sid, channel) VALUES (?, ?, ?)",
+            (_now_utc().strftime("%Y-%m-%dT%H:%M:%SZ"), sid, channel),
+        )
+
+
 def _recall_log_dir() -> Path:
     """~/.config/marrow/logs/recall/ — created on first use."""
     d = config.DATA_DIR / "logs" / "recall"
@@ -1067,6 +1117,120 @@ def session_end() -> int:
 
     finally:
         conn.close()
+    return 0
+
+
+# ── Stop hook: per-turn ingest ────────────────────────────────────────────────
+
+def _tail_uuid(records: list[dict]) -> str | None:
+    """Last record with a uuid, in file order (matches transcript tail semantics)."""
+    t: str | None = None
+    for r in records:
+        if r.get("uuid"):
+            t = r["uuid"]
+    return t
+
+
+def _tail_chain_connects(new_records: list[dict], last_uuid: str | None) -> bool:
+    """True iff the newly-appended tail is a linear continuation of last_uuid.
+
+    Walk parentUuid from the new tail; the chain root's parentUuid must equal
+    last_uuid. A rewind/branch points the root elsewhere -> False (caller then
+    does a full-file live-chain rebuild)."""
+    if not last_uuid or not new_records:
+        return False
+    by_uuid = {r["uuid"]: r for r in new_records if r.get("uuid")}
+    tail = _tail_uuid(new_records)
+    if tail is None:
+        return False
+    cur: str | None = tail
+    seen: set[str] = set()
+    while cur in by_uuid and cur not in seen:
+        seen.add(cur)
+        cur = by_uuid[cur].get("parentUuid")
+    return cur == last_uuid
+
+
+def stop() -> int:
+    """Per-turn ingest fired after each completed assistant turn.
+
+    Archives the newly completed user+assistant pair (idempotent by
+    source_hash) and logs a ct_activity row. Tail-reads from the per-sid cursor
+    for cheap long-session appends; when the parentUuid walk can't reach the
+    last-ingested uuid (rewind / bridge rewrite / stale offset) it falls back to
+    a full-file live-chain rebuild via transcript.rows_from_records purely to
+    locate + ingest the current pair and reset the cursor. Ghost rows ingested
+    before a rewind stay in the DB (no retraction in v1)."""
+    # Self-pollution guard: cortex's own resumed session must not feed marrow.
+    if os.environ.get("MARROW_CORTEX"):
+        return 0
+    # Isolated pipeline spawns don't load hooks; mirror the guard defensively.
+    if os.environ.get("MARROW_PIPELINE") == "1":
+        return 0
+
+    inp = _read_input()
+    tpath = inp.get("transcript_path") if isinstance(inp, dict) else None
+    sid = (inp.get("session_id") or "").strip() if isinstance(inp, dict) else ""
+    cwd = inp.get("cwd") if isinstance(inp, dict) else None
+    if not tpath or not sid:
+        return 0
+
+    # Task-isolated sessions (git worktree / Task-tool subagent) never enter
+    # personal memory — mirror session_start / session_end.
+    if "/tasks/" in tpath or _is_worktree_session(cwd or ""):
+        return 0
+
+    is_bridge = os.environ.get("MARROW_BRIDGE") == "1"
+    channel = os.environ.get("MARROW_CHANNEL") or "cli"
+    if not is_bridge and transcript.is_headless(tpath):
+        return 0
+
+    try:
+        size = os.path.getsize(tpath)
+    except OSError:
+        return 0
+
+    cursor = _load_ct_cursor(sid)
+    rows: list[dict] = []
+    new_last_uuid: str | None = None
+    incremental = False
+
+    if (cursor and isinstance(cursor.get("offset"), int)
+            and 0 < cursor["offset"] <= size):
+        tail_records: list[dict] = []
+        try:
+            # Binary seek: getsize is bytes; text-mode seek to an arbitrary
+            # byte offset is unsafe once the file holds multibyte (CJK) content.
+            with open(tpath, "rb") as f:
+                f.seek(cursor["offset"])
+                for raw in f.read().split(b"\n"):
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    try:
+                        tail_records.append(json.loads(raw.decode("utf-8")))
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        continue
+        except OSError:
+            tail_records = []
+        if _tail_chain_connects(tail_records, cursor.get("last_uuid")):
+            incremental = True
+            rows = transcript.rows_from_records(tail_records, channel=channel)
+            new_last_uuid = _tail_uuid(tail_records) or cursor.get("last_uuid")
+
+    if not incremental:
+        records = transcript.parse_records(tpath)
+        rows = transcript.rows_from_records(records, channel=channel)
+        new_last_uuid = _tail_uuid(records)
+
+    conn = storage.connect(config.db_path())
+    try:
+        if rows:
+            repo.archive_events(conn, rows)
+        _write_ct_activity(conn, sid, channel)
+    finally:
+        conn.close()
+    _save_ct_cursor(sid, new_last_uuid, size)
     return 0
 
 
@@ -2078,6 +2242,7 @@ def turn_inject() -> int:
 _EVENTS = {
     "session_start": session_start,
     "session_end": session_end,
+    "stop": stop,
     "user_prompt_submit": user_prompt_submit,
     "turn_inject": turn_inject,
     "pretool_use": pretool_use,
