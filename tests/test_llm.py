@@ -336,6 +336,23 @@ def test_call_cortex_no_isolation_flags(monkeypatch, tmp_path):
     assert captured["cwd"] == str(tmp_path)
     assert "--model" in captured["cmd"]
     assert captured["cmd"][captured["cmd"].index("--model") + 1] == "claude-opus"
+    assert "--permission-mode" in captured["cmd"]
+    assert captured["cmd"][captured["cmd"].index("--permission-mode") + 1] == "bypassPermissions"
+
+
+def test_call_cortex_default_timeout_is_600(monkeypatch, tmp_path):
+    cfg = {**CORTEX_CFG, "llm": {**CORTEX_CFG["llm"],
+           "claude_cli_cortex": {"kind": "claude_cli_cortex"}}}
+    c = LLMClient(cfg)
+    captured = {}
+
+    def fake_stream(cmd, prompt, timeout, env, cwd=None):
+        captured["timeout"] = timeout
+        return _cortex_stream_out("ok")
+
+    monkeypatch.setattr(c, "_stream_subprocess", fake_stream)
+    c.call_cortex("hello", cwd=str(tmp_path))
+    assert captured["timeout"] == 600
 
 
 def test_call_cortex_resume_sid_passes_resume_flag(monkeypatch, tmp_path):

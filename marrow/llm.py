@@ -180,9 +180,10 @@ class LLMClient:
         """Stream-json runner with NO isolation flags (cortex full-env, C3).
         Mirrors _run_claude_stream's spawn/timeout/kill contract exactly —
         only the isolation flags, env var, cwd, and --resume differ."""
-        timeout = spec.get("timeout_s", 300)
+        timeout = spec.get("timeout_s", 600)
         cmd = [_claude_bin(), "--output-format", "stream-json",
-               "--input-format", "stream-json", "--verbose", "--model", model]
+               "--input-format", "stream-json", "--verbose", "--model", model,
+               "--permission-mode", "bypassPermissions"]
         if resume_sid:
             cmd.extend(["--resume", resume_sid])
         env = {**os.environ, "MARROW_CORTEX": "1"}

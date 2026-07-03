@@ -48,7 +48,7 @@ kind = "claude_cli_cortex"
 # Full-environment runner for the cortex session (C3, Decided 07-03): NO
 # isolation flags — persona/rules/MCP/agents load like a real session.
 # MARROW_CORTEX=1 always injected so hooks/tl_add skip its turns.
-timeout_s = 300
+timeout_s = 600
 
 [tiers]
 # Intent -> model. Passed to `claude -p --model`; CC resolves aliases.
