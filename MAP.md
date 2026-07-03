@@ -6,7 +6,7 @@
 
 ## 0. Contents
 
-§1 system map+hooks · §2 write path · §3 read path · §4 storage+recall · §5 surface sync (§5.4 CLI+MCP) · §7 scheduled jobs · §8 alerts · §9 catchup/self-heal · §10 aging · §11 infra · §12 addons · §13 invariants+status
+§1 system map+hooks · §2 write path · §3 read path · §4 storage+recall · §5 surface sync (§5.4 CLI+MCP) · §6 cortex bridge (tl/goals/wishlist/agent_guard) · §7 scheduled jobs · §8 alerts · §9 catchup/self-heal · §10 aging · §11 infra · §12 addons · §13 invariants+status
 
 ## 1. System map
 
@@ -31,8 +31,12 @@ Three runtimes:
 
 - SessionStart `hooks:session_start` — injects affect heartbeat (events-but-no-affect gap day in last 7d) + `timeline:render_timeline` (06/11; see §3). Hardcap 6000 chars. Does NOT inject tasks/alerts. Spawns sessionstart_catchup detached. Writes lifecycle:start marker (ppid+started_at).
 - SessionEnd `hooks:session_end` — transcript.clean → repo:archive_events (idempotent by source_hash) → lifecycle:end commits BEFORE popen → idempotent spawn gate (skip popen when user_count ≤ last ok,user_count=N) → popen_detach_lazy sessionend_async. MARROW_BRIDGE=1 suppresses popen (bridge owns timing).
-- UserPromptSubmit `hooks:user_prompt_submit` — mm-/mm+ control prefixes + recall fusion injection (params §3). Per-session recall_seen dedup state under DATA_DIR/state/recall_seen/<sid>.json (wiped at start+end).
-- PreToolUse `hooks:pretool_use` — Write/Bash placement ops get atlas ancestor-chain guidance (desc + naming_hint); others get a literal path reminder.
+- UserPromptSubmit `hooks:user_prompt_submit` — mm-/mm+ control prefixes + recall fusion injection (params §3). Per-session recall_seen dedup state under DATA_DIR/state/recall_seen/<sid>.json (wiped at start+end). Second registered hook same event: `hooks:turn_inject` — time+delta-since-last-reply stamp (skipped when MARROW_CHANNEL=wx, bridge injects its own), schedule.check_and_inject, and the config-first per-turn care directive (`[turn_inject].care_text`, absorbed from the old global turn-inject.sh 07-03 eve).
+- PreToolUse `hooks:pretool_use` — Write/Bash placement ops get atlas ancestor-chain guidance (desc + naming_hint); others get a literal path reminder. Matcher=Agent → `hooks:agent_guard` — denies any Agent dispatch whose subagent_type is in `[agent_guard].deny` (default `["general-purpose"]`, burst-recursion protection); exit 2 + stderr reason, fail-soft (any error → exit 0).
+- MARROW_CORTEX guard — session_start/session_end/stop/user_prompt_submit each short-circuit to a no-op at their top when MARROW_CORTEX=1 (cortex's own resumed session, see §6): no lifecycle rows, no sessions row, no recall/timeline injection, no per-turn archive. Total invisibility so cortex turns never enter chat memory.
+
+### 1.3 install.py hook registration
+- `install.py:register_hooks` — idempotent: for each event, strips every existing `marrow.hooks` command (and legacy-absorbed commands, `_ABSORBED`) from every matcher group ONCE before re-adding, then prunes emptied groups. Fixes the prior double-registration bug (stripping per-entry inside the add loop would wipe an already-added sibling entry sharing the same matcher, e.g. UserPromptSubmit's two hooks).
 
 ## 2. Write path
 
@@ -47,6 +51,13 @@ Three runtimes:
 - seg_task_cand: cosine dedup 0.85 vs active + 24h-done tasks; tick-by-id from sonnet `{"id":N,"status":"done"}`.
 - Digest raw log → ~/.config/marrow/logs/digest/digest-YYYY-MM-DD.log (6AM cutoff, pruned >2.5d).
 - Tail (fail-soft, alerted): `dashboard:write_dashboard` + `recall:embed_pending(batch=200)`.
+
+### 2.5 tl_add/tl_update self-authored timeline (tl_writer.py, A2r)
+- One MCP call → one `events` row, `role='tl'`, `channel`=platform (MARROW_CHANNEL env, default cli). No affect-table write: affect phrase lives verbatim in content, importance in `events.imp`.
+- Format: `HH:mm[-HH:mm] 【N word·i | Y word·i】body` — N/Y word ≤8 chars each, body ≤30 chars, i = per-side intensity 1-5 (`n_intensity`/`y_intensity`), `importance` param = row-level composite (default max of the two sides). At least one of n_word/y_word required.
+- `tl_add`/`tl_update` both hard-block with `MARROW_CORTEX=1` (cortex sessions never self-write timeline — that's cortex's own day_log/wake path, not chat memory).
+- `tl_update` only accepts `role='tl'` event ids; only passed fields change (label/body/timerange/imp independently updatable).
+- Retire chain: v29 migration (`storage:_migrate_to_v29`) backfilled every prior `channel='self'` row to `role='tl'`, folded its affect-table label into content as `【label】body`, dropped the `channel='self'` marker entirely (channel now always a real platform value).
 
 ### 2.3 mid_scan (mid_scan.py, bridge-called per active session)
 - Pre-archives transcript into events, then watermark-based trigger check (elapsed hours / turn thresholds) → spawns sessionend_async extraction; audit_log action=mid_scan_trigger per fire, segment_seq increments for multi-segment sessions.
@@ -68,11 +79,13 @@ Three runtimes:
 - UserPromptSubmit: recall fusion hits as passive context. Render shaping in `hooks:user_prompt_submit`: budget 800 chars · rank_caps [300,120,120,40,40] · rel_cutoff 0.6×top1 · only rank-1 event hit gets ±1 context turns (`recall:fetch_event_context`) · timestamps via `timeutil:format_recall_ts` · recall_seen dedup per session · post-injection `recall:bump_recall_counts` (best-effort).
 - Time-lane (passive): `timecue:parse_time_cue` on prompt (昨天/前天/上周X/N天前/X月X号/EN equivalents → Melbourne natural-day → UTC window; future cues → None). Cue + substantive stripped text → windowed fusion takes TOP slots (budget min([recall].timelane_budget 400, budget/2)); stripped trivial → `recall:fetch_window_digests` lines `[MM-DD Day · digest]`, seen-key ("digest", sid). Semantic pool fills remainder, deduped vs windowed; rel_cutoff per-pool only.
 - MCP `daemon:recall` — same fusion, exclude_kinds=() (hook excludes diary+task), optional context=bool for ±1 turns, `when` relative-time field. since/until params (Melbourne YYYY-MM-DD, converted via `timecue:melb_day_range`); empty query + window → window digests instead of fusion.
+- Source tag: `recall.py:recall_fusion` sets `c["source_tag"] = "tl" if role=='tl' else "event"` per candidate; both hook (`hooks.py:1621`) and daemon output prefix hits with `[tl]`/`[event]`. Same-sid dedup not implemented — deferred, observe 2 weeks (07-03 pm).
+- tl_add nudge: `hooks:user_prompt_submit` appends a hint (10-turn threshold, `[tl_nudge]` config, text from `marrow/data/tl_nudge.txt`) when a session has gone `[tl_nudge].threshold` assistant turns without a tl_add call; `/tl-` (`tl_silence` MCP) mutes it per-sid, state dies with the session.
 
 ## 4. Storage & retrieval
 
-### 4.1 schema (storage.py, v27)
-- Migrations `storage:init_db` _migrate_to_v2…v19 idempotent, PRAGMA user_version guarded; v5/v7/v8/v9 are empty sentinels; v18 = tl_hidden on session_digests + diary; v19 = stickers C2 schema (path/sha256/phash/desc/source/last_used); v25 = diary tone/overview + session_digests.updated_at; v27 = entities/memes/affect updated_at.
+### 4.1 schema (storage.py, v30)
+- Migrations `storage:init_db` _migrate_to_v2…v30 idempotent, PRAGMA user_version guarded; v5/v7/v8/v9 are empty sentinels; v18 = tl_hidden on session_digests + diary; v19 = stickers C2 schema (path/sha256/phash/desc/source/last_used); v25 = diary tone/overview + session_digests.updated_at; v27 = entities/memes/affect updated_at; v29 = events +imp INTEGER (recall boost/retire/milestone SQL) +flag TEXT (cortex management marks, open vocab), backfills channel='self' rows to role='tl' (§2.5); v30 = goals table (key PK, value, unit, updated_at — latest value only, no history), set via goal_set/read via goal_list MCP (§6).
 - Connection: journal_mode=DELETE (deliberate — DECISIONS.md, APFS SIGBUS; never WAL) · busy_timeout 30s · sqlite-vec loaded per conn. Rule: never open a second conn to the same DB inside a write txn.
 - Tables: events (recall_count/last_recalled_at v16; never aged) · tasks (active→archived on 30d no-mention) · milestones (pinned exempt) · memes (pinned=0 + last_seen>90d → DELETE; v27: +updated_at) · stickers · pit · diary (date PK, DELETE+INSERT rewrite; v17: +tl_line; v25: +tone +overview) · goose_bites (schema history only) · alerts · audit_log · affect (superseded_by NULL = live; affect_live view; v27: +updated_at) · entities (entities_live view; v27: +updated_at) · session_digests (v17: +kind/tl_line/life_lines; sid PK, date, text, ts; v26: +updated_at) · md_index (block hash + tombstone_at) · memes_reject_log · atlas · 6×*_vec + *_vec_meta.
 
@@ -81,6 +94,7 @@ Three runtimes:
 
 ### 4.3 recall fusion (`recall:recall_fusion` / entry `recall:recall_with_config`)
 - Events: FTS5 (phrase-quoted, BM25-normalised) ∪ vec cosine, merged by id. Weighted sum: vec .55 · bm25 .30 · recency .15 · affect .10. Recency exp(-days/30) with floors: imp 5 / override → 0.5 · imp 3-4 → 0.18 · imp ≤2 → 0.
+- tl imp boost (A2r, staged additive, `[recall].imp_boost` = [0.0, 0.0, 0.0, 0.02, 0.035, 0.05] indexed by events.imp 0-5): applies on top of the weighted sum for every candidate carrying `events.imp` regardless of role — imp 1-2 sit level with plain events (0 boost), imp 5 = milestone-tier (+0.05 cap). `recall.py:_imp_boost_table`/`_imp_boost`.
 - Anchor lanes (memes/milestones/entities): vec weight .60; diary/tasks .55; reserved slot caps so events can't starve them.
 - Gates: min_score 0.35 · _VEC_ONLY_FLOOR 0.55 (cross-table vec-only adds) · _ANCHOR_VEC_FLOOR 0.50 (pre-gate, bypassed by strong-hit) · _ANCHOR_BIAS +0.10 (rows clearing floor or strong-hit) · cwd bucket bias ±0.10 (cc-lab→project, desktop/ny→daily, study→study).
 - Strong-hit: full-table scan, two tiers — (name) = name/aliases/key/title needles, score floored to `_STRONG_NAME_FLOOR` 0.55; (body) = fact/value/description via `recall:_body_needles`, floored to `_STRONG_BODY_FLOOR` 0.45. Body 2-char cjk windows pass 3 filters: `_CJK_STOP_BIGRAMS` (如果/觉得) → `_CJK_FUNC_CHARS` (any of ~50 function chars in window kills it: 你说/可以/现在) → table DF < `_BODY_DF_MAX` 3. ASCII needles: whole tokens + runs inside mixed tokens ((马自达suv)→(suv)), letter-boundary matched via `recall:_needles_match` — digits transparent, (gpt) hits (gpt4画画), (nd) can't hit inside (handover). Entity force-include lives HERE, in recall.py; entity_recall.py only does mention-count bumps.
@@ -108,9 +122,18 @@ Three runtimes:
 
 ### 5.4 mw CLI + MCP tools (`cli.py` entry `~/.local/bin/mw`, `daemon.py` MCP)
 - CLI: mutation (set/rm/done/pin/add-alert/alerts-clear, no refresh) · `resolve <id>` (only mutation w/ auto-refresh) · session mgmt · display (show/ls/atlas/doctor) · system (refresh/sessionend-rerun/drift/watcher/install). Command hints for AI live in MCP tool descriptions (`daemon.py`).
+- MCP tools (`daemon.py`): recall · tl_add · tl_update · tl_silence · goal_set · goal_list · wish_add · atlas_lookup · embed_pending · sticker_search/pick/ingest/update/delete/list_pending. tl/goal/wish tools detailed in §6.
 
 ### 5.5 write arbitration
 - Dashboard writers: watcher (observe-only) · sync_loop (timed) · sessionend-tail (one-shot). Both renderers run reconcile first; a race = two atomic writes, second wins, nothing lost. sync_loop guards USER_ACTIVE_WINDOW; sessionend-tail doesn't (session over). flock on every md write.
+
+## 6. Cortex bridge (C3)
+
+- Purpose: marrow is cortex's LLM runner (own repo/venv, see cortex/MAP.md §1) and its data-write surface (goals, wishlist) + timeline surface (tl_add) shared with chat sessions.
+- `llm.py:LLMClient.call_cortex` — full-environment resumed session, NO isolation flags (persona/rules/MCP/agents load like a real session, unlike `.call`'s `_ISOLATION`-stripped pipeline calls). Always sets `MARROW_CORTEX=1` env so every hook boundary above (§1.2) skips this session's turns. `cwd` defaults to `[cortex].home`; `resume_sid=None` = fresh session (daily rebirth); `timeout` param overrides `[llm.claude_cli_cortex].timeout_s` (600s default) so cortex's own config stays the single source of truth for the call budget (cortex derives its outer subprocess kill from the same number, see cortex/MAP.md §4). Single attempt, no chain/retry — caller (cortex pacemaker) owns retry policy. `_run_claude_cortex` adds `--permission-mode bypassPermissions` (headless pipe, nobody to approve tool prompts) and `--resume <sid>` when resuming; returns `{"text", "session_id"}`.
+- `goal_set`/`goal_list` MCP (`daemon.py`) — key/value/unit upsert into `goals` (v30), no history. Any session calls `goal_set` the moment she states/changes a goal ("sleep goal 8h") — no file edit, next cortex tick reads it straight from DB.
+- `wish_add` MCP — append-only line into cortex's wishlist.md (`[cortex].wishlist_path`, default `<home>/wishlist.md`), flock-guarded atomic write, date-prefixed. Her hand edits in the md are never touched/rewritten — pure one-way DB-writer → md, no reconcile.
+- agent_guard (§1.2) lives here rather than a cortex-side hook because hooks only execute in the main session's settings.json, and cortex's resumed session shares the same global settings.
 
 ## 7. Scheduled jobs (launchd, 7 plists)
 
