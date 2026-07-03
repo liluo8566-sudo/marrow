@@ -13,7 +13,7 @@ import sqlite_vec
 
 from . import config
 
-SCHEMA_VERSION = 29
+SCHEMA_VERSION = 30
 
 # Phase 1 first-class tables + Phase 2 affect/entities (DECISIONS Phase 2).
 # The retired emotions/people/preferences/dir placeholders stay absent.
@@ -554,6 +554,7 @@ def init_db(path: str | None = None) -> sqlite3.Connection:
         _migrate_to_v27(conn)
         _migrate_to_v28(conn)
         _migrate_to_v29(conn)
+        _migrate_to_v30(conn)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     return conn
 
@@ -1199,6 +1200,23 @@ def _migrate_to_v29(conn: sqlite3.Connection) -> None:
             (content, imp, r["id"]),
         )
     conn.execute("PRAGMA user_version=29")
+
+
+def _migrate_to_v30(conn: sqlite3.Connection) -> None:
+    """v30: goals table (C1/C3, Decided 07-03 eve) — key/value/unit pairs set
+    via goal_set MCP, read via goal_list. No history, latest value only."""
+    v = conn.execute("PRAGMA user_version").fetchone()[0]
+    if v >= 30:
+        return
+    conn.executescript("""
+CREATE TABLE IF NOT EXISTS goals (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  unit TEXT,
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+    """)
+    conn.execute("PRAGMA user_version=30")
 
 
 def get_latest_watermark(conn, sid):

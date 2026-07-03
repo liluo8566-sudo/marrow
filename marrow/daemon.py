@@ -190,6 +190,92 @@ def tl_silence(sid: str | None = None) -> dict:
 
 
 @mcp.tool()
+def goal_set(key: str, value: str, unit: str | None = None) -> dict:
+    """Set or update a goal (C1/C3 Track zone). Call the moment she tells
+    any session a goal or changes one — no file edit, no parse, next cortex
+    tick reads it. e.g. she says 'sleep goal 8h' -> goal_set('sleep', '8', 'h')."""
+    key = (key or "").strip()
+    value = (value or "").strip()
+    if not key:
+        return {"ok": False, "error": "key required"}
+    if not value:
+        return {"ok": False, "error": "value required"}
+    conn = storage.connect(_DB)
+    try:
+        with conn:
+            conn.execute(
+                "INSERT INTO goals (key, value, unit, updated_at)"
+                " VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))"
+                " ON CONFLICT(key) DO UPDATE SET"
+                " value=excluded.value, unit=excluded.unit,"
+                " updated_at=excluded.updated_at",
+                (key, value, unit),
+            )
+        return {"ok": True, "key": key, "value": value, "unit": unit}
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def goal_list() -> list[dict]:
+    """List all current goals (key/value/unit/updated_at)."""
+    conn = storage.connect(_DB)
+    try:
+        rows = conn.execute(
+            "SELECT key, value, unit, updated_at FROM goals ORDER BY key"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def _wishlist_path() -> Path:
+    cortex_cfg = config.load().get("cortex", {})
+    wp = (cortex_cfg.get("wishlist_path") or "").strip()
+    if wp:
+        return Path(wp).expanduser()
+    home = cortex_cfg.get("home") or "~/.config/marrow/cortex"
+    return Path(home).expanduser() / "wishlist.md"
+
+
+_WISHLIST_HEADER = (
+    "# Wishlist\n\n"
+    "> Owed treats, wants, self-rewards. Append-only — hand edits are sacred.\n\n"
+)
+
+
+@mcp.tool()
+def wish_add(text: str) -> dict:
+    """Record a want / owed treat / self-reward the moment she mentions one —
+    verbatim + date, append-only (her hand edits in the md are never touched
+    or rewritten). Call whenever she names something she wants, feels she
+    deserves, or a self-reward for finishing something. Execution/timing is
+    cortex's call, not yours — just record it."""
+    import fcntl
+
+    from datetime import datetime
+
+    text = (text or "").strip()
+    if not text:
+        return {"ok": False, "error": "text required"}
+    path = _wishlist_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    date = datetime.now(config.get_tz()).strftime("%Y-%m-%d")
+    line = f"- {date} {text}\n"
+    lock_path = str(path) + ".lock"
+    lf = open(lock_path, "a")
+    try:
+        fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+        existing = path.read_text(encoding="utf-8") if path.exists() else _WISHLIST_HEADER
+        from ._atomic import atomic_write
+        atomic_write(str(path), existing + line)
+    finally:
+        fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+        lf.close()
+    return {"ok": True, "path": str(path), "line": line.strip()}
+
+
+@mcp.tool()
 def atlas_lookup(prefix: str) -> list[dict]:
     """Look up atlas rows by path prefix. Returns description/naming for matched dirs."""
     conn = storage.connect(_DB)
