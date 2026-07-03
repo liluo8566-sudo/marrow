@@ -13,7 +13,7 @@ import sqlite_vec
 
 from . import config
 
-SCHEMA_VERSION = 28
+SCHEMA_VERSION = 29
 
 # Phase 1 first-class tables + Phase 2 affect/entities (DECISIONS Phase 2).
 # The retired emotions/people/preferences/dir placeholders stay absent.
@@ -553,6 +553,7 @@ def init_db(path: str | None = None) -> sqlite3.Connection:
         _migrate_to_v26(conn)
         _migrate_to_v27(conn)
         _migrate_to_v28(conn)
+        _migrate_to_v29(conn)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     return conn
 
@@ -1162,6 +1163,42 @@ def _migrate_to_v28(conn: sqlite3.Connection) -> None:
         except sqlite3.OperationalError:
             pass
     conn.execute("PRAGMA user_version=28")
+
+
+def _migrate_to_v29(conn: sqlite3.Connection) -> None:
+    """v29: events.imp / events.flag — self-authored (role='tl') recall boost,
+    retire, milestone SQL (imp) + cortex management marks (flag, open vocab).
+    Retires the channel='self' marker: role='tl', channel backfilled to a real
+    platform, affect label folded into content. Idempotent.
+    """
+    v = conn.execute("PRAGMA user_version").fetchone()[0]
+    if v >= 29:
+        return
+    for col in ("imp INTEGER", "flag TEXT"):
+        try:
+            conn.execute(f"ALTER TABLE events ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass
+    rows = conn.execute(
+        "SELECT id, content FROM events WHERE channel='self'"
+    ).fetchall()
+    for r in rows:
+        af = conn.execute(
+            "SELECT label, importance FROM affect WHERE event_id=?"
+            " ORDER BY id DESC LIMIT 1",
+            (r["id"],),
+        ).fetchone()
+        label = (af["label"] if af else "") or ""
+        imp = af["importance"] if af else None
+        content = r["content"] or ""
+        if label and not content.lstrip().startswith("【"):
+            content = f"【{label}】{content}"
+        conn.execute(
+            "UPDATE events SET role='tl', channel='cli', content=?, imp=?"
+            " WHERE id=?",
+            (content, imp, r["id"]),
+        )
+    conn.execute("PRAGMA user_version=29")
 
 
 def get_latest_watermark(conn, sid):
