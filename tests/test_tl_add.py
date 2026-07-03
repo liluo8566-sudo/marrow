@@ -195,6 +195,26 @@ def test_tl_update_rejects_non_tl(conn):
         tl_writer.tl_update(conn, eid, body="y")
 
 
+# ── C3: MARROW_CORTEX guard ───────────────────────────────────────────────────
+
+def test_tl_add_blocked_under_marrow_cortex(conn, monkeypatch):
+    monkeypatch.setenv("MARROW_CORTEX", "1")
+    with pytest.raises(tl_writer.TlError, match="cortex"):
+        _add(conn)
+    n = conn.execute("SELECT COUNT(*) c FROM events").fetchone()["c"]
+    assert n == 0
+
+
+def test_tl_update_blocked_under_marrow_cortex(conn, monkeypatch):
+    r = _add(conn)
+    monkeypatch.setenv("MARROW_CORTEX", "1")
+    with pytest.raises(tl_writer.TlError, match="cortex"):
+        tl_writer.tl_update(conn, r["event_id"], body="should not land")
+    ev = conn.execute("SELECT content FROM events WHERE id=?",
+                      (r["event_id"],)).fetchone()
+    assert ev["content"] == "【N 愉悦·3 | Y 委屈·2】body orig"
+
+
 # ── nudge ────────────────────────────────────────────────────────────────────
 
 def test_nudge_on_by_default_10_turns(conn):

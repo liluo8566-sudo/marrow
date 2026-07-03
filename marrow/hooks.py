@@ -817,7 +817,13 @@ def session_start() -> int:
         # Subagent (Task tool dispatch) — task-isolated like worktree;
         # no personal memory / no /resume tracking.
         is_subagent = bool(tpath and "/tasks/" in tpath)
-        if sid:
+        # Cortex session (C3, MARROW_CORTEX=1): total invisibility — no
+        # lifecycle:start row, no sessions row. Writing nothing means
+        # sessionstart_catchup never sees this sid as a candidate (its
+        # candidate scan unions audit_log lifecycle:start + events, both
+        # skipped end-to-end by the Stop/SessionEnd guards below).
+        is_cortex = bool(os.environ.get("MARROW_CORTEX"))
+        if sid and not is_cortex:
             # Fresh window or resume — drop prior recall dedup state either way
             # (cheap; resume re-shows seen rows once, acceptable).
             _wipe_recall_seen(sid)
@@ -861,9 +867,9 @@ def session_start() -> int:
                 except Exception:  # noqa: BLE001 — never block session_start
                     pass
 
-        if is_worktree or is_subagent:
-            # Task-isolated (git worktree or Task-tool subagent): no
-            # personal memory injection.
+        if is_worktree or is_subagent or is_cortex:
+            # Task-isolated (git worktree / Task-tool subagent) or cortex
+            # (own bulletin, not this hook's injection): no personal memory.
             ctx = ""
         else:
             parts: list[str] = []
@@ -939,6 +945,12 @@ def session_start() -> int:
 
 
 def session_end() -> int:
+    # Cortex session (C3): total invisibility, mirrors session_start/stop —
+    # session_start never wrote a lifecycle:start row for this sid, so there
+    # is nothing to close and nothing for catchup to see.
+    if os.environ.get("MARROW_CORTEX"):
+        return 0
+
     inp = _read_input()
     tpath = inp.get("transcript_path")
     if not tpath:
@@ -1634,6 +1646,14 @@ def user_prompt_submit() -> int:
     vec + bm25 + recency + affect. Fail-soft: any error falls through to a
     no-op so the user prompt always reaches the model.
     """
+    # Cortex session (C3): total invisibility — no title/model backfill (that
+    # spawns an LLM summarizer of THIS conversation into sessions.title,
+    # exactly the chat-memory leak the guard exists to prevent), no session
+    # touch, no recall injection (cortex gets its own bulletin, not this
+    # hook's marrow-memory context).
+    if os.environ.get("MARROW_CORTEX"):
+        return 0
+
     inp = _read_input()
 
     # mm control plane — check before recall, independent of recall config.
