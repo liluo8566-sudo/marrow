@@ -4,9 +4,10 @@ One call -> a single events row (role='tl', channel=platform). No affect table
 write: the affect phrase lives verbatim inside content, importance lives in
 events.imp. Render/reconcile treat these rows by their tl:e:<event_id> anchor.
 
-Format: HH:mm[-HH:mm] 【N word·i | Y word·i】body
-  N = user affect, Y = assistant affect. word <=8 chars, i = composite 1-5.
-  body <=30 chars. imp (events.imp) = row-level composite for recall boost.
+Format: HH:mm[-HH:mm] 【N word | Y word】·i body
+  N = user affect, Y = assistant affect. word <=8 chars.
+  i = composite 1-5 (events.imp), one value for the whole row, not per side.
+  body <=30 chars.
 """
 from __future__ import annotations
 
@@ -18,7 +19,7 @@ from zoneinfo import ZoneInfo
 _MELB = ZoneInfo("Australia/Melbourne")
 _WORD_MAX = 8
 _BODY_MAX = 30
-_LABEL_RE = re.compile(r"^\s*(【[^】]*】)?(.*)$", re.DOTALL)
+_LABEL_RE = re.compile(r"^\s*(【[^】]*】)?(?:·\d\s*)?(.*)$", re.DOTALL)
 
 
 class TlError(ValueError):
@@ -78,12 +79,12 @@ def _hhmm_to_utc(hhmm: str, base_date: _dt.date, now_melb: _dt.datetime) -> str:
     return local.astimezone(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _compose_label(n_word, n_int, y_word, y_int) -> str:
+def _compose_label(n_word, y_word) -> str:
     seg = []
     if n_word:
-        seg.append(f"N {n_word}·{n_int}")
+        seg.append(f"N {n_word}")
     if y_word:
-        seg.append(f"Y {y_word}·{y_int}")
+        seg.append(f"Y {y_word}")
     return " | ".join(seg)
 
 
@@ -102,8 +103,8 @@ def _platform() -> str:
 # ── write path ───────────────────────────────────────────────────────────────
 
 def tl_add(conn, timerange: str, body: str,
-           n_word: str | None = None, n_intensity: int | None = None,
-           y_word: str | None = None, y_intensity: int | None = None,
+           n_word: str | None = None,
+           y_word: str | None = None,
            importance: int | None = None,
            sid: str | None = None) -> dict:
     """Insert one self timeline row (events only) in a single txn."""
@@ -119,12 +120,10 @@ def tl_add(conn, timerange: str, body: str,
     y_word = _check_word(y_word, "Y")
     if not n_word and not y_word:
         raise TlError("at least one of n_word / y_word required")
-    n_int = _clamp_1_5(n_intensity, "n_intensity", 3) if n_word else 3
-    y_int = _clamp_1_5(y_intensity, "y_intensity", 3) if y_word else 3
-    imp = _clamp_1_5(importance, "importance", max(n_int, y_int))
+    imp = _clamp_1_5(importance, "importance", 3)
 
-    label = _compose_label(n_word, n_int, y_word, y_int)
-    content = f"【{label}】{body}" if label else body
+    label = _compose_label(n_word, y_word)
+    content = f"【{label}】·{imp} {body}" if label else f"·{imp} {body}"
 
     hhmm_start, hhmm_end = _parse_timerange(timerange)
     now_melb = _dt.datetime.now(_MELB)
@@ -165,8 +164,8 @@ def tl_add(conn, timerange: str, body: str,
 
 def tl_update(conn, event_id: int, timerange: str | None = None,
               body: str | None = None,
-              n_word: str | None = None, n_intensity: int | None = None,
-              y_word: str | None = None, y_intensity: int | None = None,
+              n_word: str | None = None,
+              y_word: str | None = None,
               importance: int | None = None) -> dict:
     """Update an existing self row in place. Only provided fields change."""
     if os.environ.get("MARROW_CORTEX"):
@@ -201,11 +200,9 @@ def tl_update(conn, event_id: int, timerange: str | None = None,
     n_word = _check_word(n_word, "N")
     y_word = _check_word(y_word, "Y")
     if n_word or y_word:
-        n_int = _clamp_1_5(n_intensity, "n_intensity", 3)
-        y_int = _clamp_1_5(y_intensity, "y_intensity", 3)
-        label_part = f"【{_compose_label(n_word, n_int, y_word, y_int)}】"
-    new_content = f"{label_part}{body_part}"
-    imp = _clamp_1_5(importance, "importance", ev["imp"] or 2)
+        label_part = f"【{_compose_label(n_word, y_word)}】"
+    imp = _clamp_1_5(importance, "importance", ev["imp"] or 3)
+    new_content = f"{label_part}·{imp} {body_part}"
 
     with conn:
         conn.execute(

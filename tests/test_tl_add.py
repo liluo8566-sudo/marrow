@@ -35,7 +35,7 @@ def _hhmm(hours_ago: float) -> str:
 def _add(conn, sid="sess-1", body="body orig", **kw):
     return tl_writer.tl_add(
         conn, f"{_hhmm(2)}-{_hhmm(1.9)}", body,
-        n_word="愉悦", n_intensity=3, y_word="委屈", y_intensity=2,
+        n_word="愉悦", y_word="委屈",
         sid=sid, **kw,
     )
 
@@ -58,8 +58,8 @@ def test_tl_add_writes_tl_row_no_affect(conn):
     assert ev["role"] == "tl"
     assert ev["channel"] == "cli"  # MARROW_CHANNEL unset -> default platform
     # affect phrase lives verbatim inside content; no affect table write.
-    assert ev["content"] == "【N 愉悦·3 | Y 委屈·2】body orig"
-    assert ev["imp"] == 3  # default = max(n_int, y_int)
+    assert ev["content"] == "【N 愉悦 | Y 委屈】·3 body orig"
+    assert ev["imp"] == 3  # default
     assert ev["flag"] is None
     assert ev["ts_start"] and ev["ts_end"]
     n_af = conn.execute("SELECT COUNT(*) c FROM affect WHERE event_id=?",
@@ -97,7 +97,7 @@ def test_single_moment_no_end(conn):
 def test_render_new_format_with_anchor(conn):
     r = _add(conn, body="翻日志扑空")
     md = timeline.render_timeline(conn)
-    assert f"【N 愉悦·3 | Y 委屈·2】翻日志扑空 <!-- tl:e:{r['event_id']} -->" in md
+    assert f"【N 愉悦 | Y 委屈】·3 翻日志扑空 <!-- tl:e:{r['event_id']} -->" in md
     assert f"e={r['event_id']}" in md  # trail marker
 
 
@@ -124,13 +124,13 @@ def test_self_edit_round_trip(conn, tmp_path):
     dash = tmp_path / "dashboard.md"
     md = timeline.render_timeline(conn)
     _write_dash(dash, md.replace("body original", "body edited")
-                        .replace("愉悦·3", "温柔·4"))
+                        .replace("愉悦", "温柔"))
     rpt = reconcile.reconcile_timeline(conn, dash)
     assert rpt.updated == 1
-    # label + body both live inside content now
+    # label + i + body all live inside content now
     assert conn.execute("SELECT content FROM events WHERE id=?",
                         (eid,)).fetchone()["content"] == \
-        "【N 温柔·4 | Y 委屈·2】body edited"
+        "【N 温柔 | Y 委屈】·3 body edited"
 
 
 def test_self_delete(conn, tmp_path):
@@ -169,11 +169,11 @@ def test_seg_digest_suppresses_life_lines_for_self_sid(conn):
 def test_tl_update_changes_body_and_label(conn):
     r = _add(conn, body="orig")
     tl_writer.tl_update(conn, r["event_id"], body="updated",
-                        n_word="温柔", n_intensity=5, y_word="委屈", y_intensity=1,
+                        n_word="温柔", y_word="委屈",
                         importance=4)
     ev = conn.execute("SELECT content, imp FROM events WHERE id=?",
                       (r["event_id"],)).fetchone()
-    assert ev["content"] == "【N 温柔·5 | Y 委屈·1】updated"
+    assert ev["content"] == "【N 温柔 | Y 委屈】·4 updated"
     assert ev["imp"] == 4
 
 
@@ -182,7 +182,7 @@ def test_tl_update_body_only_keeps_label(conn):
     tl_writer.tl_update(conn, r["event_id"], body="just body")
     ev = conn.execute("SELECT content FROM events WHERE id=?",
                       (r["event_id"],)).fetchone()
-    assert ev["content"] == "【N 愉悦·3 | Y 委屈·2】just body"
+    assert ev["content"] == "【N 愉悦 | Y 委屈】·3 just body"
 
 
 def test_tl_update_rejects_non_tl(conn):
@@ -212,7 +212,7 @@ def test_tl_update_blocked_under_marrow_cortex(conn, monkeypatch):
         tl_writer.tl_update(conn, r["event_id"], body="should not land")
     ev = conn.execute("SELECT content FROM events WHERE id=?",
                       (r["event_id"],)).fetchone()
-    assert ev["content"] == "【N 愉悦·3 | Y 委屈·2】body orig"
+    assert ev["content"] == "【N 愉悦 | Y 委屈】·3 body orig"
 
 
 # ── nudge ────────────────────────────────────────────────────────────────────

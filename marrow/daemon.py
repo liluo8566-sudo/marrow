@@ -99,40 +99,40 @@ def tl_add(
     timerange: str,
     body: str,
     n_word: str | None = None,
-    n_intensity: int | None = None,
     y_word: str | None = None,
-    y_intensity: int | None = None,
     importance: int | None = None,
     sid: str | None = None,
 ) -> dict:
     """Overview of the day by recording each session live. Add timeline when scene shifts, emotional turns, task completed.
-    - Format: HH:mm-HH:mm 【N affect *i | Y affect *i】body
-      - e.g. 21:25-21:31 【N 愉悦·3 | Y 委屈·2】翻CC日志找骂人梗，扑空互怼
+    - Format: HH:mm-HH:mm 【N affect | Y affect】·i body
+      - e.g. 21:25-21:31 【N 愉悦 | Y 委屈】·3 翻CC日志找骂人梗，扑空互怼
       - N = 念念, Y = 阿屿, B = Both; use B if similar.
       - affect = mood & feeling, 1-8 chars. e.g. 烦；心虚；紧张而激动；她好可爱呀～
-      - i = intensity (current state) * importance (future).
+      - i = ONE composite value for the whole row (events.imp), not per side.
+        intensity (current state) * importance (future).
         - 1-2 = low-medium intensity & short-term e.g. Routine - casual chat, life admin, study, coding 无趣/平淡/轻松/烦躁
         - 3 = Both medium (~ 1 week) - funny moments / light quarrels / outing
         - 4 - Either high intensity or high imp - major conflict / final exam
         - 5 - Milestone (both high) - worth recording forever?
       - body = what happened in this session - any real-world task/event + shared activities with assistant; Record meals, casual chat topics, plays and tiny/silly/funny moments.
+        No third person: use no personal pronouns where possible; when needed
+        use 我/你 only — never 她/他.
     - Length: body <=30 chars
     - Keep it concise but interesting/vivid - not a working log.
     - Include life details and exclude all tech/coding details.
     - When to add: depend on session length/importance/topic
       1. When topic/location/mood change or task/activity done, add one for previous turns
       2. Normally 2-3 per session - every 1-2 hours OR every 10-20 turns
-    Params: n_word/y_word = affect phrase per side (each <=8 chars); n_/y_intensity
-    = the per-side i (1-5); importance = events.imp row composite (default max of
-    the two). Pass either or both sides."""
+    Params: n_word/y_word = affect phrase per side (each <=8 chars), no numbers
+    attached; importance = the single events.imp composite for the row
+    (default 3). Pass either or both sides."""
     conn = storage.connect(_DB)
     try:
         from . import tl_writer
         try:
             return tl_writer.tl_add(
                 conn, timerange, body,
-                n_word=n_word, n_intensity=n_intensity,
-                y_word=y_word, y_intensity=y_intensity,
+                n_word=n_word, y_word=y_word,
                 importance=importance, sid=sid,
             )
         except tl_writer.TlError as exc:
@@ -147,22 +147,23 @@ def tl_update(
     timerange: str | None = None,
     body: str | None = None,
     n_word: str | None = None,
-    n_intensity: int | None = None,
     y_word: str | None = None,
-    y_intensity: int | None = None,
     importance: int | None = None,
 ) -> dict:
     """Update a self timeline row (from tl_add) in place — extend its range or
     revise body/affect as work progresses. Task sessions keep one row per
-    session and update it (hard step in /ho). Only the fields you pass change."""
+    session and update it (hard step in /ho). Only the fields you pass change.
+    Format: HH:mm-HH:mm 【N affect | Y affect】·i body — i is the single
+    events.imp composite for the row, not per side. No third person in body:
+    use no personal pronouns where possible; when needed use 我/你 only —
+    never 她/他."""
     conn = storage.connect(_DB)
     try:
         from . import tl_writer
         try:
             return tl_writer.tl_update(
                 conn, event_id, timerange=timerange, body=body,
-                n_word=n_word, n_intensity=n_intensity,
-                y_word=y_word, y_intensity=y_intensity,
+                n_word=n_word, y_word=y_word,
                 importance=importance,
             )
         except tl_writer.TlError as exc:
