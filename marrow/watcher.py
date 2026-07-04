@@ -321,7 +321,12 @@ class _StickerHandler(FileSystemEventHandler):
             else:
                 self._log.info("sticker_ingest new: %s -> id=%s path=%s",
                                path, result.get("id"), result.get("path"))
-            if p.exists() and p.resolve() != Path(result.get("path", "")).resolve():
+            dest_path = result.get("path", "")
+            if not dest_path and result.get("existing_id"):
+                row = conn.execute("SELECT path FROM stickers WHERE id = ?",
+                                   (result["existing_id"],)).fetchone()
+                dest_path = row["path"] if row else ""
+            if dest_path and p.exists() and p.resolve() != Path(dest_path).resolve():
                 p.unlink()
                 self._log.info("sticker_ingest cleaned source: %s", path)
         except Exception as exc:
