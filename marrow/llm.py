@@ -179,12 +179,15 @@ class LLMClient:
         (cortex pacemaker) owns retry policy. `timeout` (s) overrides the
         provider default so the caller's config is the single source of truth
         for the call budget (cortex derives its outer kill from the same value).
-        `max_tokens` (>0) caps the per-wake *newly-processed* token spend
-        (input+output+cache_write; cache_read is excluded so a resumed
-        session's cache replay never counts against the cap): accumulated
-        mid-stream, breach terminates the subprocess and returns capped=True
-        so the caller rebirths. Returns {"text": str, "session_id": str |
-        None} (+ capped / total_tokens when a cap is active).
+        `max_tokens` (>0) caps the per-wake CURRENT WINDOW SIZE — the latest
+        turn's (input+cache_read+cache_creation), i.e. the same figure the
+        caller reasons about via the statusline "total" (Decided 07-04, not
+        cumulative consumption across turns): accumulated mid-stream (usage
+        deduped by requestId — a single turn streams as several assistant
+        lines each repeating identical usage), breach terminates the
+        subprocess and returns capped=True so the caller rebirths. Returns
+        {"text": str, "session_id": str | None} (+ capped / total_tokens
+        [= final window size] when a cap is active).
         """
         spec = self.specs.get("claude_cli_cortex")
         if not spec:
@@ -238,9 +241,10 @@ class LLMClient:
         """Stream-json runner with NO isolation flags (cortex full-env, C3).
         Mirrors _run_claude_stream's spawn/timeout/kill contract exactly —
         only the isolation flags, env var, cwd, --resume, and --effort differ.
-        When max_tokens>0, accumulates per-wake usage mid-stream and terminates
-        cleanly on breach (capped=True). Env-driven stream-event timing is
-        attached best-effort for wake-latency diagnosis."""
+        When max_tokens>0, accumulates per-wake usage mid-stream (deduped by
+        requestId) and terminates cleanly when the current turn's window
+        size breaches the cap (capped=True). Env-driven stream-event timing
+        is attached best-effort for wake-latency diagnosis."""
         timeout = timeout if timeout is not None else spec.get("timeout_s", 600)
         cmd = [_claude_bin(), "--output-format", "stream-json",
                "--input-format", "stream-json", "--verbose", "--model", model,
@@ -258,23 +262,28 @@ class LLMClient:
         sink = None
         if cap_active:
             sink = {"in": 0, "out": 0, "cache_read": 0, "cache_write": 0,
-                    "counted": 0, "total": 0, "capped": False}
+                    "window": 0, "capped": False, "by_request": {},
+                    "has_usage": False}
             extra["max_tokens"] = max_tokens
             extra["usage_sink"] = sink
         raw = self._stream_subprocess(cmd, prompt, timeout, env, cwd=cwd, **extra)
         if sink is not None and sink["capped"]:
-            self._log_usage(self._sink_usage(sink), model, "stream-json")
+            self._log_usage(self._sink_usage(sink), model, "stream-json",
+                             window=sink["window"])
             self._log_cortex_cap(sink, max_tokens, model)
             return {"text": "", "session_id": None, "capped": True,
-                    "total_tokens": sink["counted"]}
+                    "total_tokens": sink["window"]}
         text = self._parse_claude(raw, "stream-json")
         session_id = self._extract_session_id(raw)
         if sink is not None:
-            usage = self._sink_usage(sink) if sink["total"] \
-                else self._extract_usage(raw, "stream-json")
-            self._log_usage(usage, model, "stream-json")
+            if sink["has_usage"]:
+                self._log_usage(self._sink_usage(sink), model, "stream-json",
+                                 window=sink["window"])
+            else:
+                self._log_usage(self._extract_usage(raw, "stream-json"),
+                                 model, "stream-json")
             return {"text": text, "session_id": session_id,
-                    "total_tokens": sink["counted"]}
+                    "total_tokens": sink["window"]}
         self._log_usage(self._extract_usage(raw, "stream-json"), model, "stream-json")
         return {"text": text, "session_id": session_id}
 
@@ -282,24 +291,49 @@ class LLMClient:
     def _add_event_usage(sink: dict, ev: dict) -> None:
         """Fold one stream-json event's turn usage into the running per-wake
         sink. Only assistant events carry message.usage; the trailing result
-        event and tool-result events add 0 (no double count). `counted` is
-        the cap-comparable figure (input+output+cache_write — newly-processed
-        tokens only); `total` keeps the raw four-field sum (incl. cache_read)
-        for audit reporting, matching the shape of the plain-usage log line."""
+        event and tool-result events add 0 (no double count).
+
+        A single API turn streams as MULTIPLE assistant lines (thinking
+        block, tool_use block, text block, ...) and every line repeats the
+        SAME usage under the SAME top-level `requestId` — summing them
+        naively over-counts real consumption ~Nx (live-confirmed 07-04).
+        Dedupe by requestId: a repeat requestId replaces (not adds to) its
+        prior contribution to the cumulative fields — "last-seen wins"
+        (the repeats are identical in practice, so this is a no-op delta,
+        but stays correct if they ever aren't). Events without a requestId
+        (only expected from synthetic/test input) are never deduped.
+
+        `in/out/cache_read/cache_write` are the cumulative deduped sums —
+        true consumption across the wake so far, used for the llm_call_cost
+        audit line. `window` is the CURRENT turn's context size
+        (input+cache_read+cache_creation), NOT cumulative — this is what the
+        per-wake cap compares against (Decided 07-04: matches the statusline
+        "total" figure the caller reasons with)."""
         msg = ev.get("message")
         usage = msg.get("usage") if isinstance(msg, dict) else None
         if not isinstance(usage, dict):
             return
+        sink["has_usage"] = True
         i = usage.get("input_tokens") or 0
         o = usage.get("output_tokens") or 0
         cr = usage.get("cache_read_input_tokens") or 0
         cw = usage.get("cache_creation_input_tokens") or 0
-        sink["in"] += i
-        sink["out"] += o
-        sink["cache_read"] += cr
-        sink["cache_write"] += cw
-        sink["counted"] += i + o + cw
-        sink["total"] += i + o + cr + cw
+        req_id = ev.get("requestId")
+        prior = sink["by_request"].get(req_id) if req_id is not None else None
+        if prior is not None:
+            pi, po, pcr, pcw = prior
+            sink["in"] += i - pi
+            sink["out"] += o - po
+            sink["cache_read"] += cr - pcr
+            sink["cache_write"] += cw - pcw
+        else:
+            sink["in"] += i
+            sink["out"] += o
+            sink["cache_read"] += cr
+            sink["cache_write"] += cw
+        if req_id is not None:
+            sink["by_request"][req_id] = (i, o, cr, cw)
+        sink["window"] = i + cr + cw
 
     @staticmethod
     def _sink_usage(sink: dict) -> dict:
@@ -309,9 +343,10 @@ class LLMClient:
 
     def _log_cortex_cap(self, sink: dict, cap: int, model: str) -> None:
         """One audit line marking a per-wake token-cap breach. Reports the
-        cap-comparable counted total alongside the raw four usage fields
-        (matches the llm_call_cost breakdown) so a breach is auditable
-        without ambiguity about what tripped it. Best-effort."""
+        breaching turn's window size (input+cache_read+cache_creation — the
+        figure compared against cap) alongside the deduped cumulative usage
+        fields (true consumption across the wake so far) so a breach is
+        auditable without ambiguity about what tripped it. Best-effort."""
         try:
             conn = storage.connect()
             with conn:
@@ -319,10 +354,9 @@ class LLMClient:
                     "INSERT INTO audit_log (target_table, action, summary)"
                     " VALUES (?, ?, ?)",
                     ("llm_usage", "llm_cortex_cap",
-                     f"model={model} capped counted={sink['counted']} cap={cap} "
-                     f"raw(in={sink['in']} out={sink['out']} "
-                     f"cache_read={sink['cache_read']} cache_write={sink['cache_write']} "
-                     f"total={sink['total']})"),
+                     f"model={model} capped window={sink['window']} cap={cap} "
+                     f"cumulative(in={sink['in']} out={sink['out']} "
+                     f"cache_read={sink['cache_read']} cache_write={sink['cache_write']})"),
                 )
             conn.close()
         except Exception:
@@ -339,11 +373,12 @@ class LLMClient:
         spawned descendants never leak. Returns the raw joined stdout lines.
         `on_event(ev, mono)` (optional) receives every parsed event plus a
         synthetic {"type":"__spawned__"} right after Popen for latency probes.
-        `max_tokens`+`usage_sink` (optional) accumulate per-event usage and
-        break the stream cleanly on breach (sink['capped']=True). Breach
-        compares against sink['counted'] (input+output+cache_write) only —
-        cache_read is excluded since a resumed session's first turn can
-        replay >100k cached tokens without any new processing."""
+        `max_tokens`+`usage_sink` (optional) accumulate per-event usage
+        (deduped by requestId, see `_add_event_usage`) and break the stream
+        cleanly on breach (sink['capped']=True). Breach compares against
+        sink['window'] — the CURRENT turn's context size
+        (input+cache_read+cache_creation), not a cumulative sum across
+        turns (Decided 07-04: matches the statusline "total" figure)."""
         msg = json.dumps({"type": "user", "message": {
             "role": "user", "content": prompt}})
         try:
@@ -391,7 +426,7 @@ class LLMClient:
                     on_event(ev, time.monotonic())
                 if max_tokens is not None and usage_sink is not None:
                     LLMClient._add_event_usage(usage_sink, ev)
-                    if usage_sink["counted"] >= max_tokens:
+                    if usage_sink["window"] >= max_tokens:
                         usage_sink["capped"] = True
                         break
                 if ev.get("type") == "result":
@@ -540,8 +575,11 @@ class LLMClient:
         except Exception:
             return None
 
-    def _log_usage(self, usage: dict | None, model: str, fmt: str) -> None:
-        """Write a cost-monitor row to audit_log. Best-effort: never raises."""
+    def _log_usage(self, usage: dict | None, model: str, fmt: str,
+                   window: int | None = None) -> None:
+        """Write a cost-monitor row to audit_log. Best-effort: never raises.
+        `window` (optional) is the final per-wake context size (cortex cap
+        path only) appended to the summary alongside the usage breakdown."""
         if not usage:
             return
         try:
@@ -554,6 +592,8 @@ class LLMClient:
                 f"in={input_tok} out={output_tok} "
                 f"cache_read={cache_read} cache_write={cache_write}"
             )
+            if window is not None:
+                summary += f" window={window}"
             conn = storage.connect()
             with conn:
                 conn.execute(
