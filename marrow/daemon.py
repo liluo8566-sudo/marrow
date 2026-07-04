@@ -104,11 +104,11 @@ def tl_add(
     sid: str | None = None,
 ) -> dict:
     """Overview of the day by recording each session live. Add timeline when scene shifts, emotional turns, task completed.
-    - Format: HH:mm-HH:mm 【N affect | Y affect】·i body
-      - e.g. 21:25-21:31 【N 愉悦 | Y 委屈】·3 翻CC日志找骂人梗，扑空互怼
-      - N = 念念, Y = 阿屿, B = Both; use B if similar.
+    - Format: HH:mm-HH:mm 【N affect♡Y affect】body [i]
+      - e.g. 21:25-21:31 【N愉悦♡Y委屈】翻CC日志找骂人梗，扑空互怼 [3]
+      - N = 念念, Y = 阿屿, B = Both; use B if similar. Single-side rows: just 【N affect】 or 【Y affect】.
       - affect = mood & feeling, 1-8 chars. e.g. 烦；心虚；紧张而激动；她好可爱呀～
-      - i = ONE composite value for the whole row (events.imp), not per side.
+      - i = ONE composite value for the whole row (events.imp), not per side, rendered at the end as " [i]".
         intensity (current state) * importance (future).
         - 1-2 = low-medium intensity & short-term e.g. Routine - casual chat, life admin, study, coding 无趣/平淡/轻松/烦躁
         - 3 = Both medium (~ 1 week) - funny moments / light quarrels / outing
@@ -153,8 +153,8 @@ def tl_update(
     """Update a self timeline row (from tl_add) in place — extend its range or
     revise body/affect as work progresses. Task sessions keep one row per
     session and update it (hard step in /ho). Only the fields you pass change.
-    Format: HH:mm-HH:mm 【N affect | Y affect】·i body — i is the single
-    events.imp composite for the row, not per side. No third person in body:
+    Format: HH:mm-HH:mm 【N affect♡Y affect】body [i] — i is the single
+    events.imp composite for the row, not per side, rendered at the end. No third person in body:
     use no personal pronouns where possible; when needed use 我/你 only —
     never 她/他."""
     conn = storage.connect(_DB)

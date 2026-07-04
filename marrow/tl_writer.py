@@ -4,9 +4,11 @@ One call -> a single events row (role='tl', channel=platform). No affect table
 write: the affect phrase lives verbatim inside content, importance lives in
 events.imp. Render/reconcile treat these rows by their tl:e:<event_id> anchor.
 
-Format: HH:mm[-HH:mm] 【N word | Y word】·i body
+Format: HH:mm[-HH:mm] 【N word♡Y word】body [i]
   N = user affect, Y = assistant affect. word <=8 chars.
-  i = composite 1-5 (events.imp), one value for the whole row, not per side.
+  Single-side rows: just 【N word】 or 【Y word】.
+  i = composite 1-5 (events.imp), one value for the whole row, not per side,
+  rendered at the end as " [i]".
   body <=30 chars.
 """
 from __future__ import annotations
@@ -19,7 +21,8 @@ from zoneinfo import ZoneInfo
 _MELB = ZoneInfo("Australia/Melbourne")
 _WORD_MAX = 8
 _BODY_MAX = 30
-_LABEL_RE = re.compile(r"^\s*(【[^】]*】)?(?:·\d\s*)?(.*)$", re.DOTALL)
+_LABEL_RE = re.compile(r"^\s*(【[^】]*】)?(.*)$", re.DOTALL)
+_TRAIL_IMP_RE = re.compile(r"\s*\[\d\]\s*$")
 
 
 class TlError(ValueError):
@@ -82,18 +85,21 @@ def _hhmm_to_utc(hhmm: str, base_date: _dt.date, now_melb: _dt.datetime) -> str:
 def _compose_label(n_word, y_word) -> str:
     seg = []
     if n_word:
-        seg.append(f"N {n_word}")
+        seg.append(f"N{n_word}")
     if y_word:
-        seg.append(f"Y {y_word}")
-    return " | ".join(seg)
+        seg.append(f"Y{y_word}")
+    return "♡".join(seg)
 
 
 def _split_content(content: str) -> tuple[str, str]:
-    """Split stored content into (label_bracket, body)."""
+    """Split stored content into (label_bracket, body). body has the trailing
+    ' [i]' composite marker stripped (imp lives in events.imp, not content)."""
     m = _LABEL_RE.match(content or "")
     if not m:
-        return "", (content or "").strip()
-    return (m.group(1) or ""), (m.group(2) or "").strip()
+        return "", _TRAIL_IMP_RE.sub("", (content or "")).strip()
+    label = m.group(1) or ""
+    body = _TRAIL_IMP_RE.sub("", (m.group(2) or "")).strip()
+    return label, body
 
 
 def _platform() -> str:
@@ -123,7 +129,7 @@ def tl_add(conn, timerange: str, body: str,
     imp = _clamp_1_5(importance, "importance", 3)
 
     label = _compose_label(n_word, y_word)
-    content = f"【{label}】·{imp} {body}" if label else f"·{imp} {body}"
+    content = f"【{label}】{body} [{imp}]" if label else f"{body} [{imp}]"
 
     hhmm_start, hhmm_end = _parse_timerange(timerange)
     now_melb = _dt.datetime.now(_MELB)
@@ -202,7 +208,7 @@ def tl_update(conn, event_id: int, timerange: str | None = None,
     if n_word or y_word:
         label_part = f"【{_compose_label(n_word, y_word)}】"
     imp = _clamp_1_5(importance, "importance", ev["imp"] or 3)
-    new_content = f"{label_part}·{imp} {body_part}"
+    new_content = f"{label_part}{body_part} [{imp}]"
 
     with conn:
         conn.execute(

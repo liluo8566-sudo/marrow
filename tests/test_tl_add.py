@@ -58,7 +58,7 @@ def test_tl_add_writes_tl_row_no_affect(conn):
     assert ev["role"] == "tl"
     assert ev["channel"] == "cli"  # MARROW_CHANNEL unset -> default platform
     # affect phrase lives verbatim inside content; no affect table write.
-    assert ev["content"] == "【N 愉悦 | Y 委屈】·3 body orig"
+    assert ev["content"] == "【N愉悦♡Y委屈】body orig [3]"
     assert ev["imp"] == 3  # default
     assert ev["flag"] is None
     assert ev["ts_start"] and ev["ts_end"]
@@ -97,7 +97,7 @@ def test_single_moment_no_end(conn):
 def test_render_new_format_with_anchor(conn):
     r = _add(conn, body="翻日志扑空")
     md = timeline.render_timeline(conn)
-    assert f"【N 愉悦 | Y 委屈】·3 翻日志扑空 <!-- tl:e:{r['event_id']} -->" in md
+    assert f"【N愉悦♡Y委屈】翻日志扑空 [3] <!-- tl:e:{r['event_id']} -->" in md
     assert f"e={r['event_id']}" in md  # trail marker
 
 
@@ -130,7 +130,7 @@ def test_self_edit_round_trip(conn, tmp_path):
     # label + i + body all live inside content now
     assert conn.execute("SELECT content FROM events WHERE id=?",
                         (eid,)).fetchone()["content"] == \
-        "【N 温柔 | Y 委屈】·3 body edited"
+        "【N温柔♡Y委屈】body edited [3]"
 
 
 def test_self_delete(conn, tmp_path):
@@ -173,7 +173,7 @@ def test_tl_update_changes_body_and_label(conn):
                         importance=4)
     ev = conn.execute("SELECT content, imp FROM events WHERE id=?",
                       (r["event_id"],)).fetchone()
-    assert ev["content"] == "【N 温柔 | Y 委屈】·4 updated"
+    assert ev["content"] == "【N温柔♡Y委屈】updated [4]"
     assert ev["imp"] == 4
 
 
@@ -182,7 +182,7 @@ def test_tl_update_body_only_keeps_label(conn):
     tl_writer.tl_update(conn, r["event_id"], body="just body")
     ev = conn.execute("SELECT content FROM events WHERE id=?",
                       (r["event_id"],)).fetchone()
-    assert ev["content"] == "【N 愉悦 | Y 委屈】·3 just body"
+    assert ev["content"] == "【N愉悦♡Y委屈】just body [3]"
 
 
 def test_tl_update_rejects_non_tl(conn):
@@ -212,7 +212,7 @@ def test_tl_update_blocked_under_marrow_cortex(conn, monkeypatch):
         tl_writer.tl_update(conn, r["event_id"], body="should not land")
     ev = conn.execute("SELECT content FROM events WHERE id=?",
                       (r["event_id"],)).fetchone()
-    assert ev["content"] == "【N 愉悦 | Y 委屈】·3 body orig"
+    assert ev["content"] == "【N愉悦♡Y委屈】body orig [3]"
 
 
 # ── nudge ────────────────────────────────────────────────────────────────────
