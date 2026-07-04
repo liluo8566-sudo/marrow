@@ -290,6 +290,35 @@ def entity_upsert(
         conn.close()
 
 
+@mcp.tool()
+def first_tick(item: str, note: str | None = None, sid: str | None = None) -> dict:
+    """Self-mark a cortex-nagged item as seen / being handled, so other
+    sessions and later wakes stop repeat-nagging it. Call the moment you start
+    acting on an item cortex surfaced. item = the item's key/id from the nag;
+    note = one line on what you did or said. Records last-seen (UTC) + this
+    session id; latest call per item wins."""
+    item = (item or "").strip()
+    if not item:
+        return {"ok": False, "error": "item required"}
+    note = (note or "").strip() or None
+    conn = storage.connect(_DB)
+    try:
+        if not sid:
+            from .timeline import _query_current_sid
+            sid = _query_current_sid(conn)
+        with conn:
+            conn.execute(
+                "INSERT INTO ct_first_tick (item, seen_at, sid, note)"
+                " VALUES (?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), ?, ?)"
+                " ON CONFLICT(item) DO UPDATE SET"
+                " seen_at=excluded.seen_at, sid=excluded.sid, note=excluded.note",
+                (item, sid, note),
+            )
+        return {"ok": True, "item": item, "sid": sid, "note": note}
+    finally:
+        conn.close()
+
+
 def _wishlist_path() -> Path:
     cortex_cfg = config.load().get("cortex", {})
     wp = (cortex_cfg.get("wishlist_path") or "").strip()

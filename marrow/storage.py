@@ -13,7 +13,7 @@ import sqlite_vec
 
 from . import config
 
-SCHEMA_VERSION = 31
+SCHEMA_VERSION = 32
 
 # Phase 1 first-class tables + Phase 2 affect/entities (DECISIONS Phase 2).
 # The retired emotions/people/preferences/dir placeholders stay absent.
@@ -556,6 +556,7 @@ def init_db(path: str | None = None) -> sqlite3.Connection:
         _migrate_to_v29(conn)
         _migrate_to_v30(conn)
         _migrate_to_v31(conn)
+        _migrate_to_v32(conn)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     return conn
 
@@ -1236,6 +1237,25 @@ CREATE TABLE IF NOT EXISTS ct_rate_limit (
 );
     """)
     conn.execute("PRAGMA user_version=31")
+
+
+def _migrate_to_v32(conn: sqlite3.Connection) -> None:
+    """v32: ct_first_tick table (C4, First tick 07-04) — an executing session
+    self-marks a cortex-nagged item as seen/handled so other sessions and later
+    wakes stop repeat-nagging. Writer = first_tick MCP tool; reader = cortex
+    (latest mark per item, no history)."""
+    v = conn.execute("PRAGMA user_version").fetchone()[0]
+    if v >= 32:
+        return
+    conn.executescript("""
+CREATE TABLE IF NOT EXISTS ct_first_tick (
+  item TEXT PRIMARY KEY,
+  seen_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  sid TEXT,
+  note TEXT
+);
+    """)
+    conn.execute("PRAGMA user_version=32")
 
 
 def get_latest_watermark(conn, sid):
