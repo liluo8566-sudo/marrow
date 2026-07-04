@@ -238,6 +238,58 @@ def goal_list() -> list[dict]:
         conn.close()
 
 
+@mcp.tool()
+def entity_upsert(
+    kind: str,
+    name: str,
+    fact: str | None = None,
+    aliases: list[str] | None = None,
+) -> dict:
+    """Create or update a dims entity (person/pref/place) mid-conversation.
+    Call when recall misses an entity that clearly exists in the conversation
+    (create), or a recall hit shows stale/wrong fields (update the fact).
+    kind: 'person' | 'pref' | 'place'. Reuses the daily-candidate dedup gate —
+    an alias/name/cosine match updates that row (merges aliases, refreshes fact
+    when you pass one); no match inserts a new row. Do NOT use for memes or
+    milestones (milestones = importance-5 chain, handled elsewhere)."""
+    from .candidates import _ENTITY_KINDS, _merge_aliases_into, match_entity
+    import json
+
+    kind = (kind or "").strip()
+    name = (name or "").strip()
+    if not name:
+        return {"ok": False, "error": "name required"}
+    if kind not in _ENTITY_KINDS:
+        return {"ok": False, "error": f"kind must be one of {sorted(_ENTITY_KINDS)}"}
+    aliases_list = [str(a).strip() for a in (aliases or []) if str(a).strip()]
+    fact = (fact or "").strip() or None
+    conn = storage.connect(_DB)
+    try:
+        hit_id = match_entity(conn, kind, name, aliases_list,
+                              source="daemon.entity_upsert")
+        if hit_id is not None:
+            _merge_aliases_into(conn, hit_id, name, aliases_list)
+            if fact is not None:
+                with conn:
+                    conn.execute(
+                        "UPDATE entities SET fact=?,"
+                        " updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')"
+                        " WHERE id=?", (fact, hit_id),
+                    )
+            return {"ok": True, "action": "update", "id": hit_id}
+        aliases_json = (json.dumps(aliases_list, ensure_ascii=False)
+                        if aliases_list else None)
+        with conn:
+            cur = conn.execute(
+                "INSERT INTO entities (kind, name, fact, aliases, source)"
+                " VALUES (?, ?, ?, ?, 'session')",
+                (kind, name, fact, aliases_json),
+            )
+        return {"ok": True, "action": "create", "id": cur.lastrowid}
+    finally:
+        conn.close()
+
+
 def _wishlist_path() -> Path:
     cortex_cfg = config.load().get("cortex", {})
     wp = (cortex_cfg.get("wishlist_path") or "").strip()
