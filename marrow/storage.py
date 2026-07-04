@@ -13,7 +13,7 @@ import sqlite_vec
 
 from . import config
 
-SCHEMA_VERSION = 26
+SCHEMA_VERSION = 30
 
 # Phase 1 first-class tables + Phase 2 affect/entities (DECISIONS Phase 2).
 # The retired emotions/people/preferences/dir placeholders stay absent.
@@ -27,6 +27,8 @@ CREATE TABLE IF NOT EXISTS events (
   channel TEXT,
   compressed INTEGER NOT NULL DEFAULT 0,
   source_hash TEXT,
+  ts_start TEXT,
+  ts_end TEXT,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
 -- Deleted events: source_hash of rows Lumi purged. archive_events skips any
@@ -72,7 +74,8 @@ CREATE TABLE IF NOT EXISTS memes (
   pinned INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'active',
   source_hash TEXT,
-  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  updated_at TEXT
 );
 CREATE TABLE IF NOT EXISTS stickers (
   id INTEGER PRIMARY KEY,
@@ -162,7 +165,8 @@ CREATE TABLE IF NOT EXISTS affect (
   mention_count INTEGER NOT NULL DEFAULT 0,
   source TEXT,
   superseded_by INTEGER REFERENCES affect(id) ON DELETE SET NULL,
-  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  updated_at TEXT
 );
 CREATE TABLE IF NOT EXISTS entities (
   id INTEGER PRIMARY KEY,
@@ -173,7 +177,8 @@ CREATE TABLE IF NOT EXISTS entities (
   mention_count INTEGER NOT NULL DEFAULT 0,
   source TEXT,
   superseded_by INTEGER REFERENCES entities(id) ON DELETE SET NULL,
-  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  updated_at TEXT
 );
 CREATE TABLE IF NOT EXISTS events_vec_meta (
   rowid INTEGER PRIMARY KEY,
@@ -546,6 +551,10 @@ def init_db(path: str | None = None) -> sqlite3.Connection:
         _migrate_to_v24(conn)
         _migrate_to_v25(conn)
         _migrate_to_v26(conn)
+        _migrate_to_v27(conn)
+        _migrate_to_v28(conn)
+        _migrate_to_v29(conn)
+        _migrate_to_v30(conn)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     return conn
 
@@ -1126,6 +1135,88 @@ def _migrate_to_v26(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         pass
     conn.execute("PRAGMA user_version=26")
+
+
+def _migrate_to_v27(conn: sqlite3.Connection) -> None:
+    """v27: updated_at for entities, memes, affect."""
+    v = conn.execute("PRAGMA user_version").fetchone()[0]
+    if v >= 27:
+        return
+    for tbl in ("entities", "memes", "affect"):
+        try:
+            conn.execute(f"ALTER TABLE {tbl} ADD COLUMN updated_at TEXT")
+        except sqlite3.OperationalError:
+            pass
+    conn.execute("PRAGMA user_version=27")
+
+
+def _migrate_to_v28(conn: sqlite3.Connection) -> None:
+    """v28: events.ts_start / ts_end — explicit timerange for channel='self'
+    (tl_add) rows. NULL for all other rows; timestamp stays the sort key.
+    Idempotent — duplicate ALTER swallowed; user_version short-circuits.
+    """
+    v = conn.execute("PRAGMA user_version").fetchone()[0]
+    if v >= 28:
+        return
+    for col in ("ts_start TEXT", "ts_end TEXT"):
+        try:
+            conn.execute(f"ALTER TABLE events ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass
+    conn.execute("PRAGMA user_version=28")
+
+
+def _migrate_to_v29(conn: sqlite3.Connection) -> None:
+    """v29: events.imp / events.flag — self-authored (role='tl') recall boost,
+    retire, milestone SQL (imp) + cortex management marks (flag, open vocab).
+    Retires the channel='self' marker: role='tl', channel backfilled to a real
+    platform, affect label folded into content. Idempotent.
+    """
+    v = conn.execute("PRAGMA user_version").fetchone()[0]
+    if v >= 29:
+        return
+    for col in ("imp INTEGER", "flag TEXT"):
+        try:
+            conn.execute(f"ALTER TABLE events ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass
+    rows = conn.execute(
+        "SELECT id, content FROM events WHERE channel='self'"
+    ).fetchall()
+    for r in rows:
+        af = conn.execute(
+            "SELECT label, importance FROM affect WHERE event_id=?"
+            " ORDER BY id DESC LIMIT 1",
+            (r["id"],),
+        ).fetchone()
+        label = (af["label"] if af else "") or ""
+        imp = af["importance"] if af else None
+        content = r["content"] or ""
+        if label and not content.lstrip().startswith("【"):
+            content = f"【{label}】{content}"
+        conn.execute(
+            "UPDATE events SET role='tl', channel='cli', content=?, imp=?"
+            " WHERE id=?",
+            (content, imp, r["id"]),
+        )
+    conn.execute("PRAGMA user_version=29")
+
+
+def _migrate_to_v30(conn: sqlite3.Connection) -> None:
+    """v30: goals table (C1/C3, Decided 07-03 eve) — key/value/unit pairs set
+    via goal_set MCP, read via goal_list. No history, latest value only."""
+    v = conn.execute("PRAGMA user_version").fetchone()[0]
+    if v >= 30:
+        return
+    conn.executescript("""
+CREATE TABLE IF NOT EXISTS goals (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  unit TEXT,
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+    """)
+    conn.execute("PRAGMA user_version=30")
 
 
 def get_latest_watermark(conn, sid):

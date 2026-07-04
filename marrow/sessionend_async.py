@@ -34,7 +34,7 @@ from . import config, repo, storage
 from .hooks import _FORCE_SESSIONEND_ACTION, _is_manual_skip
 from .llm import LLMClient, LLMError
 from .sessionend_prompts import TASK_AFFECT_DIGEST_PROMPT
-from .sessionend_writers import seg_affect, seg_digest, seg_task_cand
+from .sessionend_writers import _seg_digest_ts, seg_affect, seg_digest, seg_task_cand
 
 _TZ = config.get_tz()
 _CUTOFF_H = 6  # 6AM day boundary (per pipeline §6)
@@ -93,6 +93,30 @@ def _user_event_count(conn, sid: str, after_event_id: int | None = None) -> int:
     return row["c"] if row else 0
 
 
+def _session_max_event_id(conn, sid: str) -> int | None:
+    row = conn.execute(
+        "SELECT MAX(id) AS max_event_id FROM events WHERE session_id = ?",
+        (sid,),
+    ).fetchone()
+    return row["max_event_id"] if row else None
+
+
+def _latest_watermark_event_id(conn, sid: str) -> int | None:
+    row = conn.execute(
+        "SELECT * FROM session_watermarks"
+        " WHERE sid = ? ORDER BY segment_seq DESC LIMIT 1",
+        (sid,),
+    ).fetchone()
+    if not row:
+        return None
+    keys = row.keys()
+    if "max_event_id" in keys:
+        return row["max_event_id"]
+    if "last_event_id" in keys:
+        return row["last_event_id"]
+    return None
+
+
 def _has_force_sessionend(conn, sid: str) -> bool:
     row = conn.execute(
         "SELECT 1 FROM audit_log"
@@ -129,6 +153,13 @@ def _already_done(conn, sid: str) -> bool:
     ).fetchone()
     if latest_row and latest_row["summary"].startswith("reset:"):
         return False
+
+    # Multi-segment mid_scan rows carry segment-local counts; use coverage by
+    # event id when a watermark exists.
+    latest_watermark_event_id = _latest_watermark_event_id(conn, sid)
+    if latest_watermark_event_id is not None:
+        max_event_id = _session_max_event_id(conn, sid)
+        return max_event_id is None or latest_watermark_event_id >= max_event_id
 
     # Check for new-style ok row with user_count.
     ok_row = conn.execute(
@@ -439,7 +470,7 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
 
             return _run_extraction(conn, sid, date, events_text, cfg, count,
-                                   cwd, segment_seq)
+                                   cwd, segment_seq, after_event_id)
         except Exception as e:  # noqa: BLE001
             try:
                 _write_final_audit(conn, sid, f"fail:{type(e).__name__}: {e}"[:220])
@@ -506,7 +537,8 @@ def _collect_run_failures(conn, sid: str) -> list[str]:
 
 def _run_extraction(conn, sid: str, date: str,
                     events_text: str, cfg: dict, count: int,
-                    cwd: str = "", segment_seq: int = 0) -> int:
+                    cwd: str = "", segment_seq: int = 0,
+                    after_event_id: int | None = None) -> int:
     """Single sonnet call: TASK_AFFECT_DIGEST_PROMPT emits all segments.
     dashboard + embed_pending run at tail (fail-soft).
     """
@@ -527,6 +559,7 @@ def _run_extraction(conn, sid: str, date: str,
     )
 
     # ── single call: all segments (sonnet mid) ────────────────────────────────
+    mid_hhmm = _local_hhmm(_seg_digest_ts(conn, sid, after_event_id))
     raw, call_err = "", None
     persona = config.persona()
     user_terms = " / ".join(config.all_user_terms())
@@ -541,7 +574,8 @@ def _run_extraction(conn, sid: str, date: str,
                 user_name=persona["user_name"],
                 assistant_name=persona["assistant_name"],
                 user_terms=user_terms,
-                assistant_terms=assistant_terms),
+                assistant_terms=assistant_terms,
+                mid_time=mid_hhmm),
             tier="mid",
         )
     except (LLMError, ValueError, RuntimeError) as e:
@@ -558,7 +592,8 @@ def _run_extraction(conn, sid: str, date: str,
                 lambda: seg_affect(conn, raw, sid, date))
     _run_writer(conn, sid, "digest",
                 lambda: seg_digest(conn, raw, sid, date, raw_llm=raw,
-                                   segment_seq=segment_seq),
+                                   segment_seq=segment_seq,
+                                   after_event_id=after_event_id),
                 zero_is_fail=True)
 
     # ── final audit ───────────────────────────────────────────────────────────

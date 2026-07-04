@@ -280,6 +280,210 @@ def test_log_usage_none_does_not_write(tmp_path, monkeypatch):
     assert written == []
 
 
+# --- Cortex full-env runner (C3) ---
+
+CORTEX_CFG = {
+    "llm": {
+        "default": "claude_cli",
+        "claude_cli": {"kind": "claude_cli", "mode": "stream", "timeout_s": 5},
+        "claude_cli_cortex": {"kind": "claude_cli_cortex", "timeout_s": 5},
+    },
+    "tiers": {"cheap": "claude-haiku", "top": "claude-opus"},
+    "cortex": {"home": "/tmp/does-not-matter-mocked", "tier": "top"},
+}
+
+
+def _cortex_stream_out(result, session_id="sess-abc"):
+    rec = {"type": "result", "result": result, "is_error": False,
+           "session_id": session_id}
+    return "\n".join([
+        json.dumps({"type": "system", "session_id": session_id}),
+        json.dumps(rec),
+    ])
+
+
+def test_extract_session_id():
+    out = _cortex_stream_out("ok", session_id="sess-xyz")
+    assert LLMClient._extract_session_id(out) == "sess-xyz"
+
+
+def test_extract_session_id_missing_returns_none():
+    out = json.dumps({"type": "result", "result": "ok"})
+    assert LLMClient._extract_session_id(out) is None
+
+
+def test_extract_session_id_garbage_returns_none():
+    assert LLMClient._extract_session_id("not json") is None
+
+
+def test_call_cortex_no_isolation_flags(monkeypatch, tmp_path):
+    c = LLMClient(CORTEX_CFG)
+    captured = {}
+
+    def fake_stream(cmd, prompt, timeout, env, cwd=None):
+        captured["cmd"] = cmd
+        captured["env"] = env
+        captured["cwd"] = cwd
+        return _cortex_stream_out("hi there")
+
+    monkeypatch.setattr(c, "_stream_subprocess", fake_stream)
+    out = c.call_cortex("hello", cwd=str(tmp_path))
+    assert out == {"text": "hi there", "session_id": "sess-abc"}
+    assert "--setting-sources" not in captured["cmd"]
+    assert "--strict-mcp-config" not in captured["cmd"]
+    assert captured["env"]["MARROW_CORTEX"] == "1"
+    assert "MARROW_PIPELINE" not in captured["env"]
+    assert captured["cwd"] == str(tmp_path)
+    assert "--model" in captured["cmd"]
+    assert captured["cmd"][captured["cmd"].index("--model") + 1] == "claude-opus"
+    assert "--permission-mode" in captured["cmd"]
+    assert captured["cmd"][captured["cmd"].index("--permission-mode") + 1] == "bypassPermissions"
+
+
+def test_call_cortex_model_override_bypasses_tier(monkeypatch, tmp_path):
+    cfg = {**CORTEX_CFG, "cortex": {**CORTEX_CFG["cortex"],
+                                     "model": "claude-opus-4-6"}}
+    c = LLMClient(cfg)
+    captured = {}
+
+    def fake_stream(cmd, prompt, timeout, env, cwd=None):
+        captured["cmd"] = cmd
+        return _cortex_stream_out("hi there")
+
+    monkeypatch.setattr(c, "_stream_subprocess", fake_stream)
+    c.call_cortex("hello", cwd=str(tmp_path))
+    assert captured["cmd"][captured["cmd"].index("--model") + 1] == "claude-opus-4-6"
+
+
+def test_call_cortex_effort_flag_passed_when_set(monkeypatch, tmp_path):
+    cfg = {**CORTEX_CFG, "cortex": {**CORTEX_CFG["cortex"], "effort": "medium"}}
+    c = LLMClient(cfg)
+    captured = {}
+
+    def fake_stream(cmd, prompt, timeout, env, cwd=None):
+        captured["cmd"] = cmd
+        return _cortex_stream_out("hi there")
+
+    monkeypatch.setattr(c, "_stream_subprocess", fake_stream)
+    c.call_cortex("hello", cwd=str(tmp_path))
+    assert "--effort" in captured["cmd"]
+    assert captured["cmd"][captured["cmd"].index("--effort") + 1] == "medium"
+
+
+def test_call_cortex_effort_flag_omitted_when_empty(monkeypatch, tmp_path):
+    c = LLMClient(CORTEX_CFG)
+    captured = {}
+
+    def fake_stream(cmd, prompt, timeout, env, cwd=None):
+        captured["cmd"] = cmd
+        return _cortex_stream_out("hi there")
+
+    monkeypatch.setattr(c, "_stream_subprocess", fake_stream)
+    c.call_cortex("hello", cwd=str(tmp_path))
+    assert "--effort" not in captured["cmd"]
+
+
+def test_call_cortex_default_timeout_is_600(monkeypatch, tmp_path):
+    cfg = {**CORTEX_CFG, "llm": {**CORTEX_CFG["llm"],
+           "claude_cli_cortex": {"kind": "claude_cli_cortex"}}}
+    c = LLMClient(cfg)
+    captured = {}
+
+    def fake_stream(cmd, prompt, timeout, env, cwd=None):
+        captured["timeout"] = timeout
+        return _cortex_stream_out("ok")
+
+    monkeypatch.setattr(c, "_stream_subprocess", fake_stream)
+    c.call_cortex("hello", cwd=str(tmp_path))
+    assert captured["timeout"] == 600
+
+
+def test_call_cortex_timeout_override(monkeypatch, tmp_path):
+    """Caller-supplied timeout overrides the provider default so the cortex
+    config is the single source of truth for the call budget."""
+    c = LLMClient(CORTEX_CFG)
+    captured = {}
+
+    def fake_stream(cmd, prompt, timeout, env, cwd=None):
+        captured["timeout"] = timeout
+        return _cortex_stream_out("ok")
+
+    monkeypatch.setattr(c, "_stream_subprocess", fake_stream)
+    c.call_cortex("hello", cwd=str(tmp_path), timeout=123)
+    assert captured["timeout"] == 123
+
+
+def test_call_cortex_resume_sid_passes_resume_flag(monkeypatch, tmp_path):
+    c = LLMClient(CORTEX_CFG)
+    captured = {}
+
+    def fake_stream(cmd, prompt, timeout, env, cwd=None):
+        captured["cmd"] = cmd
+        return _cortex_stream_out("ok")
+
+    monkeypatch.setattr(c, "_stream_subprocess", fake_stream)
+    c.call_cortex("hello", cwd=str(tmp_path), resume_sid="prior-sid")
+    assert "--resume" in captured["cmd"]
+    assert captured["cmd"][captured["cmd"].index("--resume") + 1] == "prior-sid"
+
+
+def test_call_cortex_fresh_omits_resume_flag(monkeypatch, tmp_path):
+    c = LLMClient(CORTEX_CFG)
+    captured = {}
+
+    def fake_stream(cmd, prompt, timeout, env, cwd=None):
+        captured["cmd"] = cmd
+        return _cortex_stream_out("ok")
+
+    monkeypatch.setattr(c, "_stream_subprocess", fake_stream)
+    c.call_cortex("hello", cwd=str(tmp_path))
+    assert "--resume" not in captured["cmd"]
+
+
+def test_call_cortex_defaults_cwd_and_creates_dir(monkeypatch, tmp_path):
+    cfg = {**CORTEX_CFG, "cortex": {"home": str(tmp_path / "cortex_home"),
+                                     "tier": "top"}}
+    c = LLMClient(cfg)
+    captured = {}
+
+    def fake_stream(cmd, prompt, timeout, env, cwd=None):
+        captured["cwd"] = cwd
+        return _cortex_stream_out("ok")
+
+    monkeypatch.setattr(c, "_stream_subprocess", fake_stream)
+    c.call_cortex("hello")
+    assert captured["cwd"] == str(tmp_path / "cortex_home")
+    assert (tmp_path / "cortex_home").is_dir()
+
+
+def test_call_cortex_missing_provider_raises():
+    c = LLMClient({"llm": {"default": "claude_cli",
+                            "claude_cli": {"kind": "claude_cli"}},
+                    "tiers": {"cheap": "haiku"}})
+    with pytest.raises(LLMError, match="claude_cli_cortex"):
+        c.call_cortex("hello")
+
+
+def test_isolation_flags_still_present_on_default_stream(monkeypatch):
+    """Untouched-path guard: the existing pipeline stream runner must keep
+    the isolation flags + MARROW_PIPELINE after the shared-helper refactor."""
+    c = LLMClient(CFG)
+    captured = {}
+
+    def fake_stream(cmd, prompt, timeout, env, cwd=None):
+        captured["cmd"] = cmd
+        captured["env"] = env
+        captured["cwd"] = cwd
+        return _stream_out("ok")
+
+    monkeypatch.setattr(c, "_stream_subprocess", fake_stream)
+    c._run_claude_stream({"timeout_s": 5, "mode": "stream"}, "m", "hi")
+    assert "--setting-sources" in captured["cmd"]
+    assert "--strict-mcp-config" in captured["cmd"]
+    assert captured["env"]["MARROW_PIPELINE"] == "1"
+    assert captured["cwd"] is None
+
+
 def test_log_usage_db_failure_does_not_raise(monkeypatch):
     c = LLMClient(CFG)
     # storage.connect raises — _log_usage must swallow it silently

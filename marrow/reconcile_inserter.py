@@ -432,9 +432,14 @@ def reconcile_inserter_sync(
         }
     except sqlite3.Error:
         cols = set()
-    gate_col = "updated_at" if "updated_at" in cols else (
-        "created_at" if "created_at" in cols else None
-    )
+    if "updated_at" in cols and "created_at" in cols:
+        gate_col = "COALESCE(updated_at, created_at)"
+    elif "updated_at" in cols:
+        gate_col = "updated_at"
+    elif "created_at" in cols:
+        gate_col = "created_at"
+    else:
+        gate_col = None
     gate_sql = ""
     gate_params: list = []
     if md_mtime_iso and gate_col:

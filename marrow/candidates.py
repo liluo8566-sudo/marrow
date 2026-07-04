@@ -125,8 +125,10 @@ def _merge_aliases_into(conn, row_id: int, incoming_name: str,
     merged = existing + additions
     with conn:
         conn.execute(
-            "UPDATE entities SET aliases=? WHERE id=?",
-            (json.dumps(merged, ensure_ascii=False), row_id),
+            "UPDATE entities SET aliases=?, updated_at=? WHERE id=?",
+            (json.dumps(merged, ensure_ascii=False),
+             _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+             row_id),
         )
 
 
@@ -395,9 +397,9 @@ def bump_use_counts(conn, rows: list[dict]) -> int:
         "%Y-%m-%dT%H:%M:%SZ")
     for mid, n in bumps.items():
         conn.execute(
-            "UPDATE memes SET use_count = use_count + ?, last_seen = ? "
+            "UPDATE memes SET use_count = use_count + ?, last_seen = ?, updated_at = ? "
             "WHERE id = ? AND status='active'",
-            (n, ts_now, mid),
+            (n, ts_now, ts_now, mid),
         )
     return sum(bumps.values())
 
@@ -473,8 +475,8 @@ def write_memes_cand(conn, raw: str, source: str = "daily",
                 new_pinned = 1 if (existing["pinned"] or pinned) else 0
                 conn.execute(
                     "UPDATE memes SET use_count=use_count+1, last_seen=?,"
-                    " pinned=? WHERE id=?",
-                    (ts_now, new_pinned, existing["id"]),
+                    " pinned=?, updated_at=? WHERE id=?",
+                    (ts_now, new_pinned, ts_now, existing["id"]),
                 )
             n += 1
             continue

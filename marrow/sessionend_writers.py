@@ -98,8 +98,20 @@ def _match_event_hint(conn, hint: str | None, sid: str) -> int | None:
     return None
 
 
+def _sid_has_self_rows(conn, sid: str) -> bool:
+    """Coexistence gate: a sid that authored tl_add rows (role='tl') owns
+    its timeline block — the sessionend affect/life_lines writers stand down."""
+    row = conn.execute(
+        "SELECT 1 FROM events WHERE session_id=? AND role='tl' LIMIT 1",
+        (sid,),
+    ).fetchone()
+    return row is not None
+
+
 def seg_affect(conn, raw: str, sid: str, date: str) -> int:
     """Insert affect rows with importance clamp + unresolved/reconcile linkage."""
+    if _sid_has_self_rows(conn, sid):
+        return 0
     items = candidates.extract_block(raw, "AFFECT")
     if not items:
         return 0
@@ -182,8 +194,8 @@ def seg_affect(conn, raw: str, sid: str, date: str) -> int:
                 ts_now = _dt.datetime.now(_dt.timezone.utc).strftime(
                     "%Y-%m-%dT%H:%M:%SZ")
                 conn.execute(
-                    "UPDATE affect SET resolved_at=? WHERE id=?",
-                    (ts_now, reconcile_ref),
+                    "UPDATE affect SET resolved_at=?, updated_at=? WHERE id=?",
+                    (ts_now, ts_now, reconcile_ref),
                 )
             if event_id is not None:
                 conn.execute(
@@ -451,8 +463,43 @@ def _prune_digest_logs() -> None:
         pass
 
 
+def _seg_digest_ts(conn, sid: str, after_event_id: int | None) -> str:
+    """Return ISO 8601 UTC ts for a digest: midpoint of user messages in segment.
+
+    Rounds to the nearest minute. Falls back to now() if no user messages found.
+    """
+    if after_event_id is not None:
+        row = conn.execute(
+            "SELECT MIN(timestamp) AS first_ts, MAX(timestamp) AS last_ts"
+            " FROM events WHERE session_id=? AND role='user' AND id > ?",
+            (sid, after_event_id),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT MIN(timestamp) AS first_ts, MAX(timestamp) AS last_ts"
+            " FROM events WHERE session_id=? AND role='user'",
+            (sid,),
+        ).fetchone()
+
+    if row and row["first_ts"] and row["last_ts"]:
+        first = _dt.datetime.fromisoformat(row["first_ts"].replace("Z", "+00:00"))
+        last = _dt.datetime.fromisoformat(row["last_ts"].replace("Z", "+00:00"))
+        mid = first + (last - first) / 2
+        # Round to nearest minute
+        seconds = mid.second + mid.microsecond / 1_000_000
+        if seconds >= 30:
+            mid = mid + _dt.timedelta(seconds=60 - seconds)
+        else:
+            mid = mid - _dt.timedelta(seconds=seconds)
+        mid = mid.replace(microsecond=0)
+        return mid.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def seg_digest(conn, raw: str, sid: str, date: str,
-               raw_llm: str | None = None, segment_seq: int = 0) -> int:
+               raw_llm: str | None = None, segment_seq: int = 0,
+               after_event_id: int | None = None) -> int:
     """Persist DIGEST text into session_digests. INSERT OR REPLACE on sid.
 
     Parses KIND/TL/LIFE from the structured DIGEST block and writes the new
@@ -460,6 +507,8 @@ def seg_digest(conn, raw: str, sid: str, date: str,
     Parse failure → columns NULL + alert; body always kept.
 
     raw_llm: full LLM output for quality monitoring log.
+    after_event_id: lower-bound event id for segment (exclusive). Used to
+        compute ts as midpoint of user messages in this segment.
     """
     parsed = _parse_digest_block(raw)
     body = parsed["body"]
@@ -471,6 +520,10 @@ def seg_digest(conn, raw: str, sid: str, date: str,
 
     kind = parsed["kind"]
     life_lines = parsed["life_lines"]
+    # Coexistence gate: self rows own the timeline block for this sid — suppress
+    # life_lines so they don't double-render alongside tl_add rows.
+    if life_lines is not None and _sid_has_self_rows(conn, sid):
+        life_lines = None
 
     # Alert on parse failures for kind (critical structure). TL no longer required.
     if kind is None:
@@ -487,7 +540,7 @@ def seg_digest(conn, raw: str, sid: str, date: str,
         except Exception:  # noqa: BLE001 — alert is best-effort
             pass
 
-    ts_now = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ts_now = _seg_digest_ts(conn, sid, after_event_id)
     with conn:
         conn.execute(
             "INSERT OR REPLACE INTO session_digests"

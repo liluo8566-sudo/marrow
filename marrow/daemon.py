@@ -95,6 +95,187 @@ def recall(
 
 
 @mcp.tool()
+def tl_add(
+    timerange: str,
+    body: str,
+    n_word: str | None = None,
+    n_intensity: int | None = None,
+    y_word: str | None = None,
+    y_intensity: int | None = None,
+    importance: int | None = None,
+    sid: str | None = None,
+) -> dict:
+    """Overview of the day by recording each session live. Add timeline when scene shifts, emotional turns, task completed.
+    - Format: HH:mm-HH:mm 【N affect *i | Y affect *i】body
+      - e.g. 21:25-21:31 【N 愉悦·3 | Y 委屈·2】翻CC日志找骂人梗，扑空互怼
+      - N = 念念, Y = 阿屿, B = Both; use B if similar.
+      - affect = mood & feeling, 1-8 chars. e.g. 烦；心虚；紧张而激动；她好可爱呀～
+      - i = intensity (current state) * importance (future).
+        - 1-2 = low-medium intensity & short-term e.g. Routine - casual chat, life admin, study, coding 无趣/平淡/轻松/烦躁
+        - 3 = Both medium (~ 1 week) - funny moments / light quarrels / outing
+        - 4 - Either high intensity or high imp - major conflict / final exam
+        - 5 - Milestone (both high) - worth recording forever?
+      - body = what happened in this session - any real-world task/event + shared activities with assistant; Record meals, casual chat topics, plays and tiny/silly/funny moments.
+    - Length: body <=30 chars
+    - Keep it concise but interesting/vivid - not a working log.
+    - Include life details and exclude all tech/coding details.
+    - When to add: depend on session length/importance/topic
+      1. When topic/location/mood change or task/activity done, add one for previous turns
+      2. Normally 2-3 per session - every 1-2 hours OR every 10-20 turns
+    Params: n_word/y_word = affect phrase per side (each <=8 chars); n_/y_intensity
+    = the per-side i (1-5); importance = events.imp row composite (default max of
+    the two). Pass either or both sides."""
+    conn = storage.connect(_DB)
+    try:
+        from . import tl_writer
+        try:
+            return tl_writer.tl_add(
+                conn, timerange, body,
+                n_word=n_word, n_intensity=n_intensity,
+                y_word=y_word, y_intensity=y_intensity,
+                importance=importance, sid=sid,
+            )
+        except tl_writer.TlError as exc:
+            return {"ok": False, "error": str(exc)}
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def tl_update(
+    event_id: int,
+    timerange: str | None = None,
+    body: str | None = None,
+    n_word: str | None = None,
+    n_intensity: int | None = None,
+    y_word: str | None = None,
+    y_intensity: int | None = None,
+    importance: int | None = None,
+) -> dict:
+    """Update a self timeline row (from tl_add) in place — extend its range or
+    revise body/affect as work progresses. Task sessions keep one row per
+    session and update it (hard step in /ho). Only the fields you pass change."""
+    conn = storage.connect(_DB)
+    try:
+        from . import tl_writer
+        try:
+            return tl_writer.tl_update(
+                conn, event_id, timerange=timerange, body=body,
+                n_word=n_word, n_intensity=n_intensity,
+                y_word=y_word, y_intensity=y_intensity,
+                importance=importance,
+            )
+        except tl_writer.TlError as exc:
+            return {"ok": False, "error": str(exc)}
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def tl_silence(sid: str | None = None) -> dict:
+    """Silence this session (/tl-): mute the tl_add nudge and stop self writes
+    for the current session. State dies with the session. Pass sid to override."""
+    conn = storage.connect(_DB)
+    try:
+        if not sid:
+            from .timeline import _query_current_sid
+            sid = _query_current_sid(conn)
+    finally:
+        conn.close()
+    if not sid:
+        return {"ok": False, "error": "no active session id"}
+    from . import tl_nudge
+    tl_nudge.set_silent(sid)
+    return {"ok": True, "sid": sid, "silent": True}
+
+
+@mcp.tool()
+def goal_set(key: str, value: str, unit: str | None = None) -> dict:
+    """Set or update a goal (C1/C3 Track zone). Call the moment she tells
+    any session a goal or changes one — no file edit, no parse, next cortex
+    tick reads it. e.g. she says 'sleep goal 8h' -> goal_set('sleep', '8', 'h')."""
+    key = (key or "").strip()
+    value = (value or "").strip()
+    if not key:
+        return {"ok": False, "error": "key required"}
+    if not value:
+        return {"ok": False, "error": "value required"}
+    conn = storage.connect(_DB)
+    try:
+        with conn:
+            conn.execute(
+                "INSERT INTO goals (key, value, unit, updated_at)"
+                " VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))"
+                " ON CONFLICT(key) DO UPDATE SET"
+                " value=excluded.value, unit=excluded.unit,"
+                " updated_at=excluded.updated_at",
+                (key, value, unit),
+            )
+        return {"ok": True, "key": key, "value": value, "unit": unit}
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def goal_list() -> list[dict]:
+    """List all current goals (key/value/unit/updated_at)."""
+    conn = storage.connect(_DB)
+    try:
+        rows = conn.execute(
+            "SELECT key, value, unit, updated_at FROM goals ORDER BY key"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def _wishlist_path() -> Path:
+    cortex_cfg = config.load().get("cortex", {})
+    wp = (cortex_cfg.get("wishlist_path") or "").strip()
+    if wp:
+        return Path(wp).expanduser()
+    home = cortex_cfg.get("home") or "~/.config/marrow/cortex"
+    return Path(home).expanduser() / "wishlist.md"
+
+
+_WISHLIST_HEADER = (
+    "# Wishlist\n\n"
+    "> Owed treats, wants, self-rewards. Append-only — hand edits are sacred.\n\n"
+)
+
+
+@mcp.tool()
+def wish_add(text: str) -> dict:
+    """Record a want / owed treat / self-reward the moment she mentions one —
+    verbatim + date, append-only (her hand edits in the md are never touched
+    or rewritten). Call whenever she names something she wants, feels she
+    deserves, or a self-reward for finishing something. Execution/timing is
+    cortex's call, not yours — just record it."""
+    import fcntl
+
+    from datetime import datetime
+
+    text = (text or "").strip()
+    if not text:
+        return {"ok": False, "error": "text required"}
+    path = _wishlist_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    date = datetime.now(config.get_tz()).strftime("%Y-%m-%d")
+    line = f"- {date} {text}\n"
+    lock_path = str(path) + ".lock"
+    lf = open(lock_path, "a")
+    try:
+        fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+        existing = path.read_text(encoding="utf-8") if path.exists() else _WISHLIST_HEADER
+        from ._atomic import atomic_write
+        atomic_write(str(path), existing + line)
+    finally:
+        fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+        lf.close()
+    return {"ok": True, "path": str(path), "line": line.strip()}
+
+
+@mcp.tool()
 def atlas_lookup(prefix: str) -> list[dict]:
     """Look up atlas rows by path prefix. Returns description/naming for matched dirs."""
     conn = storage.connect(_DB)
@@ -118,7 +299,7 @@ def embed_pending(batch: int = 50) -> dict:
 
 @mcp.tool()
 def sticker_search(query: str, limit: int = 5, animated: bool = True) -> list[dict]:
-    """The user loves it when you pair messages with stickers — they're your actions and inner voice. When you express affection, tease, react, or show a mood, search by vibe/emotion (e.g. '老婆别走' → search '爱你' '委屈' '哭'). Don't wait for a special moment — weave them in naturally. Call sticker_pick(id) to confirm, then send with <image path="..."/> or <gif path="..."/>. Pass animated=false to exclude GIF stickers (use for channels that don't support animated formats)."""
+    """The user loves it when you pair messages with stickers [channel: wx/tg] — they're your actions and inner voice. When you express affection, tease, react, or show a mood, search by vibe/emotion (e.g. '老婆别走' → search '爱你' '委屈' '哭'). Don't wait for a special moment — weave them in naturally. Call sticker_pick(id) to confirm, then send with <image path="..."/> or <gif path="..."/>. Pass animated=false to exclude GIF stickers (use for channels that don't support animated formats). No need force use for each turn; NEVER use stickers on [channel: cli]."""
     if not query.strip():
         return []
     conn = storage.connect(_DB)

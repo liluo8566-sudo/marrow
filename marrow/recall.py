@@ -512,6 +512,32 @@ def _is_dormant(importance: int | None, age_days: float) -> bool:
     return imp <= 2 and age_days > 90
 
 
+# Staged additive recall boost for self-authored (role='tl') rows, indexed by
+# events.imp (0..5). imp 1-2 sit level with plain events; 5 = milestone-tier.
+_IMP_BOOST_DEFAULT = (0.0, 0.0, 0.0, 0.02, 0.035, 0.05)
+
+
+def _imp_boost_table() -> tuple[float, ...]:
+    try:
+        from . import config as _config
+        arr = _config.load().get("recall", {}).get("imp_boost")
+        if isinstance(arr, list) and arr:
+            return tuple(float(x) for x in arr)
+    except Exception:
+        pass
+    return _IMP_BOOST_DEFAULT
+
+
+def _imp_boost(imp, table: tuple[float, ...]) -> float:
+    """Staged boost for events.imp; unset/1-2 -> 0.0. Cap at table tail."""
+    if not imp:
+        return 0.0
+    i = int(imp)
+    if i < 0:
+        return 0.0
+    return table[i] if i < len(table) else table[-1]
+
+
 # ── cross-table vec lane lookups ──────────────────────────────────────────────
 
 # Minimum similarity for a vec-only (no keyword match) row to surface.
@@ -1217,7 +1243,7 @@ def recall_fusion(
     if since and until:
         fts_rows = conn.execute(
             "SELECT e.id, e.session_id, e.timestamp, e.role, e.content, e.channel, "
-            "e.compressed, s.cwd AS session_cwd, rank AS fts_rank "
+            "e.compressed, e.imp AS imp, s.cwd AS session_cwd, rank AS fts_rank "
             "FROM events_fts f JOIN events e ON e.id = f.rowid "
             "LEFT JOIN sessions s ON s.sid = e.session_id "
             "WHERE events_fts MATCH ? AND e.timestamp >= ? AND e.timestamp < ? "
@@ -1227,7 +1253,7 @@ def recall_fusion(
     else:
         fts_rows = conn.execute(
             "SELECT e.id, e.session_id, e.timestamp, e.role, e.content, e.channel, "
-            "e.compressed, s.cwd AS session_cwd, rank AS fts_rank "
+            "e.compressed, e.imp AS imp, s.cwd AS session_cwd, rank AS fts_rank "
             "FROM events_fts f JOIN events e ON e.id = f.rowid "
             "LEFT JOIN sessions s ON s.sid = e.session_id "
             "WHERE events_fts MATCH ? ORDER BY rank LIMIT ?",
@@ -1245,7 +1271,7 @@ def recall_fusion(
         vec_k = limit * 6 if (since and until) else limit * 3
         all_vec_rows = conn.execute(
             "SELECT e.id, e.session_id, e.timestamp, e.role, e.content, e.channel, "
-            "e.compressed, s.cwd AS session_cwd, v.distance "
+            "e.compressed, e.imp AS imp, s.cwd AS session_cwd, v.distance "
             "FROM events_vec v JOIN events e ON e.id = v.rowid "
             "LEFT JOIN sessions s ON s.sid = e.session_id "
             "WHERE embedding MATCH ? AND k = ? "
@@ -1275,6 +1301,7 @@ def recall_fusion(
             "timestamp": r["timestamp"], "role": r["role"],
             "content": r["content"], "channel": r["channel"],
             "compressed": r["compressed"],
+            "imp": r["imp"] if "imp" in r.keys() else None,
             "session_cwd": r["session_cwd"] if "session_cwd" in r.keys() else None,
             "bm25": bm25_score,
             "vec": 0.0, "fts_hit": True,
@@ -1295,6 +1322,7 @@ def recall_fusion(
                     "timestamp": r["timestamp"], "role": r["role"],
                     "content": r["content"], "channel": r["channel"],
                     "compressed": r["compressed"],
+                    "imp": r["imp"] if "imp" in r.keys() else None,
                     "session_cwd": r["session_cwd"] if "session_cwd" in r.keys() else None,
                     "bm25": 0.0, "vec": vec_score, "fts_hit": False,
                 }
@@ -1559,6 +1587,7 @@ def recall_fusion(
 
     # ── dormant revive + scoring ──────────────────────────────────────────────
     now = datetime.datetime.now(datetime.timezone.utc)
+    imp_tbl = _imp_boost_table()
 
     scored: list[tuple[float, dict]] = []
     for eid, c in candidates.items():
@@ -1582,10 +1611,11 @@ def recall_fusion(
             if c["fts_hit"]:
                 # FTS keyword hit revives dormant: clear dormant flag
                 conn.execute(
-                    "UPDATE affect SET superseded_by=NULL "
+                    "UPDATE affect SET superseded_by=NULL, updated_at=? "
                     "WHERE event_id=? AND superseded_by IS NULL "
                     "AND importance<=2",
-                    (eid,),
+                    (datetime.datetime.now(datetime.timezone.utc).strftime(
+                        "%Y-%m-%dT%H:%M:%SZ"), eid),
                 )
                 # Re-read importance after revive (same row, cleared)
             else:
@@ -1595,12 +1625,19 @@ def recall_fusion(
         imp = importance or 0
         affect_b = min(0.10, imp / 100.0)
 
+        # Self-authored rows (role='tl') carry their composite in events.imp and
+        # get a staged additive boost; plain events (imp NULL / 1-2) unaffected.
+        ev_imp = c.get("imp")
+        is_tl = (c.get("role") == "tl")
+
         raw = (
             w_vec * c["vec"]
             + w_bm25 * c["bm25"]
             + w_recency * recency
             + w_affect * affect_b
+            + _imp_boost(ev_imp, imp_tbl)
         )
+        c["source_tag"] = "tl" if is_tl else "event"
 
         # cwd-bucket bias: nudge same-context events up, cross-context down.
         # Only fires when BOTH the current cwd and the event's session cwd
@@ -1641,6 +1678,8 @@ def recall_fusion(
                 pass  # malformed JSON or missing column: skip booster
 
         floor = _decay_floor(importance, source, age_days)
+        if ev_imp:
+            floor = max(floor, _decay_floor(ev_imp, None, age_days))
         final = max(raw, floor) if floor > 0 else raw
 
         if final >= min_score:

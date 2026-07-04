@@ -33,10 +33,10 @@ from . import config as _config
 _TZ = _config.get_tz()
 _MELB_TZ = ZoneInfo("Australia/Melbourne")
 # Matches leading HH:MM in a LIFE line (e.g. "21:40 买了b5精华")
-_LIFE_TS_RE = _re.compile(r"^(\d{2}:\d{2})(?:\s+|(?=【))(.*)", _re.DOTALL)
+_LIFE_TS_RE = _re.compile(r"^(\d{2}:\d{2})(?:-\d{2}:\d{2})?(?:\s+|(?=【))(.*)", _re.DOTALL)
 _CUTOFF_H = 6          # 6AM local day boundary
 _BUDGET = 4000         # soft char budget (safety net; zone caps control sizing)
-_24H_CAP = 20          # max film-strip lines
+_INJECT_CAP = 20       # max film-strip lines injected into context
 _OPEN_EXPIRY_DAYS = 7  # open episodes older than this are hidden
 
 
@@ -419,6 +419,38 @@ def _query_manual_events_24h(conn: sqlite3.Connection,
 
 
 
+def _query_self_rows_24h(conn: sqlite3.Connection,
+                         from_utc: str, to_utc: str) -> list[dict]:
+    """Self timeline rows (role='tl', tl_add) in the 24h window.
+
+    content already carries the 【label】body phrase verbatim; the range prefix
+    is composed from ts_start/ts_end. Returns one dict per row with a
+    pre-composed display line (HH:mm[-HH:mm] 【label】body).
+    """
+    rows = conn.execute(
+        "SELECT e.id AS id, e.ts_start AS ts_start, e.ts_end AS ts_end,"
+        " e.timestamp AS ts, e.content AS body"
+        " FROM events e"
+        " WHERE e.role='tl' AND e.timestamp >= ? AND e.timestamp < ?"
+        " ORDER BY e.timestamp ASC",
+        (from_utc, to_utc),
+    ).fetchall()
+    out: list[dict] = []
+    for r in rows:
+        ts_start = r["ts_start"] or r["ts"]
+        hhmm = _hhmm_melb(ts_start)
+        end = r["ts_end"]
+        rng = f"{hhmm}-{_hhmm_melb(end)}" if end else hhmm
+        body = (r["body"] or "").strip()
+        out.append({
+            "id": r["id"],
+            "ts": ts_start,
+            "hhmm": hhmm,
+            "composed": f"{rng} {body}".rstrip(),
+        })
+    return out
+
+
 def _query_current_sid(conn: sqlite3.Connection) -> str | None:
     """Latest in-progress session id (lifecycle:start with no end).
     Used to exclude the current session from timeline."""
@@ -459,8 +491,13 @@ def _render_24h(digests: list[dict],
                 to_utc: str | None = None,
                 event_spans: dict[str, tuple[str | None, str | None]] | None = None,
                 exclude_full_session_sids: set[str] | None = None,
+                self_rows: list[dict] | None = None,
                 ) -> tuple[list[str], list[dict]]:
-    """Flat 24h film-strip, newest first, filtered per rendered line."""
+    """Flat 24h film-strip, newest first, filtered per rendered line.
+
+    self_rows (role='tl', tl_add) render PRIMARY with a tl:e anchor and
+    the 【N word·i | Y word·i】 format; life_lines are the history fallback.
+    """
     if event_spans is None:
         event_spans = {}
     if exclude_full_session_sids is None:
@@ -558,7 +595,7 @@ def _render_24h(digests: list[dict],
         else:
             for idx, item in enumerate(life_items):
                 line_hhmm, text = _life_line_hhmm(item, sess_hhmm)
-                if _re.match(r"^\d{2}:\d{2}[\s【]", item):
+                if _re.match(r"^\d{2}:\d{2}(?:-\d{2}:\d{2})?[\s【]", item):
                     text = item
                 for ts_iso in _life_line_window_times(
                     item, ts, event_spans.get(sd["sid"])
@@ -581,40 +618,47 @@ def _render_24h(digests: list[dict],
             "text": content,
         })
 
+    for sr in (self_rows or []):
+        ts_dt = _in_window(sr.get("ts") or "")
+        composed = (sr.get("composed") or "").strip()
+        if ts_dt is None or not composed:
+            continue
+        entries.append({
+            "ts": ts_dt,
+            "local_date": ts_dt.astimezone(_TZ).date(),
+            "sid": None,
+            "event_id": sr["id"],
+            "line_index": None,
+            "hhmm": sr.get("hhmm") or _hhmm_melb(sr.get("ts") or ""),
+            "text": composed,
+            "self_row": True,
+        })
+
     entries.sort(key=lambda e: e["ts"], reverse=True)
-    shown = entries[:_24H_CAP]
-    dropped = entries[_24H_CAP:]
 
     lines: list[str] = []
-    for cal_date in sorted({entry["local_date"] for entry in shown}, reverse=True):
+    for cal_date in sorted({entry["local_date"] for entry in entries}, reverse=True):
         lines.append(f"**{cal_date.strftime('%m-%d')} {cal_date.strftime('%a')}**")
-        for entry in (e for e in shown if e["local_date"] == cal_date):
+        for entry in (e for e in entries if e["local_date"] == cal_date):
             hhmm = entry["hhmm"]
             text = entry["text"]
             sid = entry.get("sid")
             if sid is None:
-                lines.append(f"{hhmm} {text} <!-- tl:e:{entry['event_id']} -->")
+                if entry.get("self_row"):
+                    # composed already carries HH:mm[-HH:mm] 【label】body
+                    lines.append(f"{text} <!-- tl:e:{entry['event_id']} -->")
+                else:
+                    lines.append(f"{hhmm} {text} <!-- tl:e:{entry['event_id']} -->")
                 continue
 
             segment_seq = entry.get("segment_seq", 0)
             anchor = f" {_tl_anchor_sid(sid, segment_seq, line_index=entry['line_index'])}"
-            if _re.match(r"^\d{2}:\d{2}[\s【]", text):
+            if _re.match(r"^\d{2}:\d{2}(?:-\d{2}:\d{2})?[\s【]", text):
                 lines.append(f"{text}{anchor}")
             else:
                 lines.append(f"{hhmm} {text}{anchor}")
 
-    overflow_by_sid: dict[str, dict] = {}
-    for entry in dropped:
-        sid = entry.get("sid")
-        if sid is None:
-            continue
-        item = overflow_by_sid.setdefault(
-            sid, {"sid": sid, "dropped_count": 0, "line_indexes": []}
-        )
-        item["dropped_count"] += 1
-        item["line_indexes"].append(entry["line_index"])
-
-    return lines, list(overflow_by_sid.values())
+    return lines, []
 
 
 def _render_zone_b(diary_data: dict[str, dict],
@@ -645,11 +689,13 @@ def _render_zone_b(diary_data: dict[str, dict],
 
 # ── main render ──────────────────────────────────────────────────────────────
 
-def render_timeline(conn: sqlite3.Connection) -> str:
+def render_timeline(conn: sqlite3.Connection,
+                    inject_cap: int | None = None) -> str:
     """Render the ## Timeline block.
 
     Uses UTC boundaries for DB queries; Melbourne local for display.
     Never naive datetime. Returns empty string if DB is empty/cold.
+    When inject_cap is set, Zone A is truncated to that many entries.
     """
     now_utc = _dt.datetime.now(_dt.timezone.utc)
     now_utc_iso = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -679,11 +725,15 @@ def render_timeline(conn: sqlite3.Connection) -> str:
         for d in digests_24h
     }
     manual_24h = _query_manual_events_24h(conn, yesterday_start_utc_iso, now_utc_iso)
+    self_24h = _query_self_rows_24h(conn, yesterday_start_utc_iso, now_utc_iso)
     lines_24h, _overflow_24h = _render_24h(
         digests_24h, current_sid, manual_24h,
         from_utc=yesterday_start_utc_iso, to_utc=now_utc_iso,
         event_spans=event_spans_24h,
+        self_rows=self_24h,
     )
+    if inject_cap is not None:
+        lines_24h = lines_24h[:inject_cap]
 
     # ── zone B: 3 diary days before zone A start ──────────────────────────────
     zone_a_start_date = (now_melb - _dt.timedelta(days=1)).date()

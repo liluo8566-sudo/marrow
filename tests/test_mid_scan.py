@@ -33,7 +33,9 @@ def _patch_config(monkeypatch, db: str) -> None:
                 "turn_threshold_time": 10,
                 "turn_threshold_abs": 30,
                 "min_hours": 2,
-                "min_turns": 5,
+                "min_turns": 4,
+                "elapsed_hours_slow": 6,
+                "turn_threshold_slow": 4,
             }
         },
     )
@@ -179,6 +181,47 @@ def test_mid_scan_prearchives_before_trigger_eval(tmp_path, monkeypatch):
     assert n == 10
 
 
+def test_mid_scan_lock_dir_fallback_still_prearchives(tmp_path, monkeypatch):
+    db = str(tmp_path / "mid.db")
+    sid = "sid-lock-fallback"
+    conn = storage.init_db(db)
+    conn.close()
+    jsonl = tmp_path / "active.jsonl"
+    _write_jsonl(jsonl, sid, count=10, hours_ago=5)
+    blocked_data_dir = tmp_path / "not-a-dir"
+    blocked_data_dir.write_text("", encoding="utf-8")
+
+    _patch_config(monkeypatch, db)
+    _freeze_now(monkeypatch)
+    monkeypatch.setattr(config, "DATA_DIR", blocked_data_dir)
+    monkeypatch.setattr(mid_scan.config, "DATA_DIR", blocked_data_dir)
+    monkeypatch.setattr(mid_scan.tempfile, "gettempdir", lambda: str(tmp_path))
+    calls = []
+    monkeypatch.setattr(
+        mid_scan,
+        "_spawn_sessionend_async",
+        lambda *a, **kw: calls.append((a, kw)),
+    )
+
+    rc = mid_scan.main([
+        "--sid", sid,
+        "--jsonl-path", str(jsonl),
+        "--channel", "wx",
+    ])
+
+    assert rc == 0
+    assert calls == [((sid,), {"after_event_id": None, "segment_seq": 1})]
+    assert not (tmp_path / f"marrow_mid_{sid}.lock").exists()
+    conn = storage.connect(db)
+    try:
+        n = conn.execute(
+            "SELECT COUNT(*) c FROM events WHERE session_id=?", (sid,)
+        ).fetchone()["c"]
+    finally:
+        conn.close()
+    assert n == 10
+
+
 def test_pre_archive_failure_logged(tmp_path, monkeypatch):
     db = str(tmp_path / "mid.db")
     conn = storage.init_db(db)
@@ -244,6 +287,40 @@ def test_concurrent_lock_skips(tmp_path, monkeypatch):
             "--channel", "wx",
         ])
         fcntl.flock(held_fd, fcntl.LOCK_UN)
+
+    assert rc == 0
+    assert calls == []
+
+
+def test_mid_scan_triggers_on_path_c_slow(tmp_path, monkeypatch):
+    """Path C: 6h elapsed + 4 user turns → trigger."""
+    db = str(tmp_path / "mid.db")
+    conn = storage.init_db(db)
+    try:
+        _insert_user_events(conn, "sid-slow", start_id=1, count=4, hours_ago=7)
+    finally:
+        conn.close()
+    jsonl = tmp_path / "empty.jsonl"
+    jsonl.write_text("", encoding="utf-8")
+
+    rc, calls = _run_scan(monkeypatch, db, "sid-slow", str(jsonl))
+
+    assert rc == 0
+    assert calls == [(("sid-slow",), {"after_event_id": None, "segment_seq": 1})]
+
+
+def test_mid_scan_no_trigger_path_c_below_elapsed(tmp_path, monkeypatch):
+    """Path C: only 5h elapsed with 4 turns → no trigger (needs 6h)."""
+    db = str(tmp_path / "mid.db")
+    conn = storage.init_db(db)
+    try:
+        _insert_user_events(conn, "sid-slow-no", start_id=1, count=4, hours_ago=5)
+    finally:
+        conn.close()
+    jsonl = tmp_path / "empty.jsonl"
+    jsonl.write_text("", encoding="utf-8")
+
+    rc, calls = _run_scan(monkeypatch, db, "sid-slow-no", str(jsonl))
 
     assert rc == 0
     assert calls == []

@@ -54,6 +54,71 @@ def test_user_event_count_after_event_id_filters_turns(tmp_path):
         conn.close()
 
 
+def test_already_done_uses_watermark_event_coverage(tmp_path):
+    conn = storage.init_db(str(tmp_path / "watermark-covered.db"))
+    sid = "sid-covered"
+    try:
+        with conn:
+            for event_id in range(1, 34):
+                _insert_event(conn, event_id, sid, "user", f"event {event_id}")
+            storage.insert_watermark(conn, sid, 4, 33, 9)
+            conn.execute(
+                "INSERT INTO audit_log (target_table, target_id, action, summary)"
+                " VALUES ('events', ?, 'sessionend_extract', 'ok,user_count=9')",
+                (sid,),
+            )
+
+        assert sessionend_async._latest_watermark_event_id(conn, sid) == 33
+        assert sessionend_async._session_max_event_id(conn, sid) == 33
+        assert sessionend_async._already_done(conn, sid) is True
+    finally:
+        conn.close()
+
+
+def test_already_done_watermark_reruns_when_events_grew(tmp_path):
+    conn = storage.init_db(str(tmp_path / "watermark-grew.db"))
+    sid = "sid-grew"
+    try:
+        with conn:
+            for event_id in range(1, 35):
+                _insert_event(conn, event_id, sid, "user", f"event {event_id}")
+            storage.insert_watermark(conn, sid, 4, 33, 9)
+            conn.execute(
+                "INSERT INTO audit_log (target_table, target_id, action, summary)"
+                " VALUES ('events', ?, 'sessionend_extract', 'ok,user_count=9')",
+                (sid,),
+            )
+
+        assert sessionend_async._session_max_event_id(conn, sid) == 34
+        assert sessionend_async._already_done(conn, sid) is False
+    finally:
+        conn.close()
+
+
+def test_already_done_force_bypasses_watermark(tmp_path):
+    conn = storage.init_db(str(tmp_path / "watermark-force.db"))
+    sid = "sid-force"
+    try:
+        with conn:
+            for event_id in range(1, 4):
+                _insert_event(conn, event_id, sid, "user", f"event {event_id}")
+            storage.insert_watermark(conn, sid, 1, 3, 3)
+            conn.execute(
+                "INSERT INTO audit_log (target_table, target_id, action, summary)"
+                " VALUES ('events', ?, 'sessionend_extract', 'ok,user_count=3')",
+                (sid,),
+            )
+            conn.execute(
+                "INSERT INTO audit_log (target_table, target_id, action, summary)"
+                " VALUES ('events', ?, ?, 'force')",
+                (sid, sessionend_async._FORCE_SESSIONEND_ACTION),
+            )
+
+        assert sessionend_async._already_done(conn, sid) is False
+    finally:
+        conn.close()
+
+
 def test_mid_session_main_writes_watermark(tmp_path, monkeypatch):
     db = str(tmp_path / "mid-session.db")
     conn = storage.init_db(db)

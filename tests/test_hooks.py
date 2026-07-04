@@ -598,6 +598,78 @@ def test_session_end_subagent_writes_lifecycle_end_and_ended_at(
     assert n == 0
 
 
+def test_session_start_marrow_cortex_writes_nothing(env, monkeypatch, capsys):
+    """C3: cortex session_start -> no lifecycle:start row, no sessions row,
+    empty additionalContext. Total invisibility, mirrors the Stop-hook guard."""
+    db, _, _ = env
+    monkeypatch.setenv("MARROW_CORTEX", "1")
+    _stdin(monkeypatch, {"session_id": "cortex-sid-1"})
+    rc = hooks.main(["session_start"])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["hookSpecificOutput"]["additionalContext"] == ""
+    conn = storage.connect(db)
+    try:
+        lc = conn.execute(
+            "SELECT 1 FROM audit_log"
+            " WHERE action='session_lifecycle:start' AND target_id='cortex-sid-1'"
+        ).fetchone()
+        sess = conn.execute(
+            "SELECT 1 FROM sessions WHERE sid='cortex-sid-1'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert lc is None
+    assert sess is None
+
+
+def test_session_end_marrow_cortex_writes_nothing(env, monkeypatch, tmp_path):
+    """C3: cortex session_end -> no lifecycle:end row, no popen spawn."""
+    db, _, _ = env
+    jl = tmp_path / "cortex.jsonl"
+    jl.write_text(json.dumps({
+        "type": "user", "sessionId": "cortex-sid-2",
+        "timestamp": "2026-07-03T10:00:00Z",
+        "message": {"role": "user", "content": "cortex wake prompt"},
+    }))
+    monkeypatch.setenv("MARROW_CORTEX", "1")
+    _stdin(monkeypatch, {"session_id": "cortex-sid-2", "transcript_path": str(jl)})
+    with patch("marrow.hooks.popen_detach_lazy") as popen:
+        rc = hooks.main(["session_end"])
+    assert rc == 0
+    assert not popen.called
+    conn = storage.connect(db)
+    try:
+        lc = conn.execute(
+            "SELECT 1 FROM audit_log"
+            " WHERE action='session_lifecycle:end' AND target_id='cortex-sid-2'"
+        ).fetchone()
+        n = conn.execute("SELECT COUNT(*) c FROM events").fetchone()["c"]
+    finally:
+        conn.close()
+    assert lc is None
+    assert n == 0
+
+
+def test_user_prompt_submit_marrow_cortex_noop(env, monkeypatch, capsys):
+    """C3: cortex user_prompt_submit -> no title/model/touch writes, no injection."""
+    db, _, _ = env
+    monkeypatch.setenv("MARROW_CORTEX", "1")
+    _stdin(monkeypatch, {"session_id": "cortex-sid-3", "prompt": "what should I do now?"})
+    rc = hooks.main(["user_prompt_submit"])
+    assert rc == 0
+    captured = capsys.readouterr().out
+    assert captured == ""
+    conn = storage.connect(db)
+    try:
+        sess = conn.execute(
+            "SELECT 1 FROM sessions WHERE sid='cortex-sid-3'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert sess is None
+
+
 def test_session_end_skips_popen_when_already_covered(env, monkeypatch, tmp_path):
     """session_end with ok,user_count=10 and 10 events -> popen_detach NOT called.
 

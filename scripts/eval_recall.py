@@ -26,7 +26,7 @@ DB_PATH = str(Path.home() / ".config" / "marrow" / "marrow.db")
 WORKTREE = Path(__file__).parent.parent
 CACHE_PATH = WORKTREE / "eval-results" / "judge_cache.json"
 
-JUDGE_MODEL = "claude-haiku-4-5-20251001"
+JUDGE_MODEL = "haiku"
 BATCH_SIZE = 10
 
 

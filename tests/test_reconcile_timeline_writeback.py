@@ -106,7 +106,11 @@ def test_overview_edit_updates_diary(conn, dash_path):
         "SELECT overview FROM diary WHERE date='2026-06-22'"
     ).fetchone()
     assert row["overview"] == "New overview from markdown"
-    assert rpt.updated == 1
+    assert rpt.updated >= 1
+    tone_row = conn.execute(
+        "SELECT tone FROM diary WHERE date='2026-06-22'"
+    ).fetchone()
+    assert tone_row["tone"] == "calm"
 
 
 def test_life_line_index_out_of_range_conflicts_without_crash(conn, dash_path):

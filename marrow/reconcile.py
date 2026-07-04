@@ -1094,8 +1094,8 @@ def _scrub_affect_pollution(conn: sqlite3.Connection) -> int:
             new_label = _sanitize_affect_text(r["label"])
             if (new_desc != r["description"]) or (new_label != r["label"]):
                 conn.execute(
-                    "UPDATE affect SET label=?, description=? WHERE id=?",
-                    (new_label, new_desc, r["id"]),
+                    "UPDATE affect SET label=?, description=?, updated_at=? WHERE id=?",
+                    (new_label, new_desc, _now(), r["id"]),
                 )
                 _affect_audit(conn, r["id"], "scrub",
                               "stripped render-leakage anchor/time-tag")
@@ -1246,7 +1246,7 @@ def reconcile_affect(conn: sqlite3.Connection,
     if all_ids:
         placeholders = ",".join("?" for _ in all_ids)
         for row in conn.execute(
-            f"SELECT id, label, description, created_at FROM affect "
+            f"SELECT id, label, description, created_at, updated_at FROM affect "
             f"WHERE id IN ({placeholders})",
             list(all_ids),
         ).fetchall():
@@ -1282,7 +1282,7 @@ def reconcile_affect(conn: sqlite3.Connection,
         for row in conn.execute(
             "SELECT id FROM affect WHERE superseded_by IS NULL "
             "AND unresolved=1 AND resolved_at IS NULL "
-            "AND created_at>=? AND created_at<=?",
+            "AND COALESCE(updated_at, created_at)>=? AND COALESCE(updated_at, created_at)<=?",
             (week_cut, md_mtime_iso),
         ).fetchall():
             if row["id"] not in pending_lines:
@@ -1305,10 +1305,11 @@ def reconcile_affect(conn: sqlite3.Connection,
             if new_desc is not None and new_desc != (db_desc or ""):
                 updates.append(("description", new_desc))
             if updates:
-                row_created = row.get("created_at") or ""
+                row_created = row.get("updated_at") or row.get("created_at") or ""
                 if md_mtime_iso and row_created > md_mtime_iso:
                     rpt.unchanged += 1
                     continue
+                updates.append(("updated_at", _now()))
                 set_clause = ", ".join(f"{c}=?" for c, _ in updates)
                 params = [v for _, v in updates] + [aid]
                 conn.execute(
@@ -1328,9 +1329,9 @@ def reconcile_affect(conn: sqlite3.Connection,
         for aid in pending_resolved | deleted_resolved:
             conn.execute(
                 "UPDATE affect SET unresolved=0, "
-                "resolved_at=COALESCE(resolved_at, ?) WHERE id=? "
+                "resolved_at=COALESCE(resolved_at, ?), updated_at=? WHERE id=? "
                 "AND unresolved=1",
-                (now_iso, aid),
+                (now_iso, now_iso, aid),
             )
             action = "tick" if aid in pending_resolved else "delete"
             _affect_audit(
@@ -1353,9 +1354,9 @@ def reconcile_affect(conn: sqlite3.Connection,
                     anchor_deleted.discard(aid)
         for aid in anchor_deleted:
             conn.execute(
-                "UPDATE affect SET superseded_by=id WHERE id=? "
+                "UPDATE affect SET superseded_by=id, updated_at=? WHERE id=? "
                 "AND superseded_by IS NULL",
-                (aid,),
+                (_now(), aid),
             )
             _affect_audit(conn, aid, "superseded",
                           "md-reconcile: anchor-deleted")
@@ -1574,6 +1575,42 @@ def _manual_event_ts_utc(day: _dt.date, explicit_day: bool,
     return ts_melb.astimezone(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+_TL_SELF_RE = re.compile(
+    r"^(?P<rng>\d{2}:\d{2}(?:-\d{2}:\d{2})?)?\s*"
+    r"(?:【(?P<label>[^】]*)】)?\s*(?P<body>.*)$",
+    re.DOTALL,
+)
+
+
+def _reconcile_self_edit(conn, rpt, eid, raw_text, row, now_iso) -> None:
+    """Round-trip an edited self (tl_add) line back to events.content.
+
+    Parses HH:mm[-HH:mm] 【label】body -> events.content = 【label】body
+    (the affect phrase lives inside content; no affect row to touch).
+    """
+    m = _TL_SELF_RE.match(raw_text.strip())
+    if not m:
+        rpt.unchanged += 1
+        return
+    body = (m.group("body") or "").strip()
+    label = m.group("label")
+    new_content = f"【{label.strip()}】{body}" if label else body
+    if new_content and new_content != (row["content"] or ""):
+        conn.execute("UPDATE events SET content=? WHERE id=?", (new_content, eid))
+        try:
+            conn.execute("DELETE FROM events_vec WHERE rowid=?", (eid,))
+            conn.execute("DELETE FROM events_vec_meta WHERE rowid=?", (eid,))
+        except sqlite3.OperationalError:
+            pass
+        conn.execute(
+            "INSERT INTO audit_log (target_table, target_id, action, summary)"
+            " VALUES ('events', ?, 'tl_self_edit', ?)",
+            (str(eid), f"md-reconcile: {new_content[:40]!r}"))
+        rpt.updated += 1
+    else:
+        rpt.unchanged += 1
+
+
 def reconcile_timeline(conn: sqlite3.Connection,
                        dashboard_path: str | Path) -> ReconcileReport:
     """Absorb timeline edits from the dashboard ## Timeline block back into DB.
@@ -1601,6 +1638,7 @@ def reconcile_timeline(conn: sqlite3.Connection,
 
     # Parse trail marker first — tells us what was rendered last time
     trail_sid_seqs: set[tuple[str, int]] = set()
+    trail_sid_triples: set[tuple[str, int, int]] = set()
     trail_dates: set[str] = set()
     trail_evts:  set[int] = set()
     trail_eps:   set[int] = set()
@@ -1616,6 +1654,7 @@ def reconcile_timeline(conn: sqlite3.Connection,
                     parts = x.split(":")
                     if len(parts) >= 3:
                         trail_sid_seqs.add((parts[0].strip(), int(parts[1].strip())))
+                        trail_sid_triples.add((parts[0].strip(), int(parts[1].strip()), int(parts[2].strip())))
                     elif len(parts) == 2:
                         trail_sid_seqs.add((parts[0].strip(), int(parts[1].strip())))
                     else:
@@ -1630,8 +1669,11 @@ def reconcile_timeline(conn: sqlite3.Connection,
     sid_edits:      dict[tuple[str, int, int | None], str] = {}
     date_edits:     dict[str, str] = {}
     date_overview_edits: dict[str, str] = {}
+    tone_edits:     dict[str, str] = {}
     present_sid_seqs: set[tuple[str, int]] = set()
+    present_sid_triples: set[tuple[str, int, int]] = set()
     present_dates:  set[str] = set()
+    block_dates:    set[str] = set()   # ALL dates from day-context headers
     present_evts:  set[int] = set()
     present_eps:   set[int] = set()
     plus_lines:    list[tuple[_dt.date, bool, str]] = []
@@ -1653,6 +1695,7 @@ def reconcile_timeline(conn: sqlite3.Connection,
         if day_context is not None:
             current_day = day_context
             current_day_explicit = True
+            block_dates.add(day_context.isoformat())
         # Lines starting with `+ ` are manual add requests
         if _TL_PLUS_RE.match(line):
             plus_lines.append((current_day, current_day_explicit, line))
@@ -1662,15 +1705,14 @@ def reconcile_timeline(conn: sqlite3.Connection,
         if m_ep:
             present_eps.add(int(m_ep.group("epid")))
             continue
-        # Manual event anchor
+        # Event anchor (tl:e) — manual events + self (tl_add) rows.
+        # Store the anchor-stripped line; prefix/label parsing is channel-aware
+        # and happens in the write phase.
         m_evt = _TL_EVT_RE.search(line)
         if m_evt:
             eid = int(m_evt.group("eid"))
             present_evts.add(eid)
-            # Extract editable text: strip the tl:e anchor + leading HH:MM prefix
             text_part = re.sub(r"\s*<!--\s*tl:e:\d+\s*-->\s*$", "", line).rstrip()
-            text_part = _TL_HHMM_RE.sub("", text_part)
-            text_part = _TL_PERIOD_RE.sub("", text_part).strip()
             if text_part:
                 evt_edits[eid] = text_part
             continue
@@ -1680,6 +1722,8 @@ def reconcile_timeline(conn: sqlite3.Connection,
             seq = int(m_sid.group("seq")) if m_sid.group("seq") else 0
             ln = int(m_sid.group("ln")) if m_sid.group("ln") else None
             present_sid_seqs.add((sid, seq))
+            if ln is not None:
+                present_sid_triples.add((sid, seq, ln))
             text_part = _strip_tl_date_header(_strip_tl_anchor(line))
             if text_part:
                 sid_edits[(sid, seq, ln)] = text_part
@@ -1692,8 +1736,16 @@ def reconcile_timeline(conn: sqlite3.Connection,
             text_part = _extract_tl_text(line)
             if text_part:
                 date_edits[date] = text_part
+            tone_m = re.search(r'【([^】]+)】', line)
+            if tone_m:
+                tone_edits[date] = tone_m.group(1)
 
-    if not sid_edits and not date_edits and not date_overview_edits and not m_trail and not plus_lines and not evt_edits and not trail_eps and not trail_sid_seqs:
+    if (not sid_edits and not date_edits and not date_overview_edits
+            and not tone_edits and not m_trail and not plus_lines
+            and not evt_edits and not trail_eps and not trail_sid_seqs
+            and not present_sid_seqs and not present_dates
+            and not block_dates
+            and not present_evts and not present_eps):
         return rpt
 
     now_iso = _now()
@@ -1778,47 +1830,209 @@ def reconcile_timeline(conn: sqlite3.Connection,
             )
             rpt.updated += 1
 
-        # ── DELETE: anchors in trail but absent from current block → hidden ──
+        for date, tone in tone_edits.items():
+            row = conn.execute(
+                "SELECT tone, COALESCE(updated_at, date) AS mts FROM diary WHERE date=?",
+                (date,),
+            ).fetchone()
+            if row is None:
+                continue
+            if md_mtime_iso and (row["mts"] or "") > md_mtime_iso:
+                rpt.unchanged += 1
+                continue
+            if (row["tone"] or "") == tone:
+                rpt.unchanged += 1
+                continue
+            conn.execute(
+                "UPDATE diary SET tone=?, updated_at=? WHERE date=?",
+                (tone, now_iso, date),
+            )
+            conn.execute(
+                "INSERT INTO audit_log (target_table, target_id, action, summary)"
+                " VALUES ('diary', ?, 'tone_edit', ?)",
+                (date, f"md-reconcile: tone={tone!r}"),
+            )
+            rpt.updated += 1
+
+        # ── DELETE: expected anchors absent from current block → hidden ──
         if m_trail:
-            for (sid, seq) in trail_sid_seqs - present_sid_seqs:
+            expected_sid_seqs = trail_sid_seqs
+            expected_dates = trail_dates
+            expected_evts = trail_evts
+            expected_eps = trail_eps
+        elif present_sid_seqs or present_dates or present_evts or present_eps:
+            # Trail marker absent — reconstruct expected from DB,
+            # scoped to dates observed in the MD block.
+            # block_dates covers ALL day-context headers (zone A bare
+            # headers + zone B tl:d: anchored); present_dates only has
+            # tl:d:-anchored dates. Use the union for session_digests/events
+            # scope so zone A deletions are also detected.
+            expected_sid_seqs: set[tuple[str, int]] = set()
+            expected_dates: set[str] = set()
+            expected_evts: set[int] = set()
+            expected_eps: set[int] = set()
+            scope_dates = block_dates | present_dates
+            if scope_dates:
+                ph = ",".join("?" * len(scope_dates))
+                dates_vals = tuple(sorted(scope_dates))
+                expected_sid_seqs = {
+                    (r["sid"], r["segment_seq"])
+                    for r in conn.execute(
+                        "SELECT sid, segment_seq FROM session_digests"
+                        f" WHERE tl_hidden=0 AND date IN ({ph})",
+                        dates_vals,
+                    ).fetchall()
+                }
+                # Diary deletion detection: only tl:d:-anchored dates
+                if present_dates:
+                    ph_d = ",".join("?" * len(present_dates))
+                    dates_d = tuple(sorted(present_dates))
+                    expected_dates = {
+                        r["date"]
+                        for r in conn.execute(
+                            "SELECT date FROM diary"
+                            f" WHERE tl_hidden=0 AND date IN ({ph_d})",
+                            dates_d,
+                        ).fetchall()
+                    }
+                min_d, max_d = min(scope_dates), max(scope_dates)
+                from_utc = _dt.datetime.combine(
+                    _dt.date.fromisoformat(min_d), _dt.time.min,
+                    tzinfo=_TZ_MELB,
+                ).astimezone(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                to_utc = _dt.datetime.combine(
+                    _dt.date.fromisoformat(max_d) + _dt.timedelta(days=1),
+                    _dt.time.min, tzinfo=_TZ_MELB,
+                ).astimezone(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                expected_evts = {
+                    r["id"]
+                    for r in conn.execute(
+                        "SELECT id FROM events"
+                        " WHERE (channel='manual' OR role='tl')"
+                        " AND timestamp >= ? AND timestamp < ?",
+                        (from_utc, to_utc),
+                    ).fetchall()
+                }
+            expected_eps = {
+                r["id"]
+                for r in conn.execute(
+                    "SELECT id FROM affect WHERE unresolved=1",
+                ).fetchall()
+            }
+        else:
+            expected_sid_seqs = set()
+            expected_dates = set()
+            expected_evts = set()
+            expected_eps = set()
+
+        for (sid, seq) in expected_sid_seqs - present_sid_seqs:
+            if md_mtime_iso:
+                r = conn.execute(
+                    "SELECT COALESCE(updated_at, ts) AS mts FROM session_digests"
+                    " WHERE sid=? AND segment_seq=?", (sid, seq)
+                ).fetchone()
+                if r and (r["mts"] or "") > md_mtime_iso:
+                    continue
+            conn.execute(
+                "UPDATE session_digests SET tl_hidden=1 WHERE sid=? AND segment_seq=?",
+                (sid, seq))
+            conn.execute(
+                "INSERT INTO audit_log (target_table, target_id, action, summary)"
+                " VALUES ('session_digests', ?, 'tl_delete', 'user deleted tl line')",
+                (f"{sid}:{seq}",))
+            rpt.updated += 1
+
+        # Partial deletion: individual life_lines removed while digest stays
+        if trail_sid_triples:
+            _deleted_triples = trail_sid_triples - present_sid_triples
+            _deleted_by_digest: dict[tuple[str, int], set[int]] = {}
+            for _s, _q, _ln in _deleted_triples:
+                if (_s, _q) in present_sid_seqs:
+                    _deleted_by_digest.setdefault((_s, _q), set()).add(_ln)
+            for (p_sid, p_seq), deleted_lns in _deleted_by_digest.items():
+                if md_mtime_iso:
+                    r = conn.execute(
+                        "SELECT COALESCE(updated_at, ts) AS mts FROM session_digests"
+                        " WHERE sid=? AND segment_seq=?", (p_sid, p_seq)
+                    ).fetchone()
+                    if r and (r["mts"] or "") > md_mtime_iso:
+                        continue
+                row = conn.execute(
+                    "SELECT life_lines FROM session_digests"
+                    " WHERE sid=? AND segment_seq=?", (p_sid, p_seq),
+                ).fetchone()
+                if row is None:
+                    continue
+                life = (row["life_lines"] or "").splitlines()
+                new_life = [ln_text for i, ln_text in enumerate(life)
+                            if i not in deleted_lns]
                 conn.execute(
-                    "UPDATE session_digests SET tl_hidden=1 WHERE sid=? AND segment_seq=?",
-                    (sid, seq))
+                    "UPDATE session_digests SET life_lines=?, updated_at=?"
+                    " WHERE sid=? AND segment_seq=?",
+                    ("\n".join(new_life), now_iso, p_sid, p_seq),
+                )
                 conn.execute(
                     "INSERT INTO audit_log (target_table, target_id, action, summary)"
-                    " VALUES ('session_digests', ?, 'tl_delete', 'user deleted tl line')",
-                    (f"{sid}:{seq}",))
+                    " VALUES ('session_digests', ?, 'tl_partial_delete', ?)",
+                    (f"{p_sid}:{p_seq}",
+                     f"removed line_indexes {sorted(deleted_lns)}"),
+                )
                 rpt.updated += 1
-            for date in trail_dates - present_dates:
-                conn.execute(
-                    "UPDATE diary SET tl_hidden=1 WHERE date=?", (date,))
-                conn.execute(
-                    "INSERT INTO audit_log (target_table, target_id, action, summary)"
-                    " VALUES ('diary', ?, 'tl_delete', 'user deleted tl line')",
-                    (date,))
-                rpt.updated += 1
-            for eid in trail_evts - present_evts:
-                conn.execute(
-                    "DELETE FROM events WHERE id=? AND channel='manual'", (eid,))
-                try:
-                    conn.execute("DELETE FROM events_vec WHERE rowid=?", (eid,))
-                    conn.execute("DELETE FROM events_vec_meta WHERE rowid=?", (eid,))
-                except sqlite3.OperationalError:
-                    pass
-                conn.execute(
-                    "INSERT INTO audit_log (target_table, target_id, action, summary)"
-                    " VALUES ('events', ?, 'tl_manual_delete', 'user deleted manual event')",
-                    (str(eid),))
-                rpt.updated += 1
-            for epid in trail_eps - present_eps:
-                conn.execute(
-                    "UPDATE affect SET resolved_at=?, unresolved=0 WHERE id=?",
-                    (now_iso, epid))
-                conn.execute(
-                    "INSERT INTO audit_log (target_table, target_id, action, summary)"
-                    " VALUES ('affect', ?, 'ep_resolve', 'user deleted unresolved episode from timeline')",
-                    (str(epid),))
-                rpt.updated += 1
+
+        for date in expected_dates - present_dates:
+            if md_mtime_iso:
+                r = conn.execute(
+                    "SELECT COALESCE(updated_at, date) AS mts FROM diary WHERE date=?",
+                    (date,)
+                ).fetchone()
+                if r and (r["mts"] or "") > md_mtime_iso:
+                    continue
+            conn.execute(
+                "UPDATE diary SET tl_hidden=1 WHERE date=?", (date,))
+            conn.execute(
+                "INSERT INTO audit_log (target_table, target_id, action, summary)"
+                " VALUES ('diary', ?, 'tl_delete', 'user deleted tl line')",
+                (date,))
+            rpt.updated += 1
+        for eid in expected_evts - present_evts:
+            erow = conn.execute(
+                "SELECT channel, role, created_at FROM events WHERE id=?", (eid,)
+            ).fetchone()
+            is_self = erow is not None and erow["role"] == "tl"
+            if erow is None or not (is_self or erow["channel"] == "manual"):
+                continue
+            if md_mtime_iso and (erow["created_at"] or "") > md_mtime_iso:
+                continue
+            conn.execute(
+                "DELETE FROM events WHERE id=? AND (channel='manual' OR role='tl')",
+                (eid,))
+            try:
+                conn.execute("DELETE FROM events_vec WHERE rowid=?", (eid,))
+                conn.execute("DELETE FROM events_vec_meta WHERE rowid=?", (eid,))
+            except sqlite3.OperationalError:
+                pass
+            _action = "tl_self_delete" if is_self else "tl_manual_delete"
+            conn.execute(
+                "INSERT INTO audit_log (target_table, target_id, action, summary)"
+                " VALUES ('events', ?, ?, 'user deleted timeline event')",
+                (str(eid), _action))
+            rpt.updated += 1
+        for epid in expected_eps - present_eps:
+            if md_mtime_iso:
+                r = conn.execute(
+                    "SELECT COALESCE(updated_at, created_at) AS mts FROM affect WHERE id=?",
+                    (epid,)
+                ).fetchone()
+                if r and (r["mts"] or "") > md_mtime_iso:
+                    continue
+            conn.execute(
+                "UPDATE affect SET resolved_at=?, unresolved=0, updated_at=? WHERE id=?",
+                (now_iso, now_iso, epid))
+            conn.execute(
+                "INSERT INTO audit_log (target_table, target_id, action, summary)"
+                " VALUES ('affect', ?, 'ep_resolve', 'user deleted unresolved episode from timeline')",
+                (str(epid),))
+            rpt.updated += 1
 
         # ── ADD: lines starting with `+ ` → insert manual events ─────────────
         for day_context, explicit_day, raw_line in plus_lines:
@@ -1847,17 +2061,24 @@ def reconcile_timeline(conn: sqlite3.Connection,
             )
             rpt.updated += 1
 
-        # ── EDIT: manual event content ────────────────────────────────────────
-        for eid, new_text in evt_edits.items():
+        # ── EDIT: event content (manual + self rows) ──────────────────────────
+        for eid, raw_text in evt_edits.items():
             row = conn.execute(
-                "SELECT content, channel FROM events WHERE id=?", (eid,)
+                "SELECT content, channel, role FROM events WHERE id=?", (eid,)
             ).fetchone()
             if row is None:
                 rpt.conflicts.append(f"tl:e:{eid} not in events")
                 continue
+            if row["role"] == "tl":
+                _reconcile_self_edit(conn, rpt, eid, raw_text, row, now_iso)
+                continue
             if row["channel"] != "manual":
                 rpt.conflicts.append(
                     f"tl:e:{eid} not a manual event (channel={row['channel']!r})")
+                continue
+            new_text = _TL_PERIOD_RE.sub("", _TL_HHMM_RE.sub("", raw_text)).strip()
+            if not new_text:
+                rpt.unchanged += 1
                 continue
             if new_text != (row["content"] or ""):
                 conn.execute("UPDATE events SET content=? WHERE id=?", (new_text, eid))

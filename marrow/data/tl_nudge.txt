@@ -1,0 +1,3 @@
+Approved text (Lumi 07-03). Replace this file (or point [tl_nudge].text_file at your own) with zero code change.
+---
+10 turns have passed without a tl_add. Please add a tl if scene, emotion, or activity changed. Skip if nothing worth a line happened.

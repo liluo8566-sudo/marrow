@@ -57,10 +57,11 @@ def _insert_digest(
     return ts
 
 
-def _insert_diary(conn, date: str, tl: str | None = "日记TL") -> None:
+def _insert_diary(conn, date: str, tl: str | None = "日记TL",
+                   tone: str | None = None) -> None:
     conn.execute(
-        "INSERT INTO diary (date, content, tl_line) VALUES (?, 'body', ?)",
-        (date, tl),
+        "INSERT INTO diary (date, content, tl_line, tone) VALUES (?, 'body', ?, ?)",
+        (date, tl, tone),
     )
     conn.commit()
 
@@ -193,12 +194,12 @@ def test_reconcile_tl_diary_edit(conn, dash_path):
     )
 
     rpt = reconcile_timeline(conn, dash_path)
-    assert rpt.updated == 0
     assert rpt.unchanged >= 1
     row = conn.execute(
-        "SELECT tl_line FROM diary WHERE date=?", (date,)
+        "SELECT tl_line, tone FROM diary WHERE date=?", (date,)
     ).fetchone()
     assert row["tl_line"] == "原始日记TL"  # unchanged — write-back removed
+    assert row["tone"] == "平淡"  # tone extracted from 【平淡】
 
 
 def test_reconcile_tl_diary_unknown_date(conn, dash_path):
@@ -215,7 +216,7 @@ def test_reconcile_tl_diary_unknown_date(conn, dash_path):
 def test_reconcile_tl_stub_day_line_no_writeback(conn, dash_path):
     """Prefix-only stub day line (NULL tl_line) strips to empty → no write-back."""
     date = "2026-06-07"
-    _insert_diary(conn, date, tl=None)
+    _insert_diary(conn, date, tl=None, tone="平淡")
     dash_path.write_text(
         f"## Timeline\n06-07 Day 【平淡】 <!-- tl:d:{date} -->"
     )

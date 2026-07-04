@@ -374,6 +374,14 @@ def reconcile_atlas(conn: sqlite3.Connection, md_path: Path):
     text = md_path.read_text(encoding="utf-8")
     md_rows = _parse_atlas_md(text, roots)
 
+    md_mtime_iso = None
+    try:
+        md_mtime_iso = time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(md_path.stat().st_mtime)
+        )
+    except OSError:
+        pass
+
     now = _NOW()
 
     with conn:
@@ -385,7 +393,7 @@ def reconcile_atlas(conn: sqlite3.Connection, md_path: Path):
             new_naming = r.get("naming_hint")
             new_depth = r.get("depth", 0)
             existing = conn.execute(
-                "SELECT description, naming_hint, depth FROM atlas WHERE path=?",
+                "SELECT description, naming_hint, depth, updated_at FROM atlas WHERE path=?",
                 (r["path"],),
             ).fetchone()
             if existing is None:
@@ -399,6 +407,9 @@ def reconcile_atlas(conn: sqlite3.Connection, md_path: Path):
             if (existing["description"] == new_desc
                     and existing["naming_hint"] == new_naming
                     and existing["depth"] == new_depth):
+                rpt.unchanged += 1
+                continue
+            if md_mtime_iso and (existing["updated_at"] or "") > md_mtime_iso:
                 rpt.unchanged += 1
                 continue
             conn.execute(
@@ -418,6 +429,11 @@ def reconcile_atlas(conn: sqlite3.Connection, md_path: Path):
                 continue
             has_manual = any(v not in (None, "") for v in (row[1], row[2]))
             if not has_manual:
+                continue
+            row_full = conn.execute(
+                "SELECT updated_at FROM atlas WHERE path=?", (path,)
+            ).fetchone()
+            if md_mtime_iso and row_full and (row_full["updated_at"] or "") > md_mtime_iso:
                 continue
             conn.execute("DELETE FROM atlas WHERE path=?", (path,))
             rpt.deleted += 1

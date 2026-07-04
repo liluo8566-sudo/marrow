@@ -181,38 +181,46 @@ def _active_chain_uuids(records: list[dict]) -> set[str]:
     return chain
 
 
-def clean(jsonl_path: str, *, skip_headless_check: bool = False, channel: str = "cli") -> list[dict]:
-    rows: list[dict] = []
-    if not skip_headless_check and is_headless(jsonl_path):
-        return rows  # spawned claude -p (lint/digest): not a real session
+def parse_records(jsonl_path: str) -> list[dict]:
+    """Read a jsonl file into a list of parsed records; skip malformed lines.
+    Missing file -> [] (unflushed/headless transcript, not an error)."""
     try:
         fh = open(jsonl_path, encoding="utf-8")
     except FileNotFoundError:
-        return rows  # unflushed/headless transcript: nothing to clean, not an error
+        return []
+    records: list[dict] = []
     with fh as f:
-        records: list[dict] = []
         for line in f:
             line = line.strip()
             if not line:
                 continue
             try:
-                o = json.loads(line)
+                records.append(json.loads(line))
             except json.JSONDecodeError:
                 continue
-            records.append(o)
-    # First pass: build active-chain uuid set so rewound turns drop out.
-    # CC `/rewind` leaves isSidechain=False on rewound turns, so the
-    # type/isSidechain filter alone would silently digest them as if they
-    # had happened. Walk parentUuid from the file's last uuid backward.
-    active = _active_chain_uuids(records)
+    return records
+
+
+def rows_from_records(records: list[dict], *, channel: str = "cli",
+                      active: set[str] | None = None) -> list[dict]:
+    """Build event rows from parsed jsonl records — shared by clean() and the
+    per-turn Stop hook.
+
+    Keep user+assistant text on the active parentUuid chain; drop
+    meta/sidechain/tool/thinking noise. When *active* is None it is computed
+    over *records* (CC `/rewind` leaves isSidechain=False on rewound turns, so
+    the chain walk is what excludes them). Records without a uuid keep the
+    prior behavior (never chain-filtered).
+    """
+    if active is None:
+        active = _active_chain_uuids(records)
+    rows: list[dict] = []
     for o in records:
         if o.get("type") not in ("user", "assistant"):
             continue
         if o.get("isMeta") or o.get("isSidechain"):
             continue
         u = o.get("uuid")
-        # Only enforce chain membership when the record has a uuid; records
-        # without one (legacy / summary-style lines) keep the prior behavior.
         if u and u not in active:
             continue
         msg = o.get("message") or {}
@@ -227,3 +235,10 @@ def clean(jsonl_path: str, *, skip_headless_check: bool = False, channel: str = 
             "channel": channel,
         })
     return rows
+
+
+def clean(jsonl_path: str, *, skip_headless_check: bool = False, channel: str = "cli") -> list[dict]:
+    if not skip_headless_check and is_headless(jsonl_path):
+        return []  # spawned claude -p (lint/digest): not a real session
+    records = parse_records(jsonl_path)
+    return rows_from_records(records, channel=channel)

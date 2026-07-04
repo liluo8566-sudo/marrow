@@ -17,7 +17,7 @@ from typing import Iterable, Iterator, Protocol
 # Block id marker. Date is optional — existing memes/tasks shipped `<!-- id:N -->`
 # without date; Phase 3 plan adds an optional date attr but stays back-compatible.
 # `[^>]+?` accepts paths that contain whitespace (e.g. atlas block_ids like
-# `Library/Mobile Documents/.../2026T1`) alongside legacy integer ids and
+# `Library/Mobile Documents/.../Uni`) alongside legacy integer ids and
 # dot/colon separators. Lazy quantifier hands trailing whitespace to `\s*-->`.
 _ID_RE = re.compile(r"<!--\s*id:([^>]+?)(?:\s+date:(\d{4}-\d{2}-\d{2}))?\s*-->")
 

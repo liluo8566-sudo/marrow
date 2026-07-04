@@ -9,6 +9,7 @@ from __future__ import annotations
 import datetime as _dt
 import fcntl
 import sys
+import tempfile
 from pathlib import Path
 
 from . import config, repo, storage
@@ -42,9 +43,13 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    lock_dir = Path(config.DATA_DIR) / "locks"
-    lock_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = lock_dir / f"mid_{sid}.lock"
+    lock_path = Path(config.DATA_DIR) / "locks" / f"mid_{sid}.lock"
+    remove_lock = False
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        lock_path = Path(tempfile.gettempdir()) / f"marrow_mid_{sid}.lock"
+        remove_lock = True
     lock_fd = None
     try:
         lock_fd = open(lock_path, "w")  # noqa: WPS515
@@ -79,7 +84,9 @@ def main(argv: list[str] | None = None) -> int:
             turn_threshold_time = mid_cfg.get("turn_threshold_time", 10)
             turn_threshold_abs = mid_cfg.get("turn_threshold_abs", 30)
             min_hours = mid_cfg.get("min_hours", 2)
-            min_turns = mid_cfg.get("min_turns", 5)
+            min_turns = mid_cfg.get("min_turns", 4)
+            elapsed_hours_slow = mid_cfg.get("elapsed_hours_slow", 6)
+            turn_threshold_slow = mid_cfg.get("turn_threshold_slow", 4)
 
             wm = storage.get_latest_watermark(conn, sid)
             after_event_id = wm["last_event_id"] if wm else 0
@@ -122,6 +129,7 @@ def main(argv: list[str] | None = None) -> int:
             triggered = (
                 (elapsed_h >= elapsed_hours and user_turns >= turn_threshold_time)
                 or (user_turns >= turn_threshold_abs and elapsed_h >= min_hours)
+                or (elapsed_h >= elapsed_hours_slow and user_turns >= turn_threshold_slow)
             )
             if not triggered:
                 return 0
@@ -150,6 +158,11 @@ def main(argv: list[str] | None = None) -> int:
         if lock_fd:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
             lock_fd.close()
+        if remove_lock:
+            try:
+                lock_path.unlink()
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":

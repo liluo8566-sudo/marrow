@@ -1,6 +1,7 @@
 """Entity recall helpers: mention-count bump for indexed rows."""
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import sqlite3
 
@@ -52,11 +53,12 @@ def bump_mention_counts(conn: sqlite3.Connection, rows: list[dict]) -> int:
                 hit.add(eid)
         for eid in hit:
             bumps[eid] = bumps.get(eid, 0) + 1
+    ts_now = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     for eid, n in bumps.items():
         conn.execute(
-            "UPDATE entities SET mention_count = mention_count + ? "
+            "UPDATE entities SET mention_count = mention_count + ?, updated_at = ? "
             "WHERE id = ? AND superseded_by IS NULL",
-            (n, eid),
+            (n, ts_now, eid),
         )
     return sum(bumps.values())
 

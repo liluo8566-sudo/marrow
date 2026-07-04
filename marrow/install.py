@@ -33,12 +33,16 @@ _MARROW_HOOKS: dict[str, list[dict]] = {
         {"matcher": "Write",  "command": "{venv} -m marrow.hooks pretool_use"},
         {"matcher": "Edit",   "command": "{venv} -m marrow.hooks pretool_use"},
         {"matcher": "Bash",   "command": "{venv} -m marrow.hooks pretool_use"},
+        {"matcher": "Agent",  "command": "{venv} -m marrow.hooks agent_guard"},
     ],
     "SessionStart": [
         {"matcher": "", "command": "{venv} -m marrow.hooks session_start"},
     ],
     "SessionEnd": [
         {"matcher": "", "command": "{venv} -m marrow.hooks session_end"},
+    ],
+    "Stop": [
+        {"matcher": "", "command": "{venv} -m marrow.hooks stop"},
     ],
     "UserPromptSubmit": [
         {"matcher": "", "command": "{venv} -m marrow.hooks user_prompt_submit"},
@@ -248,14 +252,30 @@ def register_hooks() -> bool:
 
     hooks: dict = settings.setdefault("hooks", {})
 
+    # Legacy global hooks that marrow now owns — drop their references so they
+    # don't double-fire alongside the absorbed marrow hook.
+    _ABSORBED = {"UserPromptSubmit": ("turn-inject.sh",)}
+
     for event, entries in _MARROW_HOOKS.items():
         event_list: list = hooks.setdefault(event, [])
+
+        # Strip every existing marrow hook for this event ONCE, before adding
+        # any entry — otherwise a second entry sharing a matcher would wipe the
+        # first (the double-registration bug). Also drop absorbed legacy hooks.
+        absorbed = _ABSORBED.get(event, ())
+        for g in event_list:
+            gh: list = g.get("hooks", [])
+            gh[:] = [
+                h for h in gh
+                if "marrow.hooks" not in h.get("command", "")
+                and not any(a in h.get("command", "") for a in absorbed)
+            ]
+        # Prune groups left empty after stripping.
+        event_list[:] = [g for g in event_list if g.get("hooks")]
 
         for entry in entries:
             new_cmd = _hook_command(entry["command"])
             matcher = entry["matcher"]
-
-            # Find existing group with this matcher
             group = next(
                 (g for g in event_list if g.get("matcher") == matcher),
                 None,
@@ -263,15 +283,9 @@ def register_hooks() -> bool:
             if group is None:
                 group = {"matcher": matcher, "hooks": []}
                 event_list.append(group)
-
-            group_hooks: list = group.setdefault("hooks", [])
-
-            # Remove stale marrow hooks for this matcher (path may have changed)
-            group_hooks[:] = [
-                h for h in group_hooks
-                if not ("marrow.hooks" in h.get("command", ""))
-            ]
-            group_hooks.append({"type": "command", "command": new_cmd})
+            group.setdefault("hooks", []).append(
+                {"type": "command", "command": new_cmd}
+            )
 
     _SETTINGS.write_text(json.dumps(settings, indent=2) + "\n")
     _ok("hooks registered in settings.json")

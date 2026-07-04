@@ -17,6 +17,7 @@ import shutil
 import signal
 import subprocess
 import threading
+from pathlib import Path
 
 from . import config
 from . import storage
@@ -121,6 +122,34 @@ class LLMClient:
                     )
         raise LLMError(f"{role}: all providers failed; last: {last}")
 
+    def call_cortex(self, prompt: str, *, cwd: str | None = None,
+                     resume_sid: str | None = None,
+                     timeout: float | None = None) -> dict:
+        """Full-environment resumed session for cortex (C3, Decided 07-03):
+        no isolation flags — persona/rules/MCP/agents load like a real
+        session. Always injects MARROW_CORTEX=1 so marrow hooks + tl_add
+        skip this session's turns (cortex must never enter chat memory).
+        cwd defaults to [cortex].home; resume_sid=None starts a fresh
+        session (daily rebirth). Single attempt — no chain/retry, caller
+        (cortex pacemaker) owns retry policy. `timeout` (s) overrides the
+        provider default so the caller's config is the single source of truth
+        for the call budget (cortex derives its outer kill from the same value).
+        Returns {"text": str, "session_id": str | None}.
+        """
+        spec = self.specs.get("claude_cli_cortex")
+        if not spec:
+            raise LLMError("no claude_cli_cortex provider configured")
+        cortex_cfg = self.cfg.get("cortex", {})
+        run_cwd = os.path.expanduser(
+            cwd or cortex_cfg.get("home") or "~/.config/marrow/cortex")
+        Path(run_cwd).mkdir(parents=True, exist_ok=True)
+        tier = cortex_cfg.get("tier", "top")
+        model = cortex_cfg.get("model") or self.tiers.get(tier) or self.tiers.get("top")
+        effort = cortex_cfg.get("effort") or ""
+        return self._run_claude_cortex(
+            spec, model, prompt, cwd=run_cwd, resume_sid=resume_sid,
+            timeout=timeout, effort=effort)
+
     def _run(self, spec: dict, model: str, prompt: str) -> str:
         kind = spec.get("kind")
         if kind == "claude_cli":
@@ -145,14 +174,48 @@ class LLMClient:
                "--model", model, *_ISOLATION]
         if effort:
             cmd.extend(["--effort", effort])
+        env = {**os.environ, "MARROW_PIPELINE": "1"}
+        raw = self._stream_subprocess(cmd, prompt, timeout, env)
+        result = self._parse_claude(raw, "stream-json")
+        self._log_usage(self._extract_usage(raw, "stream-json"), model, "stream-json")
+        return result
+
+    def _run_claude_cortex(self, spec: dict, model: str, prompt: str, *,
+                            cwd: str, resume_sid: str | None,
+                            timeout: float | None = None,
+                            effort: str = "") -> dict:
+        """Stream-json runner with NO isolation flags (cortex full-env, C3).
+        Mirrors _run_claude_stream's spawn/timeout/kill contract exactly —
+        only the isolation flags, env var, cwd, --resume, and --effort differ."""
+        timeout = timeout if timeout is not None else spec.get("timeout_s", 600)
+        cmd = [_claude_bin(), "--output-format", "stream-json",
+               "--input-format", "stream-json", "--verbose", "--model", model,
+               "--permission-mode", "bypassPermissions"]
+        if effort:
+            cmd.extend(["--effort", effort])
+        if resume_sid:
+            cmd.extend(["--resume", resume_sid])
+        env = {**os.environ, "MARROW_CORTEX": "1"}
+        raw = self._stream_subprocess(cmd, prompt, timeout, env, cwd=cwd)
+        text = self._parse_claude(raw, "stream-json")
+        session_id = self._extract_session_id(raw)
+        self._log_usage(self._extract_usage(raw, "stream-json"), model, "stream-json")
+        return {"text": text, "session_id": session_id}
+
+    @staticmethod
+    def _stream_subprocess(cmd: list[str], prompt: str, timeout: float,
+                            env: dict, cwd: str | None = None) -> str:
+        """Spawn `cmd`, pipe one user message in via stdin, read stdout
+        stream-json events until `result`. Process-group kill on timeout
+        (SIGKILL) and on normal exit (SIGTERM->SIGKILL ladder) so claude's
+        spawned descendants never leak. Returns the raw joined stdout lines."""
         msg = json.dumps({"type": "user", "message": {
             "role": "user", "content": prompt}})
-        env = {**os.environ, "MARROW_PIPELINE": "1"}
         try:
             p = subprocess.Popen(
                 cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, text=True, start_new_session=True,
-                env=env)
+                env=env, cwd=cwd)
         except OSError as e:
             raise LLMError(f"claude_cli spawn failed: {e}") from e
         try:
@@ -204,10 +267,7 @@ class LLMClient:
         if not lines:
             err = (p.stderr.read() or "").strip()[:200]
             raise LLMError(f"claude_cli stream: no output ({err})")
-        raw = "\n".join(lines)
-        result = self._parse_claude(raw, "stream-json")
-        self._log_usage(self._extract_usage(raw, "stream-json"), model, "stream-json")
-        return result
+        return "\n".join(lines)
 
     def _run_claude_p(self, spec: dict, model: str, prompt: str) -> str:
         effort = spec.get("effort")
@@ -279,6 +339,30 @@ class LLMClient:
         if any(low.startswith(fp) for fp in _REFUSAL_FINGERPRINTS):
             raise LLMError(f"claude_cli refusal (fingerprint): {text[:120]}")
         return text
+
+    @staticmethod
+    def _extract_session_id(out: str) -> str | None:
+        """Pull session_id off the final stream-json result record (verified
+        live: claude --output-format stream-json always carries it). Returns
+        None on any parse failure — caller (cortex) treats that as fresh."""
+        try:
+            rec = None
+            for line in out.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if ev.get("type") == "result":
+                    rec = ev
+            if rec is None:
+                return None
+            sid = rec.get("session_id")
+            return str(sid) if sid else None
+        except Exception:
+            return None
 
     @staticmethod
     def _extract_usage(out: str, fmt: str) -> dict | None:
