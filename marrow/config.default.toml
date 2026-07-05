@@ -211,6 +211,15 @@ care_text = """
 # spawn agents recursively). Blocked with exit 2 + reason to the model.
 deny = ["general-purpose"]
 
+[trim]
+# Timeline trim (C4-rest): merge same-scene adjacent tl rows older than the
+# window. Same 【label】 + gap <= merge_gap_min folds into one range row,
+# span capped at merge_span_max_min. Merges journaled to logs/trim.jsonl.
+enabled = true
+min_age_hours = 48
+merge_gap_min = 45
+merge_span_max_min = 120
+
 [tl_nudge]
 # Per-session hint after N assistant turns with no tl_add call. Text lives in
 # marrow/data/tl_nudge.txt (or point text_file at your own).

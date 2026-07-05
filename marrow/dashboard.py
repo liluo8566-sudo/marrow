@@ -28,6 +28,7 @@ from .md_index import MdIndex
 from .reconcile import (reconcile_affect, reconcile_alerts,
                         reconcile_tasks, reconcile_timeline,
                         emit_conflict_alerts)
+from .trim import trim_timeline
 
 M0 = "<!-- marrow:top:start -->"
 M1 = "<!-- marrow:top:end -->"
@@ -187,6 +188,17 @@ def write_dashboard(path: str, conn, *, state_dir: str,
                 "dashboard_reconcile:timeline",
                 source="dashboard.py", db=db,
                 message=f"timeline reconcile failed: {e}; falling through to render",
+            )
+        # Trim runs on merged state — after her edits are absorbed, before
+        # render (C4-rest trim standard, Decided 07-04).
+        try:
+            trim_timeline(conn)
+        except Exception as e:
+            repo.add_alert(
+                "warn", "dashboard",
+                "dashboard_trim:timeline",
+                source="dashboard.py", db=db,
+                message=f"timeline trim failed: {e}; falling through to render",
             )
     Path(state_dir).mkdir(parents=True, exist_ok=True)
 
