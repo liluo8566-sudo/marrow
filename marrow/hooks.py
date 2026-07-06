@@ -916,12 +916,6 @@ def session_start() -> int:
             except Exception:
                 pass
 
-            # Static hint (always injected, not DB-derived).
-            parts.append(
-                "Dims (entity/meme/milestone): add/update/delete via mcp"
-                " tool 'dim'. Goals: 'goal'."
-            )
-
             ctx = "\n\n".join(p for p in parts if p)
 
             try:

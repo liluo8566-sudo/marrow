@@ -52,16 +52,6 @@ def test_session_start_emits_additional_context(env, monkeypatch, capsys):
     assert out["hookSpecificOutput"]["hookEventName"] == "SessionStart"
 
 
-def test_session_start_includes_dim_goal_hint(env, monkeypatch, capsys):
-    """Static hint pointing to the merged dim/goal mcp tools is always injected."""
-    _stdin(monkeypatch, {"session_id": "s1"})
-    rc = hooks.main(["session_start"])
-    assert rc == 0
-    ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
-    assert "mcp tool 'dim'" in ctx
-    assert "Goals: 'goal'" in ctx
-
-
 def test_session_end_archives_and_renders(env, monkeypatch, tmp_path):
     """session_end archives events; dashboard is NOT written by the hook
     (moved to sessionend_async tail)."""
