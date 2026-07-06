@@ -279,7 +279,7 @@ backup_guard_deny_message = "BLOCKED — bulk deletion with no backup. This targ
 rm_to_trash = true
 trash_paths = [
     "~/Library/Mobile Documents/",
-    "~/Desktop/NY/",
+    "~/Desktop/",
     "~/Documents/",
     "~/Downloads/",
 ]

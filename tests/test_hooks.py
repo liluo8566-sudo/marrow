@@ -1127,6 +1127,7 @@ def test_rm_to_trash_icloud_cwd_relative(env, monkeypatch, capsys):
 
 
 def test_rm_to_trash_rf_ny_flags_dropped(env, monkeypatch, capsys):
+    # ~/Desktop/NY/ is covered by the wider ~/Desktop/ trash prefix.
     rc = _pretool(monkeypatch, "Bash", {"command": "rm -rf ~/Desktop/NY/db-pages/old"})
     assert rc == 0
     out = _out(capsys)["hookSpecificOutput"]
@@ -1134,6 +1135,18 @@ def test_rm_to_trash_rf_ny_flags_dropped(env, monkeypatch, capsys):
     assert cmd.startswith("/usr/bin/trash ")
     assert "-rf" not in cmd and "-r" not in cmd
     assert (_HOME + "/Desktop/NY/db-pages/old") in cmd
+    assert "permissionDecision" not in out
+    assert _BG_MSG not in out.get("additionalContext", "")
+
+
+def test_rm_to_trash_desktop_non_ny_rewritten(env, monkeypatch, capsys):
+    # Whole ~/Desktop is iCloud-synced personal-file territory, not just NY.
+    rc = _pretool(monkeypatch, "Bash", {"command": "rm -rf ~/Desktop/random-project/old"})
+    assert rc == 0
+    out = _out(capsys)["hookSpecificOutput"]
+    cmd = out["updatedInput"]["command"]
+    assert cmd.startswith("/usr/bin/trash ")
+    assert (_HOME + "/Desktop/random-project/old") in cmd
     assert "permissionDecision" not in out
     assert _BG_MSG not in out.get("additionalContext", "")
 
