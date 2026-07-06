@@ -1262,7 +1262,16 @@ def _migrate_to_v33(conn: sqlite3.Connection) -> None:
     """v33: drop memes.context — memes reduced to key/value (matches
     entities: name/fact). Retrieval is whole-row vector search; context
     added no signal. Rebuilds memes_fts triggers/body to match.
-    Idempotent — column-existence check + user_version short-circuit.
+
+    Also clears memes_vec / memes_vec_meta: the embedding text definition
+    changed (was key/value/context, now key/value only), so vectors built
+    under the old definition are stale. The memes pending query skips rows
+    with an existing meta row, so without this clear they would never
+    re-embed. embed_pending's memes lane repopulates them on next run.
+
+    Idempotent — column-existence check + user_version short-circuit (both
+    the schema change and the vec clear are gated by the same "context in
+    cols" branch, which only runs once).
     """
     v = conn.execute("PRAGMA user_version").fetchone()[0]
     if v >= 33:
@@ -1290,6 +1299,8 @@ END;
             "INSERT INTO memes_fts(rowid, body) "
             "SELECT id, TRIM(COALESCE(key,'') || ' ' || COALESCE(value,'')) FROM memes"
         )
+        conn.execute("DELETE FROM memes_vec")
+        conn.execute("DELETE FROM memes_vec_meta")
     conn.execute("PRAGMA user_version=33")
 
 

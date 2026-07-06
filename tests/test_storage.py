@@ -378,6 +378,81 @@ def test_v33_drops_memes_context_preserves_rows(tmp_path):
         conn.close()
 
 
+def test_v33_clears_stale_meme_vectors(tmp_path):
+    """v33 changes the embedding text definition (key/value/context ->
+    key/value only) — pre-existing memes_vec/memes_vec_meta rows built from
+    the old text are stale and must be cleared so embed_pending's memes
+    pending query (which skips rows with an existing meta row) re-embeds
+    them under the new definition instead of skipping forever."""
+    p = str(tmp_path / "t.db")
+    conn = storage.init_db(p)
+    conn.execute("ALTER TABLE memes ADD COLUMN context TEXT")
+    conn.execute(
+        "INSERT INTO memes(type,key,value,context)"
+        " VALUES('fact','ctxkey','ctxval','some context')"
+    )
+    mid = conn.execute(
+        "SELECT id FROM memes WHERE key='ctxkey'"
+    ).fetchone()[0]
+    import struct
+    blob = struct.pack("1024f", *([0.1] * 1024))
+    conn.execute(
+        "INSERT INTO memes_vec(rowid, embedding) VALUES (?, ?)", (mid, blob)
+    )
+    conn.execute(
+        "INSERT INTO memes_vec_meta(rowid, embedder_id, dim)"
+        " VALUES (?, 'bge-m3', 1024)", (mid,)
+    )
+    conn.execute("PRAGMA user_version=32")
+    conn.commit()
+    conn.close()
+
+    conn = storage.init_db(p)
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM memes_vec"
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM memes_vec_meta"
+        ).fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_v33_noop_when_already_migrated_leaves_vectors_alone(tmp_path):
+    """Idempotency: a DB already at v33 (no context column) must NOT wipe
+    memes_vec/memes_vec_meta on a later init_db call — the clear is gated by
+    the same "context in cols" branch as the schema change, which only ever
+    runs once."""
+    p = str(tmp_path / "t.db")
+    conn = storage.init_db(p)
+    mid = conn.execute(
+        "INSERT INTO memes(type,key,value) VALUES('fact','k','v')"
+    ).lastrowid
+    import struct
+    blob = struct.pack("1024f", *([0.1] * 1024))
+    conn.execute(
+        "INSERT INTO memes_vec(rowid, embedding) VALUES (?, ?)", (mid, blob)
+    )
+    conn.execute(
+        "INSERT INTO memes_vec_meta(rowid, embedder_id, dim)"
+        " VALUES (?, 'bge-m3', 1024)", (mid,)
+    )
+    conn.commit()
+    conn.close()
+
+    conn = storage.init_db(p)
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM memes_vec WHERE rowid=?", (mid,)
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM memes_vec_meta WHERE rowid=?", (mid,)
+        ).fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
 def test_v34_ct_first_tick_status_default_done(db):
     assert "status" in _cols(db, "ct_first_tick")
     db.execute(
