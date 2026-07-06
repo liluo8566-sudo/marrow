@@ -252,9 +252,25 @@ effort = ""
 wishlist_path = ""
 
 [hooks]
-# PreToolUse backup-first reminder — fires once per session per category when
-# a Bash/Write/Edit/MCP tool call looks bulk or destructive (rm -rf, git reset
-# --hard, DROP TABLE, settings.json edits, mcp__marrow__ clear/delete). Never
-# blocks — additionalContext reminder only.
+# PreToolUse backup guard — three tiers.
+# Tier S (silent): rm/mv scoped to tmp/scratchpad/worktrees, read-only git
+#   (incl. `git branch -d` — git refuses unmerged deletes itself).
+# Tier 2 (reminder): bulk mv, rm -r on a relative (cwd-scoped) path,
+#   DELETE FROM without WHERE, mcp__marrow__ clear/delete calls, git stash
+#   drop/clear. additionalContext reminder, fires at most ONCE per session
+#   TOTAL (not per category).
+# Tier 3 (backup-state gate): rm -rf/-r on an absolute or home path, git push
+#   --force, git reset --hard, git branch -D, git clean -f,
+#   git checkout -- ., DROP TABLE, TRUNCATE, edits to ~/.claude.json /
+#   settings*.json / mcp*.json / .obsidian paths. Any Bash command that looks
+#   like a backup step (cp/rsync/tar/git commit/git stash push/.backup)
+#   stamps a timestamp; a tier-3 op is allowed silently iff a backup landed
+#   within backup_guard_window_min, otherwise it's denied via PreToolUse
+#   permissionDecision "deny" (model-facing, never escalates to the user).
+#   Set backup_guard_intercept=false to downgrade tier-3 items to tier-2
+#   reminders instead.
 backup_guard = true
-backup_guard_message = "Bulk/destructive op detected — back up the target first (DB copy, file copy, or git commit), and double-check scope before proceeding."
+backup_guard_intercept = true
+backup_guard_window_min = 15
+backup_guard_message = "Always back up / archive the DB / file / commit before you do anything destructive — bulk modify, move, delete."
+backup_guard_deny_message = "Destructive op blocked — back up the target first (DB copy / file copy / git commit), then rerun. Backups are remembered for 15 min. If no backup makes sense here, ask the user."

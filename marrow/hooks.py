@@ -2014,31 +2014,37 @@ def _append_recall_log(sid: str, prompt_text: str, hits: list[dict]) -> None:
 _PLACEMENT_BASH_OPS = {"mv", "cp", "rename", "mmv", "touch", "mkdir"}
 
 
-# ── backup-first guard (PreToolUse) ──────────────────────────────────────────
-# Non-blocking reminder for bulk/destructive tool calls, injected via the same
-# additionalContext channel the path hints use. Fires at most once per
-# session per category; state lives under DATA_DIR/state/backup_guard/,
-# mirroring the recall_seen / sticker_nudge per-sid json pattern.
+# ── backup guard (PreToolUse) — three tiers ──────────────────────────────────
+# Tier S (silent)    — rm/mv scoped to tmp/scratchpad/worktrees, read-only git
+#                       (incl. `git branch -d` — git itself refuses unmerged
+#                       deletes); no output.
+# Tier 2 (reminder)  — additionalContext text, fires at most ONCE per session
+#                       TOTAL (single flag, not per category); state lives
+#                       under DATA_DIR/state/backup_guard/, mirroring the
+#                       recall_seen / sticker_nudge per-sid json pattern.
+# Tier 3 (backup-state gate) — allowed silently iff a backup-ish Bash
+#                       command ran within backup_guard_window_min, else
+#                       hookSpecificOutput permissionDecision "deny" (every
+#                       call, no dedup, model-facing only); downgrades to
+#                       tier 2 when [hooks].backup_guard_intercept is false.
+# Fail-open throughout: any exception -> treat as no match, never block.
 
-_BG_RM_RE = _re.compile(r"\brm\b[^\n;|&]*-\w*r", _re.IGNORECASE)
-_BG_GIT_RESET_RE = _re.compile(r"\bgit\s+reset\s+--hard\b", _re.IGNORECASE)
-_BG_GIT_CLEAN_RE = _re.compile(r"\bgit\s+clean\s+-\w*f", _re.IGNORECASE)
-_BG_GIT_BRANCH_D_RE = _re.compile(r"\bgit\s+branch\s+-D\b", _re.IGNORECASE)
+_BG_SHELL_SEP_RE = _re.compile(r"&&|\|\||[;&|]")
+
+_BG_GIT_RESET_HARD_RE = _re.compile(r"\bgit\s+reset\s+--hard\b", _re.IGNORECASE)
+_BG_GIT_CLEAN_F_RE = _re.compile(r"\bgit\s+clean\s+-\w*f", _re.IGNORECASE)
 _BG_GIT_PUSH_FORCE_RE = _re.compile(r"\bgit\s+push\b[^\n;|&]*(--force\b|-f\b)", _re.IGNORECASE)
 _BG_GIT_CHECKOUT_DOT_RE = _re.compile(r"\bgit\s+checkout\s+--\s+\.", _re.IGNORECASE)
-_BG_GIT_STASH_RE = _re.compile(r"\bgit\s+stash\s+(drop|clear)\b", _re.IGNORECASE)
+# Case-SENSITIVE on purpose: -D force-deletes unmerged branches (tier 3);
+# lowercase -d is left unmatched -> falls through silent (git refuses
+# unmerged deletes itself).
+_BG_GIT_BRANCH_CAP_D_RE = _re.compile(r"\bgit\s+branch\s+-\w*D\w*\b")
+_BG_GIT_STASH_DROP_RE = _re.compile(r"\bgit\s+stash\s+(drop|clear)\b", _re.IGNORECASE)
 _BG_SQL_DROP_RE = _re.compile(r"\bdrop\s+table\b", _re.IGNORECASE)
 _BG_SQL_TRUNCATE_RE = _re.compile(r"\btruncate\b", _re.IGNORECASE)
-_BG_MV_GLOB_RE = _re.compile(r"\bmv\b[^\n;|&]*\*")
-
-_BG_BASH_RES = (
-    _BG_RM_RE, _BG_GIT_RESET_RE, _BG_GIT_CLEAN_RE, _BG_GIT_BRANCH_D_RE,
-    _BG_GIT_PUSH_FORCE_RE, _BG_GIT_CHECKOUT_DOT_RE, _BG_GIT_STASH_RE,
-    _BG_SQL_DROP_RE, _BG_SQL_TRUNCATE_RE, _BG_MV_GLOB_RE,
-)
 
 # Write/Edit targets: ~/.claude.json, any settings*.json under .claude/,
-# any .obsidian/ path, any mcp*.json config.
+# any .obsidian/ path, any mcp*.json config. Always tier 3.
 _BG_CONFIG_PATH_RE = _re.compile(
     r"(\.claude\.json$)"
     r"|(\.claude/[^\n]*settings[^/\n]*\.json$)"
@@ -2047,18 +2053,112 @@ _BG_CONFIG_PATH_RE = _re.compile(
     _re.IGNORECASE,
 )
 
+_BG_TIER_RANK = {None: 0, "2": 1, "3": 2}
 
-def _bg_bash_destructive(cmd: str) -> bool:
-    if not cmd:
+
+def _bg_is_whitelisted_path(p: str) -> bool:
+    """Tier S scope: /tmp, /private/tmp, or any path containing /scratchpad/
+    or /.claude/worktrees/."""
+    pp = (p or "").strip().strip("'\"")
+    if not pp:
         return False
-    if any(r.search(cmd) for r in _BG_BASH_RES):
+    if pp in ("/tmp", "/private/tmp"):
         return True
-    # DELETE FROM ... without a WHERE on the same line.
+    if pp.startswith("/tmp/") or pp.startswith("/private/tmp/"):
+        return True
+    if "/scratchpad/" in pp or "/.claude/worktrees/" in pp:
+        return True
+    return False
+
+
+def _bg_is_broad_path(p: str) -> bool:
+    """Absolute or home-relative (~) path -> wide blast radius (tier 3),
+    vs. a cwd-relative path -> narrower (tier 2)."""
+    pp = (p or "").strip().strip("'\"")
+    return pp.startswith("/") or pp.startswith("~")
+
+
+def _bg_bash_segments(cmd: str) -> list[list[str]]:
+    """Best-effort shell split on &&/||/;/|/& then shlex-tokenize each
+    segment. Not a full shell parser (mirrors the placement guard's
+    trim-to-first-segment approach)."""
+    import shlex
+    segs = [s.strip() for s in _BG_SHELL_SEP_RE.split(cmd or "") if s.strip()]
+    out: list[list[str]] = []
+    for seg in segs:
+        try:
+            out.append(shlex.split(seg))
+        except ValueError:
+            out.append(seg.split())
+    return out
+
+
+def _bg_classify_segment(tokens: list[str]) -> str | None:
+    """Tier for a single tokenized command segment (rm/mv/git), else None."""
+    if not tokens:
+        return None
+    op = tokens[0]
+    args = tokens[1:]
+    flags = [t for t in args if t.startswith("-")]
+    positional = [t for t in args if not t.startswith("-")]
+
+    if op == "rm":
+        recursive = any("r" in f.lower() for f in flags)
+        if not recursive or not positional:
+            return None
+        if all(_bg_is_whitelisted_path(p) for p in positional):
+            return None  # tier S
+        if any(_bg_is_broad_path(p) and not _bg_is_whitelisted_path(p) for p in positional):
+            return "3"
+        return "2"
+
+    if op == "mv":
+        if len(positional) < 2:
+            return None
+        sources, dest = positional[:-1], positional[-1]
+        if not any(any(ch in s for ch in "*?[") for s in sources):
+            return None  # only bulk (wildcard-source) mv is flagged
+        if _bg_is_whitelisted_path(dest):
+            return None  # tier S
+        return "2"
+
+    if op == "git":
+        seg = " ".join(tokens)
+        if _BG_GIT_BRANCH_CAP_D_RE.search(seg):
+            return "3"
+        if _BG_GIT_RESET_HARD_RE.search(seg):
+            return "3"
+        if _BG_GIT_CLEAN_F_RE.search(seg):
+            return "3"
+        if _BG_GIT_PUSH_FORCE_RE.search(seg):
+            return "3"
+        if _BG_GIT_CHECKOUT_DOT_RE.search(seg):
+            return "3"
+        if _BG_GIT_STASH_DROP_RE.search(seg):
+            return "2"
+        return None  # incl. read-only git + `git branch -d` -> tier S
+
+    return None
+
+
+def _bg_bash_tier(cmd: str) -> str | None:
+    if not cmd:
+        return None
+    if _BG_SQL_DROP_RE.search(cmd) or _BG_SQL_TRUNCATE_RE.search(cmd):
+        return "3"
+    best: str | None = None
+    for tokens in _bg_bash_segments(cmd):
+        t = _bg_classify_segment(tokens)
+        if _BG_TIER_RANK.get(t, 0) > _BG_TIER_RANK.get(best, 0):
+            best = t
+    # DELETE FROM ... without a WHERE on the same line (line-based: SQL can
+    # arrive as a single quoted arg, not a shell-separated segment).
     for line in cmd.splitlines():
         low = f" {line.lower()} "
         if "delete from" in low and " where " not in low:
-            return True
-    return False
+            if _BG_TIER_RANK["2"] > _BG_TIER_RANK.get(best, 0):
+                best = "2"
+    return best
 
 
 def _bg_mcp_destructive(tool_name: str, tool_input: dict) -> bool:
@@ -2074,18 +2174,19 @@ def _bg_mcp_destructive(tool_name: str, tool_input: dict) -> bool:
     return False
 
 
-def _backup_guard_category(tool_name: str, tool_input: dict) -> str | None:
-    """Return the dedup category for a matching bulk/destructive call, else None."""
+def _bg_classify(tool_name: str, tool_input: dict) -> str | None:
+    """Return the tier ("2"/"3") for *tool_name*/*tool_input*, or None
+    (tier S / no match -> silent)."""
     ti = tool_input or {}
     if tool_name == "Bash":
-        if _bg_bash_destructive(ti.get("command", "") or ""):
-            return "bash_destructive"
-    elif tool_name in ("Write", "Edit"):
+        return _bg_bash_tier(ti.get("command", "") or "")
+    if tool_name in ("Write", "Edit"):
         if _BG_CONFIG_PATH_RE.search(ti.get("file_path", "") or ""):
-            return "config_edit"
-    elif tool_name and tool_name not in ("Bash", "Write", "Edit"):
+            return "3"
+        return None
+    if tool_name and tool_name not in ("Bash", "Write", "Edit"):
         if _bg_mcp_destructive(tool_name, ti):
-            return "mcp_destructive"
+            return "2"
     return None
 
 
@@ -2093,32 +2194,44 @@ def _backup_guard_state_path(sid: str) -> Path:
     return config.DATA_DIR / "state" / "backup_guard" / f"{sid}.json"
 
 
-def _load_backup_guard_fired(sid: str) -> set[str]:
+def _bg_load_state(sid: str) -> dict:
     if not sid:
-        return set()
+        return {}
     try:
         data = json.loads(_backup_guard_state_path(sid).read_text())
-        return set(data) if isinstance(data, list) else set()
+        return data if isinstance(data, dict) else {}
     except Exception:
-        return set()
+        return {}
 
 
-def _mark_backup_guard_fired(sid: str, category: str) -> None:
+def _bg_save_state(sid: str, data: dict) -> None:
     if not sid:
         return
     p = _backup_guard_state_path(sid)
     try:
-        fired = _load_backup_guard_fired(sid)
-        fired.add(category)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(sorted(fired)))
+        p.write_text(json.dumps(data))
     except Exception:
         pass
 
 
+def _backup_guard_fired(sid: str) -> bool:
+    """Single global flag per session — tier 2 reminds at most once TOTAL."""
+    return bool(_bg_load_state(sid).get("fired"))
+
+
+def _mark_backup_guard_fired(sid: str) -> None:
+    if not sid:
+        return
+    data = _bg_load_state(sid)
+    data["fired"] = True
+    _bg_save_state(sid, data)
+
+
 def _backup_guard_line(inp: dict) -> str | None:
-    """Return the backup-first reminder text if *inp* is a bulk/destructive
-    tool call not yet reminded this session, else None.
+    """Tier 2 reminder text (additionalContext), at most once per session
+    TOTAL. Also carries tier-3 calls downgraded to tier 2 when
+    [hooks].backup_guard_intercept is false.
 
     Config-gated via [hooks].backup_guard (default enabled). Fail-open: any
     exception returns None so the guard never breaks the hook."""
@@ -2130,18 +2243,103 @@ def _backup_guard_line(inp: dict) -> str | None:
             return None
         tool_name = inp.get("tool_name", "") or ""
         ti = inp.get("tool_input", {}) or {}
-        category = _backup_guard_category(tool_name, ti)
-        if not category:
+        tier = _bg_classify(tool_name, ti)
+        if tier == "3" and not hooks_cfg.get("backup_guard_intercept", True):
+            tier = "2"
+        if tier != "2":
             return None
         sid = (inp.get("session_id") or "").strip()
-        if category in _load_backup_guard_fired(sid):
+        if _backup_guard_fired(sid):
             return None
-        _mark_backup_guard_fired(sid, category)
+        _mark_backup_guard_fired(sid)
         return hooks_cfg.get("backup_guard_message") or (
-            "Bulk/destructive op detected — back up the target first "
-            "(DB copy, file copy, or git commit), and double-check scope "
-            "before proceeding."
+            "Always back up / archive the DB / file / commit before you do "
+            "anything destructive — bulk modify, move, delete."
         )
+    except Exception:  # noqa: BLE001 — fail-open, never blocks the hook
+        return None
+
+
+# ── Tier 3: backup-state gate ─────────────────────────────────────────────
+# Model-facing only, never escalates to the user. Any Bash command that
+# looks like a backup step stamps last_backup_ts (cheap string check,
+# always on). A dangerous op is allowed silently iff a backup landed within
+# the trailing window (default 15 min); otherwise it's denied — denied stays
+# denied until a fresh backup lands (no retry-count/hash bookkeeping).
+
+_BG_BACKUP_CMD_RE = _re.compile(
+    r"\bcp\b|\brsync\b|\btar\b|\bgit\s+commit\b|\bgit\s+stash\s+push\b|\.backup\b",
+    _re.IGNORECASE,
+)
+
+_BG_DENY_MSG = (
+    "Destructive op blocked — back up the target first (DB copy / file copy "
+    "/ git commit), then rerun. Backups are remembered for 15 min. If no "
+    "backup makes sense here, ask the user."
+)
+
+
+def _bg_is_backup_cmd(cmd: str) -> bool:
+    return bool(cmd) and bool(_BG_BACKUP_CMD_RE.search(cmd))
+
+
+def _bg_note_backup(inp: dict) -> None:
+    """Opportunistically stamp last_backup_ts when a Bash command looks like
+    a backup step (cp/rsync/tar/git commit/git stash push/.backup). Cheap
+    string checks only, always on. Fail-open: never raises."""
+    try:
+        if not isinstance(inp, dict) or inp.get("tool_name") != "Bash":
+            return
+        hooks_cfg = config.load().get("hooks", {}) or {}
+        if not hooks_cfg.get("backup_guard", True):
+            return
+        cmd = (inp.get("tool_input") or {}).get("command", "") or ""
+        if not isinstance(cmd, str) or not _bg_is_backup_cmd(cmd):
+            return
+        sid = (inp.get("session_id") or "").strip()
+        if not sid:
+            return
+        state = _bg_load_state(sid)
+        state["last_backup_ts"] = datetime.now(timezone.utc).isoformat()
+        _bg_save_state(sid, state)
+    except Exception:  # noqa: BLE001 — fail-open, never blocks the hook
+        pass
+
+
+def _bg_within_window(ts_iso: str, window_min: float) -> bool:
+    try:
+        ts = datetime.fromisoformat(ts_iso)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - ts) <= timedelta(minutes=window_min)
+    except Exception:
+        return False
+
+
+def _backup_guard_deny(inp: dict) -> str | None:
+    """Tier 3 deny reason, or None to allow. Allows silently when a backup-ish
+    Bash command landed within [hooks].backup_guard_window_min (default 15).
+    None when disabled, downgraded ([hooks].backup_guard_intercept=false —
+    becomes a tier-2 reminder instead), the call isn't a tier-3 match, or on
+    any error (fail-open — never blocks the hook)."""
+    try:
+        if not isinstance(inp, dict):
+            return None
+        hooks_cfg = config.load().get("hooks", {}) or {}
+        if not hooks_cfg.get("backup_guard", True):
+            return None
+        if not hooks_cfg.get("backup_guard_intercept", True):
+            return None
+        tool_name = inp.get("tool_name", "") or ""
+        ti = inp.get("tool_input", {}) or {}
+        if _bg_classify(tool_name, ti) != "3":
+            return None
+        sid = (inp.get("session_id") or "").strip()
+        window_min = hooks_cfg.get("backup_guard_window_min", 15)
+        last_backup = _bg_load_state(sid).get("last_backup_ts") if sid else None
+        if last_backup and _bg_within_window(last_backup, window_min):
+            return None  # allow — backed up within the window, fully silent
+        return hooks_cfg.get("backup_guard_deny_message") or _BG_DENY_MSG
     except Exception:  # noqa: BLE001 — fail-open, never blocks the hook
         return None
 
@@ -2184,6 +2382,31 @@ def pretool_use() -> int:
         inp = _read_input()
         tool = inp.get("tool_name", "")
         ti = inp.get("tool_input", {})
+
+        # Opportunistic backup-ish command stamp — always on, independent of
+        # whether this particular call is itself flagged.
+        try:
+            _bg_note_backup(inp)
+        except Exception:  # noqa: BLE001 — fail-open, never blocks the hook
+            pass
+
+        # Tier 3 — deny dangerous ops before anything else, unless a backup
+        # landed within the window. Short-circuits placement/atlas guidance;
+        # the tool call itself is what needs gating.
+        deny_reason: str | None = None
+        try:
+            deny_reason = _backup_guard_deny(inp)
+        except Exception:  # noqa: BLE001 — fail-open, never blocks the hook
+            deny_reason = None
+        if deny_reason:
+            print(json.dumps({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": deny_reason,
+                }
+            }))
+            return 0
 
         if tool == "sticker_pick":
             sid = inp.get("session_id") if isinstance(inp, dict) else None
@@ -2265,6 +2488,15 @@ def pretool_use() -> int:
 
         root = _atlas_mod._root_of(str(target), roots)
         if root is None:
+            # No atlas guidance for this target, but the backup guard must
+            # still surface — it's orthogonal to placement/atlas coverage.
+            if guard_line:
+                print(json.dumps({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "additionalContext": guard_line,
+                    }
+                }))
             return 0
 
         # Build ancestor chain: root -> parent of target (inclusive)

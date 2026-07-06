@@ -33,6 +33,7 @@ _MARROW_HOOKS: dict[str, list[dict]] = {
         {"matcher": "Write",  "command": "{venv} -m marrow.hooks pretool_use"},
         {"matcher": "Edit",   "command": "{venv} -m marrow.hooks pretool_use"},
         {"matcher": "Bash",   "command": "{venv} -m marrow.hooks pretool_use"},
+        {"matcher": "mcp__marrow__.*", "command": "{venv} -m marrow.hooks pretool_use"},
         {"matcher": "Agent",  "command": "{venv} -m marrow.hooks agent_guard"},
     ],
     "SessionStart": [

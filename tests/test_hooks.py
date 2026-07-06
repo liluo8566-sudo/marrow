@@ -769,9 +769,25 @@ def test_session_end_fires_popen_when_events_grew(env, monkeypatch, tmp_path):
     assert len(async_calls) == 1, "popen_detach must be called when events grew"
 
 
-# ── pretool_use backup-first guard ────────────────────────────────────────────
+# ── pretool_use backup guard — three tiers ───────────────────────────────────
+# Tier S (silent, tmp/scratchpad/worktrees + read-only git) / Tier 2
+# (additionalContext reminder, once per session TOTAL) / Tier 3 (backup-state
+# gate: silent allow if a backup-ish Bash command landed within the window,
+# else permissionDecision "deny"; downgrades to tier 2 when
+# backup_guard_intercept=false).
 
-_BG_MSG = "Bulk/destructive op detected"
+from pathlib import Path as _Path
+
+_BG_MSG = "back up / archive the DB"
+_BG_DENY_MSG = "Backups are remembered for"
+_MV_DST = str(_Path.home() / "CC-Lab" / "marrow" / "_bg_test_dst")
+
+
+def _write_backup_ts(sid, ago_minutes):
+    p = hooks._backup_guard_state_path(sid)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    ts = (datetime.now(timezone.utc) - timedelta(minutes=ago_minutes)).isoformat()
+    p.write_text(json.dumps({"last_backup_ts": ts}))
 
 
 def _pretool(monkeypatch, tool_name, tool_input, sid="s1"):
@@ -780,65 +796,206 @@ def _pretool(monkeypatch, tool_name, tool_input, sid="s1"):
     return hooks.main(["pretool_use"])
 
 
-def test_backup_guard_rm_rf_triggers(env, monkeypatch, capsys):
-    rc = _pretool(monkeypatch, "Bash", {"command": "rm -rf /tmp/foo"})
-    assert rc == 0
-    ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
-    assert _BG_MSG in ctx
+def _out(capsys):
+    return json.loads(capsys.readouterr().out)
 
 
 def test_backup_guard_rm_single_file_no_trigger(env, monkeypatch, capsys):
     rc = _pretool(monkeypatch, "Bash", {"command": "rm /tmp/foo.txt"})
     assert rc == 0
-    ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
-    assert _BG_MSG not in ctx
-
-
-def test_backup_guard_git_reset_hard_triggers(env, monkeypatch, capsys):
-    rc = _pretool(monkeypatch, "Bash", {"command": "git reset --hard origin/main"})
-    assert rc == 0
-    ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
-    assert _BG_MSG in ctx
+    out = _out(capsys)
+    assert "permissionDecision" not in out["hookSpecificOutput"]
+    assert _BG_MSG not in out["hookSpecificOutput"]["additionalContext"]
 
 
 def test_backup_guard_git_status_no_trigger(env, monkeypatch, capsys):
     rc = _pretool(monkeypatch, "Bash", {"command": "git status"})
     assert rc == 0
-    ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
-    assert _BG_MSG not in ctx
+    out = _out(capsys)
+    assert "permissionDecision" not in out["hookSpecificOutput"]
+    assert _BG_MSG not in out["hookSpecificOutput"]["additionalContext"]
 
 
-def test_backup_guard_settings_json_edit_triggers(env, monkeypatch, capsys):
+# -- Tier S: silent -----------------------------------------------------------
+
+def test_backup_guard_tier_s_rm_rf_tmp_silent(env, monkeypatch, capsys):
+    rc = _pretool(monkeypatch, "Bash", {"command": "rm -rf /tmp/foo"})
+    assert rc == 0
+    out = _out(capsys)
+    assert "permissionDecision" not in out["hookSpecificOutput"]
+    assert _BG_MSG not in out["hookSpecificOutput"]["additionalContext"]
+
+
+def test_backup_guard_tier_s_rm_rf_private_tmp_silent(env, monkeypatch, capsys):
+    rc = _pretool(monkeypatch, "Bash", {"command": "rm -rf /private/tmp/foo"})
+    assert rc == 0
+    out = _out(capsys)
+    assert "permissionDecision" not in out["hookSpecificOutput"]
+    assert _BG_MSG not in out["hookSpecificOutput"]["additionalContext"]
+
+
+def test_backup_guard_tier_s_scratchpad_silent(env, monkeypatch, capsys):
+    rc = _pretool(monkeypatch, "Bash",
+                  {"command": "rm -rf /Users/x/project/scratchpad/old"})
+    assert rc == 0
+    out = _out(capsys)
+    assert "permissionDecision" not in out["hookSpecificOutput"]
+    assert _BG_MSG not in out["hookSpecificOutput"]["additionalContext"]
+
+
+def test_backup_guard_tier_s_git_branch_lower_d_silent(env, monkeypatch, capsys):
+    rc = _pretool(monkeypatch, "Bash", {"command": "git branch -d old-feature"})
+    assert rc == 0
+    out = _out(capsys)
+    assert "permissionDecision" not in out["hookSpecificOutput"]
+    assert _BG_MSG not in out["hookSpecificOutput"]["additionalContext"]
+
+
+# -- Tier 2: reminder, once per session TOTAL ---------------------------------
+
+def test_backup_guard_tier2_bulk_mv_reminds(env, monkeypatch, capsys):
+    rc = _pretool(monkeypatch, "Bash", {"command": f"mv src/* {_MV_DST}"})
+    assert rc == 0
+    out = _out(capsys)
+    assert "permissionDecision" not in out["hookSpecificOutput"]
+    assert _BG_MSG in out["hookSpecificOutput"]["additionalContext"]
+
+
+def test_backup_guard_tier2_delete_from_no_where_reminds(env, monkeypatch, capsys):
+    rc = _pretool(monkeypatch, "Bash",
+                  {"command": 'sqlite3 t.db "DELETE FROM events"'})
+    assert rc == 0
+    out = _out(capsys)
+    assert "permissionDecision" not in out["hookSpecificOutput"]
+    assert _BG_MSG in out["hookSpecificOutput"]["additionalContext"]
+
+
+def test_backup_guard_tier2_event_clear_reminds(env, monkeypatch, capsys):
+    rc = _pretool(monkeypatch, "mcp__marrow__event_clear", {})
+    assert rc == 0
+    out = _out(capsys)
+    assert "permissionDecision" not in out["hookSpecificOutput"]
+    assert _BG_MSG in out["hookSpecificOutput"]["additionalContext"]
+
+
+def test_backup_guard_tier2_dedup_once_per_session_total(env, monkeypatch, capsys):
+    """A second, DIFFERENT tier-2 category must stay silent — the flag is
+    global per session, not per category."""
+    _pretool(monkeypatch, "mcp__marrow__event_clear", {})
+    first = _out(capsys)["hookSpecificOutput"]["additionalContext"]
+    assert _BG_MSG in first
+
+    rc = _pretool(monkeypatch, "Bash",
+                  {"command": 'sqlite3 t.db "DELETE FROM events"'})
+    assert rc == 0
+    second = _out(capsys)["hookSpecificOutput"]["additionalContext"]
+    assert _BG_MSG not in second, "tier-2 reminder must fire at most once per session TOTAL"
+
+
+# -- Tier 3: backup-state gate -------------------------------------------------
+
+def test_backup_guard_tier3_no_backup_denies(env, monkeypatch, capsys):
+    rc = _pretool(monkeypatch, "Bash", {"command": "rm -rf ~/Documents/x"})
+    assert rc == 0
+    out = _out(capsys)["hookSpecificOutput"]
+    assert out["permissionDecision"] == "deny"
+    assert _BG_DENY_MSG in out["permissionDecisionReason"]
+    assert "additionalContext" not in out
+
+
+def test_backup_guard_tier3_git_push_force_denies(env, monkeypatch, capsys):
+    rc = _pretool(monkeypatch, "Bash", {"command": "git push --force origin main"})
+    assert rc == 0
+    out = _out(capsys)["hookSpecificOutput"]
+    assert out["permissionDecision"] == "deny"
+    assert _BG_DENY_MSG in out["permissionDecisionReason"]
+
+
+def test_backup_guard_tier3_git_branch_cap_d_denies(env, monkeypatch, capsys):
+    rc = _pretool(monkeypatch, "Bash", {"command": "git branch -D old-feature"})
+    assert rc == 0
+    out = _out(capsys)["hookSpecificOutput"]
+    assert out["permissionDecision"] == "deny"
+
+
+def test_backup_guard_tier3_settings_json_edit_denies(env, monkeypatch, capsys):
     rc = _pretool(monkeypatch, "Edit",
                   {"file_path": "/Users/x/.claude/settings.json", "old_string": "a",
                    "new_string": "b"})
     assert rc == 0
-    ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
-    assert _BG_MSG in ctx
+    out = _out(capsys)["hookSpecificOutput"]
+    assert out["permissionDecision"] == "deny"
 
 
-def test_backup_guard_event_clear_triggers(env, monkeypatch, capsys):
-    rc = _pretool(monkeypatch, "mcp__marrow__event_clear", {})
+def test_backup_guard_tier3_drop_table_denies(env, monkeypatch, capsys):
+    rc = _pretool(monkeypatch, "Bash",
+                  {"command": 'sqlite3 t.db "DROP TABLE tasks"'})
     assert rc == 0
-    ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
-    assert _BG_MSG in ctx
+    out = _out(capsys)["hookSpecificOutput"]
+    assert out["permissionDecision"] == "deny"
 
 
-def test_backup_guard_dedup_once_per_session(env, monkeypatch, capsys):
-    _pretool(monkeypatch, "Bash", {"command": "rm -rf /tmp/foo"})
-    first = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
-    assert _BG_MSG in first
+def test_backup_guard_tier3_backup_within_window_allows_silently(env, monkeypatch, capsys):
+    # A backup-ish command first — stamps last_backup_ts for this sid.
+    rc_bak = _pretool(monkeypatch, "Bash",
+                       {"command": "cp -r ~/Documents/x /tmp/backup_x"})
+    assert rc_bak == 0
+    capsys.readouterr()  # discard — cp targets /tmp, no atlas root -> may be empty
 
-    _pretool(monkeypatch, "Bash", {"command": "rm -rf /tmp/bar"})
-    second = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
-    assert _BG_MSG not in second, "same category must not re-fire within a session"
+    rc = _pretool(monkeypatch, "Bash", {"command": "rm -rf ~/Documents/x"})
+    assert rc == 0
+    out = _out(capsys)["hookSpecificOutput"]
+    assert "permissionDecision" not in out
+    assert _BG_DENY_MSG not in out.get("additionalContext", "")
+    assert _BG_MSG not in out.get("additionalContext", "")
 
+
+def test_backup_guard_tier3_backup_older_than_window_denies(env, monkeypatch, capsys):
+    _write_backup_ts("s1", ago_minutes=20)  # default window is 15 min
+    rc = _pretool(monkeypatch, "Bash", {"command": "rm -rf ~/Documents/x"})
+    assert rc == 0
+    out = _out(capsys)["hookSpecificOutput"]
+    assert out["permissionDecision"] == "deny"
+
+
+def test_backup_guard_tier3_window_config_extends_allow(env, monkeypatch, capsys):
+    base_cfg = config.load()
+    base_cfg.setdefault("hooks", {})["backup_guard_window_min"] = 60
+    monkeypatch.setattr(config, "load", lambda: base_cfg)
+    _write_backup_ts("s1", ago_minutes=20)  # stale for default 15, fresh for 60
+    rc = _pretool(monkeypatch, "Bash", {"command": "rm -rf ~/Documents/x"})
+    assert rc == 0
+    out = _out(capsys)["hookSpecificOutput"]
+    assert "permissionDecision" not in out
+
+
+def test_backup_guard_tier3_intercept_off_downgrades_to_reminder(env, monkeypatch, capsys):
+    base_cfg = config.load()
+    base_cfg.setdefault("hooks", {})["backup_guard_intercept"] = False
+    monkeypatch.setattr(config, "load", lambda: base_cfg)
+    rc = _pretool(monkeypatch, "Bash", {"command": "git push --force origin main"})
+    assert rc == 0
+    out = _out(capsys)["hookSpecificOutput"]
+    assert "permissionDecision" not in out
+    assert _BG_MSG in out["additionalContext"]
+
+
+# -- Config off / fail-open -----------------------------------------------------
 
 def test_backup_guard_disabled_via_config(env, monkeypatch, capsys):
     base_cfg = config.load()
     base_cfg.setdefault("hooks", {})["backup_guard"] = False
     monkeypatch.setattr(config, "load", lambda: base_cfg)
-    rc = _pretool(monkeypatch, "Bash", {"command": "rm -rf /tmp/foo"})
+
+    rc = _pretool(monkeypatch, "Bash", {"command": "git push --force origin main"})
     assert rc == 0
-    ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
-    assert _BG_MSG not in ctx
+    out = _out(capsys)["hookSpecificOutput"]
+    assert "permissionDecision" not in out
+    assert _BG_MSG not in out["additionalContext"]
+
+
+def test_backup_guard_fail_open_malformed_input(env, monkeypatch, capsys):
+    _stdin(monkeypatch, {"session_id": "s1", "tool_name": "Bash",
+                         "tool_input": "not-a-dict"})
+    rc = hooks.main(["pretool_use"])
+    assert rc == 0
