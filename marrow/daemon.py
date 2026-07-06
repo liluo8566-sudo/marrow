@@ -142,7 +142,41 @@ def event_embed(batch: int = 50) -> dict:
 
 # ── tl ───────────────────────────────────────────────────────────────────────
 
-_TL_ACTIONS = {"add", "update", "clear"}
+_TL_ACTIONS = {"add", "update", "clear", "query"}
+
+
+def _tl_resolve(conn, match: str | None, date: str | None) -> list[dict]:
+    """Find role='tl' rows by content substring (`match`) and/or Melbourne-local
+    day (`date`, YYYY-MM-DD). Returns [{event_id, line}] rendered with Melbourne
+    hh:mm, newest first, capped at 20. Raises ValueError on a malformed date."""
+    clauses = ["role='tl'"]
+    params: list = []
+    if match:
+        clauses.append("content LIKE ?")
+        params.append(f"%{match}%")
+    if date:
+        from .timecue import melb_day_range
+        since_utc, until_utc = melb_day_range(date)  # ValueError on bad date
+        clauses.append("COALESCE(ts_start, timestamp) >= ?"
+                       " AND COALESCE(ts_start, timestamp) < ?")
+        params.extend([since_utc, until_utc])
+    rows = conn.execute(
+        "SELECT id, ts_start, ts_end, timestamp, content FROM events"
+        f" WHERE {' AND '.join(clauses)}"
+        " ORDER BY COALESCE(ts_start, timestamp) DESC LIMIT 20", params
+    ).fetchall()
+    from .timeline import _hhmm_melb
+    from . import tl_writer
+    out = []
+    for r in rows:
+        ts_start = r["ts_start"] or r["timestamp"]
+        hhmm_start = _hhmm_melb(ts_start)
+        hhmm_end = _hhmm_melb(r["ts_end"]) if r["ts_end"] else None
+        out.append({
+            "event_id": r["id"],
+            "line": tl_writer.render_line(hhmm_start, hhmm_end, r["content"]),
+        })
+    return out
 
 
 def _tl_where(event_id, sid, before, after):
@@ -243,10 +277,17 @@ def tl(
     event_id: int | None = None,
     before: str | None = None,
     after: str | None = None,
+    match: str | None = None,
+    date: str | None = None,
 ) -> dict:
-    """Add/update/clear timeline.
-    - 'update': revise a row by event_id
-    - 'clear': delete rows by event_id / sid / before+after range (DB backup first).
+    """Add/update/clear/query timeline.
+    - 'query': find rows by match (content substring) and/or date (Melbourne
+      YYYY-MM-DD) -> [{event_id, line}]. Use it to look up an event_id.
+    - 'update'/'clear': address a row by event_id, OR by match (+optional date)
+      when you don't have the id. e.g. update match='千层' date='2026-07-05'.
+      Exactly one hit -> executes; several hits -> returns the candidate list
+      without changing anything (refine, or pass event_id); zero hits -> error.
+    - 'clear': delete rows by event_id / match / sid / before+after range (DB backup first).
     - Add tl during each session: scene shifts, emotional turns, or phase tasks complete. (every 1-2h or 10-20 turns)
     - Format (add/update): HH:mm-HH:mm 【N affect♡Y affect (OR B affect)】body [i]
       - e.g. 21:25-21:31 【N愉悦♡Y委屈】翻CC日志找骂人梗，扑空互怼 [3]
@@ -290,9 +331,21 @@ def tl(
         finally:
             conn.close()
 
+    if action == "query":
+        if not match and not date:
+            return {"ok": False, "error": "query requires match and/or date"}
+        conn = storage.connect(_DB)
+        try:
+            try:
+                return {"ok": True, "matches": _tl_resolve(conn, match, date)}
+            except ValueError as exc:
+                return {"ok": False, "error": f"bad date {date!r}: {exc}"}
+        finally:
+            conn.close()
+
     if action == "update":
-        if event_id is None:
-            return {"ok": False, "error": "update requires event_id"}
+        if event_id is None and not (match or date):
+            return {"ok": False, "error": "update requires event_id or match/date"}
         conn = storage.connect(_DB)
         try:
             from . import tl_nudge
@@ -300,6 +353,17 @@ def tl(
             _sid = _query_current_sid(conn)
             if tl_nudge.is_silent(_sid):
                 return {"ok": False, "silenced": True, "error": "session is silenced (/tl-)"}
+            if event_id is None:
+                try:
+                    hits = _tl_resolve(conn, match, date)
+                except ValueError as exc:
+                    return {"ok": False, "error": f"bad date {date!r}: {exc}"}
+                if not hits:
+                    return {"ok": False, "error": "no tl row matches"}
+                if len(hits) > 1:
+                    return {"ok": False, "error": "multiple matches — refine or pass event_id",
+                            "matches": hits}
+                event_id = hits[0]["event_id"]
             from . import tl_writer
             try:
                 return tl_writer.tl_update(
@@ -313,6 +377,21 @@ def tl(
             conn.close()
 
     # clear
+    if event_id is None and (match or date) and not sid and not before and not after:
+        conn = storage.connect(_DB)
+        try:
+            try:
+                hits = _tl_resolve(conn, match, date)
+            except ValueError as exc:
+                return {"ok": False, "error": f"bad date {date!r}: {exc}"}
+        finally:
+            conn.close()
+        if not hits:
+            return {"ok": False, "error": "no tl row matches"}
+        if len(hits) > 1:
+            return {"ok": False, "error": "multiple matches — refine or pass event_id",
+                    "matches": hits}
+        event_id = hits[0]["event_id"]
     return _tl_clear(event_id=event_id, sid=sid, before=before, after=after)
 
 
@@ -453,10 +532,13 @@ def _sticker_update(sticker_id: int, desc: str) -> dict:
 def _sticker_delete(sticker_id: int) -> dict:
     conn = storage.connect(_DB)
     try:
-        from .sticker_ops import delete_sticker
+        from .sticker_ops import delete_sticker, _purge_md_lines
         result = delete_sticker(conn, sticker_id)
         if result.get("ok"):
             _write_stickers_subpage(conn)
+            # The stickers inserter is upsert-only and never removes a block
+            # whose DB row is gone, so strip the stale anchored line directly.
+            _purge_md_lines(config.db_pages_path(), [sticker_id])
         return result
     finally:
         conn.close()
@@ -1005,6 +1087,18 @@ def _time_where(col, before, after):
     return "", []
 
 
+def _tombstone_deleted(conn, select_sql: str, params, reason: str) -> None:
+    """Record event_tombstones for rows about to be deleted, so a later
+    catchup/SessionEnd re-archive can't resurrect them (mirrors
+    clean_harness_events.py). Keyed by the existing events.source_hash;
+    rows with NULL source_hash are skipped by the caller's SQL."""
+    hashes = [r[0] for r in conn.execute(select_sql, params).fetchall()]
+    if hashes:
+        conn.executemany(
+            "INSERT OR IGNORE INTO event_tombstones (source_hash, reason)"
+            " VALUES (?, ?)", [(h, reason) for h in hashes])
+
+
 def _do_event_clear(before: str | None, after: str | None, last: int | None) -> dict:
     import re
     import shutil
@@ -1031,12 +1125,16 @@ def _do_event_clear(before: str | None, after: str | None, last: int | None) -> 
     counts = {}
     try:
         if last:
+            _sub = "(SELECT id FROM events ORDER BY timestamp DESC LIMIT ?)"
             sids = [r[0] for r in conn.execute(
                 "SELECT DISTINCT session_id FROM events WHERE id IN "
-                "(SELECT id FROM events ORDER BY timestamp DESC LIMIT ?)", [last]).fetchall()]
-            conn.execute(
-                "DELETE FROM events WHERE id IN "
-                "(SELECT id FROM events ORDER BY timestamp DESC LIMIT ?)", [last])
+                + _sub, [last]).fetchall()]
+            _tombstone_deleted(
+                conn,
+                "SELECT source_hash FROM events WHERE id IN " + _sub
+                + " AND source_hash IS NOT NULL",
+                [last], "event_clear: last=N")
+            conn.execute("DELETE FROM events WHERE id IN " + _sub, [last])
             if sids:
                 conn.executemany(
                     "DELETE FROM audit_log WHERE action='sessionend_extract' AND target_id=?",
@@ -1046,6 +1144,11 @@ def _do_event_clear(before: str | None, after: str | None, last: int | None) -> 
             where, params = _time_where("timestamp", before, after)
             sids = [r[0] for r in conn.execute(
                 "SELECT DISTINCT session_id FROM events" + where, params).fetchall()]
+            _tombstone_deleted(
+                conn,
+                "SELECT source_hash FROM events" + where
+                + " AND source_hash IS NOT NULL", params,
+                "event_clear: range")
             conn.execute("DELETE FROM events" + where, params)
             if sids:
                 conn.executemany(

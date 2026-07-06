@@ -100,6 +100,104 @@ def test_tl_unknown_action(env):
     assert out["ok"] is False
 
 
+# ── tl query + content-based (match/date) addressing ─────────────────────────
+
+def _no_dashboard(monkeypatch, tmp_path):
+    """Point tl_writer's dashboard path at a scratch file so update tests never
+    touch the real ~/Desktop/NY/dashboard.md."""
+    from marrow import tl_writer
+    monkeypatch.setattr(tl_writer, "_dashboard_path",
+                        lambda: tmp_path / "dashboard.md")
+
+
+def test_tl_query_by_match(env):
+    eid = _insert_tl(env, "买千层蛋糕", ts="2026-07-05T05:00:00Z")
+    _insert_tl(env, "别的事情", ts="2026-07-05T06:00:00Z")
+    out = daemon.tl("query", match="千层")
+    assert out["ok"] is True
+    assert len(out["matches"]) == 1
+    assert out["matches"][0]["event_id"] == eid
+    assert "千层" in out["matches"][0]["line"]
+
+
+def test_tl_query_by_date_respects_melb_day(env):
+    _insert_tl(env, "day five", ts="2026-07-05T05:00:00Z")
+    _insert_tl(env, "day six", ts="2026-07-06T05:00:00Z")
+    out = daemon.tl("query", date="2026-07-05")
+    assert out["ok"] is True
+    assert [m["line"] for m in out["matches"]]
+    assert all("day six" not in m["line"] for m in out["matches"])
+
+
+def test_tl_query_requires_param(env):
+    out = daemon.tl("query")
+    assert out["ok"] is False
+
+
+def test_tl_query_bad_date(env):
+    out = daemon.tl("query", date="not-a-date")
+    assert out["ok"] is False
+
+
+def test_tl_update_by_match_single_hit(env, monkeypatch, tmp_path):
+    _no_dashboard(monkeypatch, tmp_path)
+    eid = _insert_tl(env, "【N愉悦】买千层 [3]", ts="2026-07-05T05:00:00Z")
+    out = daemon.tl("update", match="千层", body="买千层蛋糕")
+    assert out["ok"] is True
+    assert out["event_id"] == eid
+    conn = storage.connect(env)
+    try:
+        content = conn.execute(
+            "SELECT content FROM events WHERE id=?", (eid,)).fetchone()[0]
+    finally:
+        conn.close()
+    assert "买千层蛋糕" in content
+
+
+def test_tl_update_by_match_multiple_does_not_execute(env, monkeypatch, tmp_path):
+    _no_dashboard(monkeypatch, tmp_path)
+    _insert_tl(env, "千层 one", ts="2026-07-05T05:00:00Z")
+    _insert_tl(env, "千层 two", ts="2026-07-05T06:00:00Z")
+    out = daemon.tl("update", match="千层", body="changed")
+    assert out["ok"] is False
+    assert len(out["matches"]) == 2
+    conn = storage.connect(env)
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM events WHERE content LIKE '%changed%'"
+        ).fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_tl_update_by_match_zero_hits(env):
+    out = daemon.tl("update", match="nonexistent")
+    assert out["ok"] is False
+
+
+def test_tl_update_still_requires_addressing(env):
+    out = daemon.tl("update", body="x")
+    assert out["ok"] is False
+
+
+def test_tl_clear_by_match_single(env):
+    _insert_tl(env, "千层 unique", ts="2026-07-05T05:00:00Z")
+    _insert_tl(env, "other row", ts="2026-07-05T06:00:00Z")
+    out = daemon.tl("clear", match="千层")
+    assert out["ok"] is True
+    assert out["cleared"] == 1
+    assert _event_count(env) == 1
+
+
+def test_tl_clear_by_match_multiple_does_not_execute(env):
+    _insert_tl(env, "千层 one")
+    _insert_tl(env, "千层 two")
+    out = daemon.tl("clear", match="千层")
+    assert out["ok"] is False
+    assert len(out["matches"]) == 2
+    assert _event_count(env) == 2
+
+
 # ── dim: entities already covered in test_daemon_entity_upsert.py ────────────
 
 def test_dim_upsert_meme_create_and_update(env):
@@ -313,6 +411,35 @@ def test_sticker_admin_ingest_requires_fields(env):
     assert out["ok"] is False
 
 
+def test_sticker_admin_delete_strips_md_line_and_unlinks(env, tmp_path, monkeypatch):
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    monkeypatch.setattr(config, "db_pages_path", lambda: str(pages))
+    # Isolate the fix under test (the stale-line purge); the full subpage
+    # re-render exercises unrelated builders, so stub it out.
+    monkeypatch.setattr(daemon, "_write_stickers_subpage", lambda conn: None)
+    img = tmp_path / "stk_001.png"
+    img.write_bytes(b"png")
+    conn = storage.connect(env)
+    try:
+        with conn:
+            cur = conn.execute(
+                "INSERT INTO stickers (path, sha256, desc, source)"
+                " VALUES (?, 'abc', 'happy', 'wechat')", (str(img),))
+        sid = cur.lastrowid
+    finally:
+        conn.close()
+    (pages / "stickers.md").write_text(
+        f"- stk_{sid:03d} happy <!-- id:{sid} -->\n"
+        "- stk_999 keep <!-- id:999 -->\n", encoding="utf-8")
+    out = daemon.sticker_admin("delete", sticker_id=sid)
+    assert out["ok"] is True
+    assert not img.exists()  # image unlinked
+    md = (pages / "stickers.md").read_text(encoding="utf-8")
+    assert f"id:{sid} " not in md and f"id:{sid} -->" not in md
+    assert "id:999" in md  # sibling line untouched
+
+
 # ── alert dispatch ─────────────────────────────────────────────────────────────
 
 def test_alert_unknown_action(env):
@@ -476,6 +603,51 @@ def test_event_clear_last_n(env):
 def test_event_clear_before_and_last_mutually_exclusive(env):
     out = daemon.event_clear(before="2026-06-15", last=1)
     assert out["ok"] is False
+
+
+def _insert_event_hashed(db, ts, source_hash):
+    conn = storage.connect(db)
+    try:
+        with conn:
+            conn.execute(
+                "INSERT INTO events (session_id, timestamp, role, content,"
+                " channel, source_hash) VALUES ('s', ?, 'user', 'x', 'cli', ?)",
+                (ts, source_hash))
+    finally:
+        conn.close()
+
+
+def _tombstone_count(db, source_hash):
+    conn = storage.connect(db)
+    try:
+        return conn.execute(
+            "SELECT COUNT(*) FROM event_tombstones WHERE source_hash=?",
+            (source_hash,)).fetchone()[0]
+    finally:
+        conn.close()
+
+
+def test_event_clear_range_writes_tombstone(env):
+    _insert_event_hashed(env, "2026-06-01T00:00:00Z", "hash-range")
+    daemon.event_clear(before="2026-06-15")
+    assert _tombstone_count(env, "hash-range") == 1
+
+
+def test_event_clear_last_writes_tombstone(env):
+    _insert_event_hashed(env, "2026-07-01T00:00:00Z", "hash-last")
+    daemon.event_clear(last=1)
+    assert _tombstone_count(env, "hash-last") == 1
+
+
+def test_event_clear_range_skips_null_source_hash(env):
+    _insert_event(env, "2026-06-01T00:00:00Z")  # no source_hash
+    daemon.event_clear(before="2026-06-15")
+    conn = storage.connect(env)
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM event_tombstones").fetchone()[0] == 0
+    finally:
+        conn.close()
 
 
 def test_event_clear_backs_up_db_first(env, tmp_path):
