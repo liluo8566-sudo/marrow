@@ -102,7 +102,7 @@ def recall(
     return rows
 
 
-@mcp.tool()
+@mcp.tool(meta={"anthropic/alwaysLoad": True})
 def tl_add(
     timerange: str,
     body: str,
