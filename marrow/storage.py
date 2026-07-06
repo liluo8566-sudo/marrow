@@ -1523,13 +1523,20 @@ def _migrate_to_v37(conn: sqlite3.Connection) -> None:
         "SELECT path, block_id, content_hash, last_seen_at, tombstone_at"
         " FROM md_index"
     ).fetchall()
+    def _rank(r: tuple) -> str:
+        # A tombstone is always at least as fresh as its own last_seen_at
+        # (md_index.py bumps both together going forward); for pre-fix rows
+        # written before that change, still prefer tombstone_at when it is
+        # the newer of the two so a newer tombstone beats an older active row.
+        return max(r[4] or "", r[3] or "")
+
     best: dict[tuple[str, str], tuple] = {}
     for r in rows:
         canon = _canon_md_path(r[0])
         key = (canon, r[1])
         prev = best.get(key)
         # Most-recently-observed row wins the merge (latest fs truth).
-        if prev is None or (r[3] or "") >= (prev[3] or ""):
+        if prev is None or _rank(r) >= _rank(prev):
             best[key] = (canon, r[1], r[2], r[3], r[4])
     if rows:
         conn.execute("DELETE FROM md_index")

@@ -157,9 +157,11 @@ class MdIndex:
     def tombstone(self, path: str, block_id: str) -> None:
         path = _canon(path)
         with self.conn:
+            now = _now_iso()
             self.conn.execute(
-                "UPDATE md_index SET tombstone_at=? WHERE path=? AND block_id=?",
-                (_now_iso(), path, block_id),
+                "UPDATE md_index SET tombstone_at=?, last_seen_at=?"
+                " WHERE path=? AND block_id=?",
+                (now, now, path, block_id),
             )
 
     def clear_tombstone(self, path: str, block_id: str) -> None:
