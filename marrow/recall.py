@@ -1051,12 +1051,18 @@ def _fts_lane_hits(
 
 
 def _bm25_normalize(ranks: list[float]) -> list[float]:
-    """Map FTS5 rank list to [0,1]: best (smallest abs) -> 1.0."""
+    """Map FTS5 rank list to [0,1]: best (largest abs) -> 1.0.
+
+    FTS5 rank is bm25(), negative; more negative (larger abs) = more relevant.
+    Linear scale abs(rank)/max_abs preserves order: best -> 1.0, weak -> ~0.
+    """
     abs_ranks = [abs(r) for r in ranks]
     if not abs_ranks:
         return []
-    min_r = min(abs_ranks)
-    return [(min_r / r) if r else 1.0 for r in abs_ranks]
+    max_r = max(abs_ranks)
+    if max_r == 0:
+        return [1.0 for _ in abs_ranks]
+    return [r / max_r for r in abs_ranks]
 
 
 def _milestone_candidates(
@@ -1318,15 +1324,15 @@ def recall_fusion(
     # ── merge candidates by event_id ──────────────────────────────────────────
     candidates: dict[int, dict] = {}
 
-    # BM25: FTS5 rank is negative; smallest abs = best.
-    # Normalize: best gets 1.0 (min_abs/rank_i), worst approaches 0.
+    # BM25: FTS5 rank is negative; largest abs = best.
+    # Normalize: best gets 1.0 (abs/max_abs), weakest approaches 0.
     fts_ranks = [abs(r["fts_rank"]) for r in fts_rows]
-    min_fts = min(fts_ranks) if fts_ranks else 1.0
+    max_fts = max(fts_ranks) if fts_ranks else 0.0
 
     for i, r in enumerate(fts_rows):
         eid = r["id"]
-        # min_fts / fts_rank[i]: best (=min) -> 1.0, worse ranks -> <1.0
-        bm25_score = min_fts / fts_ranks[i] if fts_ranks[i] else 1.0
+        # fts_rank[i] / max_fts: best (=max) -> 1.0, weaker ranks -> <1.0
+        bm25_score = fts_ranks[i] / max_fts if max_fts else 1.0
         candidates[eid] = {
             "id": eid, "session_id": r["session_id"],
             "timestamp": r["timestamp"], "role": r["role"],
