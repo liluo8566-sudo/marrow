@@ -2549,6 +2549,119 @@ def _git_revert_guard(inp: dict) -> str | None:
         return None
 
 
+# ── rm → trash auto-rewrite (PreToolUse) ─────────────────────────────────────
+# Rewrite a Bash `rm` segment to `/usr/bin/trash <paths>` when ALL its
+# positional targets resolve under a configured trash_paths prefix — the delete
+# becomes recoverable from Trash. Runs BEFORE the backup-guard classification so
+# a rewritten segment (no longer an rm) reclassifies as harmless; any remaining
+# un-rewritten rm segment still classifies normally. Mixed targets, zero
+# positionals, and wildcard tokens are left untouched (a quoted glob would not
+# expand). Fail-open: any error leaves the command unchanged.
+_RM_TRASH_BIN = "/usr/bin/trash"
+# Capturing split so the original separators survive round-trip reassembly.
+_RM_TRASH_SPLIT_RE = _re.compile("(" + _BG_SHELL_SEP_RE.pattern + ")")
+
+
+def _rm_trash_prefixes(hooks_cfg: dict) -> list[str]:
+    """Expanded, normalised trash_paths prefixes (each ends with '/')."""
+    out: list[str] = []
+    for p in hooks_cfg.get("trash_paths") or []:
+        if not isinstance(p, str) or not p.strip():
+            continue
+        e = os.path.normpath(os.path.expanduser(p.strip()))
+        out.append(e if e.endswith("/") else e + "/")
+    return out
+
+
+def _rm_trash_resolve(p: str, cwd: str) -> str:
+    """Resolve a positional token to an absolute path for the prefix test:
+    expand ~, join a relative path onto cwd. No filesystem access."""
+    pp = (p or "").strip().strip("'\"")
+    if not pp:
+        return pp
+    pp = os.path.expanduser(pp)
+    if pp.startswith("/"):
+        return os.path.normpath(pp)
+    if cwd:
+        return os.path.normpath(os.path.join(cwd, pp))
+    return pp
+
+
+def _rm_trash_under(path: str, prefixes: list[str]) -> bool:
+    if not path:
+        return False
+    for pre in prefixes:
+        if path == pre.rstrip("/") or path.startswith(pre):
+            return True
+    return False
+
+
+def _rm_trash_rewrite_segment(seg: str, cwd: str, prefixes: list[str]) -> str | None:
+    """Return the rewritten segment (surrounding whitespace preserved) if it is
+    an `rm` whose positional paths ALL fall under a trash prefix, else None."""
+    import shlex
+    core = seg.strip()
+    if not core:
+        return None
+    try:
+        toks = shlex.split(core)
+    except ValueError:
+        return None
+    if not toks or toks[0] != "rm":
+        return None
+    positional = [t for t in toks[1:] if not t.startswith("-")]
+    if not positional:
+        return None
+    # A quoted glob would not expand — leave wildcard segments for the guard.
+    if any(any(ch in t for ch in "*?[") for t in positional):
+        return None
+    resolved = [_rm_trash_resolve(t, cwd) for t in positional]
+    if not all(_rm_trash_under(r, prefixes) for r in resolved):
+        return None
+    new_core = _RM_TRASH_BIN + " " + " ".join(shlex.quote(r) for r in resolved)
+    lead = seg[: len(seg) - len(seg.lstrip())]
+    trail = seg[len(seg.rstrip()):]
+    return f"{lead}{new_core}{trail}"
+
+
+def _rm_to_trash_rewrite(inp: dict) -> tuple[dict | None, str | None]:
+    """Rewrite qualifying rm segments to /usr/bin/trash. Mutates
+    inp['tool_input']['command'] in place so downstream guards reclassify the
+    rewritten command. Returns (updated_input, context_line) or (None, None).
+    Config-gated via [hooks].rm_to_trash. Fail-open."""
+    try:
+        if not isinstance(inp, dict) or inp.get("tool_name") != "Bash":
+            return None, None
+        hooks_cfg = config.load().get("hooks", {}) or {}
+        if not hooks_cfg.get("rm_to_trash", True):
+            return None, None
+        prefixes = _rm_trash_prefixes(hooks_cfg)
+        if not prefixes:
+            return None, None
+        ti = inp.get("tool_input") or {}
+        cmd = ti.get("command", "") or ""
+        if not isinstance(cmd, str) or "rm" not in cmd:
+            return None, None
+        cwd = inp.get("cwd") or ""
+        parts = _RM_TRASH_SPLIT_RE.split(cmd)
+        rewritten: list[str] = []
+        for i in range(0, len(parts), 2):
+            new_seg = _rm_trash_rewrite_segment(parts[i], cwd, prefixes)
+            if new_seg is not None:
+                parts[i] = new_seg
+                rewritten.append(new_seg.strip())
+        if not rewritten:
+            return None, None
+        new_cmd = "".join(parts)
+        ti["command"] = new_cmd
+        inp["tool_input"] = ti
+        ctx = ("rm auto-rewritten to trash (recoverable from Trash): "
+               + "; ".join(rewritten))
+        return {"command": new_cmd}, ctx
+    except Exception:  # noqa: BLE001 — fail-open, never break the hook
+        return None, None
+
+
 def agent_guard() -> int:
     """PreToolUse:Agent burst protection — deny recursion-prone subagents.
 
@@ -2588,6 +2701,30 @@ def pretool_use() -> int:
         tool = inp.get("tool_name", "")
         ti = inp.get("tool_input", {})
 
+        # rm → trash auto-rewrite. Runs BEFORE every guard so classification
+        # sees the rewritten (harmless) command; the updatedInput + context are
+        # merged into whatever hookSpecificOutput the guards below emit. Rewrite
+        # wins for the rewritten segments; decisions are computed on the
+        # rewritten command (a remaining un-rewritten rm still denies normally).
+        rewrite_updated: dict | None = None
+        rewrite_ctx: str | None = None
+        try:
+            rewrite_updated, rewrite_ctx = _rm_to_trash_rewrite(inp)
+        except Exception:  # noqa: BLE001 — fail-open, never blocks the hook
+            rewrite_updated, rewrite_ctx = None, None
+        ti = inp.get("tool_input", {})  # re-read: rewrite may have replaced command
+
+        def _emit_hso(fields: dict) -> None:
+            hso = {"hookEventName": "PreToolUse", **fields}
+            if rewrite_updated is not None:
+                hso["updatedInput"] = rewrite_updated
+            if rewrite_ctx:
+                ex = hso.get("additionalContext")
+                hso["additionalContext"] = (
+                    f"{rewrite_ctx}\n\n{ex}" if ex else rewrite_ctx
+                )
+            print(json.dumps({"hookSpecificOutput": hso}))
+
         # Force-push hard deny — runs first, no escape hatch, no worktree
         # exemption. Rewriting remote history can permanently destroy commits.
         force_push: str | None = None
@@ -2596,13 +2733,10 @@ def pretool_use() -> int:
         except Exception:  # noqa: BLE001 — fail-open, never blocks the hook
             force_push = None
         if force_push:
-            print(json.dumps({
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": force_push,
-                }
-            }))
+            _emit_hso({
+                "permissionDecision": "deny",
+                "permissionDecisionReason": force_push,
+            })
             return 0
 
         # Git revert-type authorship gate — held via "ask" (user confirms
@@ -2620,13 +2754,10 @@ def pretool_use() -> int:
         except Exception:  # noqa: BLE001 — fail-open, never blocks the hook
             git_revert = None
         if git_revert:
-            print(json.dumps({
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "ask",
-                    "permissionDecisionReason": git_revert,
-                }
-            }))
+            _emit_hso({
+                "permissionDecision": "ask",
+                "permissionDecisionReason": git_revert,
+            })
             return 0
 
         # Deny tier — block dangerous ops (recursive delete / db destruction
@@ -2643,13 +2774,10 @@ def pretool_use() -> int:
             except Exception:  # noqa: BLE001 — fail-open, never blocks the hook
                 deny_reason = None
         if deny_reason:
-            print(json.dumps({
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": deny_reason,
-                }
-            }))
+            _emit_hso({
+                "permissionDecision": "deny",
+                "permissionDecisionReason": deny_reason,
+            })
             return 0
 
         if tool == "mcp__marrow__sticker" and str(
@@ -2674,12 +2802,7 @@ def pretool_use() -> int:
 
         def _emit(text: str) -> None:
             payload = f"{guard_line}\n\n{text}" if guard_line else text
-            print(json.dumps({
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "additionalContext": payload,
-                }
-            }))
+            _emit_hso({"additionalContext": payload})
 
         # Determine mode
         is_placement = False
@@ -2734,15 +2857,13 @@ def pretool_use() -> int:
 
         root = _atlas_mod._root_of(str(target), roots)
         if root is None:
-            # No atlas guidance for this target, but the backup guard must
-            # still surface — it's orthogonal to placement/atlas coverage.
-            if guard_line:
-                print(json.dumps({
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "additionalContext": guard_line,
-                    }
-                }))
+            # No atlas guidance for this target, but the backup guard reminder
+            # (and any rm→trash rewrite) must still surface — orthogonal to
+            # placement/atlas coverage.
+            if guard_line is not None:
+                _emit_hso({"additionalContext": guard_line})
+            elif rewrite_updated is not None:
+                _emit_hso({})
             return 0
 
         # Build ancestor chain: root -> parent of target (inclusive)

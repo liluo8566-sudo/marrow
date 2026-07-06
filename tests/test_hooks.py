@@ -850,7 +850,7 @@ def test_backup_guard_recursive_rm_with_tar_backup_silent(env, monkeypatch, caps
     # Escape hatch: a backup action in the SAME command → fully silent allow,
     # no deny AND no reminder.
     rc = _pretool(monkeypatch, "Bash",
-                  {"command": "tar -czf /tmp/bak.tgz ~/Documents/x && rm -rf ~/Documents/x"})
+                  {"command": "tar -czf /tmp/bak.tgz ~/projects/x && rm -rf ~/projects/x"})
     assert rc == 0
     out = _out(capsys)["hookSpecificOutput"]
     assert "permissionDecision" not in out
@@ -860,7 +860,7 @@ def test_backup_guard_recursive_rm_with_tar_backup_silent(env, monkeypatch, caps
 
 def test_backup_guard_recursive_rm_with_cp_backup_silent(env, monkeypatch, capsys):
     rc = _pretool(monkeypatch, "Bash",
-                  {"command": "cp -r ~/Documents/x /tmp/bak && rm -rf ~/Documents/x"})
+                  {"command": "cp -r ~/projects/x /tmp/bak && rm -rf ~/projects/x"})
     assert rc == 0
     out = _hook_out(capsys)
     assert "permissionDecision" not in out
@@ -871,7 +871,7 @@ def test_backup_guard_recursive_rm_backup_after_still_denies(env, monkeypatch, c
     """Codex P2 fix: the escape hatch is segment-ORDERED. A backup keyword
     landing AFTER the destructive segment must not launder it — deny stands."""
     rc = _pretool(monkeypatch, "Bash",
-                  {"command": "rm -rf ~/Documents/x && tar -czf /tmp/bak.tgz ~/Documents/x"})
+                  {"command": "rm -rf ~/projects/x && tar -czf /tmp/bak.tgz ~/projects/x"})
     assert rc == 0
     out = _out(capsys)["hookSpecificOutput"]
     assert out["permissionDecision"] == "deny"
@@ -885,7 +885,7 @@ def test_backup_guard_recursive_rm_unrelated_cp_before_allows_order_only(
     false-positive explosion vs minimal-interception). A `cp` of an UNRELATED
     path before the destructive segment still satisfies the escape hatch."""
     rc = _pretool(monkeypatch, "Bash",
-                  {"command": "cp ~/unrelated /tmp/whatever && rm -rf ~/Documents/x"})
+                  {"command": "cp ~/unrelated /tmp/whatever && rm -rf ~/projects/x"})
     assert rc == 0
     out = _hook_out(capsys)
     assert "permissionDecision" not in out
@@ -897,7 +897,7 @@ def test_backup_guard_rm_single_file_reminds_every_call(env, monkeypatch, capsys
     # Non-recursive rm on a non-whitelisted path → reminder, every call (no
     # once-per-session dedup).
     for _ in range(2):
-        rc = _pretool(monkeypatch, "Bash", {"command": "rm ~/Documents/note.txt"})
+        rc = _pretool(monkeypatch, "Bash", {"command": "rm ~/projects/note.txt"})
         assert rc == 0
         out = _out(capsys)["hookSpecificOutput"]
         assert "permissionDecision" not in out
@@ -941,7 +941,7 @@ def test_backup_guard_mcp_action_delete_reminds(env, monkeypatch, capsys):
 # -- Deny: recursive rm / db destruction, stateless ---------------------------
 
 def test_backup_guard_recursive_rm_no_backup_denies(env, monkeypatch, capsys):
-    rc = _pretool(monkeypatch, "Bash", {"command": "rm -rf ~/Documents/x"})
+    rc = _pretool(monkeypatch, "Bash", {"command": "rm -rf ~/projects/x"})
     assert rc == 0
     out = _out(capsys)["hookSpecificOutput"]
     assert out["permissionDecision"] == "deny"
@@ -971,8 +971,9 @@ def test_backup_guard_relative_rm_rf_cwd_in_scratchpad_silent(env, monkeypatch, 
 
 
 def test_backup_guard_relative_rm_rf_cwd_outside_whitelist_denies(env, monkeypatch, capsys):
+    # cwd outside both whitelist AND trash zones → relative rm -rf still denies.
     rc = _pretool(monkeypatch, "Bash", {"command": "rm -rf ask-demo"},
-                  cwd="/Users/Gabrielle/Documents")
+                  cwd="/Users/Gabrielle/projects")
     assert rc == 0
     out = _out(capsys)["hookSpecificOutput"]
     assert out["permissionDecision"] == "deny"
@@ -1066,7 +1067,7 @@ def test_backup_guard_intercept_off_downgrades_deny_to_reminder(env, monkeypatch
     base_cfg = config.load()
     base_cfg.setdefault("hooks", {})["backup_guard_intercept"] = False
     monkeypatch.setattr(config, "load", lambda: base_cfg)
-    rc = _pretool(monkeypatch, "Bash", {"command": "rm -rf ~/Documents/x"})
+    rc = _pretool(monkeypatch, "Bash", {"command": "rm -rf ~/projects/x"})
     assert rc == 0
     out = _out(capsys)["hookSpecificOutput"]
     assert "permissionDecision" not in out
@@ -1080,7 +1081,7 @@ def test_backup_guard_disabled_via_config(env, monkeypatch, capsys):
     base_cfg.setdefault("hooks", {})["backup_guard"] = False
     monkeypatch.setattr(config, "load", lambda: base_cfg)
 
-    rc = _pretool(monkeypatch, "Bash", {"command": "rm -rf ~/Documents/x"})
+    rc = _pretool(monkeypatch, "Bash", {"command": "rm -rf ~/projects/x"})
     assert rc == 0
     out = _out(capsys)["hookSpecificOutput"]
     assert "permissionDecision" not in out
@@ -1092,6 +1093,111 @@ def test_backup_guard_fail_open_malformed_input(env, monkeypatch, capsys):
                          "tool_input": "not-a-dict"})
     rc = hooks.main(["pretool_use"])
     assert rc == 0
+
+
+# ── rm → trash auto-rewrite ──────────────────────────────────────────────────
+# Bash `rm` whose positional targets ALL fall under a trash_paths prefix is
+# rewritten to `/usr/bin/trash <paths>` (recoverable) BEFORE the backup guard.
+# Mixed / out-of-zone / wildcard targets fall through to the guard untouched.
+
+_HOME = str(_Path.home())
+_ICLOUD = _HOME + "/Library/Mobile Documents/com~apple~CloudDocs/Study/x.pdf"
+
+
+def test_rm_to_trash_icloud_absolute(env, monkeypatch, capsys):
+    rc = _pretool(monkeypatch, "Bash",
+                  {"command": 'rm "~/Library/Mobile Documents/com~apple~CloudDocs/Study/x.pdf"'})
+    assert rc == 0
+    out = _out(capsys)["hookSpecificOutput"]
+    assert out["updatedInput"]["command"].startswith("/usr/bin/trash ")
+    assert _ICLOUD in out["updatedInput"]["command"]
+    assert "permissionDecision" not in out
+    assert "rm auto-rewritten to trash" in out["additionalContext"]
+    assert _BG_MSG not in out["additionalContext"]
+
+
+def test_rm_to_trash_icloud_cwd_relative(env, monkeypatch, capsys):
+    cwd = _HOME + "/Library/Mobile Documents/com~apple~CloudDocs/Study"
+    rc = _pretool(monkeypatch, "Bash", {"command": "rm x.pdf"}, cwd=cwd)
+    assert rc == 0
+    out = _out(capsys)["hookSpecificOutput"]
+    assert out["updatedInput"]["command"].startswith("/usr/bin/trash ")
+    assert _ICLOUD in out["updatedInput"]["command"]
+    assert "permissionDecision" not in out
+
+
+def test_rm_to_trash_rf_ny_flags_dropped(env, monkeypatch, capsys):
+    rc = _pretool(monkeypatch, "Bash", {"command": "rm -rf ~/Desktop/NY/db-pages/old"})
+    assert rc == 0
+    out = _out(capsys)["hookSpecificOutput"]
+    cmd = out["updatedInput"]["command"]
+    assert cmd.startswith("/usr/bin/trash ")
+    assert "-rf" not in cmd and "-r" not in cmd
+    assert (_HOME + "/Desktop/NY/db-pages/old") in cmd
+    assert "permissionDecision" not in out
+    assert _BG_MSG not in out.get("additionalContext", "")
+
+
+def test_rm_to_trash_non_trash_repo_not_rewritten_reminds(env, monkeypatch, capsys):
+    # Path outside trash_paths (git repo) → NOT rewritten; guard reminder fires.
+    rc = _pretool(monkeypatch, "Bash", {"command": "rm ~/projects/note.txt"})
+    assert rc == 0
+    out = _out(capsys)["hookSpecificOutput"]
+    assert "updatedInput" not in out
+    assert _BG_MSG in out["additionalContext"]
+
+
+def test_rm_to_trash_non_trash_recursive_still_denies(env, monkeypatch, capsys):
+    rc = _pretool(monkeypatch, "Bash", {"command": "rm -rf ~/projects/x"})
+    assert rc == 0
+    out = _out(capsys)["hookSpecificOutput"]
+    assert "updatedInput" not in out
+    assert out["permissionDecision"] == "deny"
+
+
+def test_rm_to_trash_mixed_targets_not_rewritten(env, monkeypatch, capsys):
+    rc = _pretool(monkeypatch, "Bash",
+                  {"command": "rm ~/Documents/a.txt ~/projects/b.txt"})
+    assert rc == 0
+    out = _out(capsys)["hookSpecificOutput"]
+    assert "updatedInput" not in out
+    assert _BG_MSG in out["additionalContext"]
+
+
+def test_rm_to_trash_chained_only_rm_segment_rewritten(env, monkeypatch, capsys):
+    import shlex
+    rc = _pretool(monkeypatch, "Bash",
+                  {"command": "cd X && rm ~/Downloads/old.zip && echo done"})
+    assert rc == 0
+    out = _out(capsys)["hookSpecificOutput"]
+    expected = (
+        "cd X && /usr/bin/trash "
+        + shlex.quote(_HOME + "/Downloads/old.zip")
+        + " && echo done"
+    )
+    assert out["updatedInput"]["command"] == expected
+    assert "permissionDecision" not in out
+
+
+def test_rm_to_trash_spaces_quoted_roundtrip(env, monkeypatch, capsys):
+    import shlex
+    rc = _pretool(monkeypatch, "Bash",
+                  {"command": 'rm "~/Library/Mobile Documents/com~apple~CloudDocs/Study/x.pdf"'})
+    assert rc == 0
+    out = _out(capsys)["hookSpecificOutput"]
+    toks = shlex.split(out["updatedInput"]["command"])
+    assert toks[0] == "/usr/bin/trash"
+    assert toks[1:] == [_ICLOUD]
+
+
+def test_rm_to_trash_disabled_via_config(env, monkeypatch, capsys):
+    base_cfg = config.load()
+    base_cfg.setdefault("hooks", {})["rm_to_trash"] = False
+    monkeypatch.setattr(config, "load", lambda: base_cfg)
+    rc = _pretool(monkeypatch, "Bash", {"command": "rm ~/Downloads/old.zip"})
+    assert rc == 0
+    out = _out(capsys)["hookSpecificOutput"]
+    assert "updatedInput" not in out
 
 
 # -- git force-push guard — hard deny -----------------------------------------
@@ -1317,7 +1423,7 @@ def test_git_revert_worktree_substring_compound_bypass_still_denies(
     # non-whitelisted path ride through — the "" exempt result only skips the
     # ASK, never the backup deny.
     cmd = ("git checkout -- /Users/x/.claude/worktrees/agent-abc/f "
-           "&& rm -rf ~/Documents/y")
+           "&& rm -rf ~/projects/y")
     rc = _pretool(monkeypatch, "Bash", {"command": cmd})
     assert rc == 0
     out = _out(capsys)["hookSpecificOutput"]

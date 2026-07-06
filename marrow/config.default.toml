@@ -270,6 +270,20 @@ backup_guard_intercept = true
 backup_guard_message = "Warning: back up code/db OR archive docs before anything destructive — delete, bulk modify, import/export.\n- Bypass only if the user explicitly said to delete/modify THIS now.\n- If unsure, stop and ask — never assume the user doesn't need/want it."
 backup_guard_deny_message = "BLOCKED — bulk deletion with no backup. This target is not in git/tmp: once deleted it is gone. Chain a backup into the SAME command and rerun, e.g. `tar -czf /tmp/bak.tgz <target> && rm -rf <target>` (db: `cp` first). Even if the user ordered the deletion, back up anyway — it costs one command. Do NOT work around this guard with alternative delete commands."
 
+# rm → trash auto-rewrite (PreToolUse). When a Bash `rm` segment's positional
+# paths ALL fall under a trash_paths prefix, the segment is rewritten to
+# `/usr/bin/trash <paths>` (rm flags dropped — recoverable from Trash) BEFORE
+# the backup guard runs. Mixed / wildcard / out-of-zone targets are left
+# untouched and fall through to the guard tiers. Paths expand ~ at load. Set
+# rm_to_trash=false to disable.
+rm_to_trash = true
+trash_paths = [
+    "~/Library/Mobile Documents/",
+    "~/Desktop/NY/",
+    "~/Documents/",
+    "~/Downloads/",
+]
+
 # Git force-push guard — hard deny (PreToolUse "deny"), no escape hatch, no
 # worktree exemption. Tokenized per shell segment so a flag inside a quoted
 # commit message cannot false-positive. Set git_force_push_guard=false to
