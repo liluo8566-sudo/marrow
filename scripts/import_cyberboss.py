@@ -37,6 +37,9 @@ DEFAULT_DB = "/Users/born_blazing_bright/.config/marrow/marrow.db"
 _NOISE_PREFIXES = (
     "WECHAT SESSION INSTRUCTIONS",
     "Caveat:",
+    "SYSTEM ACTION MODE",
+    "<local-command-",
+    "<bash-",
 )
 _NOISE_SUBSTRINGS = (
     "<task-notification>",
