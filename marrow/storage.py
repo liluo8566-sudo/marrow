@@ -13,7 +13,7 @@ import sqlite_vec
 
 from . import config
 
-SCHEMA_VERSION = 33
+SCHEMA_VERSION = 32
 
 # Phase 1 first-class tables + Phase 2 affect/entities (DECISIONS Phase 2).
 # The retired emotions/people/preferences/dir placeholders stay absent.
@@ -557,7 +557,6 @@ def init_db(path: str | None = None) -> sqlite3.Connection:
         _migrate_to_v30(conn)
         _migrate_to_v31(conn)
         _migrate_to_v32(conn)
-        _migrate_to_v33(conn)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     return conn
 
@@ -1257,28 +1256,6 @@ CREATE TABLE IF NOT EXISTS ct_first_tick (
 );
     """)
     conn.execute("PRAGMA user_version=32")
-
-
-def _migrate_to_v33(conn: sqlite3.Connection) -> None:
-    """v33: wishes table (MCP tool surface rebuild, 07-06) — backs the `wish`
-    MCP tool's list/done/delete actions with an id + status, alongside the
-    existing append-only wishlist.md (writer = wish MCP tool; md stays the
-    human-readable, hand-edit-sacred surface; this table is the queryable
-    mirror cortex/sessions read/mutate by id)."""
-    v = conn.execute("PRAGMA user_version").fetchone()[0]
-    if v >= 33:
-        return
-    conn.executescript("""
-CREATE TABLE IF NOT EXISTS wishes (
-  id INTEGER PRIMARY KEY,
-  text TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'open',
-  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
-  fulfilled_at TEXT,
-  note TEXT
-);
-    """)
-    conn.execute("PRAGMA user_version=33")
 
 
 def get_latest_watermark(conn, sid):

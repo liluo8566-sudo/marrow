@@ -1,10 +1,9 @@
 """Marrow MCP server (stdio). Thin protocol shell over repo.py.
 
-12-tool surface (07-06 rebuild): recall / atlas_lookup / event_embed +
-9 action-dispatch tools (tl / sticker / sticker_admin / goal / wish /
-first_tick / dim / alert / event_clear). The session-start handoff is
-rendered by the SessionStart hook. LLMClient wired so provider failures
-land in alerts.
+12-tool surface (07-06 rebuild): recall / atlas_lookup / event_embed / wish +
+8 action-dispatch tools (tl / sticker / sticker_admin / goal / first_tick /
+dim / alert / event_clear). The session-start handoff is rendered by the
+SessionStart hook. LLMClient wired so provider failures land in alerts.
 """
 from __future__ import annotations
 
@@ -574,10 +573,12 @@ _WISHLIST_HEADER = (
     "> Owed treats, wants, self-rewards. Append-only — hand edits are sacred.\n\n"
 )
 
-_WISH_ACTIONS = {"add", "list", "done", "delete"}
 
-
-def _wish_add(text: str) -> dict:
+@mcp.tool(meta={"anthropic/alwaysLoad": True})
+def wish(text: str) -> dict:
+    """Append her want / owed treat / self-reward verbatim to the wishlist md
+    the moment she names one. Returns the md path — to change or remove
+    entries, edit that file directly. Cortex reads the md."""
     import fcntl
     from datetime import datetime
 
@@ -598,81 +599,7 @@ def _wish_add(text: str) -> dict:
     finally:
         fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
         lf.close()
-    conn = storage.connect(_DB)
-    try:
-        with conn:
-            cur = conn.execute(
-                "INSERT INTO wishes (text, created_at)"
-                " VALUES (?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))",
-                (text,),
-            )
-        wish_id = cur.lastrowid
-    finally:
-        conn.close()
-    return {"ok": True, "id": wish_id, "path": str(path), "line": line.strip()}
-
-
-def _wish_list() -> list[dict]:
-    conn = storage.connect(_DB)
-    try:
-        rows = conn.execute(
-            "SELECT id, text, status, created_at, fulfilled_at, note FROM wishes"
-            " WHERE status != 'done' ORDER BY created_at"
-        ).fetchall()
-        return [dict(r) for r in rows]
-    finally:
-        conn.close()
-
-
-def _wish_done(wish_id: int, note: str | None) -> dict:
-    conn = storage.connect(_DB)
-    try:
-        with conn:
-            cur = conn.execute(
-                "UPDATE wishes SET status='done',"
-                " fulfilled_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'),"
-                " note=COALESCE(?, note) WHERE id=?",
-                (note, wish_id),
-            )
-        if cur.rowcount == 0:
-            return {"ok": False, "error": f"wish id={wish_id} not found"}
-        return {"ok": True, "id": wish_id, "status": "done"}
-    finally:
-        conn.close()
-
-
-def _wish_delete(wish_id: int) -> dict:
-    conn = storage.connect(_DB)
-    try:
-        with conn:
-            cur = conn.execute("DELETE FROM wishes WHERE id=?", (wish_id,))
-        return {"ok": cur.rowcount > 0, "id": wish_id, "deleted": cur.rowcount > 0}
-    finally:
-        conn.close()
-
-
-@mcp.tool(meta={"anthropic/alwaysLoad": True})
-def wish(
-    action: str,
-    text: str | None = None,
-    wish_id: int | None = None,
-    note: str | None = None,
-) -> dict | list[dict]:
-    """Her wants / owed treats / self-rewards. action='add' verbatim the moment
-    she names one — execution timing is cortex's call, just record; 'list'
-    open wishes; 'done' marks one fulfilled (by id, optional note); 'delete'
-    removes a wrong entry. Her hand edits in the md are never rewritten."""
-    if action not in _WISH_ACTIONS:
-        return {"ok": False, "error": f"unknown action {action!r}, expected one of {sorted(_WISH_ACTIONS)}"}
-    if action == "add":
-        return _wish_add(text or "")
-    if action == "list":
-        return _wish_list()
-    if wish_id is None:
-        return {"ok": False, "error": f"{action} requires wish_id"}
-    if action == "done":
-        return _wish_done(wish_id, note)
-    return _wish_delete(wish_id)
+    return {"ok": True, "path": str(path), "line": line.strip()}
 
 
 # ── first_tick ───────────────────────────────────────────────────────────────
