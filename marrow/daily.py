@@ -18,6 +18,7 @@ date. Writes diary row + candidate inserts in one daily run.
 from __future__ import annotations
 
 import datetime as _dt
+import sqlite3
 import sys
 
 from pathlib import Path
@@ -163,6 +164,31 @@ def _extract_candidates(conn, llm: LLMClient, date: str,
     return counts
 
 
+def _delete_diary_row(conn, date: str) -> None:
+    """Delete the diary row for `date` and its diary_vec/diary_vec_meta rows
+    in the same transaction as the caller.
+
+    diary.date is a TEXT PK; SQLite assigns an implicit INTEGER rowid, and
+    DELETE+INSERT frees it for reuse by the very next insert. If the old
+    rowid's diary_vec_meta row survives, the rewritten diary silently
+    inherits it as "already embedded" and never re-embeds — same disease as
+    the events_vec_meta poisoning fixed in a48de18. Vec deletes are
+    best-effort: tables may not exist in a vec-less test/dev DB.
+    """
+    row = conn.execute(
+        "SELECT rowid FROM diary WHERE date = ?", (date,)
+    ).fetchone()
+    conn.execute("DELETE FROM diary WHERE date = ?", (date,))
+    if row is None:
+        return
+    rowid = row[0]
+    try:
+        conn.execute("DELETE FROM diary_vec WHERE rowid = ?", (rowid,))
+        conn.execute("DELETE FROM diary_vec_meta WHERE rowid = ?", (rowid,))
+    except sqlite3.OperationalError:
+        pass
+
+
 def run_day(conn, date: str, llm: LLMClient, *, db: str | None = None,
             force: bool = False) -> bool:
     existed = daily_catchup.has_diary(conn, date)
@@ -175,7 +201,7 @@ def run_day(conn, date: str, llm: LLMClient, *, db: str | None = None,
 
     if not digests and not affect_episodes:
         with conn:
-            conn.execute("DELETE FROM diary WHERE date = ?", (date,))
+            _delete_diary_row(conn, date)
             conn.execute(
                 "INSERT INTO diary (date, content, session_ids) "
                 "VALUES (?, ?, ?)", (date, "—", ""))
@@ -217,7 +243,7 @@ def run_day(conn, date: str, llm: LLMClient, *, db: str | None = None,
     diary_text = diary_text or narrative  # fallback: keep full text if parse yields empty
 
     with conn:
-        conn.execute("DELETE FROM diary WHERE date = ?", (date,))
+        _delete_diary_row(conn, date)
         conn.execute(
             "INSERT INTO diary (date, content, tone, overview, session_ids, updated_at) "
             "VALUES (?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))",
