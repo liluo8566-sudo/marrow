@@ -865,6 +865,30 @@ def test_backup_guard_recursive_rm_with_cp_backup_silent(env, monkeypatch, capsy
     assert _BG_MSG not in out.get("additionalContext", "")
 
 
+def test_backup_guard_recursive_rm_backup_after_still_denies(env, monkeypatch, capsys):
+    """Codex P2 fix: the escape hatch is segment-ORDERED. A backup keyword
+    landing AFTER the destructive segment must not launder it — deny stands."""
+    rc = _pretool(monkeypatch, "Bash",
+                  {"command": "rm -rf ~/Documents/x && tar -czf /tmp/bak.tgz ~/Documents/x"})
+    assert rc == 0
+    out = _out(capsys)["hookSpecificOutput"]
+    assert out["permissionDecision"] == "deny"
+    assert _BG_DENY_MSG in out["permissionDecisionReason"]
+
+
+def test_backup_guard_recursive_rm_unrelated_cp_before_allows_order_only(
+    env, monkeypatch, capsys
+):
+    """Position-only check, no backup-target matching (explicitly rejected —
+    false-positive explosion vs minimal-interception). A `cp` of an UNRELATED
+    path before the destructive segment still satisfies the escape hatch."""
+    rc = _pretool(monkeypatch, "Bash",
+                  {"command": "cp ~/unrelated /tmp/whatever && rm -rf ~/Documents/x"})
+    assert rc == 0
+    out = _hook_out(capsys)
+    assert "permissionDecision" not in out
+
+
 # -- Reminder: fires EVERY call, no dedup -------------------------------------
 
 def test_backup_guard_rm_single_file_reminds_every_call(env, monkeypatch, capsys):
@@ -963,6 +987,16 @@ def test_backup_guard_sqlite_delete_no_where_with_backup_allows(env, monkeypatch
     out = _hook_out(capsys)
     assert "permissionDecision" not in out
     assert _BG_MSG not in out.get("additionalContext", "")
+
+
+def test_backup_guard_sqlite_delete_backup_after_still_denies(env, monkeypatch, capsys):
+    """Same ordering fix applied to db-destruction: cp AFTER the sqlite3
+    destructive segment must not launder it."""
+    rc = _pretool(monkeypatch, "Bash",
+                  {"command": 'sqlite3 t.db "DELETE FROM events" && cp t.db /tmp/t.db.bak'})
+    assert rc == 0
+    out = _out(capsys)["hookSpecificOutput"]
+    assert out["permissionDecision"] == "deny"
 
 
 def test_backup_guard_drop_table_denies(env, monkeypatch, capsys):

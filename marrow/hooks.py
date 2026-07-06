@@ -2142,14 +2142,21 @@ def _bg_is_whitelisted_path(p: str) -> bool:
     return False
 
 
+def _bg_raw_segments(cmd: str) -> list[str]:
+    """Ordered raw (untokenized) shell segments, split on &&/||/;/|/&. Used
+    for segment-ordered backup/destructive checks — position, not just
+    presence, decides the escape hatch (a backup keyword AFTER the
+    destructive segment must not launder it)."""
+    return [s.strip() for s in _BG_SHELL_SEP_RE.split(cmd or "") if s.strip()]
+
+
 def _bg_bash_segments(cmd: str) -> list[list[str]]:
     """Best-effort shell split on &&/||/;/|/& then shlex-tokenize each
     segment. Not a full shell parser (mirrors the placement guard's
     trim-to-first-segment approach)."""
     import shlex
-    segs = [s.strip() for s in _BG_SHELL_SEP_RE.split(cmd or "") if s.strip()]
     out: list[list[str]] = []
-    for seg in segs:
+    for seg in _bg_raw_segments(cmd):
         try:
             out.append(shlex.split(seg))
         except ValueError:
@@ -2226,21 +2233,50 @@ def _bg_has_backup(cmd: str) -> bool:
 
 def _bg_bash_category(cmd: str) -> str | None:
     """'deny', 'remind', or None for a Bash command. Stateless and
-    intercept-agnostic. A same-command backup action silences everything."""
+    intercept-agnostic.
+
+    The escape hatch is segment-ORDERED, not whole-string: a backup action
+    (cp/rsync/tar/git commit/git stash push/.backup) only satisfies it when it
+    appears in an EARLIER segment than the first destructive segment
+    (recursive rm on a non-whitelisted path, rm of a *.db, or sqlite3 *.db
+    destruction). A backup keyword landing AFTER the destructive segment (or
+    absent) does not launder it — deny stands. No backup-target/path matching
+    is done (position-only check — same segment order both `cp a /tmp && rm
+    -rf x` and `cp <target> /tmp && rm -rf <target>` are treated identically)."""
     if not cmd:
         return None
-    if _bg_has_backup(cmd):
-        return None  # escape hatch — fully silent
-    if _bg_sqlite_db_destruction(cmd):
+    import shlex
+    segments = _bg_raw_segments(cmd)
+    if not segments:
+        return None
+
+    backup_idx: int | None = None
+    destructive_idx: int | None = None
+    seg_tokens: list[list[str]] = []
+    for i, seg in enumerate(segments):
+        try:
+            toks = shlex.split(seg)
+        except ValueError:
+            toks = seg.split()
+        seg_tokens.append(toks)
+        if backup_idx is None and _bg_has_backup(seg):
+            backup_idx = i
+        if destructive_idx is None and (
+            _bg_rm_segment(toks) == "deny" or _bg_sqlite_db_destruction(seg)
+        ):
+            destructive_idx = i
+
+    if destructive_idx is not None:
+        if backup_idx is not None and backup_idx < destructive_idx:
+            return None  # backup landed BEFORE the destructive segment — silent
         return "deny"
+
+    # No deny-tier match anywhere — compute the reminder tier as before.
     remind = False
-    for tokens in _bg_bash_segments(cmd):
-        k = _bg_rm_segment(tokens)
-        if k == "deny":
-            return "deny"
-        if k == "remind":
+    for toks in seg_tokens:
+        if _bg_rm_segment(toks) == "remind":
             remind = True
-        if _bg_bulk_modify_segment(tokens):
+        if _bg_bulk_modify_segment(toks):
             remind = True
     # DELETE FROM without WHERE on a line that is NOT a sqlite .db destruction
     # (that path already returned "deny" above).
