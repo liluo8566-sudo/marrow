@@ -102,6 +102,40 @@ def strip_wx_boilerplate(text: str) -> str:
     return text.strip()
 
 
+# ── whole-row harness junk (dropped, never archived) ─────────────────────────
+# Four CC-harness classes that arrive as an entire event row of junk (never
+# mixed with real dialogue). Row-level drop, not substring strip: real
+# dialogue that *quotes* these tags mid-sentence (e.g. a discussion of the
+# task-notification leak itself) must survive untouched.
+_TASK_NOTIFICATION_PREFIX = "<task-notification>"
+_INTERRUPTED_MARKERS = frozenset((
+    "[Request interrupted by user]",
+    "[Request interrupted by user for tool use]",
+))
+_STICKER_TAG_ONLY_RE = re.compile(
+    r'^(?:\s*<(?:image|gif)\s+path="[^"]*"\s*/>\s*)+$'
+)
+
+
+def _is_harness_row(text: str) -> bool:
+    """True iff *text* (already stripped) is entirely CC-harness junk.
+
+    Checked whole-row, not by substring: a row is only dropped when it IS the
+    junk, never when it merely contains/quotes it alongside real text.
+      1. Starts with <task-notification> — CC task-receipt block (whole row).
+      2. Exactly "[Request interrupted by user]" or the "for tool use" variant.
+      3. Consists only of one or more <image path="..."/> / <gif path="..."/>
+         tags and whitespace — bare sticker-send bubbles.
+    """
+    if text.startswith(_TASK_NOTIFICATION_PREFIX):
+        return True
+    if text in _INTERRUPTED_MARKERS:
+        return True
+    if _STICKER_TAG_ONLY_RE.match(text):
+        return True
+    return False
+
+
 def _raw_content_str(content) -> str:
     if isinstance(content, str):
         return content
@@ -226,6 +260,8 @@ def rows_from_records(records: list[dict], *, channel: str = "cli",
         msg = o.get("message") or {}
         text = _text(msg.get("content"))
         if not text:
+            continue
+        if _is_harness_row(text):
             continue
         rows.append({
             "session_id": o.get("sessionId") or o.get("session_id") or "",
