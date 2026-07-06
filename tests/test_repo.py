@@ -519,6 +519,45 @@ def test_daemon_recall_returns_list(tmp_path, monkeypatch):
     assert isinstance(result, list)
 
 
+def test_daemon_recall_context_rows_strip_bridge_markers(tmp_path, monkeypatch):
+    """`_context` rows (fetch_event_context) are raw DB content — unlike main
+    rows, which recall_with_config -> recall_fusion already shapes via its own
+    row passthrough (recall.py row passthrough, ~line 1817-1818). daemon.recall
+    must mirror the same wx time-prefix + bare image/file tag strip onto
+    `_context` content so a context turn never leaks a raw bridge marker."""
+    p = str(tmp_path / "d.db")
+    storage.init_db(p).close()
+    monkeypatch.setattr(daemon, "_DB", p)
+    sid = "s1"
+    conn = storage.connect(p)
+    with conn:
+        conn.execute(
+            "INSERT INTO events (id, session_id, timestamp, role, content) "
+            "VALUES (1, ?, '2026-06-23T04:49:00Z', 'user', ?)",
+            (sid, "[time: 2026-06-23 Tue 14:49 | gap: 0m]\n啥\nhow comes"),
+        )
+        conn.execute(
+            "INSERT INTO events (id, session_id, timestamp, role, content) "
+            "VALUES (2, ?, '2026-06-23T04:50:00Z', 'user', 'target hit row')",
+            (sid,),
+        )
+    conn.close()
+    # Bypass full fusion scoring (not the seam under test here) — return a
+    # controlled main-row hit so fetch_event_context runs for real against the
+    # DB above and we can assert on its shaped output.
+    fake_row = {"id": 2, "session_id": sid, "kind": "event",
+                "content": "target hit row", "timestamp": "2026-06-23T04:50:00Z"}
+    monkeypatch.setattr(daemon._recall_mod, "recall_with_config",
+                        lambda *a, **k: [dict(fake_row)])
+    result = daemon.recall("anything", context=True)
+    assert len(result) == 1
+    ctx = result[0]["_context"]
+    assert len(ctx) == 1
+    assert ctx[0]["id"] == 1
+    assert "[time:" not in ctx[0]["content"]
+    assert ctx[0]["content"] == "啥\nhow comes"
+
+
 # ── fingerprint dedup regression tests ───────────────────────────────────────
 # Covers the callsite migrations from 2026-06-06: each callsite now passes a
 # stable fingerprint so repeated failures produce 1 row + hit_count bump,

@@ -95,6 +95,14 @@ def recall(
         pass
     # Convert UTC timestamps to Melbourne local time at the read boundary.
     # `when` is computed from the raw UTC string before conversion.
+    # `_context` rows come straight from fetch_event_context (raw DB content —
+    # unlike the main rows, which recall_with_config -> recall_fusion already
+    # shapes via its own row passthrough, recall.py ~line 1817-1818). Mirror
+    # that same shaping here so context turns don't leak the wx time-anchor
+    # prefix or bare image/file tags into the MCP tool result.
+    import re
+    _ctx_time_prefix = re.compile(r"^\[time:[^\]]+\]\s*")
+    _ctx_media_tag = re.compile(r'\s*<(?:image|file)\s+path="[^"]*?"[^>]*>\s*')
     for row in rows:
         ts = row.get("timestamp")
         if ts:
@@ -105,6 +113,8 @@ def recall(
                 cts = c.get("timestamp")
                 if cts:
                     c["timestamp"] = utc_iso_to_local_datetime(cts)
+                content = _ctx_time_prefix.sub("", c.get("content") or "")
+                c["content"] = _ctx_media_tag.sub(" ", content).strip()
     return rows
 
 
