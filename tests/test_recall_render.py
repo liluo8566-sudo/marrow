@@ -10,12 +10,13 @@ Covers:
 from __future__ import annotations
 
 import datetime
+import re
 import struct
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from marrow.timeutil import format_recall_ts
+from marrow.timeutil import format_recall_ts, reltime_short
 from marrow.hooks import _apply_rel_cutoff, _render_hit_block
 
 
@@ -89,6 +90,49 @@ class TestFormatRecallTs:
         # Bad parse → falls back to first-10-char slice.
         label = format_recall_ts("not-a-date")
         assert "not-a-dat" in label
+
+
+# ── reltime_short buckets ─────────────────────────────────────────────────────
+# Short single-token label (no 'ago' suffix) used by daemon.recall()'s `when`
+# field: <24h -> Xh; <7d -> Xd; 7d-365d -> MM-DD (Melbourne local);
+# >=365d -> YYYY (Melbourne local). Distinct from format_recall_ts, which
+# still backs hooks.py's hit-block renderer / recall log writer.
+
+class TestReltimeShort:
+    def test_hours_bucket(self):
+        ts = _ts(5 * 3600)  # 5h
+        assert reltime_short(ts, now=_now()) == "5h"
+
+    def test_sub_hour_floors_to_zero(self):
+        ts = _ts(1800)  # 30 min — no minute bucket in this format
+        assert reltime_short(ts, now=_now()) == "0h"
+
+    def test_days_under_week_bucket(self):
+        ts = _ts(3 * 86400)  # 3d
+        assert reltime_short(ts, now=_now()) == "3d"
+
+    def test_exactly_seven_days_falls_into_date_bucket(self):
+        # Exactly 7d is NOT < 7d — falls into the MM-DD bucket, not '7d'.
+        ts = _ts(7 * 86400)
+        assert re.fullmatch(r"\d{2}-\d{2}", reltime_short(ts, now=_now()))
+
+    def test_month_scale_renders_mm_dd(self):
+        ts = _ts(30 * 86400)  # 30d
+        assert re.fullmatch(r"\d{2}-\d{2}", reltime_short(ts, now=_now()))
+
+    def test_year_plus_renders_year_only(self):
+        ts = _ts(400 * 86400)  # >1yr
+        assert re.fullmatch(r"\d{4}", reltime_short(ts, now=_now()))
+
+    def test_no_ago_suffix_anywhere(self):
+        for delta in (3600, 3 * 86400, 30 * 86400, 400 * 86400):
+            assert "ago" not in reltime_short(_ts(delta), now=_now())
+
+    def test_empty_string(self):
+        assert reltime_short("") == ""
+
+    def test_fallback_on_bad_input(self):
+        assert reltime_short("not-a-date") == ""
 
 
 # ── _apply_rel_cutoff ─────────────────────────────────────────────────────────

@@ -15,7 +15,7 @@ from mcp.server.fastmcp import FastMCP
 
 from . import config, recall as _recall_mod, repo, storage
 from .llm import LLMClient
-from .timeutil import utc_iso_to_local_datetime, format_recall_ts
+from .timeutil import utc_iso_to_local_datetime, reltime_short
 
 mcp = FastMCP("marrow")
 
@@ -106,7 +106,7 @@ def recall(
     for row in rows:
         ts = row.get("timestamp")
         if ts:
-            row["when"] = format_recall_ts(ts)
+            row["when"] = reltime_short(ts)
             row["timestamp"] = utc_iso_to_local_datetime(ts)
         if "_context" in row:
             for c in row["_context"]:
