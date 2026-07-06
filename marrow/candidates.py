@@ -462,7 +462,6 @@ def write_memes_cand(conn, raw: str, source: str = "daily",
         if memes_dedup.fast_skip_already_rejected(conn, key, vtype):
             continue
         value = (it.get("value") or "").strip() or None
-        context = (it.get("context") or "").strip() or None
         try:
             llm_pinned = 1 if int(it.get("pinned", 0)) else 0
         except (TypeError, ValueError):
@@ -485,7 +484,7 @@ def write_memes_cand(conn, raw: str, source: str = "daily",
                 new_pinned = 1 if (existing["pinned"] or pinned) else 0
                 # updated_at is NOT touched here — a re-mention with no
                 # content change is not a content change. It only moves
-                # when type/key/value/context actually change (elsewhere),
+                # when type/key/value actually change (elsewhere),
                 # so reconcile's DB-wins check doesn't clobber hand md edits.
                 conn.execute(
                     "UPDATE memes SET use_count=use_count+1, last_seen=?,"
@@ -525,10 +524,10 @@ def write_memes_cand(conn, raw: str, source: str = "daily",
             "%Y-%m-%dT%H:%M:%SZ")
         with conn:
             conn.execute(
-                "INSERT INTO memes (type, key, value, context,"
+                "INSERT INTO memes (type, key, value,"
                 " use_count, last_seen, pinned, source_hash)"
-                " VALUES (?, ?, ?, ?, 1, ?, ?, ?)",
-                (vtype, key, value, context, ts_now, pinned, source),
+                " VALUES (?, ?, ?, 1, ?, ?, ?)",
+                (vtype, key, value, ts_now, pinned, source),
             )
         n += 1
     return n

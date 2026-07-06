@@ -150,9 +150,7 @@ _LANES: dict[str, dict[str, str]] = {
             "SELECT m.id AS id, "
             "  TRIM(COALESCE(m.key,'') || "
             "       CASE WHEN COALESCE(m.value,'')!='' "
-            "            THEN ': ' || m.value ELSE '' END || "
-            "       CASE WHEN COALESCE(m.context,'')!='' "
-            "            THEN ' (' || m.context || ')' ELSE '' END) AS text "
+            "            THEN ': ' || m.value ELSE '' END) AS text "
             "FROM memes m WHERE m.status='active' "
             "AND NOT EXISTS (SELECT 1 FROM memes_vec_meta x "
             "                WHERE x.rowid=m.id) "
@@ -1007,7 +1005,7 @@ def _memes_strong_hits(
 ) -> list[tuple[sqlite3.Row, str]]:
     """Scan active memes; key = name tier, value = DF-filtered body tier."""
     rows = conn.execute(
-        "SELECT id, type, key, value, context, pinned, use_count "
+        "SELECT id, type, key, value, pinned, use_count "
         "FROM memes WHERE status='active'"
     ).fetchall()
     body_sets = _body_needles([r["value"] or "" for r in rows])
@@ -1106,12 +1104,12 @@ def _milestone_candidates(
 def _memes_candidates(
     conn: sqlite3.Connection, query: str, limit: int
 ) -> list[dict]:
-    """FTS5 scan over memes_fts (key+value+context body). Active rows only."""
+    """FTS5 scan over memes_fts (key+value body). Active rows only."""
     terms = _fts_terms(query)
     fts_q = _fts_query(terms)
     rows = _fts_lane_hits(
         conn,
-        "SELECT m.id, m.type, m.key, m.value, m.context, m.pinned, m.use_count, "
+        "SELECT m.id, m.type, m.key, m.value, m.pinned, m.use_count, "
         "       rank AS fts_rank "
         "FROM memes_fts f JOIN memes m ON m.id = f.rowid "
         "WHERE memes_fts MATCH ? AND m.status='active' "
@@ -1125,10 +1123,7 @@ def _memes_candidates(
     for i, r in enumerate(rows):
         key = r["key"] or ""
         value = r["value"] or ""
-        ctx = r["context"] or ""
         content = f"{key}: {value}" if value else key
-        if ctx:
-            content = f"{content} ({ctx})"
         out.append({
             "kind": "memes", "id": r["id"],
             "session_id": None, "timestamp": "",
@@ -1392,7 +1387,7 @@ def recall_fusion(
             memes_by_id[mid]["vec"] = vs
         elif vs >= _VEC_ONLY_FLOOR:
             r = conn.execute(
-                "SELECT id, type, key, value, context, pinned, use_count "
+                "SELECT id, type, key, value, pinned, use_count "
                 "FROM memes WHERE id=? AND status='active'",
                 (mid,),
             ).fetchone()
@@ -1400,10 +1395,7 @@ def recall_fusion(
                 continue
             key = r["key"] or ""
             value = r["value"] or ""
-            ctx = r["context"] or ""
             content = f"{key}: {value}" if value else key
-            if ctx:
-                content = f"{content} ({ctx})"
             memes_by_id[mid] = {
                 "kind": "memes", "id": mid,
                 "session_id": None, "timestamp": "",
@@ -1425,10 +1417,7 @@ def recall_fusion(
             continue
         key = r["key"] or ""
         value = r["value"] or ""
-        ctx = r["context"] or ""
         content = f"{key}: {value}" if value else key
-        if ctx:
-            content = f"{content} ({ctx})"
         memes_by_id[mid] = {
             "kind": "memes", "id": mid,
             "session_id": None, "timestamp": "",

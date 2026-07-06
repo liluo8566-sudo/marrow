@@ -13,7 +13,7 @@ import sqlite_vec
 
 from . import config
 
-SCHEMA_VERSION = 32
+SCHEMA_VERSION = 34
 
 # Phase 1 first-class tables + Phase 2 affect/entities (DECISIONS Phase 2).
 # The retired emotions/people/preferences/dir placeholders stay absent.
@@ -68,7 +68,6 @@ CREATE TABLE IF NOT EXISTS memes (
   type TEXT NOT NULL,
   key TEXT NOT NULL,
   value TEXT,
-  context TEXT,
   use_count INTEGER NOT NULL DEFAULT 0,
   last_seen TEXT,
   pinned INTEGER NOT NULL DEFAULT 0,
@@ -282,7 +281,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memes_fts USING fts5(
 );
 CREATE TRIGGER IF NOT EXISTS memes_ai AFTER INSERT ON memes BEGIN
   INSERT INTO memes_fts(rowid, body) VALUES (new.id,
-    TRIM(COALESCE(new.key,'') || ' ' || COALESCE(new.value,'') || ' ' || COALESCE(new.context,''))
+    TRIM(COALESCE(new.key,'') || ' ' || COALESCE(new.value,''))
   );
 END;
 CREATE TRIGGER IF NOT EXISTS memes_ad AFTER DELETE ON memes BEGIN
@@ -291,7 +290,7 @@ END;
 CREATE TRIGGER IF NOT EXISTS memes_au AFTER UPDATE ON memes BEGIN
   DELETE FROM memes_fts WHERE rowid = old.id;
   INSERT INTO memes_fts(rowid, body) VALUES (new.id,
-    TRIM(COALESCE(new.key,'') || ' ' || COALESCE(new.value,'') || ' ' || COALESCE(new.context,''))
+    TRIM(COALESCE(new.key,'') || ' ' || COALESCE(new.value,''))
   );
 END;
 
@@ -337,8 +336,7 @@ END;
 _FTS_EXT_BACKFILL: dict[str, str] = {
     "memes_fts": (
         "INSERT INTO memes_fts(rowid, body) "
-        "SELECT id, TRIM(COALESCE(key,'') || ' ' || COALESCE(value,'') "
-        "             || ' ' || COALESCE(context,'')) FROM memes"
+        "SELECT id, TRIM(COALESCE(key,'') || ' ' || COALESCE(value,'')) FROM memes"
     ),
     "milestones_fts": (
         "INSERT INTO milestones_fts(rowid, body) "
@@ -557,6 +555,8 @@ def init_db(path: str | None = None) -> sqlite3.Connection:
         _migrate_to_v30(conn)
         _migrate_to_v31(conn)
         _migrate_to_v32(conn)
+        _migrate_to_v33(conn)
+        _migrate_to_v34(conn)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     return conn
 
@@ -1256,6 +1256,60 @@ CREATE TABLE IF NOT EXISTS ct_first_tick (
 );
     """)
     conn.execute("PRAGMA user_version=32")
+
+
+def _migrate_to_v33(conn: sqlite3.Connection) -> None:
+    """v33: drop memes.context — memes reduced to key/value (matches
+    entities: name/fact). Retrieval is whole-row vector search; context
+    added no signal. Rebuilds memes_fts triggers/body to match.
+    Idempotent — column-existence check + user_version short-circuit.
+    """
+    v = conn.execute("PRAGMA user_version").fetchone()[0]
+    if v >= 33:
+        return
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(memes)").fetchall()}
+    if "context" in cols:
+        conn.execute("DROP TRIGGER IF EXISTS memes_ai")
+        conn.execute("DROP TRIGGER IF EXISTS memes_au")
+        conn.execute("ALTER TABLE memes DROP COLUMN context")
+        conn.executescript("""
+CREATE TRIGGER memes_ai AFTER INSERT ON memes BEGIN
+  INSERT INTO memes_fts(rowid, body) VALUES (new.id,
+    TRIM(COALESCE(new.key,'') || ' ' || COALESCE(new.value,''))
+  );
+END;
+CREATE TRIGGER memes_au AFTER UPDATE ON memes BEGIN
+  DELETE FROM memes_fts WHERE rowid = old.id;
+  INSERT INTO memes_fts(rowid, body) VALUES (new.id,
+    TRIM(COALESCE(new.key,'') || ' ' || COALESCE(new.value,''))
+  );
+END;
+        """)
+        conn.execute("DELETE FROM memes_fts")
+        conn.execute(
+            "INSERT INTO memes_fts(rowid, body) "
+            "SELECT id, TRIM(COALESCE(key,'') || ' ' || COALESCE(value,'')) FROM memes"
+        )
+    conn.execute("PRAGMA user_version=33")
+
+
+def _migrate_to_v34(conn: sqlite3.Connection) -> None:
+    """v34: ct_first_tick.status — column for the tool-side status write
+    (later workstream); schema only here. Default 'done' matches the
+    seen/handled semantics existing rows already carry implicitly.
+    Idempotent — duplicate ALTER swallowed; user_version short-circuits.
+    """
+    v = conn.execute("PRAGMA user_version").fetchone()[0]
+    if v >= 34:
+        return
+    try:
+        conn.execute(
+            "ALTER TABLE ct_first_tick ADD COLUMN status TEXT NOT NULL"
+            " DEFAULT 'done'"
+        )
+    except sqlite3.OperationalError:
+        pass
+    conn.execute("PRAGMA user_version=34")
 
 
 def get_latest_watermark(conn, sid):

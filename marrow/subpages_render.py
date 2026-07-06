@@ -185,7 +185,7 @@ _MEME_PUBLIC = ("meme", "event", "news", "others")
 def render_memes(conn: sqlite3.Connection) -> str:
     key = "memes"
     rows = conn.execute(
-        "SELECT id, type, key, value, context "
+        "SELECT id, type, key, value "
         "FROM memes ORDER BY "
         "CASE type "
         "  WHEN 'paw' THEN 1 "
@@ -201,9 +201,8 @@ def render_memes(conn: sqlite3.Connection) -> str:
     public = [r for r in rows if r["type"] not in _MEME_PERSONAL]
 
     def _line(r) -> str:
-        ctx = f" _{r['context']}_" if r["context"] else ""
         val = f" → {r['value']}" if r["value"] else ""
-        return f"- [{r['type']}] **{r['key']}**{val}{ctx}" + _anchor(r["id"])
+        return f"- [{r['type']}] **{r['key']}**{val}" + _anchor(r["id"])
 
     def _section(label: str, entries: list) -> list[str]:
         lines = [f"## {label}", ""]

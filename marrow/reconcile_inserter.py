@@ -29,11 +29,10 @@ _ANCHOR_STR_RE = re.compile(r"<!-- id:([^>]+?) -->")
 _SECTION_H2_RE = re.compile(r"^##\s+(?P<label>\S.*?)\s*$")
 
 # Unanchored row patterns for INSERT pass (anchor optional/absent).
-# Memes: `- [type] **key**{ → value}{ _context_}`
+# Memes: `- [type] **key**{ → value}`
 _MEME_UNANCHORED_RE = re.compile(
     r"^-\s+\[(?P<type>[^\]]+)\]\s+\*\*(?P<key>[^*]+)\*\*"
     r"(?:\s+→\s+(?P<value>.+?))?"
-    r"(?:\s+_(?P<context>[^_]+)_)?"
     r"\s*$"
 )
 # Profile: `- [kind] **name**{ — fact}`
@@ -570,14 +569,12 @@ def _insert_memes(
                 "type": default_type,
                 "key": bkey,
                 "value": bval,
-                "context": None,
             }))
             continue
         parsed = {
             "type": m.group("type").strip(),
             "key": m.group("key").strip(),
             "value": (m.group("value") or "").strip() or None,
-            "context": (m.group("context") or "").strip() or None,
         }
         meme_type = (parsed.get("type") or "").strip()
         if not meme_type:
@@ -617,7 +614,6 @@ def _insert_memes(
                 "type": meme_type,
                 "key": meme_key,
                 "value": parsed.get("value"),
-                "context": parsed.get("context"),
                 "pinned": 1,
                 "status": "active",
             }
@@ -776,7 +772,7 @@ def reconcile_memes(conn: sqlite3.Connection, md_path: Path) -> ReconcileReport:
     spec = subpage_specs.build_memes_spec(str(Path(md_path).parent))
     rpt = reconcile_inserter_sync(
         conn, spec, md_path, "memes",
-        editable_cols=["type", "key", "value", "context"],
+        editable_cols=["type", "key", "value"],
         bare_cols=("key", "value"),
         soft_delete=False,
     )

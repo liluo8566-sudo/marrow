@@ -221,7 +221,7 @@ def build_memes_spec(folder: str) -> InserterSpec:
     """
     def fetch(conn: sqlite3.Connection) -> list[dict]:
         rows = conn.execute(
-            "SELECT id, type, key, value, context FROM memes"
+            "SELECT id, type, key, value FROM memes"
             " ORDER BY CASE type"
             "   WHEN 'fact' THEN 1 WHEN 'paw' THEN 2 WHEN 'meme' THEN 3"
             "   WHEN 'news' THEN 4 WHEN 'event' THEN 5 ELSE 6"
@@ -230,16 +230,14 @@ def build_memes_spec(folder: str) -> InserterSpec:
         return [dict(r) for r in rows]
 
     def render(r: dict) -> str:
-        ctx = f" _{r['context']}_" if r.get("context") else ""
         val = f" → {r['value']}" if r.get("value") else ""
-        return (f"- [{r['type']}] **{r['key']}**{val}{ctx} "
+        return (f"- [{r['type']}] **{r['key']}**{val} "
                 + _anchor(r["id"]))
 
-    # Pattern: `- [type] **key**{ → value}{ _context_} <!-- id:N -->`
+    # Pattern: `- [type] **key**{ → value} <!-- id:N -->`
     _MEME_RE = re.compile(
         r"^-\s+\[(?P<type>[^\]]+)\]\s+\*\*(?P<key>[^*]+)\*\*"
         r"(?:\s+→\s+(?P<value>.+?))?"
-        r"(?:\s+_(?P<context>[^_]+)_)?"
         r"\s*<!-- id:(?P<id>\d+) -->"
     )
 
@@ -251,7 +249,6 @@ def build_memes_spec(folder: str) -> InserterSpec:
             "type": m.group("type").strip(),
             "key": m.group("key").strip(),
             "value": (m.group("value") or "").strip() or None,
-            "context": (m.group("context") or "").strip() or None,
         }
 
     return InserterSpec(

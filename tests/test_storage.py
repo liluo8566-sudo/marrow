@@ -349,3 +349,41 @@ def test_vec_dim_migration_preserves_when_nonempty(tmp_path, monkeypatch):
     n = conn.execute("SELECT count(*) FROM events_vec").fetchone()[0]
     conn.close()
     assert "float[384]" in sql and n == 1
+
+
+def test_v33_drops_memes_context_preserves_rows(tmp_path):
+    """v33: memes.context column dropped; existing key/value rows survive."""
+    p = str(tmp_path / "t.db")
+    conn = storage.init_db(p)
+    conn.execute("ALTER TABLE memes ADD COLUMN context TEXT")
+    conn.execute(
+        "INSERT INTO memes(type,key,value,context)"
+        " VALUES('fact','ctxkey','ctxval','some context')"
+    )
+    conn.execute("PRAGMA user_version=32")
+    conn.commit()
+    conn.close()
+
+    conn = storage.init_db(p)
+    try:
+        assert "context" not in _cols(conn, "memes")
+        row = conn.execute(
+            "SELECT key, value FROM memes WHERE key='ctxkey'"
+        ).fetchone()
+        assert row is not None
+        assert row["value"] == "ctxval"
+        assert (conn.execute("PRAGMA user_version").fetchone()[0]
+                == storage.SCHEMA_VERSION)
+    finally:
+        conn.close()
+
+
+def test_v34_ct_first_tick_status_default_done(db):
+    assert "status" in _cols(db, "ct_first_tick")
+    db.execute(
+        "INSERT INTO ct_first_tick(item) VALUES('probe-item')"
+    )
+    row = db.execute(
+        "SELECT status FROM ct_first_tick WHERE item='probe-item'"
+    ).fetchone()
+    assert row["status"] == "done"

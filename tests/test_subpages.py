@@ -33,8 +33,8 @@ def db(tmp_path):
                      "VALUES('us','2026-01-17','First meeting','In the rain',1)")
         conn.execute("INSERT INTO milestones(scope,date,title,pinned) "
                      "VALUES('me','2026-03-01','Head of school award',1)")
-        conn.execute("INSERT INTO memes(type,key,value,context,use_count) "
-                     "VALUES('cipher','大龙虾','Openclaw','popular AI agent',5)")
+        conn.execute("INSERT INTO memes(type,key,value,use_count) "
+                     "VALUES('cipher','大龙虾','Openclaw',5)")
         conn.execute("INSERT INTO tasks(category,title,status,due,next_step) "
                      "VALUES('study','Biochem:Unit 3','active','2026-06-01','read ch5')")
         conn.execute("INSERT INTO tasks(category,title,status,next_step) "
