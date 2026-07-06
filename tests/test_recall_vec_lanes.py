@@ -175,6 +175,45 @@ def test_embed_pending_idempotent_second_run(db):
     assert second == 0
 
 
+def test_embed_pending_skips_meta_only_tombstone_row(db):
+    # Event with a meta row but NO vector = eviction tombstone (or pre-repair
+    # poison). Dedup is NOT EXISTS vec AND NOT EXISTS meta, so it must be skipped
+    # — not re-embedded on every backfill.
+    eid = _make_event(db, "tombstoned event")
+    db.execute(
+        "INSERT INTO events_vec_meta(rowid, embedder_id, dim) "
+        "VALUES(?, 'bge-m3', 1024)", (eid,))
+    db.commit()
+    mock_emb = MagicMock()
+    mock_emb.embed.side_effect = lambda texts: np.stack(
+        [_fake_vec(400 + i) for i, _ in enumerate(texts)])
+    with patch.object(rm, "_ensure_embedder", return_value=mock_emb):
+        n = rm.embed_pending(db, batch=10)
+    assert n == 0
+    assert db.execute("SELECT COUNT(*) FROM events_vec").fetchone()[0] == 0
+
+
+def test_embed_pending_reembeds_after_poison_meta_removed(db):
+    # The repair deletes the poisoned meta row (meta, no vec). Once gone, the
+    # event is fresh (no meta, no vec) and embed_pending re-embeds it.
+    eid = _make_event(db, "poisoned event")
+    db.execute(
+        "INSERT INTO events_vec_meta(rowid, embedder_id, dim) "
+        "VALUES(?, 'bge-m3', 1024)", (eid,))
+    db.commit()
+    mock_emb = MagicMock()
+    mock_emb.embed.side_effect = lambda texts: np.stack(
+        [_fake_vec(500 + i) for i, _ in enumerate(texts)])
+    with patch.object(rm, "_ensure_embedder", return_value=mock_emb):
+        assert rm.embed_pending(db, batch=10) == 0  # skipped while meta present
+        db.execute("DELETE FROM events_vec_meta WHERE rowid=?", (eid,))
+        db.commit()
+        assert rm.embed_pending(db, batch=10) == 1  # re-embedded after repair
+    assert db.execute(
+        "SELECT COUNT(*) FROM events_vec WHERE rowid=?", (eid,)
+    ).fetchone()[0] == 1
+
+
 def test_embed_pending_skips_inactive_and_superseded(db):
     # Active meme + dormant meme; live entity + superseded entity.
     live_mid = _make_meme(db, "live-key", status="active")

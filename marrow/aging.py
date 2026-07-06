@@ -210,10 +210,13 @@ def evict_vec_window(
 
     # Candidate rowids: out-of-window and not exempt.
     # Exempt: affect.event_id link with importance>=3 OR recall_count>0.
+    # Source = events_vec (real vectors), NOT events_vec_meta: eviction keeps
+    # the meta row as a tombstone, so a meta-based scan would re-select the same
+    # already-evicted rows every run.
     candidate_rows = conn.execute(
         f"""
         SELECT ev.rowid
-        FROM events_vec_meta ev
+        FROM events_vec ev
         JOIN events e ON e.id = ev.rowid
         WHERE e.timestamp < {cutoff_sql}
           AND e.recall_count = 0
@@ -228,7 +231,7 @@ def evict_vec_window(
     exempt_rows = conn.execute(
         f"""
         SELECT ev.rowid
-        FROM events_vec_meta ev
+        FROM events_vec ev
         JOIN events e ON e.id = ev.rowid
         WHERE e.timestamp < {cutoff_sql}
           AND (
@@ -250,7 +253,7 @@ def evict_vec_window(
 
     # Safety caps: abort if too many rows would be evicted.
     total_vec = conn.execute(
-        "SELECT COUNT(*) FROM events_vec_meta"
+        "SELECT COUNT(*) FROM events_vec"
     ).fetchone()[0]
     if (evict_count > _VEC_EVICT_CAP_MIN
             and total_vec > 0
@@ -285,11 +288,9 @@ def evict_vec_window(
         return result
 
     # DELETE in same transaction as caller; conn is already inside `with conn:`.
+    # Drop only the vector — KEEP events_vec_meta as an eviction tombstone so the
+    # recall dedup (NOT EXISTS vec AND NOT EXISTS meta) does not re-embed the row.
     placeholders = ",".join("?" * len(candidate_ids))
-    conn.execute(
-        f"DELETE FROM events_vec_meta WHERE rowid IN ({placeholders})",
-        candidate_ids,
-    )
     conn.execute(
         f"DELETE FROM events_vec WHERE rowid IN ({placeholders})",
         candidate_ids,

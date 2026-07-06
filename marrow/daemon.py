@@ -1049,6 +1049,10 @@ def _do_event_clear(before: str | None, after: str | None, last: int | None) -> 
             conn.execute("DELETE FROM event_tombstones")
             conn.execute("INSERT INTO events_fts(events_fts) VALUES('rebuild')")
             conn.execute("DELETE FROM events_vec")
+            # Triggers are dropped above so events_ad_vec does not cascade —
+            # clear meta manually or freed ids inherit orphan meta rows that
+            # poison the vec dedup on reuse.
+            conn.execute("DELETE FROM events_vec_meta")
             conn.execute("DELETE FROM audit_log WHERE action='sessionend_extract'")
             for t in triggers:
                 conn.execute(t["sql"])

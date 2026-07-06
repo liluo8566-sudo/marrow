@@ -136,9 +136,15 @@ _LANES: dict[str, dict[str, str]] = {
     "events": {
         "vec_table": "events_vec",
         "meta_table": "events_vec_meta",
+        # Primary truth: a real vector row (events_vec) means embedded. Meta is
+        # bookkeeping — freed/reused ids inherit orphan meta with no vector, so
+        # a meta-only test skips them forever (vec-lane poisoning). The second
+        # clause keeps intentionally-evicted rows (aging.py drops the vector but
+        # KEEPS the meta as an eviction tombstone) out of the pending set.
         "pending_sql": (
             "SELECT e.id AS id, e.content AS text FROM events e "
-            "WHERE NOT EXISTS (SELECT 1 FROM events_vec_meta m "
+            "WHERE NOT EXISTS (SELECT 1 FROM events_vec v WHERE v.rowid=e.id) "
+            "  AND NOT EXISTS (SELECT 1 FROM events_vec_meta m "
             "                  WHERE m.rowid=e.id) "
             "ORDER BY e.id DESC LIMIT ?"
         ),

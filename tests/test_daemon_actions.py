@@ -434,6 +434,29 @@ def test_event_clear_no_filter_wipes_everything(env):
     assert _event_count(env) == 0
 
 
+def test_event_clear_no_filter_clears_vec_meta(env):
+    # Gate: no-filter clear drops triggers, so events_ad_vec does NOT cascade.
+    # Meta must be wiped explicitly or freed ids inherit orphan meta (poison).
+    _insert_event(env, "2026-06-01T00:00:00Z")
+    conn = storage.connect(env)
+    try:
+        with conn:
+            eid = conn.execute(
+                "SELECT id FROM events LIMIT 1").fetchone()[0]
+            conn.execute(
+                "INSERT INTO events_vec_meta (rowid, embedder_id, dim) "
+                "VALUES (?, 'bge-m3', 1024)", (eid,))
+    finally:
+        conn.close()
+    daemon.event_clear()
+    conn = storage.connect(env)
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM events_vec_meta").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
 def test_event_clear_before_after_range(env):
     _insert_event(env, "2026-06-01T00:00:00Z")
     _insert_event(env, "2026-07-01T00:00:00Z")
