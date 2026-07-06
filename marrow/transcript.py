@@ -83,6 +83,9 @@ _WX_MERGE_NOTE_RE = re.compile(r"^\[bridge:[^\]]*\]\n?", re.M)
 # 3. Lone "." sentinel — a pure-media bubble arrives as body "." + instruction.
 #    After patterns 1 & 2 are stripped this may leave a bare dot line.
 _WX_DOT_SENTINEL_RE = re.compile(r"^\.\s*$", re.M)
+# NOTE: the wx-bridge "[time: ...]" prefix is intentionally NOT stripped here —
+# it is retained in stored content and removed only at each consumption point
+# (hooks._WX_TIME_PREFIX_RE, recall needle build). See test_wx_boilerplate_strip.
 
 
 def strip_wx_boilerplate(text: str) -> str:
@@ -115,6 +118,12 @@ _INTERRUPTED_MARKERS = frozenset((
 _STICKER_TAG_ONLY_RE = re.compile(
     r'^(?:\s*<(?:image|gif)\s+path="[^"]*"\s*/>\s*)+$'
 )
+# Whole-row wx-bridge header with no body: one or more [time: ...] / [sticker: ...]
+# markers and whitespace only. Line-anchored per-marker ([^\]\n]) so a row that
+# merely quotes such a tag alongside real dialogue does NOT match.
+_BRIDGE_MARKER_ONLY_RE = re.compile(
+    r'^(?:\s*\[(?:time|sticker):[^\]\n]*\]\s*)+$'
+)
 
 
 def _is_harness_row(text: str) -> bool:
@@ -126,12 +135,16 @@ def _is_harness_row(text: str) -> bool:
       2. Exactly "[Request interrupted by user]" or the "for tool use" variant.
       3. Consists only of one or more <image path="..."/> / <gif path="..."/>
          tags and whitespace — bare sticker-send bubbles.
+      4. Consists only of one or more [time: ...] / [sticker: ...] wx-bridge
+         header markers and whitespace — a bridge header with no message body.
     """
     if text.startswith(_TASK_NOTIFICATION_PREFIX):
         return True
     if text in _INTERRUPTED_MARKERS:
         return True
     if _STICKER_TAG_ONLY_RE.match(text):
+        return True
+    if _BRIDGE_MARKER_ONLY_RE.match(text):
         return True
     return False
 

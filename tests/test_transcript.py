@@ -407,6 +407,31 @@ def test_sticker_tag_mixed_with_real_text_is_kept():
     assert transcript._is_harness_row(text) is False
 
 
+def test_pure_bridge_time_sticker_header_rows_are_dropped():
+    assert transcript._is_harness_row(
+        "[time: 2026-06-28 Sun 17:07 | gap: 0m]") is True
+    assert transcript._is_harness_row(
+        "[sticker: emoji=⭐, set=lumi_stickers_by_Stellan_CYC_bot]") is True
+    assert transcript._is_harness_row(
+        "[time: 2026-06-28 Sun 17:07 | gap: 0m]\n"
+        "[sticker: emoji=⭐, set=x]") is True
+
+
+def test_bridge_marker_with_real_dialogue_is_kept():
+    # Marker line + real message: whole-row predicate must NOT drop it.
+    assert transcript._is_harness_row(
+        "[time: 2026-06-23 Tue 14:49 | gap: 0m]\n啥\nhow comes") is False
+    assert transcript._is_harness_row(
+        "[sticker: emoji=⭐, set=x]\n？狗男人怎么接不住我的梗") is False
+
+
+def test_bridge_marker_quoted_mid_line_is_kept():
+    # Prose that quotes the marker inline (not a whole header line) survives —
+    # the predicate is line-anchored full-match, never substring.
+    assert transcript._is_harness_row(
+        "我们讨论一下 [time: ...] 这个格式该怎么处理") is False
+
+
 def test_rows_from_records_drops_harness_junk_rows(tmp_path):
     jl = _w(tmp_path / "j.jsonl", [
         {"type": "user", "sessionId": "s1", "timestamp": "t",
