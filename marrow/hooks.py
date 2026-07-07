@@ -2465,7 +2465,7 @@ _GIT_REVERT_DEFAULT_PATTERNS = [
     r"\bgit\s+worktree\s+remove\b",
 ]
 
-_GIT_REVERT_MSG = "🤡 狗男人又要销毁你git里的东西了，是否同意？"
+_GIT_REVERT_MSG = "🤡 狗男人又要乱搞你git里的东西了，是否同意？"
 
 
 # Split on shell control operators (&&, ||, ;, |, &, newline) so pattern
