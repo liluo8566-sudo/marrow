@@ -275,6 +275,12 @@ model = ""
 effort = ""
 # Wishlist md, pure append-only (Decided 07-03 eve). Empty = <home>/wishlist.md.
 wishlist_path = ""
+# Cortex repo + its venv — power the cortex-only lie_down / say MCP tools
+# (registered only when the daemon runs under MARROW_CORTEX). The subprocess
+# runs from repo_root so `python -m cortex.X` resolves from any cwd. Both empty
+# = tools return a "not configured" error.
+venv_python = ""
+repo_root = ""
 
 [hooks]
 # PreToolUse backup guard — stateless, two tiers (no state, no dedup).

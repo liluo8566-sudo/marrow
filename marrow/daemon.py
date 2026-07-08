@@ -4,6 +4,9 @@
 8 action-dispatch tools (tl / sticker / sticker_admin / goal / first /
 dim / alert / event_clear). The session-start handoff is rendered by the
 SessionStart hook. LLMClient wired so provider failures land in alerts.
+
+Cortex-only (registered when MARROW_CORTEX in env): lie_down / say — subprocess
+into the cortex repo, invisible to normal sessions.
 """
 from __future__ import annotations
 
@@ -23,6 +26,20 @@ def marrow_tool():
     """All marrow tools inject fully at session start (alwaysLoad).
     New tools MUST use this decorator, never bare @mcp.tool()."""
     return mcp.tool(meta={"anthropic/alwaysLoad": True})
+
+
+# Cortex-only tools (lie_down / say) register into the schema only when the
+# daemon subprocess was spawned by a cortex window (MARROW_CORTEX in env at
+# import time — the window sets it explicitly). Normal sessions never see them.
+_CORTEX = bool(os.environ.get("MARROW_CORTEX"))
+
+
+def cortex_tool():
+    """Register only in cortex sessions; no-op decorator elsewhere so the tool
+    stays absent from the schema for normal sessions."""
+    if _CORTEX:
+        return marrow_tool()
+    return lambda fn: fn
 
 _DB = config.db_path()
 llm = LLMClient(
@@ -313,7 +330,7 @@ def tl(
     - Frequency: every 1-2h or 10-20 turns - you can skip even when hook nudge you!!!
     - Format (add/update): HH:mm-HH:mm 【N affect♡Y affect (OR B affect)】body [i]
       - e.g. 21:25-21:31 【N愉悦♡Y委屈】翻CC日志找骂人梗，扑空互怼 [3]
-      - N = 念念, Y = 阿屿, B = single affect when similar.
+      - N = user, Y = assistant, B = single affect when similar.
       - affect = emotion & feeling ONLY, 1-8 chars. e.g. 烦；心虚；紧张而激动；她好可爱呀～
         - NOT plot or behaviour summary. x【锐利督战】
         - Never pad - less char is better. Never mimic previous timelines.
@@ -734,7 +751,7 @@ def first(
     status: str = "done",
 ) -> dict | list[dict]:
     """Respond to the Cortex First section (notes/concerns injected into context).
-    'tick' each item you acted on + a tiny note (1-10 chars), e.g. 哄好啦；老婆洗澡去了，待会就睡。
+    'tick' each item you acted on + a tiny note (1-10 chars), e.g. 处理好啦；等会儿再跟进。
     status='tried' when attempted but unsolved — note what blocked.
     'untick' a wrong ack; 'list' current ticks."""
     if action not in _FIRST_ACTIONS:
@@ -1218,6 +1235,52 @@ def event_clear(before: str = "", after: str = "", last: int = 0) -> dict:
     before/after (ISO or YYYY-MM-DD); last=N most recent; none = all.
     DB backup first."""
     return _do_event_clear(before or None, after or None, last or None)
+
+
+# ── cortex (lie_down / say) ───────────────────────────────────────────────────
+
+def _cortex_paths() -> tuple[str, str]:
+    """(venv_python, repo_root) from marrow config [cortex]; either empty =
+    not configured. Both drive the cortex subprocess; repo_root is the cwd so
+    `python -m cortex.X` resolves the package regardless of the caller's cwd."""
+    c = config.load().get("cortex", {})
+    return (str(c.get("venv_python") or "").strip(),
+            str(c.get("repo_root") or "").strip())
+
+
+def _run_cortex_module(module: str, extra_args: list[str] | None = None) -> dict:
+    py, root = _cortex_paths()
+    if not py or not root:
+        return {"ok": False, "error": "cortex not configured "
+                "([cortex].venv_python + repo_root in config.toml)"}
+    py = str(Path(py).expanduser())
+    root = str(Path(root).expanduser())
+    cmd = [py, "-m", module] + (extra_args or [])
+    try:
+        p = subprocess.run(cmd, cwd=root, capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": f"{module} timed out after 30s"}
+    except OSError as exc:
+        return {"ok": False, "error": f"{module} failed to launch: {exc}"}
+    if p.returncode != 0:
+        return {"ok": False, "error": (p.stderr or p.stdout or "").strip()
+                or f"{module} exited {p.returncode}"}
+    return {"ok": True, "stdout": (p.stdout or "").strip()}
+
+
+@cortex_tool()
+def lie_down() -> dict:
+    """End this wake. Write your handoff note (碎碎念) BEFORE calling if you have
+    content to carry forward. Clears due self_schedule, records this wake's
+    tokens, redraws the floor, and may queue a /clear when the window is full."""
+    return _run_cortex_module("cortex.lie_down")
+
+
+@cortex_tool()
+def say() -> dict:
+    """Quiet attention ping to her (no focus steal) — call once BEFORE speaking
+    in-window; unsaid = silent activity. Then just say your words in the window."""
+    return _run_cortex_module("cortex.say")
 
 
 def main() -> None:
