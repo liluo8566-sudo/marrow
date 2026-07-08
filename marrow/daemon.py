@@ -43,13 +43,6 @@ def recall(
     context=True attaches ±1 adjacent same-session turns.
     since/until: Melbourne-local YYYY-MM-DD day strings.
     Diary: query='diary' + since/until."""
-    # C3 guard: cortex's resumed session loads MCP tools full-env (no
-    # isolation, see MAP §6) so it COULD call this tool directly, unlike
-    # the passive hook-injection path which already no-ops (hooks.py
-    # user_prompt_submit). Matches tl's add/update hard block — cortex
-    # gets its own bulletin, never chat memory (MAP §1.2 "total invisibility").
-    if os.environ.get("MARROW_CORTEX"):
-        raise RuntimeError("recall unavailable in a cortex session (MARROW_CORTEX=1)")
     from .timecue import melb_day_range
     since_utc: str | None = None
     until_utc: str | None = None

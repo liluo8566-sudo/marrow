@@ -541,6 +541,7 @@ def test_call_cortex_no_isolation_flags(monkeypatch, tmp_path):
     assert "--setting-sources" not in captured["cmd"]
     assert "--strict-mcp-config" not in captured["cmd"]
     assert captured["env"]["MARROW_CORTEX"] == "1"
+    assert captured["env"]["MARROW_CHANNEL"] == "ct"
     assert "MARROW_PIPELINE" not in captured["env"]
     assert captured["cwd"] == str(tmp_path)
     assert "--model" in captured["cmd"]

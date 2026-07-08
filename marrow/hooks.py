@@ -1002,13 +1002,7 @@ def session_start() -> int:
         # Subagent (Task tool dispatch) — task-isolated like worktree;
         # no personal memory / no /resume tracking.
         is_subagent = bool(tpath and "/tasks/" in tpath)
-        # Cortex session (C3, MARROW_CORTEX=1): total invisibility — no
-        # lifecycle:start row, no sessions row. Writing nothing means
-        # sessionstart_catchup never sees this sid as a candidate (its
-        # candidate scan unions audit_log lifecycle:start + events, both
-        # skipped end-to-end by the Stop/SessionEnd guards below).
-        is_cortex = bool(os.environ.get("MARROW_CORTEX"))
-        if sid and not is_cortex:
+        if sid:
             # Fresh window or resume — drop prior recall dedup state either way
             # (cheap; resume re-shows seen rows once, acceptable).
             _wipe_recall_seen(sid)
@@ -1052,9 +1046,8 @@ def session_start() -> int:
                 except Exception:  # noqa: BLE001 — never block session_start
                     pass
 
-        if is_worktree or is_subagent or is_cortex:
-            # Task-isolated (git worktree / Task-tool subagent) or cortex
-            # (own bulletin, not this hook's injection): no personal memory.
+        if is_worktree or is_subagent:
+            # Task-isolated (git worktree / Task-tool subagent): no personal memory.
             ctx = ""
         else:
             parts: list[str] = []
@@ -1134,12 +1127,6 @@ def session_start() -> int:
 
 
 def session_end() -> int:
-    # Cortex session (C3): total invisibility, mirrors session_start/stop —
-    # session_start never wrote a lifecycle:start row for this sid, so there
-    # is nothing to close and nothing for catchup to see.
-    if os.environ.get("MARROW_CORTEX"):
-        return 0
-
     inp = _read_input()
     tpath = inp.get("transcript_path")
     if not tpath:
@@ -1362,9 +1349,6 @@ def stop() -> int:
     a full-file live-chain rebuild via transcript.rows_from_records purely to
     locate + ingest the current pair and reset the cursor. Ghost rows ingested
     before a rewind stay in the DB (no retraction in v1)."""
-    # Self-pollution guard: cortex's own resumed session must not feed marrow.
-    if os.environ.get("MARROW_CORTEX"):
-        return 0
     # Isolated pipeline spawns don't load hooks; mirror the guard defensively.
     if os.environ.get("MARROW_PIPELINE") == "1":
         return 0
@@ -1898,14 +1882,6 @@ def user_prompt_submit() -> int:
     vec + bm25 + recency + affect. Fail-soft: any error falls through to a
     no-op so the user prompt always reaches the model.
     """
-    # Cortex session (C3): total invisibility — no title/model backfill (that
-    # spawns an LLM summarizer of THIS conversation into sessions.title,
-    # exactly the chat-memory leak the guard exists to prevent), no session
-    # touch, no recall injection (cortex gets its own bulletin, not this
-    # hook's marrow-memory context).
-    if os.environ.get("MARROW_CORTEX"):
-        return 0
-
     inp = _read_input()
 
     # mm control plane — check before recall, independent of recall config.
@@ -3158,15 +3134,48 @@ def pretool_use() -> int:
     return 0
 
 
-def turn_inject() -> int:
-    """Inject current time + delta since last reply.
+def _in_time_window(now_min: int, start: str, end: str) -> bool:
+    """Minute-of-day membership; wraps past midnight when end <= start."""
+    def _to_min(hhmm: str) -> int:
+        h, m = hhmm.split(":")
+        return int(h) * 60 + int(m)
+    s, e = _to_min(start), _to_min(end)
+    if s <= e:
+        return s <= now_min < e
+    return now_min >= s or now_min < e
 
-    WX bridge injects its own time via system prompt — skip when
-    MARROW_CHANNEL=wx. CLI and TG both need this.
+
+def _kickout_context(channel: str, now: datetime) -> str:
+    """B8 anti-late-night deterministic nudge, config-first ([kickout] in
+    config.toml — see config.default.toml for the live windows/text). Cortex
+    is immune (MARROW_CORTEX=1, own bulletin/schedule, not this hook's rules)."""
+    if os.environ.get("MARROW_CORTEX"):
+        return ""
+    kc = config.load().get("kickout", {}) or {}
+    now_min = now.hour * 60 + now.minute
+    if channel == "cli":
+        if _in_time_window(now_min, kc.get("cli_wind_down_start", "21:30"),
+                            kc.get("cli_wind_down_end", "22:00")):
+            return kc.get("cli_wind_down_text", "")
+        if _in_time_window(now_min, kc.get("cli_leave_start", "22:00"),
+                            kc.get("cli_leave_end", "06:00")):
+            return kc.get("cli_leave_text", "")
+    elif channel in ("wx", "tg"):
+        if _in_time_window(now_min, kc.get("im_quiet_start", "23:00"),
+                            kc.get("im_quiet_end", "06:00")):
+            return kc.get("im_quiet_text", "")
+    return ""
+
+
+def turn_inject() -> int:
+    """Inject current time + delta since last reply, plus the B8 kickout
+    nudge (config [kickout]).
+
+    WX bridge injects its own time via system prompt — skip the time+delta
+    stamp when MARROW_CHANNEL=wx, but the kickout nudge still applies there.
+    CLI and TG both need the time stamp.
     """
     channel = (os.environ.get("MARROW_CHANNEL") or "").strip() or "cli"
-    if channel == "wx":
-        return 0
 
     inp = _read_input()
     tpath = (inp.get("transcript_path") or "")
@@ -3179,6 +3188,19 @@ def turn_inject() -> int:
 
     tz = config.get_tz()
     now = datetime.now(timezone.utc).astimezone(tz)
+    kickout_ctx = _kickout_context(channel, now)
+
+    if channel == "wx":
+        if kickout_ctx:
+            json.dump(
+                {"hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": kickout_ctx,
+                }},
+                sys.stdout,
+            )
+        return 0
+
     now_str = now.strftime("%Y-%m-%d %a %H:%M")
     now_epoch = int(now.timestamp())
 
@@ -3224,7 +3246,8 @@ def turn_inject() -> int:
     except Exception:
         pass
 
-    ctx = f"# Context — {now_str}{delta}{sched_ctx}{care_ctx}"
+    kickout_full = f"\n\n{kickout_ctx}" if kickout_ctx else ""
+    ctx = f"# Context — {now_str}{delta}{sched_ctx}{care_ctx}{kickout_full}"
     json.dump(
         {"hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",

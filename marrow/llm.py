@@ -247,9 +247,11 @@ class LLMClient:
                      max_tokens: int | None = None) -> dict:
         """Full-environment resumed session for cortex (C3, Decided 07-03):
         no isolation flags — persona/rules/MCP/agents load like a real
-        session. Always injects MARROW_CORTEX=1 so marrow hooks + tl_add
-        skip this session's turns (cortex must never enter chat memory).
-        cwd defaults to [cortex].home; resume_sid=None starts a fresh
+        session. Always injects MARROW_CORTEX=1 (identity marker, e.g. B8
+        kickout immunity) and MARROW_CHANNEL=ct so this session's turns get
+        full marrow memory (events/recall/tl) attributed to the cortex
+        channel, same as any other session. cwd defaults to [cortex].home;
+        resume_sid=None starts a fresh
         session (daily rebirth). Single attempt — no chain/retry, caller
         (cortex pacemaker) owns retry policy. `timeout` (s) overrides the
         provider default so the caller's config is the single source of truth
@@ -328,7 +330,7 @@ class LLMClient:
             cmd.extend(["--effort", effort])
         if resume_sid:
             cmd.extend(["--resume", resume_sid])
-        env = {**os.environ, "MARROW_CORTEX": "1"}
+        env = {**os.environ, "MARROW_CORTEX": "1", "MARROW_CHANNEL": "ct"}
         on_event = _cortex_stream_timer()
         cap_active = bool(max_tokens and max_tokens > 0)
         extra: dict = {}

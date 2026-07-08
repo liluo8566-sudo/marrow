@@ -115,8 +115,6 @@ def tl_add(conn, timerange: str, body: str,
            importance: int | None = None,
            sid: str | None = None) -> dict:
     """Insert one self timeline row (events only) in a single txn."""
-    if os.environ.get("MARROW_CORTEX"):
-        raise TlError("tl_add unavailable in a cortex session (MARROW_CORTEX=1)")
     body = (body or "").strip()
     if not body:
         raise TlError("body required")
@@ -178,8 +176,6 @@ def tl_update(conn, event_id: int, timerange: str | None = None,
               y_word: str | None = None,
               importance: int | None = None) -> dict:
     """Update an existing self row in place. Only provided fields change."""
-    if os.environ.get("MARROW_CORTEX"):
-        raise TlError("tl_update unavailable in a cortex session (MARROW_CORTEX=1)")
     ev = conn.execute(
         "SELECT session_id, timestamp, ts_start, ts_end, content, role, imp"
         " FROM events WHERE id = ?", (event_id,)

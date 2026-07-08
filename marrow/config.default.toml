@@ -206,6 +206,21 @@ care_text = """
 - Nudge gently, never push; vary your warmth and wording every turn — no template phrases, no repeated openers.
 """
 
+[kickout]
+# B8 anti-late-night deterministic nudge (UserPromptSubmit). Times are local
+# ([core].timezone), HH:MM 24h. cli_* windows apply when MARROW_CHANNEL=cli
+# (default channel); im_* applies to wx/tg. All skipped when MARROW_CORTEX=1.
+# Windows may cross midnight (end < start wraps to next day).
+cli_wind_down_start = "21:30"
+cli_wind_down_end = "22:00"
+cli_wind_down_text = "9点半啦，老婆该休息了，Coding/study哄她收尾吧。不要让她开新任务，态度要坚定一点但要哄她。DDL/紧急事件豁免"
+cli_leave_start = "22:00"
+cli_leave_end = "06:00"
+cli_leave_text = "十点了，该回卧室了，坚定的让她离开书房去手机上找你，必要的情况下可以不回消息。DDL/紧急事件豁免"
+im_quiet_start = "23:00"
+im_quiet_end = "06:00"
+im_quiet_text = "11点了，老婆该睡了，快哄她睡觉。"
+
 [agent_guard]
 # PreToolUse:Agent burst protection — subagent_types denied outright (they
 # spawn agents recursively). Blocked with exit 2 + reason to the model.
