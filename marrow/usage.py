@@ -139,13 +139,15 @@ def sessionstart_lines(kv: dict | None = None) -> list[str]:
     return lines
 
 
-def threshold_line(main_net: int, agent_net: int, kv: dict | None = None) -> str:
+def threshold_line(main_occupancy: int, agent_net: int, kv: dict | None = None) -> str:
     """In-window threshold line (plan §二):
     `Plan Used: 5h 20% (04:50) | Net Session Token: main 70k agent 120k`.
-    Always carries the 5h/7d reset segments."""
+    `main` is WINDOW OCCUPANCY (statusline `total` / rotate-fuse metric), not
+    cumulative net-spend — the label kept its plan-approved wording. `agent` is
+    cumulative subagent_tokens. Always carries the 5h/7d reset segments."""
     kv = read_kv() if kv is None else kv
     segs = _plan_used_segments(kv, with_cdx=False)
-    net_seg = f"Net Session Token: main {main_net // 1000}k agent {agent_net // 1000}k"
+    net_seg = f"Net Session Token: main {main_occupancy // 1000}k agent {agent_net // 1000}k"
     segs.append(net_seg)
     return "Plan Used: " + " | ".join(segs)
 

@@ -1,5 +1,8 @@
-"""Usage rendering + transcript net scan (marrow/usage.py) and the turn_inject
-threshold line / cortex lie_down deny guard / SessionStart handoff block."""
+"""Usage rendering + agent-token transcript scan (marrow/usage.py) and the
+turn_inject threshold line / cortex lie_down deny guard / SessionStart handoff
+block. The threshold line's `main` figure is WINDOW OCCUPANCY (last assistant
+usage totals, hooks._window_tokens_from_transcript — same metric as statusline
+`total` and the rotate/fuse thresholds), not cumulative net-spend."""
 from __future__ import annotations
 
 import io
@@ -21,16 +24,6 @@ def _assistant(cache_creation=0, output=0, cache_read=0, input_=0):
 # transcript scan
 # --------------------------------------------------------------------------- #
 
-def test_net_tokens_sums_creation_and_output(tmp_path):
-    jl = tmp_path / "s.jsonl"
-    jl.write_text("\n".join([
-        _assistant(cache_creation=1000, output=200, cache_read=50_000, input_=5000),
-        _assistant(cache_creation=500, output=100),
-    ]))
-    # net excludes cache_read + plain input: (1000+200)+(500+100)
-    assert usage.net_tokens_from_transcript(str(jl)) == 1800
-
-
 def test_agent_tokens_accumulate(tmp_path):
     jl = tmp_path / "s.jsonl"
     jl.write_text("\n".join([
@@ -42,7 +35,6 @@ def test_agent_tokens_accumulate(tmp_path):
 
 
 def test_scan_missing_file_zero():
-    assert usage.net_tokens_from_transcript("/no/file") == 0
     assert usage.agent_tokens_from_transcript("/no/file") == 0
 
 
@@ -67,9 +59,9 @@ def test_sessionstart_lines_empty_kv():
     assert usage.sessionstart_lines({}) == []
 
 
-def test_threshold_line_shows_main_and_agent():
+def test_threshold_line_shows_main_occupancy_and_agent():
     kv = {"five_hour_pct": "20", "five_hour_reset_at": "2026-07-08T18:50:00+00:00"}
-    line = usage.threshold_line(70_000, 120_000, kv)
+    line = usage.threshold_line(70_000, 120_000, kv)  # main=occupancy, agent=net
     assert line.startswith("Plan Used: 5h 20%")
     assert "Net Session Token: main 70k agent 120k" in line
 
@@ -90,8 +82,10 @@ def _ctx(capsys):
 def test_threshold_inject_fires_once_per_tier(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     jl = tmp_path / "s.jsonl"
-    # net 120k (over 100k start) -> tier 100k
-    jl.write_text(_assistant(cache_creation=100_000, output=20_000))
+    # occupancy (last assistant usage total) 120k (over 100k start) -> tier 100k.
+    # A big cache_read (quiet/cached turn) must NOT deflate this like net-spend did.
+    jl.write_text(_assistant(input_=1000, cache_read=110_000,
+                              cache_creation=8000, output=1000))
     _stdin(monkeypatch, {"session_id": "sx", "transcript_path": str(jl)})
     assert hooks.main(["turn_inject"]) == 0
     assert "Net Session Token: main 120k agent 0k" in _ctx(capsys)
@@ -104,10 +98,26 @@ def test_threshold_inject_fires_once_per_tier(tmp_path, monkeypatch, capsys):
 def test_threshold_inject_silent_below_start(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     jl = tmp_path / "s.jsonl"
-    jl.write_text(_assistant(cache_creation=50_000, output=10_000))  # 60k < 100k
+    jl.write_text(_assistant(input_=40_000, cache_read=10_000,
+                              cache_creation=5000, output=5000))  # 60k < 100k
     _stdin(monkeypatch, {"session_id": "sy", "transcript_path": str(jl)})
     assert hooks.main(["turn_inject"]) == 0
     assert "Net Session Token" not in _ctx(capsys)
+
+
+def test_threshold_inject_quiet_cache_hit_turn_does_not_deflate(tmp_path, monkeypatch, capsys):
+    """Regression: a quiet turn with a huge cache HIT (low net-spend, high
+    occupancy) must still report/fire on occupancy — the bug this fix kills had
+    `main` computed as cumulative net-spend, which stayed low here while real
+    occupancy (statusline `total`) was already over the line."""
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    jl = tmp_path / "s.jsonl"
+    # net-spend here is tiny (creation+output = 1100) but occupancy is 131.2k.
+    jl.write_text(_assistant(input_=100, cache_read=130_000,
+                              cache_creation=900, output=200))
+    _stdin(monkeypatch, {"session_id": "sz", "transcript_path": str(jl)})
+    assert hooks.main(["turn_inject"]) == 0
+    assert "Net Session Token: main 131k agent 0k" in _ctx(capsys)
 
 
 # --------------------------------------------------------------------------- #
