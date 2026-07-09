@@ -1,4 +1,4 @@
-"""B5: cortex rotate warning in turn_inject (MARROW_CORTEX only)."""
+"""Cortex window-occupancy 亮牌 in turn_inject (MARROW_CORTEX only)."""
 from __future__ import annotations
 
 import io
@@ -31,34 +31,34 @@ def _ctx(capsys):
     return json.loads(out)["hookSpecificOutput"]["additionalContext"]
 
 
-def test_rotate_warning_fires_over_threshold(tmp_path, monkeypatch, capsys):
+def test_show_fires_over_threshold(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("MARROW_CORTEX", "1")
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
-    warn = config.load()["cortex_rotate"]["warn_tokens"]
-    jl = _transcript(tmp_path, warn + 1)
+    show = config.load()["cortex_rotate"]["show_tokens"]
+    jl = _transcript(tmp_path, show + 1)
     _stdin(monkeypatch, {"session_id": "s1", "transcript_path": str(jl)})
     assert hooks.main(["turn_inject"]) == 0
-    assert "/clear" in _ctx(capsys)
+    assert "lie_down(rotate=True)" in _ctx(capsys)
 
 
-def test_rotate_warning_silent_below_threshold(tmp_path, monkeypatch, capsys):
+def test_show_silent_below_threshold(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("MARROW_CORTEX", "1")
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
-    warn = config.load()["cortex_rotate"]["warn_tokens"]
-    jl = _transcript(tmp_path, warn - 1000)
+    show = config.load()["cortex_rotate"]["show_tokens"]
+    jl = _transcript(tmp_path, show - 1000)
     _stdin(monkeypatch, {"session_id": "s1", "transcript_path": str(jl)})
     assert hooks.main(["turn_inject"]) == 0
-    assert "/clear" not in _ctx(capsys)
+    assert "lie_down(rotate=True)" not in _ctx(capsys)
 
 
-def test_rotate_warning_absent_for_normal_session(tmp_path, monkeypatch, capsys):
+def test_show_absent_for_normal_session(tmp_path, monkeypatch, capsys):
     monkeypatch.delenv("MARROW_CORTEX", raising=False)
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
-    warn = config.load()["cortex_rotate"]["warn_tokens"]
-    jl = _transcript(tmp_path, warn + 50_000)
+    show = config.load()["cortex_rotate"]["show_tokens"]
+    jl = _transcript(tmp_path, show + 50_000)
     _stdin(monkeypatch, {"session_id": "s1", "transcript_path": str(jl)})
     assert hooks.main(["turn_inject"]) == 0
-    assert "/clear" not in _ctx(capsys)
+    assert "lie_down(rotate=True)" not in _ctx(capsys)
 
 
 def test_window_tokens_parser_sums_last_usage(tmp_path):

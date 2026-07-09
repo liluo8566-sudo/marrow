@@ -5,6 +5,14 @@ import pytest
 from marrow import usage_snapshot as us
 
 
+@pytest.fixture(autouse=True)
+def _no_side_sources(monkeypatch):
+    """Default-off cdx + ccusage collectors so the primary-usage tests never
+    touch network / npx. Dedicated tests re-patch these explicitly."""
+    monkeypatch.setattr(us, "_codex_rows", lambda: [])
+    monkeypatch.setattr(us, "_today_net_rows", lambda: [])
+
+
 def _kv(conn, key):
     row = conn.execute(
         "SELECT value FROM ct_rate_limit WHERE key=?", (key,)).fetchone()
@@ -115,3 +123,54 @@ def test_main_returns_1_and_logs_stderr_on_failure(monkeypatch, tmp_path, capsys
     assert us.main() == 1
     err = capsys.readouterr().err
     assert "no oauth token available" in err
+
+
+_REAL_CODEX_ROWS = us._codex_rows
+_REAL_TODAY_ROWS = us._today_net_rows
+
+
+def test_codex_rows_parses_used_percent(monkeypatch, tmp_path):
+    monkeypatch.setattr(us, "_codex_rows", _REAL_CODEX_ROWS)  # opt out of autouse stub
+    auth = tmp_path / "auth.json"
+    auth.write_text(json.dumps({"tokens": {"access_token": "t", "account_id": "a"}}))
+    monkeypatch.setattr(us, "CDX_AUTH", auth)
+
+    class R:
+        def read(self_inner):
+            return json.dumps({"rate_limit": {
+                "primary_window": {"used_percent": 5},
+                "secondary_window": {"used_percent": 12.5}}}).encode()
+        def __enter__(self_inner):
+            return self_inner
+        def __exit__(self_inner, *a):
+            return False
+    monkeypatch.setattr("marrow.usage_snapshot.urllib.request.urlopen",
+                        lambda *a, **k: R())
+    rows = dict(us._codex_rows())
+    assert rows["cdx_five_hour_pct"] == "5.0"
+    assert rows["cdx_seven_day_pct"] == "12.5"
+
+
+def test_codex_rows_empty_without_auth(monkeypatch, tmp_path):
+    monkeypatch.setattr(us, "_codex_rows", _REAL_CODEX_ROWS)
+    monkeypatch.setattr(us, "CDX_AUTH", tmp_path / "nope.json")
+    assert us._codex_rows() == []
+
+
+def test_today_net_rows_parses_ccusage(monkeypatch):
+    monkeypatch.setattr(us, "_today_net_rows", _REAL_TODAY_ROWS)
+    class P:
+        returncode = 0
+        stdout = json.dumps({"daily": [
+            {"cacheCreationTokens": 1000, "outputTokens": 200}]})
+        stderr = ""
+    monkeypatch.setattr(us.subprocess, "run", lambda *a, **k: P())
+    assert us._today_net_rows() == [("today_net_tokens", "1200")]
+
+
+def test_today_net_rows_empty_on_failure(monkeypatch):
+    monkeypatch.setattr(us, "_today_net_rows", _REAL_TODAY_ROWS)
+    def boom(*a, **k):
+        raise OSError("no npx")
+    monkeypatch.setattr(us.subprocess, "run", boom)
+    assert us._today_net_rows() == []
