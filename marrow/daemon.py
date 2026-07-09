@@ -311,6 +311,8 @@ def tl(
     n_word: str | None = None,
     y_word: str | None = None,
     importance: int | None = None,
+    n_intensity: int | None = None,  # deprecated, kept for schema compat
+    y_intensity: int | None = None,  # deprecated, kept for schema compat
     sid: str | None = None,
     event_id: int | None = None,
     before: str | None = None,
