@@ -1270,13 +1270,15 @@ def _run_cortex_module(module: str, extra_args: list[str] | None = None) -> dict
 
 @cortex_tool()
 def lie_down(rotate: bool = False, next_wake_min: float | None = None) -> dict:
-    """End this wake. Write your handoff note (碎碎念) BEFORE calling — a PreToolUse
-    guard denies lie_down (rotate or a large window) until the handoff is written
-    this window. Clears due self_schedule, records tokens, sets the next internal
-    wake. next_wake_min = minutes until you next wake (clamped to the wake window);
-    omit it to roll the dice (a uniform random draw within the window).
-    rotate=True respawns a fresh window on the next wake (you decide when the
-    window is full — there is no auto rotate)."""
+    """End this wake and pick when you next wake. next_wake_min = minutes from
+    now (clamped to the wake window); omit it to roll the dice (random draw
+    within the window). A normal nap needs nothing beforehand — just call it.
+    rotate=True respawns a FRESH window on the next wake (use it as the last
+    lie_down of a full window; you decide when it's full — no auto rotate).
+    Only rotate=True (or a lie_down when the window is already at the ~150k fuse
+    line) requires a handoff (碎碎念) written this window first — a PreToolUse
+    guard denies those until it's saved. Also clears due self_schedule + records
+    tokens."""
     args = ["--rotate"] if rotate else []
     if next_wake_min is not None:
         args += ["--next-wake-min", str(next_wake_min)]
@@ -1287,7 +1289,8 @@ def lie_down(rotate: bool = False, next_wake_min: float | None = None) -> dict:
 def wait(minutes: float) -> dict:
     """Stay awake-idle: hold off the watchdog's routine silence timeout for
     `minutes` (e.g. you expect her back soon). Clamped to the wake-window max;
-    fires once then resets to default. The runaway token fuse still applies."""
+    fires once then resets to default. The runaway token fuse still applies.
+    Capped at twice per wake — a third call this wake is refused."""
     return _run_cortex_module("cortex.wait", ["--minutes", str(minutes)])
 
 

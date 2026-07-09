@@ -229,7 +229,7 @@ im_quiet_text = ""
 # nudge to wrap up, write the 碎碎念 (handoff), and lie_down(rotate=True). Normal
 # sessions never see this. Empty text = inert.
 show_tokens = 100000
-show_text = "Window filling up (≥100k) — wrap this turn, write your 碎碎念 (handoff), then lie_down(rotate=True) for a fresh window."
+show_text = "Context ≥100k - If not actively chatting with user, handoff within 3 turns and lie_down(rotate=True) to clear.  If mid-conversation: carry on, the 150k fuse is the backstop."
 
 [cortex_usage]
 # Net-token visibility (all sessions self-aware). Rendered by usage.py off the
