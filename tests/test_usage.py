@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import time
+from datetime import datetime
 
 import pytest
 
@@ -275,3 +277,81 @@ def test_handoff_block_reads_file(tmp_path, monkeypatch):
 def test_handoff_block_empty_when_absent(tmp_path, monkeypatch):
     monkeypatch.setattr(hooks, "_cortex_handoff_path", lambda: tmp_path / "none.md")
     assert hooks._cortex_handoff_block() == ""
+
+
+# --------------------------------------------------------------------------- #
+# daily handoff page-turn
+# --------------------------------------------------------------------------- #
+
+def _page_turn_setup(tmp_path, monkeypatch, l1_date=None, template="# Title [YYYY-MM-DD]\n\nbody"):
+    """Home dir with handoff.md (given L1 date) + a template file. Patches
+    config.load() cortex section so home/template/archive_dir resolve here."""
+    home = tmp_path / "cortex_home"
+    home.mkdir(parents=True, exist_ok=True)
+    hp = home / "handoff.md"
+    l1 = f"# Title [{l1_date}]" if l1_date else "# Title"
+    hp.write_text(f"{l1}\nyesterday's content", encoding="utf-8")
+    (home / "handoff_template.md").write_text(template, encoding="utf-8")
+    monkeypatch.setattr(hooks, "_cortex_handoff_path", lambda: hp)
+    real_load = config.load
+
+    def _patched_load():
+        cfg = real_load()
+        cfg = dict(cfg)
+        cx = dict(cfg.get("cortex", {}))
+        cx["home"] = str(home)
+        cx["handoff_archive_dir"] = "handoff_archive"
+        cx["handoff_template_file"] = "handoff_template.md"
+        cfg["cortex"] = cx
+        return cfg
+
+    monkeypatch.setattr(config, "load", _patched_load)
+    return home, hp
+
+
+def test_page_turn_same_day_noop(tmp_path, monkeypatch):
+    today = datetime.now(config.get_tz()).date().isoformat()
+    home, hp = _page_turn_setup(tmp_path, monkeypatch, l1_date=today)
+    block = hooks._cortex_handoff_block()
+    assert "yesterday's content" in block
+    assert hp.exists()
+    assert not (home / "handoff_archive").exists()
+
+
+def test_page_turn_cross_day_archives_and_refreshes(tmp_path, monkeypatch):
+    old_mtime = time.time() - 86400
+    home, hp = _page_turn_setup(tmp_path, monkeypatch, l1_date="2026-07-01")
+    os.utime(hp, (old_mtime, old_mtime))
+    block = hooks._cortex_handoff_block()
+    # injected text is the OLD content
+    assert "yesterday's content" in block
+    # archive file exists
+    archived = home / "handoff_archive" / "2026-07-01.md"
+    assert archived.exists()
+    assert "yesterday's content" in archived.read_text(encoding="utf-8")
+    # new file has today's date
+    today = datetime.now(config.get_tz()).date().isoformat()
+    new_text = hp.read_text(encoding="utf-8")
+    assert f"[{today}]" in new_text
+    assert "yesterday's content" not in new_text
+    # new file mtime is in the past (backdated, not "written this window")
+    assert hp.stat().st_mtime <= old_mtime + 1
+
+
+def test_page_turn_unparsable_date_no_op(tmp_path, monkeypatch):
+    home, hp = _page_turn_setup(tmp_path, monkeypatch, l1_date=None)
+    block = hooks._cortex_handoff_block()
+    assert "yesterday's content" in block
+    assert hp.exists()
+    assert not (home / "handoff_archive").exists()
+    assert "yesterday's content" in hp.read_text(encoding="utf-8")
+
+
+def test_page_turn_collision_suffix(tmp_path, monkeypatch):
+    home, hp = _page_turn_setup(tmp_path, monkeypatch, l1_date="2026-07-01")
+    archive_dir = home / "handoff_archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    (archive_dir / "2026-07-01.md").write_text("existing", encoding="utf-8")
+    hooks._cortex_handoff_block()
+    assert (archive_dir / "2026-07-01.md").read_text(encoding="utf-8") == "existing"
+    assert (archive_dir / "2026-07-01-2.md").exists()

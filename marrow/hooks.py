@@ -3183,6 +3183,8 @@ def _kickout_context(channel: str, now: datetime) -> str:
     if os.environ.get("MARROW_CORTEX"):
         return ""
     kc = config.load().get("kickout", {}) or {}
+    if not kc.get("enabled", True):
+        return ""
     now_min = now.hour * 60 + now.minute
     if channel == "cli":
         if _in_time_window(now_min, kc.get("cli_wind_down_start", "21:30"),
@@ -3267,8 +3269,68 @@ def _cortex_handoff_path():
         return None
 
 
+_HANDOFF_DATE_RE = _re.compile(
+    r"\[(\d{4}-\d{2}-\d{2})\]|(\d{4}-\d{2}-\d{2})\s*$")
+
+
+def _handoff_l1_date(text: str) -> str | None:
+    """L1 date: `[YYYY-MM-DD]` bracketed or a bare trailing YYYY-MM-DD.
+    None if L1 is missing/unparsable (e.g. the literal template placeholder)."""
+    l1 = text.splitlines()[0] if text else ""
+    m = _HANDOFF_DATE_RE.search(l1)
+    if not m:
+        return None
+    date_str = m.group(1) or m.group(2)
+    try:
+        datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        return None
+    return date_str
+
+
+def _cortex_page_turn(p: Path, old_text: str) -> None:
+    """Archive a stale handoff.md and replace it with a fresh dated copy of the
+    template. Best-effort: any failure leaves the stale file in place (the
+    NEXT SessionStart will retry the page-turn)."""
+    cx = config.load().get("cortex", {}) or {}
+    home = (cx.get("home") or "~/.config/marrow/cortex")
+    home_p = Path(home).expanduser()
+    archive_dir = home_p / (cx.get("handoff_archive_dir") or "handoff_archive")
+    template_name = cx.get("handoff_template_file") or "handoff_template.md"
+    template_p = home_p / template_name
+    old_date = _handoff_l1_date(old_text)
+    try:
+        old_mtime = p.stat().st_mtime
+    except OSError:
+        old_mtime = time.time()
+    try:
+        template_text = template_p.read_text(encoding="utf-8")
+    except OSError:
+        return  # no template to copy from — leave the stale file in place
+    try:
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        dest = archive_dir / f"{old_date}.md"
+        n = 1
+        while dest.exists():
+            n += 1
+            dest = archive_dir / f"{old_date}-{n}.md"
+        shutil.move(str(p), str(dest))
+
+        today = datetime.now(config.get_tz()).date().isoformat()
+        new_text = template_text.replace("[YYYY-MM-DD]", f"[{today}]")
+        p.write_text(new_text, encoding="utf-8")
+        # Backdate mtime so _cortex_lie_down_deny's "written this window" gate
+        # doesn't wrongly read the fresh copy as this window's own handoff.
+        os.utime(p, (old_mtime, old_mtime))
+    except OSError:
+        pass
+
+
 def _cortex_handoff_block() -> str:
-    """Handoff note content for a fresh cortex window. Empty if absent/unreadable."""
+    """Handoff note content for a fresh cortex window. Empty if absent/unreadable.
+    Daily file: a stale (before-today) L1 date is injected as-is this one last
+    time, then the file is archived and replaced by a fresh dated template copy
+    for tomorrow's read. No parsable date -> inject as-is, never page-turn."""
     p = _cortex_handoff_path()
     if p is None:
         return ""
@@ -3279,8 +3341,14 @@ def _cortex_handoff_block() -> str:
     if not text:
         return ""
     title = (config.load().get("cortex", {}) or {}).get(
-        "handoff_title", "阿屿の碎碎念")
-    return f"{title}:\n{text}"
+        "handoff_title", "Handoff")
+    block = f"{title}:\n{text}"
+    date_str = _handoff_l1_date(text)
+    if date_str is not None:
+        today = datetime.now(config.get_tz()).date().isoformat()
+        if date_str < today:
+            _cortex_page_turn(p, text)
+    return block
 
 
 def _window_tokens_from_transcript(tpath: str) -> int:

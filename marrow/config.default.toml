@@ -298,13 +298,18 @@ venv_python = ""
 repo_root = ""
 # Handoff (碎碎念) note file under <home>. Injected at SessionStart on a fresh
 # cortex window (new process = fresh; resume skips). Written by the session.
+# Daily file with lazy page-turn: a stale (yesterday-or-older) L1 date is
+# injected as-is once more, then archived to <home>/<handoff_archive_dir>/
+# and replaced by a fresh copy of <home>/<handoff_template_file>.
 handoff_file = "handoff.md"
-handoff_title = "阿屿の碎碎念"
+handoff_title = "Handoff"
+handoff_archive_dir = "handoff_archive"
+handoff_template_file = "handoff_template.md"
 # lie_down PreToolUse guard: deny (write your 碎碎念 first) when rotate=True OR
 # window occupancy >= force_tokens (15万 fuse line) and no handoff was written
 # this window (handoff mtime after the window's first transcript line).
 force_tokens = 150000
-handoff_deny_text = "Write your 碎碎念 (handoff) first — call lie_down again after saving it."
+handoff_deny_text = "Write your handoff note first — call lie_down again after saving it."
 
 [hooks]
 # PreToolUse backup guard — stateless, two tiers (no state, no dedup).
