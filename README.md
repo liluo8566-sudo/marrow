@@ -73,7 +73,7 @@ For chat-channel commands (WeChat, Telegram), see [synapse](https://github.com/J
 ## Architecture
 
 - **4 hooks** — inject recall context on prompt, capture session transcript on end
-- **MCP daemon** — serves `recall`, `sticker_pick`, and `embed_pending` tools to Claude Code
+- **MCP daemon** — serves `recall`, `sticker`, and `event_embed` tools to Claude Code
 - **SQLite** — events, tasks, milestones, entities, memes, stickers; FTS5 full-text index
 - **sqlite-vec** — 1024-dim bge-m3 embeddings, 90-day rolling window
 - **Dashboard** — auto-rendered markdown pages (Obsidian / VSCode / any editor)

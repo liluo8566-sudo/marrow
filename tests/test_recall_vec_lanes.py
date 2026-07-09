@@ -161,6 +161,62 @@ def test_embed_pending_backfills_all_six_lanes(db):
         assert db.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0] == 1
 
 
+def test_events_lane_embed_strips_time_and_sticker_markers(db):
+    # Events-lane embed text must match what recall_fusion actually surfaces
+    # (recall.py row passthrough, ~line 1817): wx time-anchor prefix and bare
+    # [sticker: ...] marker lines stripped before the text is embedded.
+    _make_event(db, "[time: 2026-06-23 Tue 14:49 | gap: 0m]\n啥\nhow comes")
+    captured = {}
+    mock_emb = MagicMock()
+
+    def _embed(texts):
+        captured["texts"] = list(texts)
+        return np.stack([_fake_vec(600 + i) for i, _ in enumerate(texts)])
+    mock_emb.embed.side_effect = _embed
+    with patch.object(rm, "_ensure_embedder", return_value=mock_emb):
+        n = rm.embed_pending(db, batch=10)
+    assert n == 1
+    assert captured["texts"] == ["啥\nhow comes"]
+
+
+def test_events_lane_embed_strips_sticker_line_mixed_with_dialogue(db):
+    _make_event(
+        db,
+        "[sticker: emoji=⭐, set=lumi_stickers_by_Stellan_CYC_bot]\n"
+        "？狗男人怎么接不住我的梗",
+    )
+    captured = {}
+    mock_emb = MagicMock()
+
+    def _embed(texts):
+        captured["texts"] = list(texts)
+        return np.stack([_fake_vec(650 + i) for i, _ in enumerate(texts)])
+    mock_emb.embed.side_effect = _embed
+    with patch.object(rm, "_ensure_embedder", return_value=mock_emb):
+        rm.embed_pending(db, batch=10)
+    assert captured["texts"] == ["？狗男人怎么接不住我的梗"]
+
+
+def test_events_lane_embed_skips_row_empty_after_shaping(db):
+    # Bare marker with no body (should be junk-dropped pre-embed by repair /
+    # ingest gate, but guard the embed path directly): shaping strips it to
+    # empty, so it must be skipped entirely — no embed() call, no vec/meta row.
+    eid = _make_event(db, "[time: 2026-06-23 Tue 14:49 | gap: 0m]")
+    mock_emb = MagicMock()
+    mock_emb.embed.side_effect = lambda texts: np.stack(
+        [_fake_vec(700 + i) for i, _ in enumerate(texts)])
+    with patch.object(rm, "_ensure_embedder", return_value=mock_emb):
+        n = rm.embed_pending(db, batch=10)
+    assert n == 0
+    mock_emb.embed.assert_not_called()
+    assert db.execute(
+        "SELECT COUNT(*) FROM events_vec WHERE rowid=?", (eid,)
+    ).fetchone()[0] == 0
+    assert db.execute(
+        "SELECT COUNT(*) FROM events_vec_meta WHERE rowid=?", (eid,)
+    ).fetchone()[0] == 0
+
+
 def test_embed_pending_idempotent_second_run(db):
     _make_event(db, "ev1")
     _make_meme(db, "mk")
@@ -173,6 +229,45 @@ def test_embed_pending_idempotent_second_run(db):
         second = rm.embed_pending(db, batch=10)
     assert first == 2
     assert second == 0
+
+
+def test_embed_pending_skips_meta_only_tombstone_row(db):
+    # Event with a meta row but NO vector = eviction tombstone (or pre-repair
+    # poison). Dedup is NOT EXISTS vec AND NOT EXISTS meta, so it must be skipped
+    # — not re-embedded on every backfill.
+    eid = _make_event(db, "tombstoned event")
+    db.execute(
+        "INSERT INTO events_vec_meta(rowid, embedder_id, dim) "
+        "VALUES(?, 'bge-m3', 1024)", (eid,))
+    db.commit()
+    mock_emb = MagicMock()
+    mock_emb.embed.side_effect = lambda texts: np.stack(
+        [_fake_vec(400 + i) for i, _ in enumerate(texts)])
+    with patch.object(rm, "_ensure_embedder", return_value=mock_emb):
+        n = rm.embed_pending(db, batch=10)
+    assert n == 0
+    assert db.execute("SELECT COUNT(*) FROM events_vec").fetchone()[0] == 0
+
+
+def test_embed_pending_reembeds_after_poison_meta_removed(db):
+    # The repair deletes the poisoned meta row (meta, no vec). Once gone, the
+    # event is fresh (no meta, no vec) and embed_pending re-embeds it.
+    eid = _make_event(db, "poisoned event")
+    db.execute(
+        "INSERT INTO events_vec_meta(rowid, embedder_id, dim) "
+        "VALUES(?, 'bge-m3', 1024)", (eid,))
+    db.commit()
+    mock_emb = MagicMock()
+    mock_emb.embed.side_effect = lambda texts: np.stack(
+        [_fake_vec(500 + i) for i, _ in enumerate(texts)])
+    with patch.object(rm, "_ensure_embedder", return_value=mock_emb):
+        assert rm.embed_pending(db, batch=10) == 0  # skipped while meta present
+        db.execute("DELETE FROM events_vec_meta WHERE rowid=?", (eid,))
+        db.commit()
+        assert rm.embed_pending(db, batch=10) == 1  # re-embedded after repair
+    assert db.execute(
+        "SELECT COUNT(*) FROM events_vec WHERE rowid=?", (eid,)
+    ).fetchone()[0] == 1
 
 
 def test_embed_pending_skips_inactive_and_superseded(db):

@@ -10,12 +10,13 @@ Covers:
 from __future__ import annotations
 
 import datetime
+import re
 import struct
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from marrow.timeutil import format_recall_ts
+from marrow.timeutil import format_recall_ts, reltime_short
 from marrow.hooks import _apply_rel_cutoff, _render_hit_block
 
 
@@ -91,6 +92,49 @@ class TestFormatRecallTs:
         assert "not-a-dat" in label
 
 
+# ── reltime_short buckets ─────────────────────────────────────────────────────
+# Short single-token label (no 'ago' suffix) used by daemon.recall()'s `when`
+# field: <24h -> Xh; <7d -> Xd; 7d-365d -> MM-DD (Melbourne local);
+# >=365d -> YYYY (Melbourne local). Distinct from format_recall_ts, which
+# still backs hooks.py's hit-block renderer / recall log writer.
+
+class TestReltimeShort:
+    def test_hours_bucket(self):
+        ts = _ts(5 * 3600)  # 5h
+        assert reltime_short(ts, now=_now()) == "5h"
+
+    def test_sub_hour_floors_to_zero(self):
+        ts = _ts(1800)  # 30 min — no minute bucket in this format
+        assert reltime_short(ts, now=_now()) == "0h"
+
+    def test_days_under_week_bucket(self):
+        ts = _ts(3 * 86400)  # 3d
+        assert reltime_short(ts, now=_now()) == "3d"
+
+    def test_exactly_seven_days_falls_into_date_bucket(self):
+        # Exactly 7d is NOT < 7d — falls into the MM-DD bucket, not '7d'.
+        ts = _ts(7 * 86400)
+        assert re.fullmatch(r"\d{2}-\d{2}", reltime_short(ts, now=_now()))
+
+    def test_month_scale_renders_mm_dd(self):
+        ts = _ts(30 * 86400)  # 30d
+        assert re.fullmatch(r"\d{2}-\d{2}", reltime_short(ts, now=_now()))
+
+    def test_year_plus_renders_year_only(self):
+        ts = _ts(400 * 86400)  # >1yr
+        assert re.fullmatch(r"\d{4}", reltime_short(ts, now=_now()))
+
+    def test_no_ago_suffix_anywhere(self):
+        for delta in (3600, 3 * 86400, 30 * 86400, 400 * 86400):
+            assert "ago" not in reltime_short(_ts(delta), now=_now())
+
+    def test_empty_string(self):
+        assert reltime_short("") == ""
+
+    def test_fallback_on_bad_input(self):
+        assert reltime_short("not-a-date") == ""
+
+
 # ── _apply_rel_cutoff ─────────────────────────────────────────────────────────
 
 class TestApplyRelCutoff:
@@ -134,22 +178,22 @@ class TestRenderHitBlock:
         block = _render_hit_block(0, h, self._caps)
         # The main bullet line content should be ≤300 chars (cap for rank 0).
         main_line = block[0]
-        # Extract content after the timestamp label
-        content_part = main_line.split("] ", 1)[-1] if "]" in main_line else main_line
+        # Extract content after the "<head>: " marker
+        content_part = main_line.split(": ", 1)[-1]
         assert len(content_part) <= 300
 
     def test_rank1_cap_120(self):
         h = _hit(0.9, content=self._long_content(500))
         block = _render_hit_block(1, h, self._caps)
         main_line = block[0]
-        content_part = main_line.split("] ", 1)[-1] if "]" in main_line else main_line
+        content_part = main_line.split(": ", 1)[-1]
         assert len(content_part) <= 120
 
     def test_rank3_cap_40(self):
         h = _hit(0.7, content=self._long_content(200))
         block = _render_hit_block(3, h, self._caps)
         main_line = block[0]
-        content_part = main_line.split("] ", 1)[-1] if "]" in main_line else main_line
+        content_part = main_line.split(": ", 1)[-1]
         assert len(content_part) <= 40
 
     def test_rank_beyond_list_uses_last(self):
@@ -158,7 +202,7 @@ class TestRenderHitBlock:
         block = _render_hit_block(10, h, self._caps)
         # Should not raise; content capped at 40
         main_line = block[0]
-        content_part = main_line.split("] ", 1)[-1] if "]" in main_line else main_line
+        content_part = main_line.split(": ", 1)[-1]
         assert len(content_part) <= 40
 
     def test_anchor_truncated_no_context(self):
@@ -166,7 +210,7 @@ class TestRenderHitBlock:
         block = _render_hit_block(0, h, self._caps)
         # Anchor rows: exactly 1 line, no context bullets.
         assert len(block) == 1
-        content_part = block[0].split("] ", 1)[-1] if "]" in block[0] else block[0]
+        content_part = block[0].split(": ", 1)[-1]
         assert len(content_part) <= 300
 
     def test_rank0_event_context_included(self):
@@ -212,8 +256,55 @@ def test_render_rank_beyond_list_uses_last_cap():
          "timestamp": _ts(60), "role": "user"}
     block = _render_hit_block(10, h, caps)
     main_line = block[0]
-    content_part = main_line.split("] ", 1)[-1] if "]" in main_line else main_line
+    content_part = main_line.split(": ", 1)[-1]
     assert len(content_part) <= 40
+
+
+# ── per-kind recall head format ──────────────────────────────────────────────
+
+_CAPS = [300, 120, 120, 40, 40]
+
+
+def test_head_event_channel_and_id():
+    h = {**_hit(1.0, content="hello"), "channel": "wx"}
+    line = _render_hit_block(0, h, _CAPS)[0]
+    assert line.startswith("- [wx ")
+    assert "] ev#1: hello" in line
+
+
+def test_head_event_channel_fallback_cli():
+    h = _hit(1.0, content="hi")  # channel None
+    line = _render_hit_block(0, h, _CAPS)[0]
+    assert line.startswith("- [cli ")
+    assert "ev#1: hi" in line
+
+
+def test_head_milestone_strips_t00():
+    h = {**_hit(0.8, content="grad", kind="milestone"),
+         "timestamp": "2013-03-15T00:00:00Z"}
+    line = _render_hit_block(0, h, _CAPS)[0]
+    assert "T00:00" not in line
+    assert line == "- [2013-03-15] ms#1: grad"
+
+
+def test_head_milestone_year_only():
+    h = {**_hit(0.8, content="born", kind="milestone"),
+         "timestamp": "2013T00:00:00Z"}
+    line = _render_hit_block(0, h, _CAPS)[0]
+    assert line == "- [2013] ms#1: born"
+
+
+def test_head_entity_no_time():
+    h = {**_hit(0.8, content="Melbourne", kind="entity"),
+         "timestamp": "2026-01-01T00:00:00Z"}
+    line = _render_hit_block(0, h, _CAPS)[0]
+    assert line == "- en#1: Melbourne"
+
+
+def test_head_meme_empty_ts_no_bracket():
+    h = {**_hit(0.8, content="梗: 内容", kind="memes"), "timestamp": ""}
+    line = _render_hit_block(0, h, _CAPS)[0]
+    assert line == "- me#1: 梗: 内容"
 
 
 # ── mcp recall context param plumbing ────────────────────────────────────────

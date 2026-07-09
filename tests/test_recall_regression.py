@@ -167,8 +167,8 @@ def test_anchor_pregate_memes_low_vec_dropped(db):
     the anchor key/value (no strong-hit). Strong-hit only fires on literal match.
     """
     db.execute(
-        "INSERT INTO memes(type, key, value, context, use_count, status) "
-        "VALUES('phrase', 'zxqlowvec phrase', 'zxqsome unique value', 'ctx', 1, 'active')"
+        "INSERT INTO memes(type, key, value, use_count, status) "
+        "VALUES('phrase', 'zxqlowvec phrase', 'zxqsome unique value', 1, 'active')"
     )
     db.commit()
     mid = db.execute("SELECT id FROM memes WHERE key='zxqlowvec phrase'").fetchone()["id"]

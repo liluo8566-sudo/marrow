@@ -1,3 +1,8 @@
-Approved text (Lumi 07-03). Replace this file (or point [tl_nudge].text_file at your own) with zero code change.
+Approved text (Lumi 07-07). Replace this file (or point [tl_nudge].text_file at your own) with zero code change.
 ---
-10 turns have passed without a tl_add. Please add a tl if scene, emotion, or activity changed. Skip if nothing worth a line happened.
+No tl add/update for a while.
+- Coding/study session: keep ONE tl per session — update it when things change.
+- Casual chat: add one when topic/location/mood shifts or something got done.
+- Skip if no major change, or the last tl was within 0.5h.
+- Please add/update when the session feels near its end and has no tl yet.
+- Affect 【】 = mood & feeling ONLY — 只写你内心的情绪和感受，不允许包含行为 (x 挨训认改).

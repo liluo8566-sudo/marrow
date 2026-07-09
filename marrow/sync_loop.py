@@ -306,6 +306,55 @@ class AtlasSweepLoop:
 
 
 # ---------------------------------------------------------------------------
+# Usage snapshot tick — carrier for marrow.usage_snapshot (5h/7d/cdx/today).
+# Runs inside the watcher (always alive) so the numbers stay fresh regardless
+# of whether cortex is running; cortex's own tick may also call it — the
+# write is an upsert, so a duplicate call from either side is harmless.
+# ---------------------------------------------------------------------------
+
+def _usage_snapshot_tick_s() -> float:
+    from . import config as _config
+    return float((_config.load().get("cortex_usage", {}) or {}).get(
+        "snapshot_tick_s", 300) or 300)
+
+
+class UsageSnapshotLoop:
+    """Runs usage_snapshot.fetch_and_write on a periodic tick. Owns no DB
+    connection itself (fetch_and_write opens its own) — tick_s only."""
+
+    def __init__(self, tick_s: float | None = None) -> None:
+        self._tick_s = tick_s if tick_s is not None else _usage_snapshot_tick_s()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(
+            target=self._run, name="marrow-usage-snapshot", daemon=True
+        )
+        self._thread.start()
+
+    def stop(self, timeout: float = 10.0) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=timeout)
+
+    def _run(self) -> None:
+        # Boot tick fires immediately so a watcher restart refreshes right away.
+        self._safe_snapshot()
+        while not self._stop.wait(self._tick_s):
+            self._safe_snapshot()
+
+    def _safe_snapshot(self) -> None:
+        from . import usage_snapshot
+        try:
+            usage_snapshot.fetch_and_write()
+        except usage_snapshot.UsageSnapshotError as e:
+            log.debug("usage_snapshot tick: %s", e)
+        except Exception:  # noqa: BLE001
+            log.exception("usage_snapshot tick error")
+
+
+# ---------------------------------------------------------------------------
 # Factory: build targets from _REGISTRY + dashboard
 # ---------------------------------------------------------------------------
 

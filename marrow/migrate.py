@@ -94,7 +94,7 @@ def parse_memes_cipher(text: str) -> list[dict]:
             key, _, val = s[2:].partition(": ")
             val = re.sub(r"\s*\[P\]\s*$", "", val).strip()
             rows.append({"type": "cipher", "key": key.strip(), "value": val,
-                         "context": None, "use_count": 0, "last_seen": None})
+                         "use_count": 0, "last_seen": None})
     return rows
 
 

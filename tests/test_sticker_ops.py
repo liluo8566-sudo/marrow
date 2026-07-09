@@ -81,7 +81,7 @@ def test_update_sticker_success(db, tmp_path, monkeypatch):
 
     out = sticker_ops.update_sticker(db, result["id"], "new desc")
 
-    assert out == {"ok": True, "id": result["id"], "desc": "new desc"}
+    assert out == {"ok": True, "id": result["id"], "desc": "new desc", "old_desc": "old desc"}
     row = db.execute("SELECT desc FROM stickers WHERE id = ?", (result["id"],)).fetchone()
     assert row["desc"] == "new desc"
 
@@ -106,7 +106,9 @@ def test_delete_sticker_success(db, tmp_path, monkeypatch):
 
     out = sticker_ops.delete_sticker(db, result["id"])
 
-    assert out == {"ok": True, "id": result["id"], "deleted_path": str(sticker_file)}
+    assert out == {"ok": True, "id": result["id"], "desc": "a sticker",
+                    "deleted_path": str(sticker_file)}
+    # trashed, not hard-deleted: gone from the original location either way
     assert not sticker_file.exists()
     assert not thumb_file.exists()
     assert db.execute("SELECT id FROM stickers WHERE id = ?", (result["id"],)).fetchone() is None
@@ -115,3 +117,36 @@ def test_delete_sticker_success(db, tmp_path, monkeypatch):
 def test_delete_sticker_not_found(db):
     out = sticker_ops.delete_sticker(db, 9999)
     assert out == {"ok": False, "error": "not_found"}
+
+
+def test_reconcile_stickers_md_delete_unlinks_files(db, tmp_path):
+    """Reverse path: hand-deleting a sticker's md line makes reconcile drop the
+    DB row AND unlink the orphaned image + thumbnail from disk."""
+    from marrow.reconcile_inserter import reconcile_stickers
+
+    img = tmp_path / "stk_001.png"
+    img.write_bytes(b"img")
+    thumb = tmp_path / "_thumb" / "stk_001.webp"
+    thumb.parent.mkdir()
+    thumb.write_bytes(b"thumb")
+    with db:
+        db.execute(
+            "INSERT INTO stickers (id, path, sha256, desc, source,"
+            " created_at, updated_at) VALUES"
+            " (1, ?, 'abc', 'happy', 'wechat',"
+            " '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z')", (str(img),))
+    md = tmp_path / "stickers.md"
+    # md WITHOUT id=1 (hand-deleted) but with a surviving anchor so the
+    # empty-file guard in reconcile_inserter_sync does not short-circuit.
+    md.write_text(
+        "<!-- marrow:stickers:start -->\n"
+        "- stk_002 keep <!-- id:2 -->\n"
+        "<!-- marrow:stickers:end -->\n", encoding="utf-8")
+
+    rpt = reconcile_stickers(db, md)
+
+    assert rpt.deleted == 1
+    assert db.execute(
+        "SELECT COUNT(*) FROM stickers WHERE id=1").fetchone()[0] == 0
+    assert not img.exists()
+    assert not thumb.exists()

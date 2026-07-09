@@ -34,30 +34,29 @@ def test_memes_md_edit_writes_back_to_db(tmp_path):
     conn = _conn(db_path)
     with conn:
         cur = conn.execute(
-            "INSERT INTO memes(type,key,value,context) VALUES('fact','speed','fast','racing')"
+            "INSERT INTO memes(type,key,value) VALUES('fact','speed','fast')"
         )
         rid = cur.lastrowid
 
     # Build md via render_row and inject into a file with the anchor.
     spec = subpage_specs.build_memes_spec(str(tmp_path))
     rendered = spec.render_row({"id": rid, "type": "fact", "key": "speed",
-                                "value": "fast", "context": "racing"})
+                                "value": "fast"})
     md = tmp_path / "memes.md"
     md.write_text(rendered + "\n", encoding="utf-8")
 
-    # Hand-edit: change value and context.
-    new_line = rendered.replace("fast", "blazing").replace("racing", "cycling")
+    # Hand-edit: change value.
+    new_line = rendered.replace("fast", "blazing")
     md.write_text(new_line + "\n", encoding="utf-8")
 
     rpt = reconcile_memes(conn, md)
     row = conn.execute(
-        "SELECT value, context FROM memes WHERE id=?", (rid,)
+        "SELECT value FROM memes WHERE id=?", (rid,)
     ).fetchone()
     conn.close()
 
     assert rpt.updated == 1
     assert row["value"] == "blazing"
-    assert row["context"] == "cycling"
 
 
 def test_memes_md_delete_removes_db_row(tmp_path):
@@ -89,23 +88,17 @@ def test_memes_md_delete_removes_db_row(tmp_path):
 
 
 def test_memes_parse_row_handles_optional_fields(tmp_path):
-    """parse_row accepts value-only, context-only, both, neither."""
+    """parse_row accepts value-present and value-absent rows."""
     spec = subpage_specs.build_memes_spec(str(tmp_path))
     pr = spec.parse_row
 
-    # Both present.
-    r = pr("- [fact] **key** → val _ctx_ <!-- id:1 -->")
-    assert r == {"type": "fact", "key": "key", "value": "val", "context": "ctx"}
-
     # value only.
     r = pr("- [paw] **k2** → myval <!-- id:2 -->")
-    assert r == {"type": "paw", "key": "k2", "value": "myval", "context": None}
+    assert r == {"type": "paw", "key": "k2", "value": "myval"}
 
-    # context only — parse_row may not handle context-without-arrow well,
-    # since the render format always puts value before context. Test the
-    # permissive case: no value, no context.
+    # no value.
     r = pr("- [meme] **bare** <!-- id:3 -->")
-    assert r == {"type": "meme", "key": "bare", "value": None, "context": None}
+    assert r == {"type": "meme", "key": "bare", "value": None}
 
     # Malformed — returns None.
     r = pr("not a meme line at all")
@@ -553,6 +546,55 @@ def test_memes_insert_unmappable_section_conflict(tmp_path):
 
     assert rpt.inserted == 0
     assert len(rpt.conflicts) == 1
+
+
+def test_memes_insert_type_mismatched_section_absorbed(tmp_path):
+    """[meme] tag under ## Personal is absorbed with type='meme', not skipped."""
+    db_path = _db(tmp_path)
+    conn = _conn(db_path)
+
+    md = tmp_path / "memes.md"
+    md.write_text(
+        "## Personal\n"
+        "- [meme] **X** → v\n",
+        encoding="utf-8",
+    )
+
+    rpt = reconcile_memes(conn, md)
+    row = conn.execute(
+        "SELECT type, key, value FROM memes WHERE key='X'"
+    ).fetchone()
+    conn.close()
+
+    assert rpt.inserted == 1
+    assert len(rpt.conflicts) == 0
+    assert row is not None
+    assert row["type"] == "meme"
+    assert row["value"] == "v"
+
+
+def test_memes_insert_garbage_tag_falls_back_to_section_default(tmp_path):
+    """Unrecognised [type] tag falls back to the section default type."""
+    db_path = _db(tmp_path)
+    conn = _conn(db_path)
+
+    md = tmp_path / "memes.md"
+    md.write_text(
+        "## Personal\n"
+        "- [nonsense] **Y** → v\n"
+        "## Public\n"
+        "- [nonsense] **Z** → v\n",
+        encoding="utf-8",
+    )
+
+    rpt = reconcile_memes(conn, md)
+    row_y = conn.execute("SELECT type FROM memes WHERE key='Y'").fetchone()
+    row_z = conn.execute("SELECT type FROM memes WHERE key='Z'").fetchone()
+    conn.close()
+
+    assert rpt.inserted == 2
+    assert row_y["type"] == "fact"
+    assert row_z["type"] == "others"
 
 
 def test_memes_insert_idempotent(tmp_path):

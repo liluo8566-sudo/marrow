@@ -19,9 +19,11 @@ resume detection: session_start fires on cc resume with same sid; if skip row ex
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re as _re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -30,7 +32,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from . import config, repo, storage, top_sections, transcript
 from .popen_detach import popen_detach, popen_detach_lazy
-from .timeutil import utc_iso_to_local_date, utc_iso_to_local_datetime, format_recall_ts
+from .timeutil import (
+    utc_iso_to_local_date,
+    utc_iso_to_local_datetime,
+    format_recall_ts,
+    reltime_short,
+)
 
 _RECALL_TZ = config.get_tz()
 _RECALL_CUTOFF_H = 6  # 6AM local day boundary (matches digest)
@@ -584,6 +591,88 @@ def _now_utc() -> datetime:
 
 # ── git housekeep ────────────────────────────────────────────────────────────
 
+# Files whose deletion must never be auto-committed away silently (Part A only).
+_HOUSEKEEP_PROTECTED_DEFAULT = [
+    "CLAUDE.md", "settings.json", "keybindings.json", "statusline.py",
+    "output-styles/ny.md",
+]
+
+
+def _housekeep_protected_files() -> list[str]:
+    try:
+        return config.load().get("hooks", {}).get(
+            "housekeep_protected_files", _HOUSEKEEP_PROTECTED_DEFAULT
+        )
+    except Exception:
+        return _HOUSEKEEP_PROTECTED_DEFAULT
+
+
+def _categorize_porcelain(lines: list[str]) -> dict[str, list[str]]:
+    """Bucket `git status --porcelain` lines into deleted/renamed/added/modified.
+
+    XY status codes: 'R'/'C' = rename/copy (own bucket, path keeps the
+    'old -> new' arrow); 'D' = deleted; '?' or 'A' = added; everything else
+    (M, T, U, ...) = modified.
+    """
+    cats: dict[str, list[str]] = {
+        "deleted": [], "renamed": [], "added": [], "modified": [],
+    }
+    for line in lines:
+        if not line.strip():
+            continue
+        xy, path = line[:2], line[3:].strip()
+        if "R" in xy or "C" in xy:
+            cats["renamed"].append(path)
+        elif "D" in xy:
+            cats["deleted"].append(path)
+        elif "?" in xy or "A" in xy:
+            cats["added"].append(path)
+        else:
+            cats["modified"].append(path)
+    return cats
+
+
+def _build_housekeep_commit_msg(cats: dict[str, list[str]], total: int) -> str:
+    """Subject line stays `auto: session-start housekeep (N files)`; body
+    lists files by category, deleted first and never truncated. Body caps
+    at ~2000 chars overall (added/modified may truncate, deleted never does).
+    """
+    subject = f"auto: session-start housekeep ({total} files)"
+    body_lines: list[str] = []
+    running = 0
+    if cats["deleted"]:
+        line = "deleted: " + ", ".join(cats["deleted"])
+        body_lines.append(line)
+        running += len(line)
+    for key in ("renamed", "added", "modified"):
+        items = cats[key]
+        if not items:
+            continue
+        line = f"{key}: " + ", ".join(items)
+        if running + len(line) > 2000:
+            remaining = 2000 - running
+            if remaining <= len(key) + 2:
+                continue
+            line = line[:remaining - 1] + "…"
+        body_lines.append(line)
+        running += len(line)
+    if not body_lines:
+        return subject
+    return subject + "\n\n" + "\n".join(body_lines)
+
+
+def _build_housekeep_report_line(label: str, cats: dict[str, list[str]], total: int) -> str:
+    line = f"{label}: committed {total} files"
+    deleted = cats["deleted"]
+    if not deleted:
+        return line
+    joined = ", ".join(deleted)
+    if len(joined) > 120:
+        joined = joined[:117] + "…"
+        return f"{line} ⚠️ {len(deleted)} deleted: {joined}"
+    return f"{line} ⚠️ deleted: {joined}"
+
+
 def _git_housekeep_block(
     cwd: str | None, current_sid: str | None, conn: sqlite3.Connection
 ) -> str | None:
@@ -605,16 +694,36 @@ def _git_housekeep_block(
                 )
                 dirty = [l for l in r.stdout.splitlines() if l.strip()]
                 if dirty:
-                    subprocess.run(
-                        ["git", "-C", str(claude_dir), "add", "-A"],
-                        capture_output=True, text=True, timeout=5, check=False,
-                    )
-                    subprocess.run(
-                        ["git", "-C", str(claude_dir), "commit",
-                         "-m", f"auto: session-start housekeep ({len(dirty)} files)"],
-                        capture_output=True, text=True, timeout=5, check=False,
-                    )
-                    lines.append(f"~/.claude: committed {len(dirty)} files")
+                    cats = _categorize_porcelain(dirty)
+                    protected = _housekeep_protected_files()
+                    blocked = [p for p in cats["deleted"] if p in protected]
+                    if blocked:
+                        repo.add_alert(
+                            "warn", "git_housekeep_protected_delete",
+                            f"claude:{','.join(sorted(blocked))}",
+                            source="hooks.py",
+                            message=(
+                                "~/.claude session-start housekeep would delete "
+                                f"protected file(s): {', '.join(blocked)} — "
+                                "commit skipped, working tree left dirty"
+                            ),
+                            db=config.db_path(),
+                        )
+                        lines.append(
+                            f"~/.claude: ⚠️ SKIPPED — protected file(s) "
+                            f"deleted: {', '.join(blocked)} (resolve manually)"
+                        )
+                    else:
+                        subprocess.run(
+                            ["git", "-C", str(claude_dir), "add", "-A"],
+                            capture_output=True, text=True, timeout=5, check=False,
+                        )
+                        subprocess.run(
+                            ["git", "-C", str(claude_dir), "commit",
+                             "-m", _build_housekeep_commit_msg(cats, len(dirty))],
+                            capture_output=True, text=True, timeout=5, check=False,
+                        )
+                        lines.append(_build_housekeep_report_line("~/.claude", cats, len(dirty)))
         except Exception:
             pass
 
@@ -634,16 +743,17 @@ def _git_housekeep_block(
                     )
                     sm_dirty = [l for l in sr.stdout.splitlines() if l.strip()]
                     if sm_dirty:
+                        sm_cats = _categorize_porcelain(sm_dirty)
                         subprocess.run(
                             ["git", "-C", sm_abs, "add", "-A"],
                             capture_output=True, text=True, timeout=5, check=False,
                         )
                         subprocess.run(
                             ["git", "-C", sm_abs, "commit",
-                             "-m", f"auto: session-start housekeep ({len(sm_dirty)} files)"],
+                             "-m", _build_housekeep_commit_msg(sm_cats, len(sm_dirty))],
                             capture_output=True, text=True, timeout=5, check=False,
                         )
-                        lines.append(f"{sm_path}: committed {len(sm_dirty)} files")
+                        lines.append(_build_housekeep_report_line(sm_path, sm_cats, len(sm_dirty)))
 
                 # B2: top-level commit (picks up updated submodule pointers + own files)
                 r = subprocess.run(
@@ -652,20 +762,17 @@ def _git_housekeep_block(
                 )
                 dirty = [l for l in r.stdout.splitlines() if l.strip()]
                 if dirty:
-                    file_names = [l[3:].strip() for l in dirty]
-                    file_list = ", ".join(file_names)
-                    if len(file_list) > 120:
-                        file_list = file_list[:117] + "..."
+                    cats = _categorize_porcelain(dirty)
                     subprocess.run(
                         ["git", "-C", cwd, "add", "-A"],
                         capture_output=True, text=True, timeout=5, check=False,
                     )
                     subprocess.run(
                         ["git", "-C", cwd, "commit",
-                         "-m", f"auto: session-start housekeep ({len(dirty)} files)"],
+                         "-m", _build_housekeep_commit_msg(cats, len(dirty))],
                         capture_output=True, text=True, timeout=5, check=False,
                     )
-                    lines.append(f"cwd: committed {len(dirty)} files ({file_list})")
+                    lines.append(_build_housekeep_report_line("cwd", cats, len(dirty)))
         except Exception:
             pass
 
@@ -726,6 +833,84 @@ def _git_housekeep_block(
             pass
 
         return " · ".join(lines) if lines else None
+    except Exception:
+        return None
+
+
+# ── ~/.claude.json mcpServers snapshot ───────────────────────────────────────
+
+_CLAUDE_JSON_SNAPSHOT_KEEP_DEFAULT = 10
+
+
+def _claude_json_snapshot_keep() -> int:
+    try:
+        return int(config.load().get("hooks", {}).get(
+            "claude_json_snapshot_keep", _CLAUDE_JSON_SNAPSHOT_KEEP_DEFAULT
+        ))
+    except Exception:
+        return _CLAUDE_JSON_SNAPSHOT_KEEP_DEFAULT
+
+
+def _claude_json_snapshot_block() -> str | None:
+    """Fail-soft rolling backup of ~/.claude.json's mcpServers block. Never
+    blocks session_start; on parse failure raises an alert instead of
+    snapshotting the corrupt file.
+    """
+    try:
+        src = Path.home() / ".claude.json"
+        if not src.exists():
+            return None
+
+        try:
+            raw = src.read_text()
+        except Exception:
+            return None
+
+        try:
+            data = json.loads(raw)
+        except Exception:
+            repo.add_alert(
+                "warn", "claude_json_corrupt", "claude_json_corrupt",
+                source="hooks.py",
+                message="~/.claude.json failed to parse as JSON — snapshot skipped",
+                db=config.db_path(),
+            )
+            return "claude.json: ⚠️ corrupt JSON, snapshot skipped"
+
+        mcp_hash = hashlib.sha256(
+            json.dumps(data.get("mcpServers", {}), sort_keys=True).encode()
+        ).hexdigest()
+
+        snap_dir = Path(config.DATA_DIR) / "backup" / "claude-json"
+        snap_dir.mkdir(parents=True, exist_ok=True)
+        existing = sorted(snap_dir.glob("claude-json-*.json"))
+
+        if existing:
+            newest = existing[-1]
+            try:
+                newest_data = json.loads(newest.read_text())
+                newest_hash = hashlib.sha256(
+                    json.dumps(newest_data.get("mcpServers", {}), sort_keys=True).encode()
+                ).hexdigest()
+            except Exception:
+                newest_hash = None
+            if newest_hash == mcp_hash:
+                return None
+
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        dest = snap_dir / f"claude-json-{stamp}.json"
+        shutil.copy2(src, dest)
+
+        keep = _claude_json_snapshot_keep()
+        all_snaps = sorted(snap_dir.glob("claude-json-*.json"))
+        if keep > 0:
+            for stale in all_snaps[:-keep]:
+                try:
+                    stale.unlink()
+                except Exception:
+                    pass
+
+        return "claude.json: snapshot saved (mcpServers changed)"
     except Exception:
         return None
 
@@ -817,13 +1002,8 @@ def session_start() -> int:
         # Subagent (Task tool dispatch) — task-isolated like worktree;
         # no personal memory / no /resume tracking.
         is_subagent = bool(tpath and "/tasks/" in tpath)
-        # Cortex session (C3, MARROW_CORTEX=1): total invisibility — no
-        # lifecycle:start row, no sessions row. Writing nothing means
-        # sessionstart_catchup never sees this sid as a candidate (its
-        # candidate scan unions audit_log lifecycle:start + events, both
-        # skipped end-to-end by the Stop/SessionEnd guards below).
-        is_cortex = bool(os.environ.get("MARROW_CORTEX"))
-        if sid and not is_cortex:
+        is_resume = False
+        if sid:
             # Fresh window or resume — drop prior recall dedup state either way
             # (cheap; resume re-shows seen rows once, acceptable).
             _wipe_recall_seen(sid)
@@ -867,9 +1047,8 @@ def session_start() -> int:
                 except Exception:  # noqa: BLE001 — never block session_start
                     pass
 
-        if is_worktree or is_subagent or is_cortex:
-            # Task-isolated (git worktree / Task-tool subagent) or cortex
-            # (own bulletin, not this hook's injection): no personal memory.
+        if is_worktree or is_subagent:
+            # Task-isolated (git worktree / Task-tool subagent): no personal memory.
             ctx = ""
         else:
             parts: list[str] = []
@@ -877,6 +1056,10 @@ def session_start() -> int:
             git_hk = _git_housekeep_block(cwd, sid, conn)
             if git_hk:
                 parts.append(git_hk)
+
+            cj_snap = _claude_json_snapshot_block()
+            if cj_snap:
+                parts.append(cj_snap)
 
             # Heartbeat block goes first so it is never buried.
             heartbeat = _affect_heartbeat(conn)
@@ -907,6 +1090,22 @@ def session_start() -> int:
             backdrop = _timeline_mod.render_timeline(conn, inject_cap=_timeline_mod._INJECT_CAP)
             if backdrop:
                 parts.append(backdrop)
+
+            # Usage block (all sessions self-aware) — off the collector kv.
+            try:
+                from . import usage as _usage
+                ulines = _usage.sessionstart_lines()
+                if ulines:
+                    parts.append("\n".join(ulines))
+            except Exception:
+                pass
+
+            # Cortex handoff (碎碎念): fresh window only (new process = fresh;
+            # a resume skips). Injected here, not in the wakeup note.
+            if os.environ.get("MARROW_CORTEX") and not is_resume:
+                hd = _cortex_handoff_block()
+                if hd:
+                    parts.append(hd)
 
             try:
                 from . import schedule as _sched
@@ -945,12 +1144,6 @@ def session_start() -> int:
 
 
 def session_end() -> int:
-    # Cortex session (C3): total invisibility, mirrors session_start/stop —
-    # session_start never wrote a lifecycle:start row for this sid, so there
-    # is nothing to close and nothing for catchup to see.
-    if os.environ.get("MARROW_CORTEX"):
-        return 0
-
     inp = _read_input()
     tpath = inp.get("transcript_path")
     if not tpath:
@@ -1173,9 +1366,6 @@ def stop() -> int:
     a full-file live-chain rebuild via transcript.rows_from_records purely to
     locate + ingest the current pair and reset the cursor. Ghost rows ingested
     before a rewind stay in the DB (no retraction in v1)."""
-    # Self-pollution guard: cortex's own resumed session must not feed marrow.
-    if os.environ.get("MARROW_CORTEX"):
-        return 0
     # Isolated pipeline spawns don't load hooks; mirror the guard defensively.
     if os.environ.get("MARROW_PIPELINE") == "1":
         return 0
@@ -1600,6 +1790,70 @@ def _apply_rel_cutoff(hits: list[dict], rel_cutoff: float) -> list[dict]:
     return [h for h in hits if (h.get("score") or 0.0) >= cutoff]
 
 
+# Per-kind id prefix for recall heads (event -> ev, memes -> me, etc.).
+_KIND_ABBREV = {
+    "event": "ev", "memes": "me", "milestone": "ms",
+    "entity": "en", "diary": "d", "task": "t",
+}
+
+
+def _meme_date(ts: str) -> str:
+    """Meme creation date as 'MM-DD' (configured local timezone), or 'YYYY' if >1y old.
+    Empty on missing/unparseable timestamp."""
+    if not ts:
+        return ""
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        local = dt.astimezone(config.get_tz())
+        if (now - dt).total_seconds() >= 365 * 86400:
+            return local.strftime("%Y")
+        return local.strftime("%m-%d")
+    except Exception:
+        return ""
+
+
+def _milestone_date(ts: str) -> str:
+    """Milestone date with the T00:00 junk stripped. Keeps calendar precision:
+    'YYYY' / 'YYYY-MM' / 'YYYY-MM-DD' (whatever the stored date carried).
+    The date is a calendar value, not an instant — no tz conversion."""
+    if not ts:
+        return ""
+    return ts.split("T", 1)[0]
+
+
+def _recall_head(h: dict) -> str:
+    """Shared recall-row head: '<time-label> <abbrev>#<id>' (content appended
+    by the caller as ': <content>'). Kept identical across the injection
+    renderer and the recall log so both read the same.
+      event     -> [<channel> <reltime>] ev#<id>   (channel fallback: cli)
+      memes     -> [<MM-DD|YYYY>] me#<id>
+      milestone -> [<YYYY[-MM[-DD]]>] ms#<id>       (never T00:00)
+      entity    -> en#<id>                          (no time)
+      diary     -> [<format_recall_ts>] d#<id>      (existing time handling)
+      task      -> [<format_recall_ts>] t#<id>
+    """
+    kind = h.get("kind") or "event"
+    ref = f"{_KIND_ABBREV.get(kind, kind)}#{h.get('id', '?')}"
+    if kind == "event":
+        ch = (h.get("channel") or "cli").strip() or "cli"
+        rt = reltime_short(h.get("timestamp") or "")
+        return f"[{ch} {rt}] {ref}" if rt else f"[{ch}] {ref}"
+    if kind == "memes":
+        d = _meme_date(h.get("timestamp") or "")
+        return f"[{d}] {ref}" if d else ref
+    if kind == "milestone":
+        d = _milestone_date(h.get("timestamp") or "")
+        return f"[{d}] {ref}" if d else ref
+    if kind == "entity":
+        return ref
+    # diary / task — keep existing format_recall_ts handling.
+    ts = format_recall_ts(h.get("timestamp") or "")
+    return f"{ts} {ref}" if ts else ref
+
+
 def _render_hit_block(rank: int, h: dict, rank_caps: list[int]) -> list[str]:
     """Return the markdown lines for one recall hit at the given rank.
 
@@ -1609,17 +1863,16 @@ def _render_hit_block(rank: int, h: dict, rank_caps: list[int]) -> list[str]:
     """
     cap = rank_caps[rank] if rank < len(rank_caps) else rank_caps[-1]
     block: list[str] = []
-    ts = format_recall_ts(h.get("timestamp") or "")
+    head = _recall_head(h)
     kind = h.get("kind") or "event"
     content_full = (h.get("content") or "").replace("\n", " ")
     if kind in _TABLE_KINDS:
-        block.append(f"- {ts} {content_full[:cap]}")
+        block.append(f"- {head}: {content_full[:cap]}")
     else:
         ctxs = h.get("_context") or [] if rank == 0 else []
         main_cap = max(40, cap - 60) if ctxs else cap
         main = content_full[:main_cap]
-        tag = f"[{h['source_tag']}] " if h.get("source_tag") else ""
-        block.append(f"- {ts} {tag}{main}")
+        block.append(f"- {head}: {main}")
         remaining = max(0, cap - len(main))
         if ctxs and remaining > 0:
             per_ctx = max(0, remaining // len(ctxs))
@@ -1646,14 +1899,6 @@ def user_prompt_submit() -> int:
     vec + bm25 + recency + affect. Fail-soft: any error falls through to a
     no-op so the user prompt always reaches the model.
     """
-    # Cortex session (C3): total invisibility — no title/model backfill (that
-    # spawns an LLM summarizer of THIS conversation into sessions.title,
-    # exactly the chat-memory leak the guard exists to prevent), no session
-    # touch, no recall injection (cortex gets its own bulletin, not this
-    # hook's marrow-memory context).
-    if os.environ.get("MARROW_CORTEX"):
-        return 0
-
     inp = _read_input()
 
     # mm control plane — check before recall, independent of recall config.
@@ -1693,7 +1938,7 @@ def user_prompt_submit() -> int:
             _sn["turn_count"] = _sn.get("turn_count", 0) + 1
             if _sn["turn_count"] - _sn.get("last_sticker_turn", 0) >= 10:
                 user_name = config.persona()["user_name"]
-                _nudge_line = f"你怎么还不发表情包，{user_name}都等急了——翻翻 sticker_search 找个应景的发一下。"
+                _nudge_line = f"你怎么还不发表情包，{user_name}都等急了——翻翻 sticker(action=search) 找个应景的发一下。"
                 _sn["last_sticker_turn"] = _sn["turn_count"]
             _save_sticker_nudge(sid, _sn)
         except Exception:
@@ -1992,17 +2237,13 @@ def _append_recall_log(sid: str, prompt_text: str, hits: list[dict]) -> None:
     parts.append("")
     for h in hits:
         kind = h.get("kind") or "event"
-        hid = h.get("id", "?")
         score = h.get("score", 0.0)
-        when = format_recall_ts(h.get("timestamp") or "")
         content = _strip_wx_time_prefix((h.get("content") or "").replace("\n", " "))
         # Mirror injection-side shaping: anchor tables ship full content
         # (rows are short + dense); only event hits get the 120-char cap.
         snip = content if kind in _TABLE_KINDS else content[:120]
-        head = f"- `{kind}#{hid}` score={score:.2f}"
-        if when:
-            head += f" {when}"
-        parts.append(f"{head} — {snip}")
+        # Same head as the injection renderer; score kept as a debug suffix.
+        parts.append(f"- {_recall_head(h)}: {snip} · score={score:.2f}")
         for c in h.get("_context", []) or []:
             arrow = "↑prev" if c.get("rel") == "prev" else "↓next"
             cs = _strip_wx_time_prefix((c.get("content") or "").replace("\n", " "))[:80]
@@ -2012,6 +2253,590 @@ def _append_recall_log(sid: str, prompt_text: str, hits: list[dict]) -> None:
 
 
 _PLACEMENT_BASH_OPS = {"mv", "cp", "rename", "mmv", "touch", "mkdir"}
+
+
+# ── backup guard (PreToolUse) — stateless, two tiers ─────────────────────────
+# Reminder tier — additionalContext text, fires EVERY matching call (no dedup,
+#   no state): any rm on a non-whitelisted path (non-recursive; recursive lands
+#   in the deny tier), bulk mv/sed -i with wildcard sources to a non-whitelisted
+#   dest, DELETE FROM without WHERE on a line (when not a db-destruction deny),
+#   and mcp destructive calls (event_clear/db_clear, sticker delete,
+#   mcp__marrow__* action clear/delete).
+# Deny tier — permissionDecision "deny", stateless. Recursive rm on a
+#   non-whitelisted path, rm of a *.db file outside the whitelist, or a sqlite3
+#   command destroying a *.db (DROP TABLE / TRUNCATE / DELETE FROM w/o WHERE).
+#   Escape hatch: a backup action (cp/rsync/tar/git commit/git stash push/
+#   .backup) in the SAME command → fully silent allow (no deny, no reminder).
+#   Downgrades to the reminder tier when [hooks].backup_guard_intercept=false.
+# Fail-open throughout: any exception -> treat as no match, never block.
+# Git ops are owned entirely by the git-revert ask guard and the force-push
+# deny guard below — the backup guard no longer classifies any git command.
+
+_BG_SHELL_SEP_RE = _re.compile(r"&&|\|\||[;&|]")
+
+# A same-command backup action satisfies the deny escape hatch (and silences
+# the reminder — they did it right).
+_BG_BACKUP_CMD_RE = _re.compile(
+    r"\bcp\b|\brsync\b|\btar\b|\bgit\s+commit\b|\bgit\s+stash\s+push\b|\.backup\b",
+    _re.IGNORECASE,
+)
+
+# db-destruction (deny): a sqlite3 command touching a *.db path with DROP TABLE
+# / TRUNCATE / DELETE FROM without WHERE.
+_BG_SQLITE_RE = _re.compile(r"\bsqlite3\b", _re.IGNORECASE)
+_BG_DB_PATH_RE = _re.compile(r"\S+\.db\b", _re.IGNORECASE)
+_BG_DROP_TABLE_RE = _re.compile(r"\bdrop\s+table\b", _re.IGNORECASE)
+_BG_TRUNCATE_RE = _re.compile(r"\btruncate\b", _re.IGNORECASE)
+
+_BG_REMIND_MSG = (
+    "Warning: back up code/db OR archive docs before anything destructive — "
+    "delete, bulk modify, import/export.\n"
+    "- Bypass only if the user explicitly said to delete/modify THIS now.\n"
+    "- If unsure, stop and ask — never assume the user doesn't need/want it."
+)
+
+_BG_DENY_MSG = (
+    "BLOCKED — bulk deletion with no backup. This target is not in git/tmp: "
+    "once deleted it is gone. Chain a backup into the SAME command and rerun, "
+    "e.g. `tar -czf /tmp/bak.tgz <target> && rm -rf <target>` (db: `cp` first). "
+    "Even if the user ordered the deletion, back up anyway — it costs one "
+    "command. Do NOT work around this guard with alternative delete commands."
+)
+
+
+def _bg_is_whitelisted_path(p: str) -> bool:
+    """Whitelist scope: /tmp, /private/tmp, or any path containing /scratchpad/
+    or /.claude/worktrees/ — destructive ops there are silent."""
+    pp = (p or "").strip().strip("'\"")
+    if not pp:
+        return False
+    if pp in ("/tmp", "/private/tmp"):
+        return True
+    if pp.startswith("/tmp/") or pp.startswith("/private/tmp/"):
+        return True
+    if "/scratchpad/" in pp or "/.claude/worktrees/" in pp:
+        return True
+    return False
+
+
+def _bg_resolve_for_whitelist(p: str, cwd: str) -> str:
+    """Resolve a relative positional path against the hook-provided cwd,
+    purely for the whitelist test (no filesystem access, no realpath — the
+    hook must stay fast and side-effect free). Absolute paths, `~`-paths, and
+    wildcard-only tokens (glob chars present) are returned unchanged — a glob
+    can't be joined meaningfully and is handled by its own broad-path logic.
+    If cwd is empty/missing, the raw (relative) path is returned unchanged —
+    it will not match the whitelist, which is today's (safe-side) behavior."""
+    pp = (p or "").strip().strip("'\"")
+    if not pp or not cwd:
+        return p
+    if pp.startswith("/") or pp.startswith("~") or any(ch in pp for ch in "*?["):
+        return p
+    return os.path.normpath(os.path.join(cwd, pp))
+
+
+def _bg_raw_segments(cmd: str) -> list[str]:
+    """Ordered raw (untokenized) shell segments, split on &&/||/;/|/&. Used
+    for segment-ordered backup/destructive checks — position, not just
+    presence, decides the escape hatch (a backup keyword AFTER the
+    destructive segment must not launder it)."""
+    return [s.strip() for s in _BG_SHELL_SEP_RE.split(cmd or "") if s.strip()]
+
+
+def _bg_bash_segments(cmd: str) -> list[list[str]]:
+    """Best-effort shell split on &&/||/;/|/& then shlex-tokenize each
+    segment. Not a full shell parser (mirrors the placement guard's
+    trim-to-first-segment approach)."""
+    import shlex
+    out: list[list[str]] = []
+    for seg in _bg_raw_segments(cmd):
+        try:
+            out.append(shlex.split(seg))
+        except ValueError:
+            out.append(seg.split())
+    return out
+
+
+def _bg_rm_segment(tokens: list[str], cwd: str = "") -> str | None:
+    """Classify a single `rm` segment: 'deny' (recursive on a non-whitelisted
+    path, or a *.db target), 'remind' (non-recursive on a non-whitelisted
+    non-db path), or None (whitelisted / not rm).
+
+    `cwd` (from the hook's `cwd` input, may be empty) is joined onto relative
+    positional paths ONLY for the whitelist test below — the raw token still
+    drives the .db-suffix and recursive-flag checks (blast-radius signal is
+    about what the user/model typed, not the resolved path; a relative path
+    resolved into /Users/... is not "broad" just because it resolved there —
+    see _bg_resolve_for_whitelist)."""
+    if not tokens or tokens[0] != "rm":
+        return None
+    args = tokens[1:]
+    flags = [t for t in args if t.startswith("-")]
+    positional = [t for t in args if not t.startswith("-")]
+    if not positional:
+        return None
+    non_wl = [
+        p for p in positional
+        if not _bg_is_whitelisted_path(_bg_resolve_for_whitelist(p, cwd))
+    ]
+    if not non_wl:
+        return None  # all whitelisted — silent
+    if any((p or "").strip().strip("'\"").endswith(".db") for p in non_wl):
+        return "deny"
+    recursive = any("r" in f.lower() for f in flags)
+    if recursive:
+        return "deny"
+    return "remind"
+
+
+def _bg_bulk_modify_segment(tokens: list[str]) -> bool:
+    """True for a bulk mv (wildcard source → non-whitelisted dest) or a bulk
+    in-place sed edit (sed -i over a wildcard non-whitelisted file). Single-file
+    mv / sed stays silent."""
+    if not tokens:
+        return False
+    op = tokens[0]
+    args = tokens[1:]
+    flags = [t for t in args if t.startswith("-")]
+    positional = [t for t in args if not t.startswith("-")]
+    if op == "mv":
+        if len(positional) < 2:
+            return False
+        sources, dest = positional[:-1], positional[-1]
+        if not any(any(ch in s for ch in "*?[") for s in sources):
+            return False  # only bulk (wildcard-source) mv is flagged
+        return not _bg_is_whitelisted_path(dest)
+    if op == "sed":
+        if not any(f == "-i" or f.startswith("-i") or f == "--in-place" for f in flags):
+            return False
+        for p in positional[1:]:  # positional[0] is the sed script
+            if any(ch in p for ch in "*?[") and not _bg_is_whitelisted_path(p):
+                return True
+        return False
+    return False
+
+
+def _bg_sqlite_db_destruction(cmd: str) -> bool:
+    """True for a sqlite3 command touching a *.db path that DROP TABLE /
+    TRUNCATE / DELETE FROM without WHERE."""
+    if not (_BG_SQLITE_RE.search(cmd) and _BG_DB_PATH_RE.search(cmd)):
+        return False
+    if _BG_DROP_TABLE_RE.search(cmd) or _BG_TRUNCATE_RE.search(cmd):
+        return True
+    for line in cmd.splitlines():
+        low = f" {line.lower()} "
+        if "delete from" in low and " where " not in low:
+            return True
+    return False
+
+
+def _bg_has_backup(cmd: str) -> bool:
+    return bool(cmd) and bool(_BG_BACKUP_CMD_RE.search(cmd))
+
+
+def _bg_bash_category(cmd: str, cwd: str = "") -> str | None:
+    """'deny', 'remind', or None for a Bash command. Stateless and
+    intercept-agnostic.
+
+    `cwd` is the hook-provided working directory (may be empty) — it is only
+    used to resolve relative positional paths for the whitelist test inside
+    _bg_rm_segment (see there). No attempt is made to emulate `cd` across
+    shell segments (e.g. `cd X && rm -rf Y` — out of scope); the single
+    hook-provided cwd is used as-is for every segment.
+
+    The escape hatch is segment-ORDERED, not whole-string: a backup action
+    (cp/rsync/tar/git commit/git stash push/.backup) only satisfies it when it
+    appears in an EARLIER segment than the first destructive segment
+    (recursive rm on a non-whitelisted path, rm of a *.db, or sqlite3 *.db
+    destruction). A backup keyword landing AFTER the destructive segment (or
+    absent) does not launder it — deny stands. No backup-target/path matching
+    is done (position-only check — same segment order both `cp a /tmp && rm
+    -rf x` and `cp <target> /tmp && rm -rf <target>` are treated identically)."""
+    if not cmd:
+        return None
+    import shlex
+    segments = _bg_raw_segments(cmd)
+    if not segments:
+        return None
+
+    backup_idx: int | None = None
+    destructive_idx: int | None = None
+    seg_tokens: list[list[str]] = []
+    for i, seg in enumerate(segments):
+        try:
+            toks = shlex.split(seg)
+        except ValueError:
+            toks = seg.split()
+        seg_tokens.append(toks)
+        if backup_idx is None and _bg_has_backup(seg):
+            backup_idx = i
+        if destructive_idx is None and (
+            _bg_rm_segment(toks, cwd) == "deny" or _bg_sqlite_db_destruction(seg)
+        ):
+            destructive_idx = i
+
+    if destructive_idx is not None:
+        if backup_idx is not None and backup_idx < destructive_idx:
+            return None  # backup landed BEFORE the destructive segment — silent
+        return "deny"
+
+    # No deny-tier match anywhere — compute the reminder tier as before.
+    remind = False
+    for toks in seg_tokens:
+        if _bg_rm_segment(toks, cwd) == "remind":
+            remind = True
+        if _bg_bulk_modify_segment(toks):
+            remind = True
+    # DELETE FROM without WHERE on a line that is NOT a sqlite .db destruction
+    # (that path already returned "deny" above).
+    for line in cmd.splitlines():
+        low = f" {line.lower()} "
+        if "delete from" in low and " where " not in low:
+            remind = True
+    return "remind" if remind else None
+
+
+def _bg_mcp_destructive(tool_name: str, tool_input: dict) -> bool:
+    name = (tool_name or "").lower()
+    if "db_clear" in name or "event_clear" in name:
+        return True
+    if "sticker" in name and "delete" in name:
+        return True
+    if name.startswith("mcp__marrow__"):
+        action = str((tool_input or {}).get("action", "")).strip().lower()
+        if action in {"clear", "delete"}:
+            return True
+    return False
+
+
+def _bg_category(tool_name: str, tool_input: dict, cwd: str = "") -> str | None:
+    """Return 'deny' / 'remind' / None. Write/Edit are no longer guarded
+    (a write requires a prior read, so it is recoverable)."""
+    ti = tool_input or {}
+    if tool_name == "Bash":
+        return _bg_bash_category(ti.get("command", "") or "", cwd)
+    if tool_name and tool_name not in ("Bash", "Write", "Edit"):
+        if _bg_mcp_destructive(tool_name, ti):
+            return "remind"
+    return None
+
+
+def _backup_guard_deny(inp: dict) -> str | None:
+    """Stateless deny reason for the deny tier, or None to allow. None when
+    disabled, downgraded ([hooks].backup_guard_intercept=false → becomes a
+    reminder instead), not a deny-tier match, or on any error (fail-open)."""
+    try:
+        if not isinstance(inp, dict):
+            return None
+        hooks_cfg = config.load().get("hooks", {}) or {}
+        if not hooks_cfg.get("backup_guard", True):
+            return None
+        if not hooks_cfg.get("backup_guard_intercept", True):
+            return None
+        tool_name = inp.get("tool_name", "") or ""
+        ti = inp.get("tool_input", {}) or {}
+        cwd = inp.get("cwd") or ""
+        if _bg_category(tool_name, ti, cwd) != "deny":
+            return None
+        return hooks_cfg.get("backup_guard_deny_message") or _BG_DENY_MSG
+    except Exception:  # noqa: BLE001 — fail-open, never blocks the hook
+        return None
+
+
+def _backup_guard_line(inp: dict) -> str | None:
+    """Reminder text (additionalContext), fires EVERY matching call — no dedup,
+    no state. Also carries deny-tier calls downgraded to a reminder when
+    [hooks].backup_guard_intercept is false.
+
+    Config-gated via [hooks].backup_guard (default enabled). Fail-open: any
+    exception returns None so the guard never breaks the hook."""
+    try:
+        if not isinstance(inp, dict):
+            return None
+        hooks_cfg = config.load().get("hooks", {}) or {}
+        if not hooks_cfg.get("backup_guard", True):
+            return None
+        tool_name = inp.get("tool_name", "") or ""
+        ti = inp.get("tool_input", {}) or {}
+        cwd = inp.get("cwd") or ""
+        cat = _bg_category(tool_name, ti, cwd)
+        if cat == "deny" and not hooks_cfg.get("backup_guard_intercept", True):
+            cat = "remind"  # downgraded — no deny gate, surface the reminder
+        if cat != "remind":
+            return None
+        return hooks_cfg.get("backup_guard_message") or _BG_REMIND_MSG
+    except Exception:  # noqa: BLE001 — fail-open, never blocks the hook
+        return None
+
+
+# ── git force-push guard (PreToolUse) — hard deny ─────────────────────────────
+# Force push rewrites remote history: a hard deny, no escape hatch, no worktree
+# exemption. Tokenized per shell segment so a commit -m "...--force..." message
+# can never false-positive. Config: [hooks].git_force_push_guard (default true)
+# + git_force_push_guard_message override.
+_GIT_FORCE_PUSH_MSG = (
+    "BLOCKED — force push rewrites remote history and can permanently destroy "
+    "commits. Never force push. If the remote rejected your push, stop and "
+    "report to the user."
+)
+
+
+def _git_force_push_matches(cmd: str) -> bool:
+    """True if any shell segment is a `git push` carrying --force / -f /
+    --force-with-lease. Tokenized (shlex) so flags inside a quoted commit
+    message are single tokens and cannot match."""
+    if not cmd:
+        return False
+    import shlex
+    for seg in _GIT_REVERT_SEP_RE.split(cmd):
+        seg = seg.strip()
+        if not seg:
+            continue
+        try:
+            toks = shlex.split(seg)
+        except ValueError:
+            toks = seg.split()
+        if not toks or toks[0] != "git" or "push" not in toks:
+            continue
+        for t in toks:
+            if t in ("--force", "-f") or t.startswith("--force-with-lease"):
+                return True
+    return False
+
+
+def _git_force_push_guard(inp: dict) -> str | None:
+    """Force-push deny reason, or None. Config: [hooks].git_force_push_guard
+    (default true) + git_force_push_guard_message. Fail-open: any error → None."""
+    try:
+        if not isinstance(inp, dict) or inp.get("tool_name") != "Bash":
+            return None
+        hooks_cfg = config.load().get("hooks", {}) or {}
+        if not hooks_cfg.get("git_force_push_guard", True):
+            return None
+        cmd = (inp.get("tool_input") or {}).get("command", "") or ""
+        if not isinstance(cmd, str) or not _git_force_push_matches(cmd):
+            return None
+        return hooks_cfg.get("git_force_push_guard_message") or _GIT_FORCE_PUSH_MSG
+    except Exception:  # noqa: BLE001 — fail-open, never blocks the hook
+        return None
+
+
+# ── git revert-type guard (PreToolUse) — held for authorship check ────────────
+# Distinct from the backup guard: revert-type git ops discard work, so the
+# risk is WHOSE work. Decision is "ask" (surface to the user), not a silent
+# deny — the model must first verify the diff's authorship. Worktree/agent
+# cleanup (branch -D teardown, worktree remove) is exempt.
+_GIT_REVERT_DEFAULT_PATTERNS = [
+    r"\bgit\s+reset\s+--hard\b",
+    # git checkout [<flags>|<tree-ish>]* -- <path> — an optional revision
+    # token (HEAD, a commit, a branch name — no leading dash) and/or flags
+    # may precede `--`. `git checkout <branch>` with no `--` (plain branch
+    # switch) is intentionally left unmatched.
+    r"\bgit\s+checkout\s+(?:\S+\s+)*?--\s+\S",
+    r"\bgit\s+restore\b",                            # worktree discard
+    r"\bgit\s+clean\s+-\w*f",                        # -f / -fd
+    r"\bgit\s+branch\s+-\w*D\w*\b",
+    r"\bgit\s+stash\s+(?:drop|clear)\b",
+    r"\bgit\s+revert\b[^\n]*--no-edit\b",
+    r"\bgit\s+switch\b[^\n]*--discard-changes\b",
+    r"\bgit\s+worktree\s+remove\b",
+]
+
+_GIT_REVERT_MSG = "🤡 狗男人又要乱搞你git里的东西了，是否同意？"
+
+
+# Split on shell control operators (&&, ||, ;, |, &, newline) so pattern
+# matching is evaluated PER SEGMENT — a safe segment (`git restore --staged
+# a`) can never launder an unsafe one later in the same compound command
+# (`git restore --staged a && git restore b`). Not a full shell parser
+# (simple split — this guard is fail-open assist), mirrors the backup
+# guard's `_BG_SHELL_SEP_RE` with newline added per review.
+_GIT_REVERT_SEP_RE = _re.compile(r"&&|\|\||[;&|]|\n")
+
+
+def _git_revert_segment_matches(seg: str, pats: list) -> bool:
+    """True if one shell segment contains a git revert-type op.
+    `git restore --staged` alone (unstage only, no worktree discard) is safe
+    — evaluated within this segment only, never command-wide."""
+    # No IGNORECASE: `git branch -D` (force) must stay distinct from the safe
+    # lowercase `-d` (git refuses unmerged deletes itself). git verbs/flags are
+    # lowercase in practice, so case-sensitive matching loses nothing.
+    restore_safe = bool(
+        _re.search(r"\bgit\s+restore\b", seg)
+        and _re.search(r"--staged\b", seg)
+        and not _re.search(r"(--worktree\b|\s-W\b)", seg)
+    )
+    for p in pats:
+        try:
+            if not _re.search(p, seg):
+                continue
+        except _re.error:
+            continue
+        if restore_safe and "restore" in p:
+            continue  # safe unstage-only restore — don't hold on this pattern
+        return True
+    return False
+
+
+def _git_revert_matches(cmd: str) -> bool:
+    """True if any shell segment of *cmd* contains a git revert-type op per
+    config patterns."""
+    if not cmd:
+        return False
+    pats = (config.load().get("hooks", {}) or {}).get(
+        "git_revert_patterns"
+    ) or _GIT_REVERT_DEFAULT_PATTERNS
+    for seg in _GIT_REVERT_SEP_RE.split(cmd):
+        seg = seg.strip()
+        if seg and _git_revert_segment_matches(seg, pats):
+            return True
+    return False
+
+
+def _git_revert_guard(inp: dict) -> str | None:
+    """Git revert-type authorship gate.
+
+    Returns the 'ask' reason string to hold the call; "" when a git-revert op
+    matched but it's worktree/agent cleanup (allow silently, skip the backup
+    deny gate); None when it isn't a git-revert op at all (fall through).
+    Config: [hooks].git_revert_guard (default true) + git_revert_patterns.
+    Fail-open: any error returns None."""
+    try:
+        if not isinstance(inp, dict) or inp.get("tool_name") != "Bash":
+            return None
+        hooks_cfg = config.load().get("hooks", {}) or {}
+        if not hooks_cfg.get("git_revert_guard", True):
+            return None
+        cmd = (inp.get("tool_input") or {}).get("command", "") or ""
+        if not isinstance(cmd, str) or not _git_revert_matches(cmd):
+            return None
+        # Worktree/agent cleanup teardown stays allowed. Use the same
+        # `/.claude/worktrees/` path-substring test as the backup guard's
+        # whitelist; also honour a live worktree-session detection when the cwd
+        # resolves.
+        cwd = inp.get("cwd") or ""
+        if (
+            "/.claude/worktrees/" in cwd
+            or "/.claude/worktrees/" in cmd
+            or _is_worktree_session(cwd)
+        ):
+            return ""
+        return hooks_cfg.get("git_revert_guard_message") or _GIT_REVERT_MSG
+    except Exception:  # noqa: BLE001 — fail-open, never blocks the hook
+        return None
+
+
+# ── rm → trash auto-rewrite (PreToolUse) ─────────────────────────────────────
+# Rewrite a Bash `rm` segment to `/usr/bin/trash <paths>` when ALL its
+# positional targets resolve under a configured trash_paths prefix — the delete
+# becomes recoverable from Trash. Runs BEFORE the backup-guard classification so
+# a rewritten segment (no longer an rm) reclassifies as harmless; any remaining
+# un-rewritten rm segment still classifies normally. Mixed targets, zero
+# positionals, and wildcard tokens are left untouched (a quoted glob would not
+# expand). Fail-open: any error leaves the command unchanged.
+_RM_TRASH_BIN = "/usr/bin/trash"
+# Capturing split so the original separators survive round-trip reassembly.
+_RM_TRASH_SPLIT_RE = _re.compile("(" + _BG_SHELL_SEP_RE.pattern + ")")
+
+
+def _rm_trash_prefixes(hooks_cfg: dict) -> list[str]:
+    """Expanded, normalised trash_paths prefixes (each ends with '/')."""
+    out: list[str] = []
+    for p in hooks_cfg.get("trash_paths") or []:
+        if not isinstance(p, str) or not p.strip():
+            continue
+        e = os.path.normpath(os.path.expanduser(p.strip()))
+        out.append(e if e.endswith("/") else e + "/")
+    return out
+
+
+def _rm_trash_resolve(p: str, cwd: str) -> str:
+    """Resolve a positional token to an absolute path for the prefix test:
+    expand ~, join a relative path onto cwd. No filesystem access."""
+    pp = (p or "").strip().strip("'\"")
+    if not pp:
+        return pp
+    pp = os.path.expanduser(pp)
+    if pp.startswith("/"):
+        return os.path.normpath(pp)
+    if cwd:
+        return os.path.normpath(os.path.join(cwd, pp))
+    return pp
+
+
+def _rm_trash_under(path: str, prefixes: list[str]) -> bool:
+    if not path:
+        return False
+    for pre in prefixes:
+        if path == pre.rstrip("/") or path.startswith(pre):
+            return True
+    return False
+
+
+def _rm_trash_rewrite_segment(seg: str, cwd: str, prefixes: list[str]) -> str | None:
+    """Return the rewritten segment (surrounding whitespace preserved) if it is
+    an `rm` whose positional paths ALL fall under a trash prefix, else None."""
+    import shlex
+    core = seg.strip()
+    if not core:
+        return None
+    try:
+        toks = shlex.split(core)
+    except ValueError:
+        return None
+    if not toks or toks[0] != "rm":
+        return None
+    positional = [t for t in toks[1:] if not t.startswith("-")]
+    if not positional:
+        return None
+    # A quoted glob would not expand — leave wildcard segments for the guard.
+    if any(any(ch in t for ch in "*?[") for t in positional):
+        return None
+    resolved = [_rm_trash_resolve(t, cwd) for t in positional]
+    if not all(_rm_trash_under(r, prefixes) for r in resolved):
+        return None
+    new_core = _RM_TRASH_BIN + " " + " ".join(shlex.quote(r) for r in resolved)
+    lead = seg[: len(seg) - len(seg.lstrip())]
+    trail = seg[len(seg.rstrip()):]
+    return f"{lead}{new_core}{trail}"
+
+
+def _rm_to_trash_rewrite(inp: dict) -> tuple[dict | None, str | None]:
+    """Rewrite qualifying rm segments to /usr/bin/trash. Mutates
+    inp['tool_input']['command'] in place so downstream guards reclassify the
+    rewritten command. Returns (updated_input, context_line) or (None, None).
+    Config-gated via [hooks].rm_to_trash. Fail-open."""
+    try:
+        if not isinstance(inp, dict) or inp.get("tool_name") != "Bash":
+            return None, None
+        hooks_cfg = config.load().get("hooks", {}) or {}
+        if not hooks_cfg.get("rm_to_trash", True):
+            return None, None
+        prefixes = _rm_trash_prefixes(hooks_cfg)
+        if not prefixes:
+            return None, None
+        ti = inp.get("tool_input") or {}
+        cmd = ti.get("command", "") or ""
+        if not isinstance(cmd, str) or "rm" not in cmd:
+            return None, None
+        cwd = inp.get("cwd") or ""
+        parts = _RM_TRASH_SPLIT_RE.split(cmd)
+        rewritten: list[str] = []
+        for i in range(0, len(parts), 2):
+            new_seg = _rm_trash_rewrite_segment(parts[i], cwd, prefixes)
+            if new_seg is not None:
+                parts[i] = new_seg
+                rewritten.append(new_seg.strip())
+        if not rewritten:
+            return None, None
+        new_cmd = "".join(parts)
+        ti["command"] = new_cmd
+        inp["tool_input"] = ti
+        ctx = ("rm auto-rewritten to trash (recoverable from Trash): "
+               + "; ".join(rewritten))
+        return {"command": new_cmd}, ctx
+    except Exception:  # noqa: BLE001 — fail-open, never break the hook
+        return None, None
 
 
 def agent_guard() -> int:
@@ -2053,7 +2878,102 @@ def pretool_use() -> int:
         tool = inp.get("tool_name", "")
         ti = inp.get("tool_input", {})
 
-        if tool == "sticker_pick":
+        # rm → trash auto-rewrite. Runs BEFORE every guard so classification
+        # sees the rewritten (harmless) command; the updatedInput + context are
+        # merged into whatever hookSpecificOutput the guards below emit. Rewrite
+        # wins for the rewritten segments; decisions are computed on the
+        # rewritten command (a remaining un-rewritten rm still denies normally).
+        rewrite_updated: dict | None = None
+        rewrite_ctx: str | None = None
+        try:
+            rewrite_updated, rewrite_ctx = _rm_to_trash_rewrite(inp)
+        except Exception:  # noqa: BLE001 — fail-open, never blocks the hook
+            rewrite_updated, rewrite_ctx = None, None
+        ti = inp.get("tool_input", {})  # re-read: rewrite may have replaced command
+
+        def _emit_hso(fields: dict) -> None:
+            hso = {"hookEventName": "PreToolUse", **fields}
+            if rewrite_updated is not None:
+                hso["updatedInput"] = rewrite_updated
+            if rewrite_ctx:
+                ex = hso.get("additionalContext")
+                hso["additionalContext"] = (
+                    f"{rewrite_ctx}\n\n{ex}" if ex else rewrite_ctx
+                )
+            print(json.dumps({"hookSpecificOutput": hso}))
+
+        # Force-push hard deny — runs first, no escape hatch, no worktree
+        # exemption. Rewriting remote history can permanently destroy commits.
+        force_push: str | None = None
+        try:
+            force_push = _git_force_push_guard(inp)
+        except Exception:  # noqa: BLE001 — fail-open, never blocks the hook
+            force_push = None
+        if force_push:
+            _emit_hso({
+                "permissionDecision": "deny",
+                "permissionDecisionReason": force_push,
+            })
+            return 0
+
+        # Git revert-type authorship gate — held via "ask" (user confirms
+        # whose diff is being discarded). "" (worktree-exempt) only skips the
+        # ASK below — the backup deny gate still runs, because the exemption
+        # test is a cheap substring match on the whole command and a compound
+        # `git checkout -- .claude/worktrees/x && rm -rf ~/y` must not ride an
+        # unrelated rm through unexamined. Genuine worktree cleanup stays
+        # unblocked via the backup guard's OWN whitelist, which is the right
+        # layer to own that decision. None = not a git-revert op at all
+        # (fall through, both gates apply normally).
+        git_revert: str | None = None
+        try:
+            git_revert = _git_revert_guard(inp)
+        except Exception:  # noqa: BLE001 — fail-open, never blocks the hook
+            git_revert = None
+        if git_revert:
+            _emit_hso({
+                "permissionDecision": "ask",
+                "permissionDecisionReason": git_revert,
+            })
+            return 0
+
+        # Cortex lie_down handoff gate — deny a rotate/full-window lie_down until
+        # the 碎碎念 (handoff) is written this window. Plain lie_down passes.
+        lie_down_deny: str | None = None
+        try:
+            lie_down_deny = _cortex_lie_down_deny(inp)
+        except Exception:  # noqa: BLE001 — fail-open, never blocks the hook
+            lie_down_deny = None
+        if lie_down_deny:
+            _emit_hso({
+                "permissionDecision": "deny",
+                "permissionDecisionReason": lie_down_deny,
+            })
+            return 0
+
+        # Deny tier — block dangerous ops (recursive delete / db destruction
+        # with no same-command backup). Short-circuits placement/atlas guidance;
+        # the tool call itself is what needs gating. Only a genuinely matched
+        # git-revert op (non-empty ask reason) owns the decision and skips
+        # this gate — "" (worktree-exempt) and None (no match) both fall
+        # through so a compound command's OTHER destructive segment still
+        # gets examined.
+        deny_reason: str | None = None
+        if not git_revert:
+            try:
+                deny_reason = _backup_guard_deny(inp)
+            except Exception:  # noqa: BLE001 — fail-open, never blocks the hook
+                deny_reason = None
+        if deny_reason:
+            _emit_hso({
+                "permissionDecision": "deny",
+                "permissionDecisionReason": deny_reason,
+            })
+            return 0
+
+        if tool == "mcp__marrow__sticker" and str(
+            (ti or {}).get("action", "")
+        ).strip().lower() == "pick":
             sid = inp.get("session_id") if isinstance(inp, dict) else None
             if sid:
                 try:
@@ -2065,13 +2985,15 @@ def pretool_use() -> int:
 
         _literal = "[Path] Use paths with /, not bare filenames."
 
+        guard_line: str | None = None
+        try:
+            guard_line = _backup_guard_line(inp)
+        except Exception:  # noqa: BLE001 — fail-open, never blocks the hook
+            guard_line = None
+
         def _emit(text: str) -> None:
-            print(json.dumps({
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "additionalContext": text,
-                }
-            }))
+            payload = f"{guard_line}\n\n{text}" if guard_line else text
+            _emit_hso({"additionalContext": payload})
 
         # Determine mode
         is_placement = False
@@ -2126,6 +3048,13 @@ def pretool_use() -> int:
 
         root = _atlas_mod._root_of(str(target), roots)
         if root is None:
+            # No atlas guidance for this target, but the backup guard reminder
+            # (and any rm→trash rewrite) must still surface — orthogonal to
+            # placement/atlas coverage.
+            if guard_line is not None:
+                _emit_hso({"additionalContext": guard_line})
+            elif rewrite_updated is not None:
+                _emit_hso({})
             return 0
 
         # Build ancestor chain: root -> parent of target (inclusive)
@@ -2236,15 +3165,221 @@ def pretool_use() -> int:
     return 0
 
 
-def turn_inject() -> int:
-    """Inject current time + delta since last reply.
+def _in_time_window(now_min: int, start: str, end: str) -> bool:
+    """Minute-of-day membership; wraps past midnight when end <= start."""
+    def _to_min(hhmm: str) -> int:
+        h, m = hhmm.split(":")
+        return int(h) * 60 + int(m)
+    s, e = _to_min(start), _to_min(end)
+    if s <= e:
+        return s <= now_min < e
+    return now_min >= s or now_min < e
 
-    WX bridge injects its own time via system prompt — skip when
-    MARROW_CHANNEL=wx. CLI and TG both need this.
+
+def _kickout_context(channel: str, now: datetime) -> str:
+    """B8 anti-late-night deterministic nudge, config-first ([kickout] in
+    config.toml — see config.default.toml for the live windows/text). Cortex
+    is immune (MARROW_CORTEX=1, own bulletin/schedule, not this hook's rules)."""
+    if os.environ.get("MARROW_CORTEX"):
+        return ""
+    kc = config.load().get("kickout", {}) or {}
+    now_min = now.hour * 60 + now.minute
+    if channel == "cli":
+        if _in_time_window(now_min, kc.get("cli_wind_down_start", "21:30"),
+                            kc.get("cli_wind_down_end", "22:00")):
+            return kc.get("cli_wind_down_text", "")
+        if _in_time_window(now_min, kc.get("cli_leave_start", "22:00"),
+                            kc.get("cli_leave_end", "06:00")):
+            return kc.get("cli_leave_text", "")
+    elif channel in ("wx", "tg"):
+        if _in_time_window(now_min, kc.get("im_quiet_start", "23:00"),
+                            kc.get("im_quiet_end", "06:00")):
+            return kc.get("im_quiet_text", "")
+    return ""
+
+
+def _window_spawn_epoch(tpath: str) -> float | None:
+    """Wall-clock start of this window = the first transcript line's timestamp
+    (a resume opens a new file; a fresh window's first line is its birth). Falls
+    back to the file's own ctime, then None."""
+    if not tpath:
+        return None
+    try:
+        with open(tpath, encoding="utf-8") as f:
+            for line in f:
+                m = _re.search(r'"timestamp":"([^"]+)"', line)
+                if m:
+                    try:
+                        return datetime.fromisoformat(
+                            m.group(1).replace("Z", "+00:00")).timestamp()
+                    except ValueError:
+                        break
+                break
+    except OSError:
+        return None
+    try:
+        return os.path.getmtime(tpath)
+    except OSError:
+        return None
+
+
+def _cortex_lie_down_deny(inp: dict) -> str | None:
+    """Deny lie_down until the 碎碎念 (handoff) is written this window, when the
+    session asked to rotate OR the window is at the fuse line (force_tokens).
+    A plain lie_down under the line is allowed. Cortex window only. None = allow."""
+    if not os.environ.get("MARROW_CORTEX"):
+        return None
+    if inp.get("tool_name") != "mcp__marrow__lie_down":
+        return None
+    ti = inp.get("tool_input", {}) or {}
+    tpath = inp.get("transcript_path") or ""
+    cx = config.load().get("cortex", {}) or {}
+    force = int(cx.get("force_tokens", 150_000) or 0)
+    wants_rotate = bool(ti.get("rotate"))
+    occupancy = _window_tokens_from_transcript(tpath)
+    if not wants_rotate and not (force > 0 and occupancy >= force):
+        return None  # plain lie_down under the line — allow
+    # Guard fires: require a handoff written after this window's spawn.
+    p = _cortex_handoff_path()
+    spawn = _window_spawn_epoch(tpath)
+    written = False
+    if p is not None and spawn is not None:
+        try:
+            written = p.stat().st_mtime >= spawn and bool(
+                p.read_text(encoding="utf-8").strip())
+        except OSError:
+            written = False
+    if written:
+        return None
+    return (cx.get("handoff_deny_text")
+            or "Write your 碎碎念 (handoff) first, then call lie_down again.")
+
+
+def _cortex_handoff_path():
+    """<[cortex].home>/<[cortex].handoff_file> — the 碎碎念 file a fresh cortex
+    window reads at SessionStart. None on config error."""
+    try:
+        cx = config.load().get("cortex", {}) or {}
+        home = (cx.get("home") or "~/.config/marrow/cortex")
+        name = (cx.get("handoff_file") or "handoff.md")
+        return Path(home).expanduser() / name
+    except Exception:
+        return None
+
+
+def _cortex_handoff_block() -> str:
+    """Handoff note content for a fresh cortex window. Empty if absent/unreadable."""
+    p = _cortex_handoff_path()
+    if p is None:
+        return ""
+    try:
+        text = p.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    if not text:
+        return ""
+    title = (config.load().get("cortex", {}) or {}).get(
+        "handoff_title", "阿屿の碎碎念")
+    return f"{title}:\n{text}"
+
+
+def _window_tokens_from_transcript(tpath: str) -> int:
+    """Context-window occupancy = the last assistant message's usage totals
+    (input + cache read + cache creation + output) in the session jsonl. Mirrors
+    cortex.transcript.window_tokens. 0 on any missing/unreadable transcript."""
+    if not tpath:
+        return 0
+    try:
+        lines = open(tpath, encoding="utf-8").read().splitlines()
+    except OSError:
+        return 0
+    total = 0
+    for line in lines:
+        try:
+            o = json.loads(line)
+        except ValueError:
+            continue
+        msg = o.get("message")
+        u = msg.get("usage") if isinstance(msg, dict) else None
+        if u:
+            total = (u.get("input_tokens", 0) + u.get("cache_read_input_tokens", 0)
+                     + u.get("cache_creation_input_tokens", 0) + u.get("output_tokens", 0))
+    return total
+
+
+def _cortex_show_context(tpath: str) -> str:
+    """Cortex-only (MARROW_CORTEX=1) window-occupancy 亮牌 at show_tokens (10万
+    soft, ahead of the 15万 fuse). Empty for normal sessions, below threshold,
+    or with the text blanked out."""
+    if not os.environ.get("MARROW_CORTEX"):
+        return ""
+    cr = config.load().get("cortex_rotate", {}) or {}
+    text = (cr.get("show_text") or "").strip()
+    if not text:
+        return ""
+    show = int(cr.get("show_tokens", 100_000) or 0)
+    if show <= 0:
+        return ""
+    if _window_tokens_from_transcript(tpath) >= show:
+        return text
+    return ""
+
+
+def _usage_threshold_context(sid: str, tpath: str) -> str:
+    """In-window token threshold line (all sessions). `main` = window occupancy
+    (last assistant turn's usage totals — same metric as statusline `total` and
+    the rotate/fuse thresholds, NOT cumulative net-spend); `agent` = cumulative
+    subagent_tokens. Fires once `main` crosses threshold_start, then
+    again every threshold_step above the last-injected watermark. Watermark
+    tracked per session under state/. Empty below the first threshold.
+
+    Tier/watermark math uses `main_occ` alone — the threshold is a
+    window-rotation signal, and agent tokens don't occupy the main window, so
+    they must not drive triggering. `agent_net` appears only in the rendered
+    line."""
+    if not sid or not tpath:
+        return ""
+    try:
+        from . import usage
+        cu = config.load().get("cortex_usage", {}) or {}
+        start = int(cu.get("threshold_start", 100_000) or 0)
+        step = int(cu.get("threshold_step", 50_000) or 0)
+        if start <= 0 or step <= 0:
+            return ""
+        main_occ = _window_tokens_from_transcript(tpath)
+        agent_net = usage.agent_tokens_from_transcript(tpath)
+        if main_occ < start:
+            return ""
+        # Current tier = highest crossed threshold (start + k*step).
+        tier = start + ((main_occ - start) // step) * step
+        state_dir = config.DATA_DIR / "state" / "usage_watermark"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        state_file = state_dir / sid
+        last = 0
+        try:
+            last = int(state_file.read_text().strip())
+        except (OSError, ValueError):
+            last = 0
+        if tier <= last:
+            return ""
+        line = usage.threshold_line(main_occ, agent_net)
+        if not line:
+            return ""
+        state_file.write_text(str(tier))
+        return line
+    except Exception:
+        return ""
+
+
+def turn_inject() -> int:
+    """Inject current time + delta since last reply, plus the B8 kickout
+    nudge (config [kickout]).
+
+    WX bridge injects its own time via system prompt — skip the time+delta
+    stamp when MARROW_CHANNEL=wx, but the kickout nudge still applies there.
+    CLI and TG both need the time stamp.
     """
     channel = (os.environ.get("MARROW_CHANNEL") or "").strip() or "cli"
-    if channel == "wx":
-        return 0
 
     inp = _read_input()
     tpath = (inp.get("transcript_path") or "")
@@ -2257,6 +3392,19 @@ def turn_inject() -> int:
 
     tz = config.get_tz()
     now = datetime.now(timezone.utc).astimezone(tz)
+    kickout_ctx = _kickout_context(channel, now)
+
+    if channel == "wx":
+        if kickout_ctx:
+            json.dump(
+                {"hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": kickout_ctx,
+                }},
+                sys.stdout,
+            )
+        return 0
+
     now_str = now.strftime("%Y-%m-%d %a %H:%M")
     now_epoch = int(now.timestamp())
 
@@ -2302,7 +3450,13 @@ def turn_inject() -> int:
     except Exception:
         pass
 
-    ctx = f"# Context — {now_str}{delta}{sched_ctx}{care_ctx}"
+    kickout_full = f"\n\n{kickout_ctx}" if kickout_ctx else ""
+    show_ctx = _cortex_show_context(tpath)
+    show_full = f"\n\n{show_ctx}" if show_ctx else ""
+    usage_ctx = _usage_threshold_context(sid, tpath)
+    usage_full = f"\n\n{usage_ctx}" if usage_ctx else ""
+    ctx = (f"# Context — {now_str}{delta}{sched_ctx}{care_ctx}"
+           f"{kickout_full}{show_full}{usage_full}")
     json.dump(
         {"hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",

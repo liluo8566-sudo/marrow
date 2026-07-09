@@ -268,6 +268,20 @@ def cmd_add_alert(args) -> int:
     return 0
 
 
+def cmd_tl_silence(args) -> int:
+    """mw tl-silence — mark the current (or --sid) session silent: no tl
+    writes, no nudge. Dies with the session (state/tl_silent/<sid>)."""
+    from . import tl_nudge
+    from .timeline import _query_current_sid
+    with _conn(args.db) as conn:
+        sid = (args.sid or "").strip() or _query_current_sid(conn)
+    if not sid:
+        return _fail("no active session id")
+    tl_nudge.set_silent(sid)
+    print(f"tl silenced for sid={sid}")
+    return 0
+
+
 def cmd_done(args) -> int:
     return _shortcut(
         args, "tasks",
@@ -882,6 +896,12 @@ def build_parser() -> argparse.ArgumentParser:
     lrs.add_argument("--require-user-events", action="store_true",
                      help="drop sessions with no real user prompt in events")
     lrs.set_defaults(fn=cmd_list_recent_sessions)
+
+    tls = sub.add_parser("tl-silence", parents=[common],
+                         help="silence this session's tl writes + nudge")
+    tls.add_argument("--sid", default=None,
+                     help="override session id (default: current)")
+    tls.set_defaults(fn=cmd_tl_silence)
 
     dn = sub.add_parser("done", parents=[common])
     dn.add_argument("id")

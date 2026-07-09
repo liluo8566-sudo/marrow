@@ -262,7 +262,7 @@ def _session_events_text(conn, sid: str,
 
 
 def _local_hhmm(utc_iso: str) -> str:
-    """UTC ISO timestamp -> local Australia/Melbourne HH:MM. '??:??' on parse
+    """UTC ISO timestamp -> configured local timezone HH:MM. '??:??' on parse
     error so a malformed row never breaks the transcript."""
     s = (utc_iso or "").strip().replace("Z", "+00:00")
     try:

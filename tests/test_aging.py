@@ -18,16 +18,6 @@ def db(tmp_path):
     conn.close()
 
 
-def _ins_memes(conn, key, *, vtype="meme", use_count=0, last_seen=None,
-               pinned=0, status="active"):
-    conn.execute(
-        "INSERT INTO memes (type, key, use_count, last_seen, pinned, status)"
-        " VALUES (?, ?, ?, ?, ?, ?)",
-        (vtype, key, use_count, last_seen, pinned, status),
-    )
-    return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-
-
 def _ins_event(conn, content, *, ts="now", sid="s1"):
     if ts == "now":
         conn.execute(
@@ -74,45 +64,6 @@ def test_v3_memes_columns_present(db):
     assert "pinned" in cols
     assert "status" in cols
     assert db.execute("PRAGMA user_version").fetchone()[0] >= 3
-
-
-# ── retire_memes ──────────────────────────────────────────────────────────────
-
-def test_retire_memes_old_last_seen_deletes(db):
-    vid = _ins_memes(
-        db, "stale", pinned=0, last_seen="2020-01-01T00:00:00Z",
-    )
-    db.commit()
-    n = aging.retire_memes(db)
-    assert n == 1
-    assert db.execute(
-        "SELECT 1 FROM memes WHERE id=?", (vid,)
-    ).fetchone() is None
-
-
-def test_retire_memes_skips_pinned(db):
-    vid = _ins_memes(
-        db, "paw-anchor", pinned=1, last_seen="2020-01-01T00:00:00Z",
-    )
-    db.commit()
-    assert aging.retire_memes(db) == 0
-    assert db.execute(
-        "SELECT 1 FROM memes WHERE id=?", (vid,)
-    ).fetchone() is not None
-
-
-def test_retire_memes_skips_recent(db):
-    _ins_memes(
-        db, "fresh", pinned=0, last_seen="2026-05-20T00:00:00Z",
-    )
-    db.commit()
-    assert aging.retire_memes(db) == 0
-
-
-def test_retire_memes_skips_null_last_seen(db):
-    _ins_memes(db, "unseen", pinned=0, last_seen=None)
-    db.commit()
-    assert aging.retire_memes(db) == 0
 
 
 # ── archive_tasks ─────────────────────────────────────────────────────────────
@@ -212,8 +163,8 @@ def test_main_runs_clean_on_empty_db(db, monkeypatch, capsys):
     _route_init_db(monkeypatch, p)
     aging.main([])
     cap = capsys.readouterr()
-    assert "retired=0" in cap.err
     assert "archived=0" in cap.err
+    assert "confirmed=0" in cap.err
 
 
 def test_main_writes_audit_log(db, monkeypatch):
@@ -230,7 +181,7 @@ def test_main_writes_audit_log(db, monkeypatch):
         ).fetchone()
         assert row is not None
         assert row["action"] == "weekly"
-        assert "retired=" in row["summary"]
+        assert "archived=" in row["summary"]
     finally:
         fresh.close()
 

@@ -1,12 +1,23 @@
 """Clean CC harness markers from event bodies in the database.
 
-Rows whose content contains CC harness tags (<command-message>, <command-name>,
-<command-args>, [Image #N], [Image: source: ...], <local-command-stdout>) are
-either updated (non-empty cleaned content) or deleted (empty after stripping).
+Two independent passes, both dry-run/apply gated:
+
+1. Substring strip — rows whose content contains CC harness tags
+   (<command-message>, <command-name>, <command-args>, [Image #N],
+   [Image: source: ...], <local-command-stdout>) are either updated
+   (non-empty cleaned content) or deleted (empty after stripping).
+2. Whole-row junk drop — rows that ARE entirely one of four harness-junk
+   classes (task-notification receipts, interrupt markers, bare sticker-tag
+   bubbles) via transcript._is_harness_row — the same predicate the ingest
+   gate in marrow/transcript.py uses, so retroactive cleanup and future
+   ingest never diverge. These rows are always deleted whole (never
+   updated), since by definition nothing real remains.
 
 Deleted rows are tombstoned so archive_events cannot resurrect them.
-events_vec / events_vec_meta rows are removed so embed_pending re-embeds the
-clean text on next run.
+events_vec / events_vec_meta / events_fts rows are removed via the
+events_ad / events_ad_vec AFTER DELETE triggers (marrow/storage.py) — no
+manual cleanup needed, but events_vec/_meta deletes are kept explicit below
+for the UPDATE case, which the triggers do not cover.
 
 Usage:
   python scripts/clean_harness_events.py --dry-run
@@ -25,7 +36,7 @@ if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
 from marrow import config, storage  # noqa: E402
-from marrow.transcript import strip_harness_markers  # noqa: E402
+from marrow.transcript import _is_harness_row, strip_harness_markers  # noqa: E402
 
 
 def _hash(*parts: str) -> str:
@@ -100,6 +111,68 @@ def _apply(conn: sqlite3.Connection, plan: list[dict]) -> None:
                 )
 
 
+_JUNK_CANDIDATE_SQL = """
+    SELECT id, session_id, timestamp, role, content
+    FROM events
+    WHERE content LIKE '<task-notification>%'
+       OR content = '[Request interrupted by user]'
+       OR content = '[Request interrupted by user for tool use]'
+       OR content LIKE '%<image path=%'
+       OR content LIKE '%<gif path=%'
+"""
+
+
+def _classify_junk(content: str) -> str:
+    if content.startswith("<task-notification>"):
+        return "task-notification"
+    if content.startswith("[Request interrupted by user"):
+        return "interrupted"
+    return "sticker-tag"
+
+
+def _build_junk_plan(conn: sqlite3.Connection) -> list[dict]:
+    """Whole-row junk candidates, decided by the shared _is_harness_row
+    predicate (SQL above is only a cheap prefilter)."""
+    rows = conn.execute(_JUNK_CANDIDATE_SQL).fetchall()
+    plan = []
+    for r in rows:
+        content = r["content"] or ""
+        if not _is_harness_row(content):
+            continue  # e.g. a row that quotes the tag mid-dialogue — keep
+        plan.append({
+            "id": r["id"],
+            "session_id": r["session_id"] or "",
+            "timestamp": r["timestamp"] or "",
+            "role": r["role"] or "",
+            "content": content,
+            "class": _classify_junk(content),
+        })
+    return plan
+
+
+def _print_junk_preview(plan: list[dict]) -> None:
+    print(f"{'id':>6}  {'role':<10}  {'class':<17}  {'len':>6}  preview")
+    print("-" * 80)
+    for p in plan:
+        preview = p["content"][:60].replace("\n", " ")
+        print(f"{p['id']:>6}  {p['role']:<10}  {p['class']:<17}  {len(p['content']):>6}  {preview}")
+    from collections import Counter
+    by_class = Counter(p["class"] for p in plan)
+    print(f"\nSummary: {dict(by_class)} total={len(plan)}")
+
+
+def _apply_junk(conn: sqlite3.Connection, plan: list[dict]) -> None:
+    with conn:
+        for p in plan:
+            eid = p["id"]
+            old_hash = _hash(p["session_id"], p["timestamp"], p["role"], p["content"])
+            conn.execute("DELETE FROM events WHERE id=?", (eid,))
+            conn.execute(
+                "INSERT OR IGNORE INTO event_tombstones (source_hash, reason) VALUES (?, ?)",
+                (old_hash, f"clean_harness_events: whole-row junk ({p['class']})"),
+            )
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     g = ap.add_mutually_exclusive_group(required=True)
@@ -113,9 +186,16 @@ def main(argv: list[str] | None = None) -> int:
     conn.row_factory = sqlite3.Row
     try:
         plan = _build_plan(conn)
+        print("── substring-strip pass ──")
         _print_preview(plan)
+
+        junk_plan = _build_junk_plan(conn)
+        print("\n── whole-row junk-drop pass ──")
+        _print_junk_preview(junk_plan)
+
         if args.apply:
             _apply(conn, plan)
+            _apply_junk(conn, junk_plan)
             print("\nApplied.")
         else:
             print("\nDry-run — no changes written.")

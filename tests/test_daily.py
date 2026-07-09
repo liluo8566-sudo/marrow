@@ -140,6 +140,33 @@ def test_run_day_force_overwrites(db):
     assert "second" in row["content"]
 
 
+def test_run_day_force_clears_stale_diary_vec(db):
+    """Regression: diary's implicit rowid is freed by DELETE and reused by
+    the very next INSERT. A surviving diary_vec_meta row for that rowid
+    would poison recall's pending-embed dedup (same disease as the events_vec
+    poisoning fixed in a48de18) — force-overwrite must clear it first.
+    """
+    p, conn = db
+    daily.run_day(conn, "2026-05-16", FakeLLM(prose="first"), db=p)
+    old_rowid = conn.execute(
+        "SELECT rowid FROM diary WHERE date='2026-05-16'"
+    ).fetchone()[0]
+    conn.execute(
+        "INSERT INTO diary_vec_meta (rowid, embedder_id, dim)"
+        " VALUES (?, 'bge-m3', 1024)", (old_rowid,))
+    conn.commit()
+
+    daily.run_day(conn, "2026-05-16", FakeLLM(prose="second"), db=p, force=True)
+
+    new_rowid = conn.execute(
+        "SELECT rowid FROM diary WHERE date='2026-05-16'"
+    ).fetchone()[0]
+    assert new_rowid == old_rowid  # freed rowid reused -- the poison mechanism
+    assert conn.execute(
+        "SELECT COUNT(*) FROM diary_vec_meta WHERE rowid=?", (new_rowid,)
+    ).fetchone()[0] == 0
+
+
 def test_run_day_stub_when_no_digests_no_affect(tmp_path):
     p = str(tmp_path / "empty.db")
     conn = storage.init_db(p)

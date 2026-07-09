@@ -367,6 +367,30 @@ def test_memes_gate_same_day_repeats_dont_count(db):
     ).fetchone() is None
 
 
+# ── write_memes_cand existing-row bump path ──────────────────────────────────
+
+def test_memes_bump_existing_row_leaves_updated_at_unchanged(db):
+    """Re-mention of an already-accepted meme bumps use_count/last_seen but
+    must NOT touch updated_at -- a bump is not a content change, and
+    reconcile's DB-wins check would otherwise clobber hand md edits."""
+    with db:
+        db.execute(
+            "INSERT INTO memes(type,key,value,use_count,pinned,status,"
+            " updated_at) VALUES('fact','Plan tier','Max 5x',1,1,'active',"
+            " '2026-01-01T00:00:00Z')"
+        )
+    cand = [{"key": "Plan tier", "type": "fact", "value": "Max 5x",
+             "context": "", "pinned": 0, "conf": 0.9}]
+    raw = "===MEMES_CAND===\n" + json.dumps(cand) + "\n===END===\n"
+    n = candidates.write_memes_cand(db, raw, date="2026-05-16")
+    row = db.execute(
+        "SELECT use_count, updated_at FROM memes WHERE key='Plan tier'"
+    ).fetchone()
+    assert n == 1
+    assert row["use_count"] == 2
+    assert row["updated_at"] == "2026-01-01T00:00:00Z"
+
+
 # ── bump_use_counts ─────────────────────────────────────────────────────────
 
 def _seed_meme(conn, key, *, vtype="paw", status="active", use_count=0):

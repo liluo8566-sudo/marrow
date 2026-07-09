@@ -101,7 +101,6 @@ Fields
 - key: short term / phrase / name as used.
 - type: one of fact / paw / meme / news / event / others.
 - value: what it means or refers to.
-- context: short example of how it was used.
 - pinned: 0 or 1. Hint only — paw/fact are always force-pinned by the \
 writer; meme/news/event/others honour your value.
 
@@ -122,7 +121,7 @@ Output markers (machine-parsed — do NOT skip, rename, or merge):
 ===MEMES_CAND===
 [
   {{{{"key": "...", "type": "paw", "value": "...", \
-"context": "...", "pinned": 0, "conf": 0.8}}}}
+"pinned": 0, "conf": 0.8}}}}
 ]
 ===END===
 

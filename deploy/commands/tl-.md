@@ -1,7 +1,7 @@
 ---
-description: Silence this session — mute the tl_add nudge and stop self writes.
+description: Silence this session — no tl writes, no nudge.
 ---
-Call `mcp__marrow__tl_silence` immediately. The state dies with this session.
+Run `~/.local/bin/mw tl-silence` via Bash. Report stdout verbatim (one line confirmation).
 
 Constraints:
 - One call, one short confirmation.

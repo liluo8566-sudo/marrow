@@ -185,6 +185,7 @@ LIFE: (casual sessions ONLY — for task sessions output exactly: LIFE: N/A)
 - Include both real-world activities (meals, classes, errands, exercise) \
     and shared activities with assistant (chatting about X topic, goofing around).
 - Summarise into dense info line.
+    - Never be too frequent - 0.5-2hours per line
     - No more than 3 lines - fewer is better.
     - output N/A for 0.
     - Homogeneous scenes (silly couple banter/cuddling/play with no actual topic):

@@ -58,41 +58,46 @@ def nudge_text() -> str:
     return raw.strip()
 
 
-def turns_since_last_tl_add(conn, sid: str) -> int:
-    """Assistant turns recorded for sid since its last tl_add (all if none)."""
-    last = conn.execute(
-        "SELECT MAX(occurred_at) AS t FROM audit_log"
-        " WHERE action='tl_add' AND target_id=?",
-        (sid,),
-    ).fetchone()
-    since = last["t"] if last else None
-    if since:
-        row = conn.execute(
-            "SELECT COUNT(*) AS n FROM events"
-            " WHERE session_id=? AND role='assistant' AND timestamp > ?",
-            (sid, since),
-        ).fetchone()
-    else:
-        row = conn.execute(
-            "SELECT COUNT(*) AS n FROM events"
-            " WHERE session_id=? AND role='assistant'",
-            (sid,),
-        ).fetchone()
-    return int(row["n"]) if row else 0
+# ── per-turn counter state (state/tl_nudge/<sid>) ────────────────────────────
+
+def _counter_dir() -> Path:
+    return config.DATA_DIR / "state" / "tl_nudge"
 
 
-def should_nudge(turns_since_add: int) -> bool:
-    """Fire once every `threshold` turns without a tl_add, when enabled."""
-    if not enabled():
-        return False
-    t = threshold()
-    return turns_since_add >= t and turns_since_add % t == 0
+def _load_count(sid: str) -> int:
+    try:
+        return int((_counter_dir() / sid).read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return 0
+
+
+def _save_count(sid: str, count: int) -> None:
+    d = _counter_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    (d / sid).write_text(str(count), encoding="utf-8")
+
+
+def reset(sid: str) -> None:
+    """Zero sid's turn counter (called after a successful tl_add)."""
+    if not sid:
+        return
+    try:
+        (_counter_dir() / sid).unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def maybe_nudge(conn, sid: str) -> str | None:
-    """Return injection text when the sid is due a nudge, else None."""
+    """Increment sid's per-turn counter; return injection text at threshold.
+
+    conn is unused (the counter is a state file, not a DB query) but kept in
+    the signature since hooks.py already passes it in.
+    """
     if not enabled() or not sid or is_silent(sid):
         return None
-    if should_nudge(turns_since_last_tl_add(conn, sid)):
+    count = _load_count(sid) + 1
+    if count >= threshold():
+        _save_count(sid, 0)
         return nudge_text() or None
+    _save_count(sid, count)
     return None

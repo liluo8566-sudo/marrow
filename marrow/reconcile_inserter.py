@@ -29,11 +29,10 @@ _ANCHOR_STR_RE = re.compile(r"<!-- id:([^>]+?) -->")
 _SECTION_H2_RE = re.compile(r"^##\s+(?P<label>\S.*?)\s*$")
 
 # Unanchored row patterns for INSERT pass (anchor optional/absent).
-# Memes: `- [type] **key**{ → value}{ _context_}`
+# Memes: `- [type] **key**{ → value}`
 _MEME_UNANCHORED_RE = re.compile(
     r"^-\s+\[(?P<type>[^\]]+)\]\s+\*\*(?P<key>[^*]+)\*\*"
     r"(?:\s+→\s+(?P<value>.+?))?"
-    r"(?:\s+_(?P<context>[^_]+)_)?"
     r"\s*$"
 )
 # Profile: `- [kind] **name**{ — fact}`
@@ -42,6 +41,8 @@ _PROFILE_UNANCHORED_RE = re.compile(
     r"(?:\s+—\s+(?P<fact>.+?))?"
     r"\s*$"
 )
+# Recognised meme [type] tags (subpage_specs.py section/order source of truth).
+_MEME_TYPE_WHITELIST = frozenset({"paw", "fact", "meme", "news", "event", "others"})
 
 
 # Separators accepted in hand-typed rows, longest first so `——` never
@@ -503,16 +504,14 @@ def _insert_memes(
 
     Unanchored lines matching the meme row format are inserted into DB.
     type is read directly from the line's [type] bracket (already in
-    parse_row output). Section heading ("Personal" / "Public") is used
-    only to validate consistency:
-      Personal → type must be in _MEME_PERSONAL (paw, fact)
-      Public   → type must NOT be in _MEME_PERSONAL
-    If inconsistent, add to conflicts and skip.
+    parse_row output). Section heading ("Personal" / "Public") is only used
+    as a fallback default when the tag itself isn't a recognised meme type —
+    a recognised tag is trusted even if it's under the "wrong" section;
+    force_sort_consistency relocates it on the next render, so no
+    hand-written line is ever silently skipped.
     Dedup: same type+key with status='active' already present → skip.
     Hand-typed rows get pinned=1, status='active'.
     """
-    from .subpage_specs import _MEME_PERSONAL
-    _personal_types: frozenset[str] = frozenset(_MEME_PERSONAL)
     _valid_sections = {"Personal", "Public"}
 
     if not md_path.exists():
@@ -570,36 +569,30 @@ def _insert_memes(
                 "type": default_type,
                 "key": bkey,
                 "value": bval,
-                "context": None,
             }))
             continue
         parsed = {
             "type": m.group("type").strip(),
             "key": m.group("key").strip(),
             "value": (m.group("value") or "").strip() or None,
-            "context": (m.group("context") or "").strip() or None,
         }
         meme_type = (parsed.get("type") or "").strip()
         if not meme_type:
             rpt.conflicts.append(f"memes insert: missing type — {line[:60]}")
             continue
-        # Section consistency check.
         if cur_section not in _valid_sections:
             rpt.conflicts.append(
                 f"memes insert: unmappable section '{cur_section}' — {line[:60]}"
             )
             continue
-        is_personal = meme_type in _personal_types
-        if cur_section == "Personal" and not is_personal:
-            rpt.conflicts.append(
-                f"memes insert: type '{meme_type}' under Personal section — {line[:60]}"
-            )
-            continue
-        if cur_section == "Public" and is_personal:
-            rpt.conflicts.append(
-                f"memes insert: personal type '{meme_type}' under Public section — {line[:60]}"
-            )
-            continue
+        # Trust the [type] tag itself when it's a recognised meme type, even
+        # if it doesn't match its current (valid) section — force_sort_
+        # consistency relocates the row to the right section on the next
+        # render. Only fall back to the section default when the tag isn't
+        # a recognised meme type at all.
+        if meme_type not in _MEME_TYPE_WHITELIST:
+            meme_type = "fact" if cur_section == "Personal" else "others"
+            parsed = dict(parsed, type=meme_type)
         candidates.append((idx, parsed))
 
     if not candidates:
@@ -621,7 +614,6 @@ def _insert_memes(
                 "type": meme_type,
                 "key": meme_key,
                 "value": parsed.get("value"),
-                "context": parsed.get("context"),
                 "pinned": 1,
                 "status": "active",
             }
@@ -780,7 +772,7 @@ def reconcile_memes(conn: sqlite3.Connection, md_path: Path) -> ReconcileReport:
     spec = subpage_specs.build_memes_spec(str(Path(md_path).parent))
     rpt = reconcile_inserter_sync(
         conn, spec, md_path, "memes",
-        editable_cols=["type", "key", "value", "context"],
+        editable_cols=["type", "key", "value"],
         bare_cols=("key", "value"),
         soft_delete=False,
     )
@@ -954,14 +946,29 @@ def reconcile_diary(conn: sqlite3.Connection,
 
 def reconcile_stickers(conn: sqlite3.Connection,
                        md_path: Path) -> ReconcileReport:
-    """UPDATE sticker desc on edit; DELETE absent rows."""
+    """UPDATE sticker desc on edit; DELETE absent rows.
+
+    A DB-row delete also orphans the image + thumbnail on disk (sweep_orphans
+    only prunes rows for missing files, never the reverse), so snapshot paths
+    before the sync and unlink files for any row the reconcile removed.
+    """
     from . import subpage_specs
+    from .sticker_ops import _unlink_sticker_files
     spec = subpage_specs.build_stickers_spec(str(Path(md_path).parent))
-    return reconcile_inserter_sync(
+    before = {r[0]: r[1] for r in conn.execute(
+        "SELECT id, path FROM stickers").fetchall()}
+    rpt = reconcile_inserter_sync(
         conn, spec, md_path, "stickers",
         editable_cols=["desc"],
         soft_delete=False,
     )
+    if rpt.deleted:
+        survivors = {r[0] for r in conn.execute(
+            "SELECT id FROM stickers").fetchall()}
+        for sid, path in before.items():
+            if sid not in survivors and path:
+                _unlink_sticker_files(path)
+    return rpt
 
 
 def reconcile_wallet(conn: sqlite3.Connection,

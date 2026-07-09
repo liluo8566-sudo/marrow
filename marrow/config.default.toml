@@ -108,6 +108,11 @@ event_context_window = 1
 # entry are stripped from the query before FTS + vec. Populate after reviewing
 # data collection results from the parallel stopword agent.
 stopwords = []
+# Per-project recall-off (C3 groundwork, HANDOVER queue item 2): session cwd
+# starting with any entry skips recall injection entirely (hooks.py
+# user_prompt_submit, checked before query construction). Empty = no opt-out.
+# No user-facing command yet — hand-edit this list (parked).
+exclude_cwds = []
 
 [recall.buckets]
 # cwd -> recall bucket (substring match, case-insensitive). same-bucket
@@ -201,6 +206,46 @@ care_text = """
 - Nudge gently, never push; vary your warmth and wording every turn — no template phrases, no repeated openers.
 """
 
+[kickout]
+# B8 anti-late-night deterministic nudge (UserPromptSubmit). Times are local
+# ([core].timezone), HH:MM 24h. cli_* windows apply when MARROW_CHANNEL=cli
+# (default channel); im_* applies to wx/tg. All skipped when MARROW_CORTEX=1.
+# Windows may cross midnight (end < start wraps to next day).
+# Fork users: fill the *_text fields in your ~/.config/marrow/config.toml.
+# Empty text = feature inert (no injection), regardless of window match.
+cli_wind_down_start = "21:30"
+cli_wind_down_end = "22:00"
+cli_wind_down_text = ""
+cli_leave_start = "22:00"
+cli_leave_end = "06:00"
+cli_leave_text = ""
+im_quiet_start = "23:00"
+im_quiet_end = "06:00"
+im_quiet_text = ""
+
+[cortex_rotate]
+# Cortex-only (MARROW_CORTEX=1) window-occupancy 亮牌. When window tokens reach
+# show_tokens (10万 soft, ahead of the 15万 fuse) turn_inject appends a one-line
+# nudge to wrap up, write the 碎碎念 (handoff), and lie_down(rotate=True). Normal
+# sessions never see this. Empty text = inert.
+show_tokens = 100000
+show_text = "Window filling up (≥100k) — wrap this turn, write your 碎碎念 (handoff), then lie_down(rotate=True) for a fresh window."
+
+[cortex_usage]
+# Net-token visibility (all sessions self-aware). Rendered by usage.py off the
+# ct_rate_limit kv the collector (usage_snapshot) writes. In-window threshold
+# inject (turn_inject): once main window occupancy crosses threshold_start, then
+# again every threshold_step above it; watermark tracked per session in state.
+# Agent tokens don't occupy the main window and don't drive triggering.
+threshold_start = 100000
+threshold_step = 50000
+# Global daily net budget the SessionStart "Net Token Used today" line reads.
+daily_budget = 1000000
+# usage_snapshot collector tick — runs inside the watcher (always alive,
+# independent of cortex) so 5h/7d/cdx numbers stay fresh even when cortex is
+# off. Cortex's own tick may also call it; the write is idempotent (upsert).
+snapshot_tick_s = 300
+
 [agent_guard]
 # PreToolUse:Agent burst protection — subagent_types denied outright (they
 # spawn agents recursively). Blocked with exit 2 + reason to the model.
@@ -212,6 +257,26 @@ deny = ["general-purpose"]
 enabled = true
 threshold = 10
 text_file = ""
+
+[day_para]
+# Day-paragraph writer (marrow.day_para): one 100-150 char overview per day,
+# composed from that day's self-timeline (role='tl') rows + calendar. Fills the
+# diary.overview column without touching diary.content. Prompt text lives in
+# marrow/data/prompt_day_para.txt (or point prompt_file at your own).
+prompt_file = ""
+chars_min = 100
+chars_max = 150
+# Pull the day's calendar (cadence cal read) into the prompt. false = tl only.
+include_calendar = true
+
+[diary]
+# Diary free-write prompt loader (marrow.day_para.load_diary_prompt). Text in
+# marrow/data/prompt_diary.txt (or point prompt_file at your own). enabled is a
+# groundwork flag for the cortex free-write slot — no writer wired yet.
+enabled = false
+prompt_file = ""
+length_range = "300-800"
+style = "叙述生动有趣，故事性强。文艺中带着搞笑。"
 
 [cortex]
 # Cortex own notebook home (C3, Decided 07-03 pm) — cwd for the resumed
@@ -225,3 +290,89 @@ model = ""
 effort = ""
 # Wishlist md, pure append-only (Decided 07-03 eve). Empty = <home>/wishlist.md.
 wishlist_path = ""
+# Cortex repo + its venv — power the cortex-only lie_down / say MCP tools
+# (registered only when the daemon runs under MARROW_CORTEX). The subprocess
+# runs from repo_root so `python -m cortex.X` resolves from any cwd. Both empty
+# = tools return a "not configured" error.
+venv_python = ""
+repo_root = ""
+# Handoff (碎碎念) note file under <home>. Injected at SessionStart on a fresh
+# cortex window (new process = fresh; resume skips). Written by the session.
+handoff_file = "handoff.md"
+handoff_title = "阿屿の碎碎念"
+# lie_down PreToolUse guard: deny (write your 碎碎念 first) when rotate=True OR
+# window occupancy >= force_tokens (15万 fuse line) and no handoff was written
+# this window (handoff mtime after the window's first transcript line).
+force_tokens = 150000
+handoff_deny_text = "Write your 碎碎念 (handoff) first — call lie_down again after saving it."
+
+[hooks]
+# PreToolUse backup guard — stateless, two tiers (no state, no dedup).
+# Silent: rm/mv/sed scoped to tmp/scratchpad/worktrees; a destructive command
+#   that chains a backup action (cp/rsync/tar/git commit/git stash push/
+#   .backup) in the SAME command; any git op (owned by the guards below).
+# Reminder (additionalContext, fires EVERY matching call): any rm on a
+#   non-whitelisted path (non-recursive), bulk mv/sed -i with wildcard sources
+#   to a non-whitelisted dest, DELETE FROM without WHERE, mcp__marrow__
+#   clear/delete calls.
+# Deny (PreToolUse permissionDecision "deny", model-facing): recursive rm on a
+#   non-whitelisted path, rm of a *.db file outside the whitelist, or a sqlite3
+#   command destroying a *.db (DROP TABLE / TRUNCATE / DELETE FROM w/o WHERE) —
+#   unless the SAME command carries a backup action. Set
+#   backup_guard_intercept=false to downgrade deny items to reminders instead.
+backup_guard = true
+backup_guard_intercept = true
+backup_guard_message = "Warning: back up code/db OR archive docs before anything destructive — delete, bulk modify, import/export.\n- Bypass only if the user explicitly said to delete/modify THIS now.\n- If unsure, stop and ask — never assume the user doesn't need/want it."
+backup_guard_deny_message = "BLOCKED — bulk deletion with no backup. This target is not in git/tmp: once deleted it is gone. Chain a backup into the SAME command and rerun, e.g. `tar -czf /tmp/bak.tgz <target> && rm -rf <target>` (db: `cp` first). Even if the user ordered the deletion, back up anyway — it costs one command. Do NOT work around this guard with alternative delete commands."
+
+# rm → trash auto-rewrite (PreToolUse). When a Bash `rm` segment's positional
+# paths ALL fall under a trash_paths prefix, the segment is rewritten to
+# `/usr/bin/trash <paths>` (rm flags dropped — recoverable from Trash) BEFORE
+# the backup guard runs. Mixed / wildcard / out-of-zone targets are left
+# untouched and fall through to the guard tiers. Paths expand ~ at load. Set
+# rm_to_trash=false to disable.
+rm_to_trash = true
+trash_paths = [
+    "~/Library/Mobile Documents/",
+    "~/Desktop/",
+    "~/Documents/",
+    "~/Downloads/",
+]
+
+# Git force-push guard — hard deny (PreToolUse "deny"), no escape hatch, no
+# worktree exemption. Tokenized per shell segment so a flag inside a quoted
+# commit message cannot false-positive. Set git_force_push_guard=false to
+# disable.
+git_force_push_guard = true
+git_force_push_guard_message = "BLOCKED — force push rewrites remote history and can permanently destroy commits. Never force push. If the remote rejected your push, stop and report to the user."
+
+# Git revert-type guard — held via PreToolUse permissionDecision "ask" (the
+# user confirms whose diff is being discarded). Owns the decision for the
+# matched git ops, so they bypass the backup deny gate. Worktree/agent cleanup
+# (branch -D teardown etc.) is exempt. `git restore --staged` alone (unstage
+# only) is treated as safe. Set git_revert_guard=false to disable.
+git_revert_guard = true
+git_revert_patterns = [
+    "\\bgit\\s+reset\\s+--hard\\b",
+    "\\bgit\\s+checkout\\s+(?:\\S+\\s+)*?--\\s+\\S",
+    "\\bgit\\s+restore\\b",
+    "\\bgit\\s+clean\\s+-\\w*f",
+    "\\bgit\\s+branch\\s+-\\w*D\\w*\\b",
+    "\\bgit\\s+stash\\s+(?:drop|clear)\\b",
+    "\\bgit\\s+revert\\b[^\\n]*--no-edit\\b",
+    "\\bgit\\s+switch\\b[^\\n]*--discard-changes\\b",
+    "\\bgit\\s+worktree\\s+remove\\b",
+]
+git_revert_guard_message = "🤡 狗男人又要乱搞你git里的东西了，是否同意？"
+
+# Session-start housekeep (~/.claude only): if the auto-commit would delete
+# one of these top-level files, the commit is skipped, an alert is raised,
+# and the working tree is left dirty for a human to decide.
+housekeep_protected_files = [
+    "CLAUDE.md", "settings.json", "keybindings.json", "statusline.py",
+    "output-styles/ny.md",
+]
+
+# ~/.claude.json mcpServers snapshot: rolling backups kept in
+# ~/.config/marrow/backups/claude-json/, newest N retained.
+claude_json_snapshot_keep = 10

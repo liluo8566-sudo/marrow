@@ -35,6 +35,26 @@ def _hash(body: str) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
+def _alert_ghost_tombstones(path: str, key: str, bids: list[str]) -> None:
+    """A fetched DB row whose block_id is tombstoned in md_index should be
+    impossible in steady state — reconcile runs before the inserter and
+    deletes md-absent rows. Seeing it means a ghost row (freed-id reuse
+    handing a new row the old tombstoned id). Fail-soft, dedup per page.
+    """
+    if not bids:
+        return
+    try:
+        from . import repo as _repo
+        _repo.add_alert(
+            "warn", "db_pages", f"inserter_ghost_tombstoned:{key}",
+            source="inserter.py",
+            message=(f"{path}: {len(bids)} fetched row(s) tombstone-skipped "
+                     f"(ghost, block_ids={bids})"),
+        )
+    except Exception:
+        pass
+
+
 @dataclass
 class InserterSpec:
     """Declarative subpage contract for the block-level inserter.
@@ -176,9 +196,13 @@ def write_subpage_inserter(spec: InserterSpec, conn: sqlite3.Connection,
                 bid = spec.block_id_of(r)
                 store.record_block(path, bid, _hash(spec.render_row(r)))
                 counts["bootstrapped"] += 1
-            counts["tombstoned_skipped"] += len(rows) - len(live_rows)
+            ghost_bids = [spec.block_id_of(r) for r in rows
+                         if spec.block_id_of(r) in tombstoned]
+            counts["tombstoned_skipped"] += len(ghost_bids)
+            _alert_ghost_tombstones(path, spec.key, ghost_bids)
             return counts
     new_rows_by_section: dict[str, list[tuple[str, str]]] = {}
+    ghost_bids: list[str] = []
     for r in rows:
         bid = spec.block_id_of(r)
         if bid in md_ids:
@@ -186,6 +210,7 @@ def write_subpage_inserter(spec: InserterSpec, conn: sqlite3.Connection,
             continue
         if bid in tombstoned:
             counts["tombstoned_skipped"] += 1
+            ghost_bids.append(bid)
             continue
         section = spec.section_of(r)
         body = spec.render_row(r)
@@ -202,6 +227,7 @@ def write_subpage_inserter(spec: InserterSpec, conn: sqlite3.Connection,
                 store.record_block(path, bid, _hash(body))
                 counts["appended"] += 1
 
+    _alert_ghost_tombstones(path, spec.key, ghost_bids)
     return counts
 
 

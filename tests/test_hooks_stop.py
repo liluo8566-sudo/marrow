@@ -192,25 +192,26 @@ def test_stale_offset_truncation_full_rebuild(env, monkeypatch, tmp_path):
 
 # ── env + isolation guards ────────────────────────────────────────────────────
 
-def test_marrow_cortex_skips(env, monkeypatch, tmp_path):
+def test_marrow_cortex_full_parity(env, monkeypatch, tmp_path):
+    """B3m (07-08): cortex turns archive into events like any other session
+    (channel=ct via MARROW_CHANNEL, set alongside MARROW_CORTEX in llm.py)."""
     db, tmp = env
     jl = tmp_path / "s.jsonl"
     _write(jl, [_u("u1", None, "hello"),
                 _u("a1", "u1", "hi", role="assistant")])
     monkeypatch.setenv("MARROW_CORTEX", "1")
+    monkeypatch.setenv("MARROW_CHANNEL", "ct")
     _stdin(monkeypatch, {"session_id": "s1", "transcript_path": str(jl),
                          "cwd": str(tmp_path)})
     assert hooks.main(["stop"]) == 0
-    assert _events(db) == []
+    assert _events(db) == ["hello", "hi"]
     conn = storage.connect(db)
     try:
-        has = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='ct_activity'"
-        ).fetchone()
+        chans = {r["channel"] for r in conn.execute("SELECT channel FROM events")}
     finally:
         conn.close()
-    assert has is None  # table never created — nothing written
-    assert not (tmp / "state" / "ct_cursor" / "s1.json").exists()
+    assert chans == {"ct"}
+    assert (tmp / "state" / "ct_cursor" / "s1.json").exists()
 
 
 def test_subagent_transcript_skipped(env, monkeypatch, tmp_path):

@@ -52,7 +52,9 @@ def _ins_vec(conn, event_id):
 
 
 def _vec_ids(conn):
-    return {r[0] for r in conn.execute("SELECT rowid FROM events_vec_meta")}
+    # Eviction deletes the real vector (events_vec) but KEEPS the meta row as a
+    # tombstone, so "still embedded" = has an events_vec row, not a meta row.
+    return {r[0] for r in conn.execute("SELECT rowid FROM events_vec")}
 
 
 def test_out_window_evicted_in_window_kept(db, fresh_backup):
@@ -68,6 +70,23 @@ def test_out_window_evicted_in_window_kept(db, fresh_backup):
     assert _vec_ids(conn) == {new}
     # events rows untouched — FTS lane intact
     assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 2
+
+
+def test_evicted_row_keeps_meta_tombstone(db, fresh_backup):
+    # Meta is kept as an eviction tombstone so the recall dedup
+    # (NOT EXISTS vec AND NOT EXISTS meta) does not re-embed the evicted row.
+    conn, p = db
+    old = _ins_event(conn, "old turn", age_days=100)
+    _ins_vec(conn, old)
+    aging.evict_vec_window(
+        conn, window_days=90, backup_dir=fresh_backup, alert_db=p
+    )
+    assert conn.execute(
+        "SELECT COUNT(*) FROM events_vec WHERE rowid=?", (old,)
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM events_vec_meta WHERE rowid=?", (old,)
+    ).fetchone()[0] == 1
 
 
 def test_exempt_affect_importance_link(db, fresh_backup):

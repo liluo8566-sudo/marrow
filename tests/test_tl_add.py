@@ -35,7 +35,7 @@ def _hhmm(hours_ago: float) -> str:
 def _add(conn, sid="sess-1", body="body orig", **kw):
     return tl_writer.tl_add(
         conn, f"{_hhmm(2)}-{_hhmm(1.9)}", body,
-        n_word="愉悦", n_intensity=3, y_word="委屈", y_intensity=2,
+        n_word="愉悦", y_word="委屈",
         sid=sid, **kw,
     )
 
@@ -58,8 +58,8 @@ def test_tl_add_writes_tl_row_no_affect(conn):
     assert ev["role"] == "tl"
     assert ev["channel"] == "cli"  # MARROW_CHANNEL unset -> default platform
     # affect phrase lives verbatim inside content; no affect table write.
-    assert ev["content"] == "【N 愉悦·3 | Y 委屈·2】body orig"
-    assert ev["imp"] == 3  # default = max(n_int, y_int)
+    assert ev["content"] == "【N愉悦♡Y委屈】body orig [3]"
+    assert ev["imp"] == 3  # default
     assert ev["flag"] is None
     assert ev["ts_start"] and ev["ts_end"]
     n_af = conn.execute("SELECT COUNT(*) c FROM affect WHERE event_id=?",
@@ -97,7 +97,7 @@ def test_single_moment_no_end(conn):
 def test_render_new_format_with_anchor(conn):
     r = _add(conn, body="翻日志扑空")
     md = timeline.render_timeline(conn)
-    assert f"【N 愉悦·3 | Y 委屈·2】翻日志扑空 <!-- tl:e:{r['event_id']} -->" in md
+    assert f"【N愉悦♡Y委屈】翻日志扑空 [3] <!-- tl:e:{r['event_id']} -->" in md
     assert f"e={r['event_id']}" in md  # trail marker
 
 
@@ -124,13 +124,13 @@ def test_self_edit_round_trip(conn, tmp_path):
     dash = tmp_path / "dashboard.md"
     md = timeline.render_timeline(conn)
     _write_dash(dash, md.replace("body original", "body edited")
-                        .replace("愉悦·3", "温柔·4"))
+                        .replace("愉悦", "温柔"))
     rpt = reconcile.reconcile_timeline(conn, dash)
     assert rpt.updated == 1
-    # label + body both live inside content now
+    # label + i + body all live inside content now
     assert conn.execute("SELECT content FROM events WHERE id=?",
                         (eid,)).fetchone()["content"] == \
-        "【N 温柔·4 | Y 委屈·2】body edited"
+        "【N温柔♡Y委屈】body edited [3]"
 
 
 def test_self_delete(conn, tmp_path):
@@ -169,11 +169,11 @@ def test_seg_digest_suppresses_life_lines_for_self_sid(conn):
 def test_tl_update_changes_body_and_label(conn):
     r = _add(conn, body="orig")
     tl_writer.tl_update(conn, r["event_id"], body="updated",
-                        n_word="温柔", n_intensity=5, y_word="委屈", y_intensity=1,
+                        n_word="温柔", y_word="委屈",
                         importance=4)
     ev = conn.execute("SELECT content, imp FROM events WHERE id=?",
                       (r["event_id"],)).fetchone()
-    assert ev["content"] == "【N 温柔·5 | Y 委屈·1】updated"
+    assert ev["content"] == "【N温柔♡Y委屈】updated [4]"
     assert ev["imp"] == 4
 
 
@@ -182,7 +182,42 @@ def test_tl_update_body_only_keeps_label(conn):
     tl_writer.tl_update(conn, r["event_id"], body="just body")
     ev = conn.execute("SELECT content FROM events WHERE id=?",
                       (r["event_id"],)).fetchone()
-    assert ev["content"] == "【N 愉悦·3 | Y 委屈·2】just body"
+    assert ev["content"] == "【N愉悦♡Y委屈】just body [3]"
+
+
+def test_tl_update_rewrites_rendered_dashboard_line(conn, monkeypatch, tmp_path):
+    """A rendered row's md line must be rewritten to match the DB update, or
+    the resident reconcile sees a stale diff and reverts it (silent data loss
+    bug — see tl_update)."""
+    r = _add(conn, body="orig")
+    eid = r["event_id"]
+    md = timeline.render_timeline(conn)
+    dash = tmp_path / "dashboard.md"
+    dash.write_text(md, encoding="utf-8")
+    monkeypatch.setattr(tl_writer, "_dashboard_path", lambda: dash)
+
+    tl_writer.tl_update(conn, eid, body="updated", n_word="温柔", y_word="委屈")
+
+    new_md = dash.read_text(encoding="utf-8")
+    assert f"【N温柔♡Y委屈】updated [3] <!-- tl:e:{eid} -->" in new_md
+    assert "orig" not in new_md
+    # reconcile must now see no diff -> no self-edit revert
+    rpt = reconcile.reconcile_timeline(conn, dash)
+    assert rpt.updated == 0
+    assert conn.execute("SELECT content FROM events WHERE id=?",
+                        (eid,)).fetchone()["content"] == "【N温柔♡Y委屈】updated [3]"
+
+
+def test_tl_update_unrendered_row_leaves_dashboard_untouched(conn, monkeypatch, tmp_path):
+    r = _add(conn, body="orig")
+    eid = r["event_id"]
+    dash = tmp_path / "dashboard.md"
+    dash.write_text("## Timeline\n_none_\n", encoding="utf-8")
+    monkeypatch.setattr(tl_writer, "_dashboard_path", lambda: dash)
+
+    tl_writer.tl_update(conn, eid, body="updated")
+
+    assert dash.read_text(encoding="utf-8") == "## Timeline\n_none_\n"
 
 
 def test_tl_update_rejects_non_tl(conn):
@@ -195,44 +230,67 @@ def test_tl_update_rejects_non_tl(conn):
         tl_writer.tl_update(conn, eid, body="y")
 
 
-# ── C3: MARROW_CORTEX guard ───────────────────────────────────────────────────
+# ── B3m (07-08): MARROW_CORTEX full memory parity ────────────────────────────
 
-def test_tl_add_blocked_under_marrow_cortex(conn, monkeypatch):
+def test_tl_add_allowed_under_marrow_cortex(conn, monkeypatch):
     monkeypatch.setenv("MARROW_CORTEX", "1")
-    with pytest.raises(tl_writer.TlError, match="cortex"):
-        _add(conn)
-    n = conn.execute("SELECT COUNT(*) c FROM events").fetchone()["c"]
-    assert n == 0
+    monkeypatch.setenv("MARROW_CHANNEL", "ct")
+    _add(conn)
+    row = conn.execute("SELECT channel FROM events").fetchone()
+    assert row["channel"] == "ct"
 
 
-def test_tl_update_blocked_under_marrow_cortex(conn, monkeypatch):
+def test_tl_update_allowed_under_marrow_cortex(conn, monkeypatch):
     r = _add(conn)
     monkeypatch.setenv("MARROW_CORTEX", "1")
-    with pytest.raises(tl_writer.TlError, match="cortex"):
-        tl_writer.tl_update(conn, r["event_id"], body="should not land")
+    monkeypatch.setenv("MARROW_CHANNEL", "ct")
+    tl_writer.tl_update(conn, r["event_id"], body="should land")
     ev = conn.execute("SELECT content FROM events WHERE id=?",
                       (r["event_id"],)).fetchone()
-    assert ev["content"] == "【N 愉悦·3 | Y 委屈·2】body orig"
+    assert "should land" in ev["content"]
 
 
 # ── nudge ────────────────────────────────────────────────────────────────────
 
+@pytest.fixture(autouse=True)
+def _clean_nudge_state(monkeypatch, tmp_path):
+    """Isolate the per-sid counter files from the real ~/.config/marrow tree."""
+    monkeypatch.setattr(tl_nudge.config, "DATA_DIR", tmp_path / "nudge_data")
+    yield
+
+
 def test_nudge_on_by_default_10_turns(conn):
     assert tl_nudge.enabled() is True
     assert tl_nudge.threshold() == 10
-    # 10 assistant turns, no tl_add -> nudge fires
-    for _ in range(10):
-        conn.execute("INSERT INTO events (session_id, timestamp, role, content)"
-                     " VALUES ('nud', '2026-07-03T00:00:00Z', 'assistant', 'x')")
-    conn.commit()
-    assert tl_nudge.maybe_nudge(conn, "nud")
+
+
+def test_nudge_fires_at_threshold_then_resets(conn):
+    for _ in range(9):
+        assert tl_nudge.maybe_nudge(conn, "nud") is None
+    assert tl_nudge.maybe_nudge(conn, "nud")  # 10th call fires
+    # counter reset after firing -> next 9 calls stay quiet again
+    for _ in range(9):
+        assert tl_nudge.maybe_nudge(conn, "nud") is None
+    assert tl_nudge.maybe_nudge(conn, "nud")  # fires again at the next 10
+
+
+def test_nudge_resets_on_tl_add(conn):
+    for _ in range(9):
+        assert tl_nudge.maybe_nudge(conn, "sess-1") is None
+    _add(conn, sid="sess-1")  # tl_add resets the counter
+    for _ in range(9):
+        assert tl_nudge.maybe_nudge(conn, "sess-1") is None
+    assert tl_nudge.maybe_nudge(conn, "sess-1")  # fires only after 10 fresh turns
 
 
 def test_nudge_silent_session_muted(conn):
-    for _ in range(10):
-        conn.execute("INSERT INTO events (session_id, timestamp, role, content)"
-                     " VALUES ('mute', '2026-07-03T00:00:00Z', 'assistant', 'x')")
-    conn.commit()
     tl_nudge.set_silent("mute")
     assert tl_nudge.is_silent("mute") is True
-    assert tl_nudge.maybe_nudge(conn, "mute") is None
+    for _ in range(15):
+        assert tl_nudge.maybe_nudge(conn, "mute") is None
+
+
+def test_nudge_disabled_never_fires(conn, monkeypatch):
+    monkeypatch.setattr(tl_nudge, "enabled", lambda: False)
+    for _ in range(20):
+        assert tl_nudge.maybe_nudge(conn, "off") is None

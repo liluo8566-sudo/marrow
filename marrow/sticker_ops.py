@@ -138,9 +138,10 @@ def ingest_sticker(conn, src_path: str, desc: str, source: str = "wechat") -> di
 
 
 def update_sticker(conn, sticker_id: int, desc: str) -> dict:
-    row = conn.execute("SELECT id FROM stickers WHERE id = ?", (sticker_id,)).fetchone()
+    row = conn.execute("SELECT id, desc FROM stickers WHERE id = ?", (sticker_id,)).fetchone()
     if not row:
         return {"ok": False, "error": "not_found"}
+    old_desc = row["desc"]
     conn.execute(
         "UPDATE stickers SET desc = ?,"
         " updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')"
@@ -148,23 +149,58 @@ def update_sticker(conn, sticker_id: int, desc: str) -> dict:
         (desc, sticker_id),
     )
     conn.commit()
-    return {"ok": True, "id": sticker_id, "desc": desc}
+    return {"ok": True, "id": sticker_id, "desc": desc, "old_desc": old_desc}
 
 
-def delete_sticker(conn, sticker_id: int) -> dict:
-    row = conn.execute("SELECT path FROM stickers WHERE id = ?", (sticker_id,)).fetchone()
-    if not row:
-        return {"ok": False, "error": "not_found"}
-    path = row["path"]
-    conn.execute("DELETE FROM stickers WHERE id = ?", (sticker_id,))
-    conn.commit()
+def _unlink_sticker_files(path: str) -> None:
+    """Remove a sticker's image + thumbnail from disk (missing-safe)."""
     p = Path(path)
     if p.exists():
         p.unlink()
     thumb = p.parent / "_thumb" / (p.stem + ".webp")
     if thumb.exists():
         thumb.unlink()
-    return {"ok": True, "id": sticker_id, "deleted_path": path}
+
+
+def _trash_one(p: Path) -> None:
+    """Move a single file to the user Trash; fall back to a /tmp move if
+    /usr/bin/trash is unavailable or fails. Missing-safe."""
+    import subprocess
+    import time
+
+    if not p.exists():
+        return
+    try:
+        result = subprocess.run(["/usr/bin/trash", str(p)],
+                                capture_output=True, text=True)
+        if result is not None and result.returncode == 0:
+            return
+    except OSError:
+        pass
+    if not p.exists():
+        return  # trash succeeded despite a non-zero/missing result report
+    dest = Path("/tmp") / f"marrow-sticker-trash-{int(time.time())}-{p.name}"
+    p.rename(dest)
+
+
+def _trash_sticker_files(path: str) -> None:
+    """Move a sticker's image + thumbnail to Trash instead of hard-deleting."""
+    p = Path(path)
+    _trash_one(p)
+    thumb = p.parent / "_thumb" / (p.stem + ".webp")
+    _trash_one(thumb)
+
+
+def delete_sticker(conn, sticker_id: int) -> dict:
+    row = conn.execute("SELECT path, desc FROM stickers WHERE id = ?", (sticker_id,)).fetchone()
+    if not row:
+        return {"ok": False, "error": "not_found"}
+    path = row["path"]
+    desc = row["desc"]
+    conn.execute("DELETE FROM stickers WHERE id = ?", (sticker_id,))
+    conn.commit()
+    _trash_sticker_files(path)
+    return {"ok": True, "id": sticker_id, "desc": desc, "deleted_path": path}
 
 
 def sweep_orphans(conn) -> list[int]:

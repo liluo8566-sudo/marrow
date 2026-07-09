@@ -58,6 +58,103 @@ def test_turn_inject_emits_care_text(monkeypatch, capsys):
     assert "Care first" in ctx  # from config.default.toml [turn_inject].care_text
 
 
+# ── B8: anti-late-night kickout nudge (turn_inject) ──────────────────────────
+
+def _freeze_melb(monkeypatch, hour, minute):
+    """Freeze hooks.datetime.now() + config.get_tz() to a fixed Melbourne
+    wall-clock instant, independent of the test env's default config
+    (core.timezone defaults to Asia/Shanghai in config.default.toml)."""
+    from datetime import datetime as _datetime
+    from zoneinfo import ZoneInfo
+    melb = ZoneInfo("Australia/Melbourne")
+
+    class _Fake:
+        @classmethod
+        def now(cls, tz=None):
+            return _datetime(2026, 7, 8, hour, minute, tzinfo=melb)
+
+    monkeypatch.setattr(hooks, "datetime", _Fake)
+    monkeypatch.setattr(config, "get_tz", lambda: melb)
+
+
+def test_kickout_cli_wind_down_window(monkeypatch, capsys):
+    _freeze_melb(monkeypatch, 21, 45)
+    monkeypatch.delenv("MARROW_CORTEX", raising=False)
+    monkeypatch.delenv("MARROW_CHANNEL", raising=False)
+    monkeypatch.setattr(hooks, "_kickout_context", lambda channel, now: "9点半啦-test")
+    _stdin(monkeypatch, {"session_id": "s1", "transcript_path": "/x/a.jsonl"})
+    hooks.turn_inject()
+    ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+    assert "9点半啦-test" in ctx
+
+
+def test_kickout_cli_leave_window(monkeypatch, capsys):
+    _freeze_melb(monkeypatch, 22, 30)
+    monkeypatch.delenv("MARROW_CORTEX", raising=False)
+    monkeypatch.delenv("MARROW_CHANNEL", raising=False)
+    monkeypatch.setattr(hooks, "_kickout_context", lambda channel, now: "该回卧室了-test")
+    _stdin(monkeypatch, {"session_id": "s1", "transcript_path": "/x/a.jsonl"})
+    hooks.turn_inject()
+    ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+    assert "该回卧室了-test" in ctx
+
+
+def test_kickout_cli_daytime_no_nudge(monkeypatch, capsys):
+    _freeze_melb(monkeypatch, 14, 0)
+    monkeypatch.delenv("MARROW_CORTEX", raising=False)
+    monkeypatch.delenv("MARROW_CHANNEL", raising=False)
+    _stdin(monkeypatch, {"session_id": "s1", "transcript_path": "/x/a.jsonl"})
+    hooks.turn_inject()
+    ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+    assert "9点半啦" not in ctx
+    assert "该回卧室了" not in ctx
+
+
+def test_kickout_cortex_immune(monkeypatch, capsys):
+    _freeze_melb(monkeypatch, 21, 45)
+    monkeypatch.setenv("MARROW_CORTEX", "1")
+    monkeypatch.setenv("MARROW_CHANNEL", "ct")
+    _stdin(monkeypatch, {"session_id": "s1", "transcript_path": "/x/a.jsonl"})
+    hooks.turn_inject()
+    # cortex short-circuits _kickout_context before it even reads config —
+    # verify directly rather than via injected ctx (defaults ship text-empty).
+    assert hooks._kickout_context("ct", hooks.datetime.now(config.get_tz())) == ""
+
+
+def test_kickout_wx_quiet_window(monkeypatch, capsys):
+    _freeze_melb(monkeypatch, 23, 30)
+    monkeypatch.delenv("MARROW_CORTEX", raising=False)
+    monkeypatch.setenv("MARROW_CHANNEL", "wx")
+    monkeypatch.setattr(hooks, "_kickout_context", lambda channel, now: "老婆该睡了-test")
+    _stdin(monkeypatch, {"session_id": "s1", "transcript_path": "/x/a.jsonl"})
+    hooks.turn_inject()
+    ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+    assert "老婆该睡了-test" in ctx
+
+
+def test_kickout_wx_evening_no_nudge(monkeypatch, capsys):
+    _freeze_melb(monkeypatch, 21, 45)
+    monkeypatch.delenv("MARROW_CORTEX", raising=False)
+    monkeypatch.setenv("MARROW_CHANNEL", "wx")
+    _stdin(monkeypatch, {"session_id": "s1", "transcript_path": "/x/a.jsonl"})
+    hooks.turn_inject()
+    captured = capsys.readouterr().out
+    assert captured == ""  # wx skips the time stamp too; no kickout in this window
+
+
+def test_kickout_inert_when_text_empty(monkeypatch, capsys):
+    """Default [kickout] texts ship empty (persona-separation) — window match
+    with no configured text must not inject anything."""
+    _freeze_melb(monkeypatch, 21, 45)
+    monkeypatch.delenv("MARROW_CORTEX", raising=False)
+    monkeypatch.delenv("MARROW_CHANNEL", raising=False)
+    _stdin(monkeypatch, {"session_id": "s1", "transcript_path": "/x/a.jsonl"})
+    hooks.turn_inject()
+    ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+    assert "kickout" not in ctx.lower()
+    assert hooks._kickout_context("cli", hooks.datetime.now(config.get_tz())) == ""
+
+
 # ── agent_guard: burst protection ────────────────────────────────────────────
 
 def test_agent_guard_denies_general_purpose(monkeypatch):

@@ -165,6 +165,52 @@ def test_tombstoned_block_not_resurrected(store, tmp_path):
     assert counts["tombstoned_skipped"] == 1
 
 
+def test_tombstoned_fetch_emits_ghost_alert(store, tmp_path, monkeypatch):
+    """A DB row fetched with a tombstoned block_id is a ghost (freed-id
+    reuse) — should be impossible in steady state, so it must raise a
+    warn alert alongside the existing skip behaviour."""
+    from marrow import repo
+
+    path = str(tmp_path / "p.md")
+    rows = [{"id": 1, "text": "alpha"}, {"id": 2, "text": "beta"}]
+    spec = _spec(path, rows)
+    write_subpage_inserter(spec, store.conn, store)
+
+    text = Path(path).read_text()
+    Path(path).write_text(text.replace("- beta <!-- id:2 -->\n", ""))
+    store.sync_file(path)
+
+    calls = []
+    monkeypatch.setattr(
+        repo, "add_alert",
+        lambda *a, **kw: calls.append((a, kw)),
+    )
+    counts = write_subpage_inserter(spec, store.conn, store)
+    assert counts["tombstoned_skipped"] == 1
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args[0] == "warn"
+    assert "inserter_ghost_tombstoned:test" in args[2]
+    assert "2" in kwargs["message"]
+
+
+def test_no_ghost_alert_when_nothing_tombstoned(store, tmp_path, monkeypatch):
+    from marrow import repo
+
+    path = str(tmp_path / "p.md")
+    rows = [{"id": 1, "text": "alpha"}]
+    spec = _spec(path, rows)
+    write_subpage_inserter(spec, store.conn, store)
+
+    calls = []
+    monkeypatch.setattr(
+        repo, "add_alert",
+        lambda *a, **kw: calls.append((a, kw)),
+    )
+    write_subpage_inserter(spec, store.conn, store)
+    assert calls == []
+
+
 # ── append new rows ────────────────────────────────────────────────────────
 
 def test_new_row_appended_in_section(store, tmp_path):

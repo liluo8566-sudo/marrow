@@ -64,9 +64,8 @@ def seeded_db(tmp_path):
 
     # Memes row: cipher Plan price.
     conn.execute(
-        "INSERT INTO memes (type, key, value, context, use_count, status) "
-        "VALUES ('cipher', 'Plan', 'Max 5x · $100/mo', "
-        "'Anthropic plan tier', 4, 'active')"
+        "INSERT INTO memes (type, key, value, use_count, status) "
+        "VALUES ('cipher', 'Plan', 'Max 5x · $100/mo', 4, 'active')"
     )
 
     # Milestone: title (Bendigo placement).

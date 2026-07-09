@@ -32,7 +32,7 @@ from . import config, repo, storage
 from .drift_sweep import AUTHORIZED_ROOTS, EXCLUDE_DIRS_SCAN, DriftWatcher
 from .md_index import MdIndex
 from .sticker_ops import _resolve_stickers_dir, ingest_sticker, sweep_orphans, sweep_file_orphans
-from .sync_loop import AtlasSweepLoop, SyncLoop, build_targets
+from .sync_loop import AtlasSweepLoop, SyncLoop, UsageSnapshotLoop, build_targets
 
 _DEBOUNCE_S = 0.2
 _LOG_NAME = "watcher.log"
@@ -425,6 +425,7 @@ class Watcher:
         self._stop = threading.Event()
         self._sync_loop: SyncLoop | None = None
         self._atlas_sweep: AtlasSweepLoop | None = None
+        self._usage_snapshot: UsageSnapshotLoop | None = None
         self.drift_watcher = DriftWatcher(roots=list(AUTHORIZED_ROOTS))
 
     def _fire_sync(self, path: str) -> None:
@@ -556,6 +557,16 @@ class Watcher:
             self.log.info("sync_loop started targets=%d", len(targets))
         except Exception:
             self.log.exception("sync_loop failed to start; watcher continues without it")
+
+        # Usage snapshot tick — always-alive carrier for 5h/7d/cdx/today
+        # (independent of cortex; cortex's own tick call is idempotent too).
+        try:
+            self._usage_snapshot = UsageSnapshotLoop()
+            self._usage_snapshot.start()
+            self.log.info("usage_snapshot loop started tick_s=%s",
+                         self._usage_snapshot._tick_s)
+        except Exception:
+            self.log.exception("usage_snapshot loop failed to start; watcher continues without it")
         if threading.current_thread() is threading.main_thread():
             signal.signal(signal.SIGTERM, self._on_signal)
             signal.signal(signal.SIGINT, self._on_signal)
@@ -568,6 +579,8 @@ class Watcher:
                 self._sync_loop.stop()
             if self._atlas_sweep is not None:
                 self._atlas_sweep.stop()
+            if self._usage_snapshot is not None:
+                self._usage_snapshot.stop()
             self.debouncer.flush()
             self.observer.stop()
             self.observer.join(timeout=5)

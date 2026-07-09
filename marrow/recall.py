@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import logging
 import math
 import re
 import sqlite3
@@ -30,6 +31,8 @@ from tokenizers import Tokenizer
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
+
+logger = logging.getLogger(__name__)
 
 
 # ── embedder singleton ────────────────────────────────────────────────────────
@@ -133,9 +136,15 @@ _LANES: dict[str, dict[str, str]] = {
     "events": {
         "vec_table": "events_vec",
         "meta_table": "events_vec_meta",
+        # Primary truth: a real vector row (events_vec) means embedded. Meta is
+        # bookkeeping — freed/reused ids inherit orphan meta with no vector, so
+        # a meta-only test skips them forever (vec-lane poisoning). The second
+        # clause keeps intentionally-evicted rows (aging.py drops the vector but
+        # KEEPS the meta as an eviction tombstone) out of the pending set.
         "pending_sql": (
             "SELECT e.id AS id, e.content AS text FROM events e "
-            "WHERE NOT EXISTS (SELECT 1 FROM events_vec_meta m "
+            "WHERE NOT EXISTS (SELECT 1 FROM events_vec v WHERE v.rowid=e.id) "
+            "  AND NOT EXISTS (SELECT 1 FROM events_vec_meta m "
             "                  WHERE m.rowid=e.id) "
             "ORDER BY e.id DESC LIMIT ?"
         ),
@@ -147,9 +156,7 @@ _LANES: dict[str, dict[str, str]] = {
             "SELECT m.id AS id, "
             "  TRIM(COALESCE(m.key,'') || "
             "       CASE WHEN COALESCE(m.value,'')!='' "
-            "            THEN ': ' || m.value ELSE '' END || "
-            "       CASE WHEN COALESCE(m.context,'')!='' "
-            "            THEN ' (' || m.context || ')' ELSE '' END) AS text "
+            "            THEN ': ' || m.value ELSE '' END) AS text "
             "FROM memes m WHERE m.status='active' "
             "AND NOT EXISTS (SELECT 1 FROM memes_vec_meta x "
             "                WHERE x.rowid=m.id) "
@@ -398,9 +405,33 @@ def _embed_pending_lane(
     rows = conn.execute(cfg["pending_sql"], (batch,)).fetchall()
     if not rows:
         return 0
-    ids = [r["id"] for r in rows]
     _media_tag = re.compile(r'\s*<(?:image|file)\s+path="[^"]*?"[^>]*>\s*')
-    texts = [_media_tag.sub(" ", r["text"] or "").strip() for r in rows]
+    if lane == "events":
+        # Events lane only — mirror the consumption-point shaping recall
+        # already applies to row content before it reaches the user
+        # (recall_fusion row passthrough, recall.py ~line 1817): strip the
+        # wx time-anchor prefix and bare [sticker: ...] marker lines, so the
+        # embedded vector matches what recall actually surfaces. Other lanes
+        # (memes/entities/...) don't carry bridge markers.
+        _time_prefix = re.compile(r"^\[time:[^\]]+\]\s*")
+        _sticker_line = re.compile(r"^\[sticker:[^\]\n]*\]\n?", re.M)
+
+        def _shape(text: str) -> str:
+            t = _time_prefix.sub("", text or "")
+            return _sticker_line.sub("", t)
+    else:
+        def _shape(text: str) -> str:
+            return text or ""
+    pairs = [(r["id"], _media_tag.sub(" ", _shape(r["text"])).strip())
+             for r in rows]
+    # Guard: if shaping strips a row down to empty, skip embedding it — leave
+    # it for the whole-row junk logic (transcript._is_harness_row / repair
+    # script). Should not happen post-repair (bare marker rows are junk-
+    # dropped there), but never write an empty-text vector.
+    ids = [i for i, t in pairs if t]
+    texts = [t for i, t in pairs if t]
+    if not texts:
+        return 0
     _CHUNK = 50
     chunks = [texts[i:i + _CHUNK] for i in range(0, len(texts), _CHUNK)]
     vecs = np.concatenate([emb.embed(c) for c in chunks], axis=0)
@@ -1004,7 +1035,7 @@ def _memes_strong_hits(
 ) -> list[tuple[sqlite3.Row, str]]:
     """Scan active memes; key = name tier, value = DF-filtered body tier."""
     rows = conn.execute(
-        "SELECT id, type, key, value, context, pinned, use_count "
+        "SELECT id, type, key, value, pinned, use_count "
         "FROM memes WHERE status='active'"
     ).fetchall()
     body_sets = _body_needles([r["value"] or "" for r in rows])
@@ -1042,17 +1073,24 @@ def _fts_lane_hits(
         return []
     try:
         return conn.execute(sql, (fts_q, k)).fetchall()
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        logger.warning("FTS lane query failed (sql=%r, fts_q=%r): %s", sql, fts_q, exc)
         return []
 
 
 def _bm25_normalize(ranks: list[float]) -> list[float]:
-    """Map FTS5 rank list to [0,1]: best (smallest abs) -> 1.0."""
+    """Map FTS5 rank list to [0,1]: best (largest abs) -> 1.0.
+
+    FTS5 rank is bm25(), negative; more negative (larger abs) = more relevant.
+    Linear scale abs(rank)/max_abs preserves order: best -> 1.0, weak -> ~0.
+    """
     abs_ranks = [abs(r) for r in ranks]
     if not abs_ranks:
         return []
-    min_r = min(abs_ranks)
-    return [(min_r / r) if r else 1.0 for r in abs_ranks]
+    max_r = max(abs_ranks)
+    if max_r == 0:
+        return [1.0 for _ in abs_ranks]
+    return [r / max_r for r in abs_ranks]
 
 
 def _milestone_candidates(
@@ -1096,12 +1134,12 @@ def _milestone_candidates(
 def _memes_candidates(
     conn: sqlite3.Connection, query: str, limit: int
 ) -> list[dict]:
-    """FTS5 scan over memes_fts (key+value+context body). Active rows only."""
+    """FTS5 scan over memes_fts (key+value body). Active rows only."""
     terms = _fts_terms(query)
     fts_q = _fts_query(terms)
     rows = _fts_lane_hits(
         conn,
-        "SELECT m.id, m.type, m.key, m.value, m.context, m.pinned, m.use_count, "
+        "SELECT m.id, m.type, m.key, m.value, m.pinned, m.use_count, "
         "       rank AS fts_rank "
         "FROM memes_fts f JOIN memes m ON m.id = f.rowid "
         "WHERE memes_fts MATCH ? AND m.status='active' "
@@ -1115,10 +1153,7 @@ def _memes_candidates(
     for i, r in enumerate(rows):
         key = r["key"] or ""
         value = r["value"] or ""
-        ctx = r["context"] or ""
         content = f"{key}: {value}" if value else key
-        if ctx:
-            content = f"{content} ({ctx})"
         out.append({
             "kind": "memes", "id": r["id"],
             "session_id": None, "timestamp": "",
@@ -1171,6 +1206,27 @@ def _entity_candidates(
 
 
 # ── fusion retrieval ──────────────────────────────────────────────────────────
+
+_EVENTS_FTS_TERM_CAP = 16
+
+
+def _events_fts_query(q: str) -> str:
+    """Build events-lane FTS5 OR query from `q`.
+
+    Unlike dims lanes (raw _fts_terms -> _fts_query), the events table is
+    ~100k rows with some very long rows, so generic CJK windows (function
+    chars only) are dropped and the term list is capped. The full query is
+    also kept as one quoted phrase member so rows containing it verbatim get
+    the bm25 contiguous-phrase boost.
+    """
+    terms = [t for t in _fts_terms(q) if t.isascii() or not any(c in _CJK_FUNC_CHARS for c in t)]
+    terms = terms[:_EVENTS_FTS_TERM_CAP]
+    members = ['"' + t.replace('"', '""') + '"' for t in terms]
+    qs = q.strip()
+    if len(qs) >= 3:
+        members.insert(0, '"' + qs.replace('"', '""') + '"')
+    return " OR ".join(members)
+
 
 def recall_fusion(
     conn: sqlite3.Connection,
@@ -1239,26 +1295,28 @@ def recall_fusion(
     cur_bucket = _cwd_bucket(current_cwd, bucket_rules)
 
     # ── FTS candidates ────────────────────────────────────────────────────────
-    fts_q = '"' + q.replace('"', '""') + '"'
-    if since and until:
+    fts_q = _events_fts_query(q)
+    if fts_q:
+        _fts_where = ["events_fts MATCH ?"]
+        _fts_params: list = [fts_q]
+        if since:
+            _fts_where.append("e.timestamp >= ?")
+            _fts_params.append(since)
+        if until:
+            _fts_where.append("e.timestamp < ?")
+            _fts_params.append(until)
+        _fts_params.append(limit * 3)
         fts_rows = conn.execute(
             "SELECT e.id, e.session_id, e.timestamp, e.role, e.content, e.channel, "
             "e.compressed, e.imp AS imp, s.cwd AS session_cwd, rank AS fts_rank "
             "FROM events_fts f JOIN events e ON e.id = f.rowid "
             "LEFT JOIN sessions s ON s.sid = e.session_id "
-            "WHERE events_fts MATCH ? AND e.timestamp >= ? AND e.timestamp < ? "
+            "WHERE " + " AND ".join(_fts_where) + " "
             "ORDER BY rank LIMIT ?",
-            (fts_q, since, until, limit * 3),
+            _fts_params,
         ).fetchall()
     else:
-        fts_rows = conn.execute(
-            "SELECT e.id, e.session_id, e.timestamp, e.role, e.content, e.channel, "
-            "e.compressed, e.imp AS imp, s.cwd AS session_cwd, rank AS fts_rank "
-            "FROM events_fts f JOIN events e ON e.id = f.rowid "
-            "LEFT JOIN sessions s ON s.sid = e.session_id "
-            "WHERE events_fts MATCH ? ORDER BY rank LIMIT ?",
-            (fts_q, limit * 3),
-        ).fetchall()
+        fts_rows = []
 
     # ── vec candidates ────────────────────────────────────────────────────────
     vec_rows: list[sqlite3.Row] = []
@@ -1268,7 +1326,7 @@ def recall_fusion(
         # When a time window is active, fetch a larger candidate set and filter
         # in Python. sqlite-vec KNN (MATCH+k=) cannot reliably apply arbitrary
         # WHERE predicates on the joined table inside the virtual-table scan.
-        vec_k = limit * 6 if (since and until) else limit * 3
+        vec_k = limit * 6 if (since or until) else limit * 3
         all_vec_rows = conn.execute(
             "SELECT e.id, e.session_id, e.timestamp, e.role, e.content, e.channel, "
             "e.compressed, e.imp AS imp, s.cwd AS session_cwd, v.distance "
@@ -1278,24 +1336,28 @@ def recall_fusion(
             "ORDER BY v.distance",
             (qblob, vec_k),
         ).fetchall()
-        if since and until:
-            vec_rows = [r for r in all_vec_rows
-                        if r["timestamp"] and r["timestamp"] >= since and r["timestamp"] < until]
+        if since or until:
+            vec_rows = [
+                r for r in all_vec_rows
+                if r["timestamp"]
+                and (not since or r["timestamp"] >= since)
+                and (not until or r["timestamp"] < until)
+            ]
         else:
             vec_rows = all_vec_rows
 
     # ── merge candidates by event_id ──────────────────────────────────────────
     candidates: dict[int, dict] = {}
 
-    # BM25: FTS5 rank is negative; smallest abs = best.
-    # Normalize: best gets 1.0 (min_abs/rank_i), worst approaches 0.
+    # BM25: FTS5 rank is negative; largest abs = best.
+    # Normalize: best gets 1.0 (abs/max_abs), weakest approaches 0.
     fts_ranks = [abs(r["fts_rank"]) for r in fts_rows]
-    min_fts = min(fts_ranks) if fts_ranks else 1.0
+    max_fts = max(fts_ranks) if fts_ranks else 0.0
 
     for i, r in enumerate(fts_rows):
         eid = r["id"]
-        # min_fts / fts_rank[i]: best (=min) -> 1.0, worse ranks -> <1.0
-        bm25_score = min_fts / fts_ranks[i] if fts_ranks[i] else 1.0
+        # fts_rank[i] / max_fts: best (=max) -> 1.0, weaker ranks -> <1.0
+        bm25_score = fts_ranks[i] / max_fts if max_fts else 1.0
         candidates[eid] = {
             "id": eid, "session_id": r["session_id"],
             "timestamp": r["timestamp"], "role": r["role"],
@@ -1355,7 +1417,7 @@ def recall_fusion(
             memes_by_id[mid]["vec"] = vs
         elif vs >= _VEC_ONLY_FLOOR:
             r = conn.execute(
-                "SELECT id, type, key, value, context, pinned, use_count "
+                "SELECT id, type, key, value, pinned, use_count "
                 "FROM memes WHERE id=? AND status='active'",
                 (mid,),
             ).fetchone()
@@ -1363,10 +1425,7 @@ def recall_fusion(
                 continue
             key = r["key"] or ""
             value = r["value"] or ""
-            ctx = r["context"] or ""
             content = f"{key}: {value}" if value else key
-            if ctx:
-                content = f"{content} ({ctx})"
             memes_by_id[mid] = {
                 "kind": "memes", "id": mid,
                 "session_id": None, "timestamp": "",
@@ -1388,10 +1447,7 @@ def recall_fusion(
             continue
         key = r["key"] or ""
         value = r["value"] or ""
-        ctx = r["context"] or ""
         content = f"{key}: {value}" if value else key
-        if ctx:
-            content = f"{content} ({ctx})"
         memes_by_id[mid] = {
             "kind": "memes", "id": mid,
             "session_id": None, "timestamp": "",
@@ -1458,31 +1514,43 @@ def recall_fusion(
 
     # Diary: vec-only lane (no kw scan for long-form prose). Build candidates
     # gated by _VEC_ONLY_FLOOR; scored with w_diary_vec, no bm25/recency.
-    # When a time window is active, collect the Melbourne-local dates it spans
-    # and filter diary rows to those dates only.
-    _diary_dates: set[str] | None = None
-    if since and until:
+    # When a time window is active (since and/or until), convert to
+    # configured-local-timezone dates and filter diary rows to that range.
+    _diary_since_date: str | None = None
+    _diary_until_date: str | None = None
+    _diary_window_error = False
+    if since or until:
         from .timeutil import utc_iso_to_local_date as _u2d
-        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
         try:
-            _s = _dt.fromisoformat(since.replace("Z", "+00:00"))
-            _e = _dt.fromisoformat(until.replace("Z", "+00:00"))
-            _diary_dates = set()
-            _cur = _s
-            while _cur <= _e:
-                _diary_dates.add(_u2d(_cur.strftime("%Y-%m-%dT%H:%M:%SZ")))
-                _cur += _td(days=1)
+            if since:
+                _diary_since_date = _u2d(since)
+            if until:
+                # `until` is the EXCLUSIVE end boundary (start of the configured-local-timezone
+                # day AFTER the requested until-day, see timecue.melb_day_range).
+                # Converting it straight to a local date yields until+1 and the
+                # `date <= ?` filter then leaks the following day. Step back 1s
+                # so a since==until window returns only that single day.
+                _u_dt = datetime.datetime.fromisoformat(
+                    until.replace("Z", "+00:00")) - datetime.timedelta(seconds=1)
+                _diary_until_date = _u2d(
+                    _u_dt.strftime("%Y-%m-%dT%H:%M:%SZ"))
         except Exception:
-            _diary_dates = None
+            _diary_window_error = True
 
     diary_cands: list[dict] = []
-    if _diary_dates is not None:
+    if (since or until) and not _diary_window_error:
         # Date window present — direct SELECT, bypass vec floor.
-        _ph = ",".join("?" * len(_diary_dates))
+        _dwhere = ["COALESCE(content,'') NOT IN ('','—')"]
+        _dparams: list = []
+        if _diary_since_date:
+            _dwhere.append("date >= ?")
+            _dparams.append(_diary_since_date)
+        if _diary_until_date:
+            _dwhere.append("date <= ?")
+            _dparams.append(_diary_until_date)
         for row in conn.execute(
-            f"SELECT rowid, date, content FROM diary "
-            f"WHERE date IN ({_ph}) AND COALESCE(content,'') NOT IN ('','—')",
-            list(_diary_dates),
+            f"SELECT rowid, date, content FROM diary WHERE {' AND '.join(_dwhere)}",
+            _dparams,
         ).fetchall():
             ts = row["date"] + "T00:00:00Z" if row["date"] else ""
             diary_cands.append({
@@ -1844,7 +1912,7 @@ def fetch_window_digests(
 ) -> list[dict]:
     """Return session_digests rows whose ts falls in [since_utc, until_utc).
 
-    Falls back to matching the date column against Melbourne-local dates in
+    Falls back to matching the date column against configured-local-timezone dates in
     the window when ts is missing/malformed. Newest first.
     Each row: {"kind": "digest", "id": sid, "date": ..., "content": text[:150]}.
     """
@@ -1860,7 +1928,7 @@ def fetch_window_digests(
     ).fetchall()
 
     if not rows:
-        # Fallback: match date column against Melbourne-local dates in window
+        # Fallback: match date column against configured-local-timezone dates in window
         try:
             _s = _dt.fromisoformat(since_utc.replace("Z", "+00:00"))
             _e = _dt.fromisoformat(until_utc.replace("Z", "+00:00"))

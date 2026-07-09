@@ -13,10 +13,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
 import threading
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import config
@@ -75,6 +78,122 @@ def _kill_group(pgid: int, sig: int) -> None:
         pass
 
 
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+_CAMEL_RE = re.compile(r"(?<!^)(?=[A-Z])")
+
+
+def _snake(name: str) -> str:
+    return _CAMEL_RE.sub("_", name).lower()
+
+
+def _write_kv_rows(rows: list[tuple[str, str]]) -> None:
+    """Upsert (key, value) pairs into ct_rate_limit, latest-wins. Best-effort,
+    never raises."""
+    if not rows:
+        return
+    try:
+        conn = storage.connect()
+        with conn:
+            conn.executemany(
+                "INSERT INTO ct_rate_limit (key, value, updated_at)"
+                " VALUES (?, ?, ?)"
+                " ON CONFLICT(key) DO UPDATE SET"
+                " value=excluded.value, updated_at=excluded.updated_at",
+                [(k, v, _utcnow_iso()) for k, v in rows],
+            )
+        conn.close()
+    except Exception:
+        pass
+
+
+def _snapshot_rate_limit(ev: dict) -> None:
+    """Flatten one `rate_limit_event` stream frame into `ct_rate_limit` kv
+    rows. Live-verified shape (07-04 direct CLI probe): top-level
+    type=="rate_limit_event", payload nested under "rate_limit_info" —
+    fields seen: status ("allowed"), resetsAt (unix epoch seconds),
+    rateLimitType ("five_hour" only, ever), overageStatus,
+    overageResetsAt, isUsingOverage. No requestId on this frame (no dedupe
+    needed) — latest frame always wins.
+
+    NOTE (verified, not assumed): this stream frame carries NO utilization
+    percentage — only status + reset timestamp. `five_hour_pct` /
+    `seven_day_pct` (cortex bulletin contract keys) have no source here;
+    percentages only exist via the separate OAuth /api/oauth/usage HTTP
+    endpoint (see synapse_core/usage.py), which this task's scope
+    (stream-json parsing) does not call. Those two keys are simply never
+    written — reader renders "no data" for them tolerantly per contract.
+    `*_reset_at` is written (converted to UTC ISO) whenever resetsAt is
+    numeric; extra raw fields ride along under their own snake_case keys
+    for forward visibility. Best-effort, never raises into the stream loop.
+    """
+    if ev.get("type") != "rate_limit_event":
+        return
+    info = ev.get("rate_limit_info")
+    if not isinstance(info, dict):
+        return
+    rtype = info.get("rateLimitType")
+    prefix = _snake(str(rtype)) if rtype else "unknown"
+    rows: list[tuple[str, str]] = []
+    for k, v in info.items():
+        if k == "rateLimitType":
+            continue
+        if k == "resetsAt" and isinstance(v, (int, float)) and not isinstance(v, bool):
+            iso = datetime.fromtimestamp(v, tz=timezone.utc).isoformat()
+            rows.append((f"{prefix}_reset_at", iso))
+            continue
+        rows.append((f"{prefix}_{_snake(k)}", str(v)))
+    _write_kv_rows(rows)
+
+
+def _snapshot_window_tokens(window: int) -> None:
+    """Snapshot the current per-wake context window size (same figure the
+    cap logic compares against, see _add_event_usage) as ct_rate_limit's
+    `window_tokens` key — cortex bulletin's 5th contract field. Written
+    from the already-computed cap-tracking sink, no new computation."""
+    _write_kv_rows([("window_tokens", str(window))])
+
+
+def _cortex_stream_timer():
+    """Env-driven stream-event timing probe for cortex wakes (wake latency
+    diagnosis). Returns a callback appending one line per notable stage to
+    CORTEX_WAKE_TIMING_LOG, or None when cortex did not request it. Best-effort:
+    never raises into the stream loop. spawned -> first_event isolates claude
+    CLI startup cost (MCP/env load) before the first token."""
+    path = os.environ.get("CORTEX_WAKE_TIMING_LOG")
+    if not path:
+        return None
+    path = os.path.expanduser(path)
+    wake_id = os.environ.get("CORTEX_WAKE_ID", "?")
+    origin = time.monotonic()
+    seen: set[str] = set()
+
+    def _emit(ev: dict, mono: float) -> None:
+        try:
+            etype = ev.get("type", "?")
+            if etype == "__spawned__":
+                label = "spawned"
+            elif "first" not in seen:
+                seen.add("first")
+                label = "first_event"
+            else:
+                sub = ev.get("subtype")
+                key = f"{etype}/{sub}" if sub else etype
+                if key in seen:
+                    return
+                seen.add(key)
+                label = f"ev.{key}"
+            ms = (mono - origin) * 1000.0
+            with open(path, "a") as f:
+                f.write(f"{_utcnow_iso()} wake={wake_id} stream.{label} +{ms:.0f}ms\n")
+        except Exception:
+            pass
+
+    return _emit
+
+
 class LLMClient:
     def __init__(self, cfg: dict | None = None, on_alert=None):
         self.cfg = cfg or config.load()
@@ -124,17 +243,28 @@ class LLMClient:
 
     def call_cortex(self, prompt: str, *, cwd: str | None = None,
                      resume_sid: str | None = None,
-                     timeout: float | None = None) -> dict:
+                     timeout: float | None = None,
+                     max_tokens: int | None = None) -> dict:
         """Full-environment resumed session for cortex (C3, Decided 07-03):
         no isolation flags — persona/rules/MCP/agents load like a real
-        session. Always injects MARROW_CORTEX=1 so marrow hooks + tl_add
-        skip this session's turns (cortex must never enter chat memory).
-        cwd defaults to [cortex].home; resume_sid=None starts a fresh
+        session. Always injects MARROW_CORTEX=1 (identity marker, e.g. B8
+        kickout immunity) and MARROW_CHANNEL=ct so this session's turns get
+        full marrow memory (events/recall/tl) attributed to the cortex
+        channel, same as any other session. cwd defaults to [cortex].home;
+        resume_sid=None starts a fresh
         session (daily rebirth). Single attempt — no chain/retry, caller
         (cortex pacemaker) owns retry policy. `timeout` (s) overrides the
         provider default so the caller's config is the single source of truth
         for the call budget (cortex derives its outer kill from the same value).
-        Returns {"text": str, "session_id": str | None}.
+        `max_tokens` (>0) caps the per-wake CURRENT WINDOW SIZE — the latest
+        turn's (input+cache_read+cache_creation), i.e. the same figure the
+        caller reasons about via the statusline "total" (Decided 07-04, not
+        cumulative consumption across turns): accumulated mid-stream (usage
+        deduped by requestId — a single turn streams as several assistant
+        lines each repeating identical usage), breach terminates the
+        subprocess and returns capped=True so the caller rebirths. Returns
+        {"text": str, "session_id": str | None} (+ capped / total_tokens
+        [= final window size] when a cap is active).
         """
         spec = self.specs.get("claude_cli_cortex")
         if not spec:
@@ -148,7 +278,7 @@ class LLMClient:
         effort = cortex_cfg.get("effort") or ""
         return self._run_claude_cortex(
             spec, model, prompt, cwd=run_cwd, resume_sid=resume_sid,
-            timeout=timeout, effort=effort)
+            timeout=timeout, effort=effort, max_tokens=max_tokens)
 
     def _run(self, spec: dict, model: str, prompt: str) -> str:
         kind = spec.get("kind")
@@ -183,10 +313,15 @@ class LLMClient:
     def _run_claude_cortex(self, spec: dict, model: str, prompt: str, *,
                             cwd: str, resume_sid: str | None,
                             timeout: float | None = None,
-                            effort: str = "") -> dict:
+                            effort: str = "",
+                            max_tokens: int | None = None) -> dict:
         """Stream-json runner with NO isolation flags (cortex full-env, C3).
         Mirrors _run_claude_stream's spawn/timeout/kill contract exactly —
-        only the isolation flags, env var, cwd, --resume, and --effort differ."""
+        only the isolation flags, env var, cwd, --resume, and --effort differ.
+        When max_tokens>0, accumulates per-wake usage mid-stream (deduped by
+        requestId) and terminates cleanly when the current turn's window
+        size breaches the cap (capped=True). Env-driven stream-event timing
+        is attached best-effort for wake-latency diagnosis."""
         timeout = timeout if timeout is not None else spec.get("timeout_s", 600)
         cmd = [_claude_bin(), "--output-format", "stream-json",
                "--input-format", "stream-json", "--verbose", "--model", model,
@@ -195,20 +330,134 @@ class LLMClient:
             cmd.extend(["--effort", effort])
         if resume_sid:
             cmd.extend(["--resume", resume_sid])
-        env = {**os.environ, "MARROW_CORTEX": "1"}
-        raw = self._stream_subprocess(cmd, prompt, timeout, env, cwd=cwd)
+        env = {**os.environ, "MARROW_CORTEX": "1", "MARROW_CHANNEL": "ct"}
+        on_event = _cortex_stream_timer()
+        cap_active = bool(max_tokens and max_tokens > 0)
+        extra: dict = {}
+        if on_event is not None:
+            extra["on_event"] = on_event
+        sink = None
+        if cap_active:
+            sink = {"in": 0, "out": 0, "cache_read": 0, "cache_write": 0,
+                    "window": 0, "capped": False, "by_request": {},
+                    "has_usage": False}
+            extra["max_tokens"] = max_tokens
+            extra["usage_sink"] = sink
+        raw = self._stream_subprocess(cmd, prompt, timeout, env, cwd=cwd, **extra)
+        if sink is not None and sink["capped"]:
+            self._log_usage(self._sink_usage(sink), model, "stream-json",
+                             window=sink["window"])
+            self._log_cortex_cap(sink, max_tokens, model)
+            _snapshot_window_tokens(sink["window"])
+            return {"text": "", "session_id": None, "capped": True,
+                    "total_tokens": sink["window"]}
         text = self._parse_claude(raw, "stream-json")
         session_id = self._extract_session_id(raw)
+        if sink is not None:
+            if sink["has_usage"]:
+                self._log_usage(self._sink_usage(sink), model, "stream-json",
+                                 window=sink["window"])
+            else:
+                self._log_usage(self._extract_usage(raw, "stream-json"),
+                                 model, "stream-json")
+            _snapshot_window_tokens(sink["window"])
+            return {"text": text, "session_id": session_id,
+                    "total_tokens": sink["window"]}
         self._log_usage(self._extract_usage(raw, "stream-json"), model, "stream-json")
         return {"text": text, "session_id": session_id}
 
     @staticmethod
+    def _add_event_usage(sink: dict, ev: dict) -> None:
+        """Fold one stream-json event's turn usage into the running per-wake
+        sink. Only assistant events carry message.usage; the trailing result
+        event and tool-result events add 0 (no double count).
+
+        A single API turn streams as MULTIPLE assistant lines (thinking
+        block, tool_use block, text block, ...) and every line repeats the
+        SAME usage under the SAME top-level `requestId` — summing them
+        naively over-counts real consumption ~Nx (live-confirmed 07-04).
+        Dedupe by requestId: a repeat requestId replaces (not adds to) its
+        prior contribution to the cumulative fields — "last-seen wins"
+        (the repeats are identical in practice, so this is a no-op delta,
+        but stays correct if they ever aren't). Events without a requestId
+        (only expected from synthetic/test input) are never deduped.
+
+        `in/out/cache_read/cache_write` are the cumulative deduped sums —
+        true consumption across the wake so far, used for the llm_call_cost
+        audit line. `window` is the CURRENT turn's context size
+        (input+cache_read+cache_creation), NOT cumulative — this is what the
+        per-wake cap compares against (Decided 07-04: matches the statusline
+        "total" figure the caller reasons with)."""
+        msg = ev.get("message")
+        usage = msg.get("usage") if isinstance(msg, dict) else None
+        if not isinstance(usage, dict):
+            return
+        sink["has_usage"] = True
+        i = usage.get("input_tokens") or 0
+        o = usage.get("output_tokens") or 0
+        cr = usage.get("cache_read_input_tokens") or 0
+        cw = usage.get("cache_creation_input_tokens") or 0
+        req_id = ev.get("requestId")
+        prior = sink["by_request"].get(req_id) if req_id is not None else None
+        if prior is not None:
+            pi, po, pcr, pcw = prior
+            sink["in"] += i - pi
+            sink["out"] += o - po
+            sink["cache_read"] += cr - pcr
+            sink["cache_write"] += cw - pcw
+        else:
+            sink["in"] += i
+            sink["out"] += o
+            sink["cache_read"] += cr
+            sink["cache_write"] += cw
+        if req_id is not None:
+            sink["by_request"][req_id] = (i, o, cr, cw)
+        sink["window"] = i + cr + cw
+
+    @staticmethod
+    def _sink_usage(sink: dict) -> dict:
+        return {"input_tokens": sink["in"], "output_tokens": sink["out"],
+                "cache_read_input_tokens": sink["cache_read"],
+                "cache_creation_input_tokens": sink["cache_write"]}
+
+    def _log_cortex_cap(self, sink: dict, cap: int, model: str) -> None:
+        """One audit line marking a per-wake token-cap breach. Reports the
+        breaching turn's window size (input+cache_read+cache_creation — the
+        figure compared against cap) alongside the deduped cumulative usage
+        fields (true consumption across the wake so far) so a breach is
+        auditable without ambiguity about what tripped it. Best-effort."""
+        try:
+            conn = storage.connect()
+            with conn:
+                conn.execute(
+                    "INSERT INTO audit_log (target_table, action, summary)"
+                    " VALUES (?, ?, ?)",
+                    ("llm_usage", "llm_cortex_cap",
+                     f"model={model} capped window={sink['window']} cap={cap} "
+                     f"cumulative(in={sink['in']} out={sink['out']} "
+                     f"cache_read={sink['cache_read']} cache_write={sink['cache_write']})"),
+                )
+            conn.close()
+        except Exception:
+            pass
+
+    @staticmethod
     def _stream_subprocess(cmd: list[str], prompt: str, timeout: float,
-                            env: dict, cwd: str | None = None) -> str:
+                            env: dict, cwd: str | None = None,
+                            on_event=None, max_tokens: int | None = None,
+                            usage_sink: dict | None = None) -> str:
         """Spawn `cmd`, pipe one user message in via stdin, read stdout
         stream-json events until `result`. Process-group kill on timeout
         (SIGKILL) and on normal exit (SIGTERM->SIGKILL ladder) so claude's
-        spawned descendants never leak. Returns the raw joined stdout lines."""
+        spawned descendants never leak. Returns the raw joined stdout lines.
+        `on_event(ev, mono)` (optional) receives every parsed event plus a
+        synthetic {"type":"__spawned__"} right after Popen for latency probes.
+        `max_tokens`+`usage_sink` (optional) accumulate per-event usage
+        (deduped by requestId, see `_add_event_usage`) and break the stream
+        cleanly on breach (sink['capped']=True). Breach compares against
+        sink['window'] — the CURRENT turn's context size
+        (input+cache_read+cache_creation), not a cumulative sum across
+        turns (Decided 07-04: matches the statusline "total" figure)."""
         msg = json.dumps({"type": "user", "message": {
             "role": "user", "content": prompt}})
         try:
@@ -223,6 +472,8 @@ class LLMClient:
         except ProcessLookupError:
             pgid = p.pid
         stdout_pipe = p.stdout
+        if on_event is not None:
+            on_event({"type": "__spawned__"}, time.monotonic())
 
         _timed_out = [False]
 
@@ -250,6 +501,15 @@ class LLMClient:
                     ev = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if on_event is not None:
+                    on_event(ev, time.monotonic())
+                if ev.get("type") == "rate_limit_event":
+                    _snapshot_rate_limit(ev)
+                if max_tokens is not None and usage_sink is not None:
+                    LLMClient._add_event_usage(usage_sink, ev)
+                    if usage_sink["window"] >= max_tokens:
+                        usage_sink["capped"] = True
+                        break
                 if ev.get("type") == "result":
                     break
         finally:
@@ -396,8 +656,11 @@ class LLMClient:
         except Exception:
             return None
 
-    def _log_usage(self, usage: dict | None, model: str, fmt: str) -> None:
-        """Write a cost-monitor row to audit_log. Best-effort: never raises."""
+    def _log_usage(self, usage: dict | None, model: str, fmt: str,
+                   window: int | None = None) -> None:
+        """Write a cost-monitor row to audit_log. Best-effort: never raises.
+        `window` (optional) is the final per-wake context size (cortex cap
+        path only) appended to the summary alongside the usage breakdown."""
         if not usage:
             return
         try:
@@ -410,6 +673,8 @@ class LLMClient:
                 f"in={input_tok} out={output_tok} "
                 f"cache_read={cache_read} cache_write={cache_write}"
             )
+            if window is not None:
+                summary += f" window={window}"
             conn = storage.connect()
             with conn:
                 conn.execute(

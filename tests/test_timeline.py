@@ -418,9 +418,7 @@ def test_zone_b_diary_appears_in_render_timeline(conn):
     """render_timeline includes diary overview from zone B dates."""
     from zoneinfo import ZoneInfo
     melb = ZoneInfo("Australia/Melbourne")
-    today = (_dt.datetime.now(melb).date()
-             if _dt.datetime.now(melb).hour >= 6
-             else (_dt.datetime.now(melb) - _dt.timedelta(days=1)).date())
+    today = _dt.datetime.now(melb).date()
     day3 = today - _dt.timedelta(days=3)
     conn.execute(
         "INSERT INTO diary (date, content, tone, overview) VALUES (?, ?, ?, ?)",
@@ -455,9 +453,7 @@ def test_trim_drops_zone_b_before_24h(conn):
     """When over budget, zone B lines are trimmed before 24h lines."""
     from zoneinfo import ZoneInfo
     melb = ZoneInfo("Australia/Melbourne")
-    today = (_dt.datetime.now(melb).date()
-             if _dt.datetime.now(melb).hour >= 6
-             else (_dt.datetime.now(melb) - _dt.timedelta(days=1)).date())
+    today = _dt.datetime.now(melb).date()
     # Seed many recent 24h sessions
     for i in range(10):
         _digest(conn, f"s-24h-{i}", _utc(i * 2),
@@ -891,8 +887,7 @@ def test_zone_b_covers_today_minus_2_to_4(conn):
     from zoneinfo import ZoneInfo
     melb = ZoneInfo("Australia/Melbourne")
     now_melb = _dt.datetime.now(melb)
-    today = (now_melb.date() if now_melb.hour >= 6
-             else (now_melb - _dt.timedelta(days=1)).date())
+    today = now_melb.date()
 
     day2 = today - _dt.timedelta(days=2)
     day4 = today - _dt.timedelta(days=4)
@@ -915,8 +910,7 @@ def test_zone_b_excludes_today_minus_5(conn):
     from zoneinfo import ZoneInfo
     melb = ZoneInfo("Australia/Melbourne")
     now_melb = _dt.datetime.now(melb)
-    today = (now_melb.date() if now_melb.hour >= 6
-             else (now_melb - _dt.timedelta(days=1)).date())
+    today = now_melb.date()
     day5 = today - _dt.timedelta(days=5)
     conn.execute(
         "INSERT INTO diary (date, content, tone, overview) VALUES (?, 'body', '平淡', ?)",

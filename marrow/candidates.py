@@ -132,6 +132,37 @@ def _merge_aliases_into(conn, row_id: int, incoming_name: str,
         )
 
 
+def match_entity(conn, kind: str, name: str, aliases_list: list[str],
+                 *, source: str = "candidates.write_entity_cand") -> int | None:
+    """Return the id of an active entity in `kind` matching `name`/aliases, or
+    None. Two-stage gate: alias/name overlap, then cosine top-match on same-kind
+    names (bge-m3). Missing embedder → warn + name-only result. Sole matcher for
+    both daily candidate ingest and the dim(action=upsert) MCP tool.
+    """
+    hit_id = _alias_dedup_lookup(conn, kind, name, aliases_list)
+    if hit_id is not None:
+        return hit_id
+    from . import semantic_dedup
+    kind_rows = conn.execute(
+        "SELECT id, name FROM entities WHERE kind=?"
+        " AND superseded_by IS NULL", (kind,),
+    ).fetchall()
+    if not kind_rows:
+        return None
+    target_names = [r["name"] for r in kind_rows]
+    match = semantic_dedup.cosine_top_match(conn, name, target_names)
+    if match is None:
+        with conn:
+            semantic_dedup.warn_embedder_missing(
+                conn, "entities_dedup_no_embedder", source,
+            )
+        return None
+    idx, score = match
+    if idx >= 0 and score >= semantic_dedup.threshold_for("entities"):
+        return kind_rows[idx]["id"]
+    return None
+
+
 def write_entity_cand(conn, raw: str, source: str = "daily") -> int:
     items = extract_block(raw, "ENTITY_CAND")
     if not items:
@@ -159,34 +190,13 @@ def write_entity_cand(conn, raw: str, source: str = "daily") -> int:
         aliases_list: list[str] = []
         if isinstance(raw_aliases, list):
             aliases_list = [str(a).strip() for a in raw_aliases if str(a).strip()]
-        hit_id = _alias_dedup_lookup(conn, kind, name, aliases_list)
+        # Gate: alias/name overlap + cosine dedup vs same-kind active names.
+        # Hit → merge new name + aliases into the matched row (auto-learn
+        # alias), not block: entity.aliases JSON exists exactly for this case.
+        hit_id = match_entity(conn, kind, name, aliases_list)
         if hit_id is not None:
             _merge_aliases_into(conn, hit_id, name, aliases_list)
             continue
-        # Cosine dedup vs same-kind active entity names. Hit → merge new
-        # name + aliases into the matched row (auto-learn alias), not
-        # block: entity.aliases JSON exists exactly for this case.
-        from . import semantic_dedup
-        kind_rows = conn.execute(
-            "SELECT id, name FROM entities WHERE kind=?"
-            " AND superseded_by IS NULL", (kind,),
-        ).fetchall()
-        if kind_rows:
-            target_names = [r["name"] for r in kind_rows]
-            match = semantic_dedup.cosine_top_match(conn, name, target_names)
-            if match is None:
-                with conn:
-                    semantic_dedup.warn_embedder_missing(
-                        conn, "entities_dedup_no_embedder",
-                        "candidates.write_entity_cand",
-                    )
-            else:
-                idx, score = match
-                if (idx >= 0
-                        and score >= semantic_dedup.threshold_for("entities")):
-                    _merge_aliases_into(conn, kind_rows[idx]["id"],
-                                        name, aliases_list)
-                    continue
         fact = (it.get("note") or "").strip() or None
         aliases_json = (json.dumps(aliases_list, ensure_ascii=False)
                         if aliases_list else None)
@@ -452,7 +462,6 @@ def write_memes_cand(conn, raw: str, source: str = "daily",
         if memes_dedup.fast_skip_already_rejected(conn, key, vtype):
             continue
         value = (it.get("value") or "").strip() or None
-        context = (it.get("context") or "").strip() or None
         try:
             llm_pinned = 1 if int(it.get("pinned", 0)) else 0
         except (TypeError, ValueError):
@@ -473,10 +482,14 @@ def write_memes_cand(conn, raw: str, source: str = "daily",
                 "%Y-%m-%dT%H:%M:%SZ")
             with conn:
                 new_pinned = 1 if (existing["pinned"] or pinned) else 0
+                # updated_at is NOT touched here — a re-mention with no
+                # content change is not a content change. It only moves
+                # when type/key/value actually change (elsewhere),
+                # so reconcile's DB-wins check doesn't clobber hand md edits.
                 conn.execute(
                     "UPDATE memes SET use_count=use_count+1, last_seen=?,"
-                    " pinned=?, updated_at=? WHERE id=?",
-                    (ts_now, new_pinned, ts_now, existing["id"]),
+                    " pinned=? WHERE id=?",
+                    (ts_now, new_pinned, existing["id"]),
                 )
             n += 1
             continue
@@ -511,10 +524,10 @@ def write_memes_cand(conn, raw: str, source: str = "daily",
             "%Y-%m-%dT%H:%M:%SZ")
         with conn:
             conn.execute(
-                "INSERT INTO memes (type, key, value, context,"
+                "INSERT INTO memes (type, key, value,"
                 " use_count, last_seen, pinned, source_hash)"
-                " VALUES (?, ?, ?, ?, 1, ?, ?, ?)",
-                (vtype, key, value, context, ts_now, pinned, source),
+                " VALUES (?, ?, ?, 1, ?, ?, ?)",
+                (vtype, key, value, ts_now, pinned, source),
             )
         n += 1
     return n

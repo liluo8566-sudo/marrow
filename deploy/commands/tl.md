@@ -1,7 +1,7 @@
 ---
-description: Record a timeline line now — call marrow tl_add for the current scene.
+description: Record a timeline line now — call marrow tl (action=add) for the current scene.
 ---
-Call `mcp__marrow__tl_add` immediately for the moment just passed. Read its tool
+Call `mcp__marrow__tl` with action="add" immediately for the moment just passed. Read its tool
 description for the format and pick the affect phrases + intensities yourself.
 $ARGUMENTS may add a hint about what to record; otherwise infer from this session.
 

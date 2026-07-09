@@ -26,6 +26,24 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _canon(path: str) -> str:
+    """Canonical md_index key = expanded + symlink-resolved absolute path.
+
+    Single choke point that collapses the historical path-key split: the
+    inserter/daemon passed the config symlink path (~/.config/marrow/db-pages/
+    ...) while the watcher passed the resolved real path (~/Desktop/NY/db-pages/
+    ...), so the same block landed under two keys and a tombstone on one lane
+    silently blocked rendering on the other. Every MdIndex method canonicalises
+    its `path` here before it touches the table. Best-effort — a path that
+    cannot be resolved falls back to itself. File IO still uses the caller's
+    path (the symlink resolves to the same file), only the DB key is canon.
+    """
+    try:
+        return str(Path(path).expanduser().resolve())
+    except (OSError, RuntimeError, ValueError):
+        return path
+
+
 def _hash(body: str) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
@@ -115,6 +133,7 @@ class MdIndex:
         self.conn = conn
 
     def record_block(self, path: str, block_id: str, content_hash: str) -> None:
+        path = _canon(path)
         with self.conn:
             self.conn.execute(
                 "INSERT INTO md_index (path, block_id, content_hash, last_seen_at)"
@@ -127,6 +146,7 @@ class MdIndex:
             )
 
     def get_hash(self, path: str, block_id: str) -> str | None:
+        path = _canon(path)
         r = self.conn.execute(
             "SELECT content_hash FROM md_index"
             " WHERE path=? AND block_id=? AND tombstone_at IS NULL",
@@ -135,13 +155,17 @@ class MdIndex:
         return r[0] if r else None
 
     def tombstone(self, path: str, block_id: str) -> None:
+        path = _canon(path)
         with self.conn:
+            now = _now_iso()
             self.conn.execute(
-                "UPDATE md_index SET tombstone_at=? WHERE path=? AND block_id=?",
-                (_now_iso(), path, block_id),
+                "UPDATE md_index SET tombstone_at=?, last_seen_at=?"
+                " WHERE path=? AND block_id=?",
+                (now, now, path, block_id),
             )
 
     def clear_tombstone(self, path: str, block_id: str) -> None:
+        path = _canon(path)
         with self.conn:
             self.conn.execute(
                 "UPDATE md_index SET tombstone_at=NULL"
@@ -150,6 +174,7 @@ class MdIndex:
             )
 
     def list_tombstones(self, path: str) -> list[tuple[str, str]]:
+        path = _canon(path)
         rows = self.conn.execute(
             "SELECT block_id, tombstone_at FROM md_index"
             " WHERE path=? AND tombstone_at IS NOT NULL"
@@ -161,6 +186,7 @@ class MdIndex:
     def is_tombstoned(self, path: str, block_id: str) -> bool:
         # Helper for inserters — TombstoneStore Protocol unchanged; this is
         # MdIndex-only. Returns True when the row exists AND has tombstone_at.
+        path = _canon(path)
         r = self.conn.execute(
             "SELECT 1 FROM md_index"
             " WHERE path=? AND block_id=? AND tombstone_at IS NOT NULL",
@@ -185,6 +211,7 @@ class MdIndex:
         Missing file = cold-start no-op, NOT tombstone-all — next refresh rebuilds.
         """
         report = report or ReconcileReport()
+        path = _canon(path)
         p = Path(path)
         if not p.exists():
             # Cold start — file missing, leave md_index untouched.
@@ -243,6 +270,7 @@ class MdIndex:
         no write happens — log lines benefit from the volume signal.
         """
         report = report or ReconcileReport()
+        path = _canon(path)
         p = Path(path)
         if not p.exists():
             for bid, _ in self._list_active(path):
@@ -318,6 +346,7 @@ class MdIndex:
         return report
 
     def _list_active(self, path: str) -> Iterable[tuple[str, str]]:
+        path = _canon(path)
         rows = self.conn.execute(
             "SELECT block_id, content_hash FROM md_index"
             " WHERE path=? AND tombstone_at IS NULL",
@@ -326,6 +355,7 @@ class MdIndex:
         return [(r[0], r[1]) for r in rows]
 
     def _raw_row(self, path: str, block_id: str) -> tuple[str, str | None] | None:
+        path = _canon(path)
         r = self.conn.execute(
             "SELECT content_hash, tombstone_at FROM md_index"
             " WHERE path=? AND block_id=?",

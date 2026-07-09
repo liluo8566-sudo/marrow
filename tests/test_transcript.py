@@ -370,6 +370,95 @@ def test_command_message_multiline_stripped():
     assert "hi" in result and "bye" in result
 
 
+# ── _is_harness_row: whole-row junk drop (not substring strip) ──────────────
+
+def test_pure_task_notification_row_is_dropped():
+    text = "<task-notification>\n<task-id>abc</task-id>\n</task-notification>"
+    assert transcript._is_harness_row(text) is True
+
+
+def test_task_notification_quoted_mid_dialogue_is_kept():
+    text = "这什么玩意？`<task-notification>` 这垃圾确实不该在，我马上查"
+    assert transcript._is_harness_row(text) is False
+
+
+def test_interrupted_marker_variants_are_dropped():
+    assert transcript._is_harness_row("[Request interrupted by user]") is True
+    assert transcript._is_harness_row(
+        "[Request interrupted by user for tool use]") is True
+
+
+def test_interrupted_marker_with_extra_text_is_kept():
+    text = "[Request interrupted by user] but then continued talking"
+    assert transcript._is_harness_row(text) is False
+
+
+def test_pure_sticker_tag_rows_are_dropped():
+    assert transcript._is_harness_row(
+        '<image path="/stk/a.png"/>') is True
+    assert transcript._is_harness_row(
+        '<gif path="/stk/a.gif"/>') is True
+    assert transcript._is_harness_row(
+        '<image path="/stk/a.png"/>\n\n<gif path="/stk/b.gif"/>') is True
+
+
+def test_sticker_tag_mixed_with_real_text_is_kept():
+    text = '<image path="/stk/a.png"/>\n\n褚念念！！！我早上想你了。'
+    assert transcript._is_harness_row(text) is False
+
+
+def test_pure_bridge_time_sticker_header_rows_are_dropped():
+    assert transcript._is_harness_row(
+        "[time: 2026-06-28 Sun 17:07 | gap: 0m]") is True
+    assert transcript._is_harness_row(
+        "[sticker: emoji=⭐, set=lumi_stickers_by_Stellan_CYC_bot]") is True
+    assert transcript._is_harness_row(
+        "[time: 2026-06-28 Sun 17:07 | gap: 0m]\n"
+        "[sticker: emoji=⭐, set=x]") is True
+
+
+def test_bridge_marker_with_real_dialogue_is_kept():
+    # Marker line + real message: whole-row predicate must NOT drop it.
+    assert transcript._is_harness_row(
+        "[time: 2026-06-23 Tue 14:49 | gap: 0m]\n啥\nhow comes") is False
+    assert transcript._is_harness_row(
+        "[sticker: emoji=⭐, set=x]\n？狗男人怎么接不住我的梗") is False
+
+
+def test_bridge_marker_quoted_mid_line_is_kept():
+    # Prose that quotes the marker inline (not a whole header line) survives —
+    # the predicate is line-anchored full-match, never substring.
+    assert transcript._is_harness_row(
+        "我们讨论一下 [time: ...] 这个格式该怎么处理") is False
+
+
+def test_rows_from_records_drops_harness_junk_rows(tmp_path):
+    jl = _w(tmp_path / "j.jsonl", [
+        {"type": "user", "sessionId": "s1", "timestamp": "t",
+         "message": {"role": "user",
+                     "content": "<task-notification>\n<task-id>x</task-id>\n"
+                                "</task-notification>"}},
+        {"type": "user", "sessionId": "s1", "timestamp": "t",
+         "message": {"role": "user", "content": "[Request interrupted by user]"}},
+        {"type": "assistant", "sessionId": "s1", "timestamp": "t",
+         "message": {"role": "assistant",
+                     "content": [{"type": "text",
+                                  "text": '<image path="/stk/a.png"/>'}]}},
+        {"type": "user", "sessionId": "s1", "timestamp": "t",
+         "message": {"role": "user",
+                     "content": "quotes `<task-notification>` mid-sentence, keep me"}},
+        {"type": "assistant", "sessionId": "s1", "timestamp": "t",
+         "message": {"role": "assistant",
+                     "content": [{"type": "text",
+                                  "text": '<image path="/stk/a.png"/>\n\n真实回复文字'}]}},
+    ])
+    rows = transcript.clean(jl)
+    assert [r["content"] for r in rows] == [
+        "quotes `<task-notification>` mid-sentence, keep me",
+        '<image path="/stk/a.png"/>\n\n真实回复文字',
+    ]
+
+
 def test_clean_drops_empty_content_after_stripping(tmp_path):
     # A row whose content is only a command-message tag becomes empty after
     # strip_harness_markers; the `if not text: continue` guard at

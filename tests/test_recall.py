@@ -257,6 +257,59 @@ def test_recall_fusion_score_above_min(db):
     assert results[0]["score"] >= 0.0
 
 
+# ── recall_fusion — since/until window ────────────────────────────────────────
+
+def _make_window_events(db):
+    _make_event(db, "marrow window alpha", session_id="w1",
+                timestamp="2026-05-19T01:00:00Z")
+    _make_event(db, "marrow window beta", session_id="w2",
+                timestamp="2026-05-21T01:00:00Z")
+    _make_event(db, "marrow window gamma", session_id="w3",
+                timestamp="2026-05-23T01:00:00Z")
+
+
+def test_recall_fusion_since_only_filters(db):
+    _make_window_events(db)
+    with patch.object(rm, "_ensure_embedder", return_value=None):
+        results = rm.recall_fusion(
+            db, "marrow window", since="2026-05-20T00:00:00Z", min_score=0.0,
+        )
+    contents = {r["content"] for r in results}
+    assert contents == {"marrow window beta", "marrow window gamma"}
+
+
+def test_recall_fusion_until_only_filters(db):
+    _make_window_events(db)
+    with patch.object(rm, "_ensure_embedder", return_value=None):
+        results = rm.recall_fusion(
+            db, "marrow window", until="2026-05-20T00:00:00Z", min_score=0.0,
+        )
+    contents = {r["content"] for r in results}
+    assert contents == {"marrow window alpha"}
+
+
+def test_recall_fusion_since_and_until_range(db):
+    _make_window_events(db)
+    with patch.object(rm, "_ensure_embedder", return_value=None):
+        results = rm.recall_fusion(
+            db, "marrow window",
+            since="2026-05-20T00:00:00Z", until="2026-05-22T00:00:00Z",
+            min_score=0.0,
+        )
+    contents = {r["content"] for r in results}
+    assert contents == {"marrow window beta"}
+
+
+def test_recall_fusion_no_window_returns_all(db):
+    _make_window_events(db)
+    with patch.object(rm, "_ensure_embedder", return_value=None):
+        results = rm.recall_fusion(db, "marrow window", min_score=0.0)
+    contents = {r["content"] for r in results}
+    assert contents == {
+        "marrow window alpha", "marrow window beta", "marrow window gamma",
+    }
+
+
 def test_recall_fusion_budget_truncation(db):
     _make_event(db, "x" * 3000, timestamp="2026-05-19T01:00:00Z")
     _make_event(db, "x" * 3000, session_id="s2", timestamp="2026-05-19T01:01:00Z")
@@ -592,17 +645,17 @@ def test_fetch_event_context_disabled_when_n_zero(db):
 
 # ── daemon tools ──────────────────────────────────────────────────────────────
 
-def test_daemon_embed_pending_callable():
+def test_daemon_event_embed_callable():
     import marrow.daemon as daemon
-    assert callable(daemon.embed_pending)
+    assert callable(daemon.event_embed)
 
 
-def test_daemon_embed_pending_returns_dict(tmp_path, monkeypatch):
+def test_daemon_event_embed_returns_dict(tmp_path, monkeypatch):
     import marrow.daemon as daemon
     p = str(tmp_path / "d.db")
     storage.init_db(p).close()
     monkeypatch.setattr(daemon, "_DB", p)
     with patch.object(rm, "_ensure_embedder", return_value=None):
-        result = daemon.embed_pending()
+        result = daemon.event_embed()
     assert isinstance(result, dict)
     assert "embedded" in result
