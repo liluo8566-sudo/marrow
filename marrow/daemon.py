@@ -1270,9 +1270,9 @@ def _run_cortex_module(module: str, extra_args: list[str] | None = None) -> dict
 
 @cortex_tool()
 def lie_down(rotate: bool = False, next_wake_min: float | None = None) -> dict:
-    """Sleep and set the next wake: lie_down(next_wake_min=N), omit = dice.
-    rotate=True = fresh window on next wake (last lie_down of a full window;
-    write your handoff section first — guarded)."""
+    """Sleep and set the next wake: lie_down(next_wake_min=N) [N=11-55],
+    omit = dice. rotate=True = fresh window on next wake (last lie_down of a
+    full window; write your handoff section first — guarded)."""
     args = ["--rotate"] if rotate else []
     if next_wake_min is not None:
         args += ["--next-wake-min", str(next_wake_min)]
@@ -1281,8 +1281,8 @@ def lie_down(rotate: bool = False, next_wake_min: float | None = None) -> dict:
 
 @cortex_tool()
 def wait(minutes: float) -> dict:
-    """Stay awake: wait(minutes=N) holds the silence timeout once, e.g. you
-    expect a reply soon. Max twice per wake."""
+    """Stay awake: wait(minutes=N) [N=11-55] holds the silence timeout once,
+    e.g. you expect a reply soon. Max twice per wake."""
     return _run_cortex_module("cortex.wait", ["--minutes", str(minutes)])
 
 
