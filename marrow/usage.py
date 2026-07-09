@@ -62,42 +62,6 @@ def read_kv() -> dict[str, str]:
         conn.close()
 
 
-def kv_age_seconds(key: str = "five_hour_pct") -> float | None:
-    """Age (seconds) of one ct_rate_limit key's updated_at — freshness anchor
-    for the whole Plan Used segment (5h/7d/cdx all land in the same collector
-    write). None on any failure / missing key (caller treats as unknown, not
-    stale — a first-ever read must not be suppressed)."""
-    try:
-        conn = storage.connect(config.db_path())
-    except Exception:
-        return None
-    try:
-        row = conn.execute(
-            "SELECT updated_at FROM ct_rate_limit WHERE key = ?", (key,)
-        ).fetchone()
-    except Exception:
-        return None
-    finally:
-        conn.close()
-    if not row or not row["updated_at"]:
-        return None
-    try:
-        dt = datetime.fromisoformat(str(row["updated_at"]).replace("Z", "+00:00"))
-    except (ValueError, TypeError):
-        return None
-    return (datetime.now(timezone.utc) - dt).total_seconds()
-
-
-def _is_stale(age_s: float | None) -> bool:
-    if age_s is None:
-        return False  # unknown age -> render rather than suppress
-    max_age_min = int((config.load().get("cortex_usage", {}) or {}).get(
-        "max_age_min", 15) or 0)
-    if max_age_min <= 0:
-        return False  # 0/absent = staleness guard off
-    return age_s > max_age_min * 60
-
-
 def _as_float(raw) -> float | None:
     try:
         return float(raw)
@@ -134,12 +98,10 @@ def _countdown(iso: str) -> str | None:
 # line renderers
 # --------------------------------------------------------------------------- #
 
-def _plan_used_segments(kv: dict, with_cdx: bool, age_s: float | None = None) -> list[str]:
-    """5h/7d/cdx segments — dropped entirely (not just individually) when the
-    collector snapshot is older than [cortex_usage].max_age_min. Stale numbers
-    are worse than none; main/agent (not built here) are always live-computed."""
-    if _is_stale(age_s):
-        return []
+def _plan_used_segments(kv: dict, with_cdx: bool) -> list[str]:
+    """5h/7d/cdx segments rendered straight from the kv the collector writes.
+    The watcher's UsageSnapshotLoop keeps the kv fresh; a dead watcher is an ops
+    problem, not a rendering one — usage is never hidden by snapshot age."""
     parts: list[str] = []
     five = _as_float(kv.get("five_hour_pct"))
     if five is not None:
@@ -165,18 +127,13 @@ def _plan_used_segments(kv: dict, with_cdx: bool, age_s: float | None = None) ->
     return parts
 
 
-def sessionstart_lines(kv: dict | None = None, age_s: float | None = None) -> list[str]:
+def sessionstart_lines(kv: dict | None = None) -> list[str]:
     """SessionStart usage block (plan §二):
     `Plan Used: 5h .. | 7d .. | cdx ..` and `Net Token Used today: 1.2M`.
-    Empty list when no data at all. age_s: kv snapshot age in seconds — live
-    mode (kv=None) reads it from the DB; a caller-supplied kv (tests) is
-    treated as fresh unless age_s is passed explicitly."""
-    live = kv is None
+    Empty list when no data at all."""
     kv = read_kv() if kv is None else kv
-    if live and age_s is None:
-        age_s = kv_age_seconds()
     lines: list[str] = []
-    segs = _plan_used_segments(kv, with_cdx=True, age_s=age_s)
+    segs = _plan_used_segments(kv, with_cdx=True)
     if segs:
         lines.append("Plan Used: " + " | ".join(segs))
     today = _as_float(kv.get("today_net_tokens"))
@@ -185,20 +142,15 @@ def sessionstart_lines(kv: dict | None = None, age_s: float | None = None) -> li
     return lines
 
 
-def threshold_line(main_occupancy: int, agent_net: int, kv: dict | None = None,
-                    age_s: float | None = None) -> str:
+def threshold_line(main_occupancy: int, agent_net: int, kv: dict | None = None) -> str:
     """In-window threshold line (plan §二):
     `Plan Used: 5h 20% (04:50) | Net Session Token: main 70k agent 120k`.
     `main` is WINDOW OCCUPANCY (statusline `total` / rotate-fuse metric), not
     cumulative net-spend — the label kept its plan-approved wording. `agent` is
-    cumulative subagent_tokens, always live-computed (never suppressed by
-    staleness). 5h/7d segments drop when the kv snapshot is stale (age_s /
-    [cortex_usage].max_age_min) — live mode reads age_s from the DB itself."""
-    live = kv is None
+    cumulative subagent_tokens, always live-computed. 5h/7d segments render
+    straight from the kv."""
     kv = read_kv() if kv is None else kv
-    if live and age_s is None:
-        age_s = kv_age_seconds()
-    segs = _plan_used_segments(kv, with_cdx=False, age_s=age_s)
+    segs = _plan_used_segments(kv, with_cdx=False)
     net_seg = f"Net Session Token: main {main_occupancy // 1000}k agent {agent_net // 1000}k"
     segs.append(net_seg)
     return "Plan Used: " + " | ".join(segs)

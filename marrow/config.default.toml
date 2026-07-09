@@ -234,9 +234,9 @@ show_text = "Window filling up (≥100k) — wrap this turn, write your 碎碎�
 [cortex_usage]
 # Net-token visibility (all sessions self-aware). Rendered by usage.py off the
 # ct_rate_limit kv the collector (usage_snapshot) writes. In-window threshold
-# inject (turn_inject): once (main occupancy + agent net) crosses
-# threshold_start, then again every threshold_step above it; watermark tracked
-# per session in state.
+# inject (turn_inject): once main window occupancy crosses threshold_start, then
+# again every threshold_step above it; watermark tracked per session in state.
+# Agent tokens don't occupy the main window and don't drive triggering.
 threshold_start = 100000
 threshold_step = 50000
 # Global daily net budget the SessionStart "Net Token Used today" line reads.
@@ -245,11 +245,6 @@ daily_budget = 1000000
 # independent of cortex) so 5h/7d/cdx numbers stay fresh even when cortex is
 # off. Cortex's own tick may also call it; the write is idempotent (upsert).
 snapshot_tick_s = 300
-# Consumer-side staleness guard: if the ct_rate_limit snapshot is older than
-# this many minutes, SessionStart/threshold lines drop the 5h/7d/cdx segment
-# rather than show stale numbers. main/agent are always live-scanned, never
-# gated. 0 = guard off.
-max_age_min = 15
 
 [agent_guard]
 # PreToolUse:Agent burst protection — subagent_types denied outright (they

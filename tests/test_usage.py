@@ -67,77 +67,22 @@ def test_threshold_line_shows_main_occupancy_and_agent():
 
 
 # --------------------------------------------------------------------------- #
-# staleness guard — 5h/7d/cdx drop when the collector snapshot is stale;
-# main/agent (built outside _plan_used_segments) are never gated
+# no staleness gating — 5h/7d/cdx always render from kv regardless of age
 # --------------------------------------------------------------------------- #
 
-def test_sessionstart_lines_drops_plan_used_when_stale(monkeypatch):
-    monkeypatch.setattr(usage.config, "load",
-                        lambda: {"cortex_usage": {"max_age_min": 15}})
+def test_sessionstart_lines_render_regardless_of_age():
     kv = {"five_hour_pct": "5", "seven_day_pct": "50", "today_net_tokens": "1200000"}
-    lines = usage.sessionstart_lines(kv, age_s=15 * 60 + 1)
-    assert not any(l.startswith("Plan Used:") for l in lines)
-    assert lines == ["Net Token Used today: 1.2M"]  # today line unaffected
-
-
-def test_sessionstart_lines_keeps_plan_used_when_fresh(monkeypatch):
-    monkeypatch.setattr(usage.config, "load",
-                        lambda: {"cortex_usage": {"max_age_min": 15}})
-    kv = {"five_hour_pct": "5"}
-    lines = usage.sessionstart_lines(kv, age_s=15 * 60 - 1)
+    lines = usage.sessionstart_lines(kv)
     assert any(l.startswith("Plan Used: 5h 5%") for l in lines)
+    assert "7d 50%" in lines[0]
+    assert "Net Token Used today: 1.2M" in lines
 
 
-def test_threshold_line_drops_5h7d_but_keeps_main_agent_when_stale(monkeypatch):
-    monkeypatch.setattr(usage.config, "load",
-                        lambda: {"cortex_usage": {"max_age_min": 15}})
+def test_threshold_line_renders_5h7d_regardless_of_age():
     kv = {"five_hour_pct": "20", "seven_day_pct": "50"}
-    line = usage.threshold_line(70_000, 120_000, kv, age_s=15 * 60 + 1)
-    assert "5h" not in line and "7d" not in line
-    assert line == "Plan Used: Net Session Token: main 70k agent 120k"
-
-
-def test_is_stale_none_age_never_suppresses():
-    """Unknown age (first-ever read, no updated_at yet) must not be treated
-    as stale — that would suppress the very first snapshot forever."""
-    assert usage._is_stale(None) is False
-
-
-def test_is_stale_guard_off_when_max_age_zero(monkeypatch):
-    monkeypatch.setattr(usage.config, "load",
-                        lambda: {"cortex_usage": {"max_age_min": 0}})
-    assert usage._is_stale(10 ** 9) is False
-
-
-def test_is_stale_over_and_under_max_age(monkeypatch):
-    monkeypatch.setattr(usage.config, "load",
-                        lambda: {"cortex_usage": {"max_age_min": 15}})
-    assert usage._is_stale(15 * 60 + 1) is True
-    assert usage._is_stale(15 * 60 - 1) is False
-
-
-def test_kv_age_seconds_reads_updated_at(monkeypatch, tmp_path):
-    from marrow import storage as stor
-    db = str(tmp_path / "t.db")
-    real_connect = stor.connect
-    stor.init_db(db)
-    monkeypatch.setattr(config, "db_path", lambda: db)
-    conn = real_connect(db)
-    conn.execute(
-        "INSERT INTO ct_rate_limit (key, value, updated_at) VALUES "
-        "('five_hour_pct', '5', '2020-01-01T00:00:00Z')")
-    conn.commit()
-    conn.close()
-    age = usage.kv_age_seconds()
-    assert age is not None and age > 0
-
-
-def test_kv_age_seconds_missing_key_is_none(monkeypatch, tmp_path):
-    from marrow import storage as stor
-    db = str(tmp_path / "t2.db")
-    stor.init_db(db)
-    monkeypatch.setattr(config, "db_path", lambda: db)
-    assert usage.kv_age_seconds() is None
+    line = usage.threshold_line(70_000, 120_000, kv)
+    assert "5h 20%" in line and "7d 50%" in line
+    assert "Net Session Token: main 70k agent 120k" in line
 
 
 # --------------------------------------------------------------------------- #
@@ -192,6 +137,22 @@ def test_threshold_inject_quiet_cache_hit_turn_does_not_deflate(tmp_path, monkey
     _stdin(monkeypatch, {"session_id": "sz", "transcript_path": str(jl)})
     assert hooks.main(["turn_inject"]) == 0
     assert "Net Session Token: main 131k agent 0k" in _ctx(capsys)
+
+
+def test_threshold_inject_agent_tokens_do_not_trigger(tmp_path, monkeypatch, capsys):
+    """Agent tokens don't occupy the main window, so a large agent_net with
+    main occupancy below threshold_start must NOT fire — the tier/watermark math
+    is main-only. agent still shows in the line once main crosses on its own."""
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    jl = tmp_path / "s.jsonl"
+    # main occupancy 60k (< 100k start), agent_net 200k on a user line.
+    jl.write_text("\n".join([
+        '{"type":"user","content":"subagent_tokens: 200,000"}',
+        _assistant(input_=40_000, cache_read=10_000, cache_creation=5000, output=5000),
+    ]))
+    _stdin(monkeypatch, {"session_id": "sa", "transcript_path": str(jl)})
+    assert hooks.main(["turn_inject"]) == 0
+    assert "Net Session Token" not in _ctx(capsys)
 
 
 # --------------------------------------------------------------------------- #

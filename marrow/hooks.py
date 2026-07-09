@@ -3329,9 +3329,14 @@ def _usage_threshold_context(sid: str, tpath: str) -> str:
     """In-window token threshold line (all sessions). `main` = window occupancy
     (last assistant turn's usage totals — same metric as statusline `total` and
     the rotate/fuse thresholds, NOT cumulative net-spend); `agent` = cumulative
-    subagent_tokens. Fires once (main + agent) crosses threshold_start, then
+    subagent_tokens. Fires once `main` crosses threshold_start, then
     again every threshold_step above the last-injected watermark. Watermark
-    tracked per session under state/. Empty below the first threshold."""
+    tracked per session under state/. Empty below the first threshold.
+
+    Tier/watermark math uses `main_occ` alone — the threshold is a
+    window-rotation signal, and agent tokens don't occupy the main window, so
+    they must not drive triggering. `agent_net` appears only in the rendered
+    line."""
     if not sid or not tpath:
         return ""
     try:
@@ -3343,11 +3348,10 @@ def _usage_threshold_context(sid: str, tpath: str) -> str:
             return ""
         main_occ = _window_tokens_from_transcript(tpath)
         agent_net = usage.agent_tokens_from_transcript(tpath)
-        total = main_occ + agent_net
-        if total < start:
+        if main_occ < start:
             return ""
         # Current tier = highest crossed threshold (start + k*step).
-        tier = start + ((total - start) // step) * step
+        tier = start + ((main_occ - start) // step) * step
         state_dir = config.DATA_DIR / "state" / "usage_watermark"
         state_dir.mkdir(parents=True, exist_ok=True)
         state_file = state_dir / sid
