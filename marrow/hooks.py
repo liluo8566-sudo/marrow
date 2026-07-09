@@ -3326,10 +3326,12 @@ def _cortex_show_context(tpath: str) -> str:
 
 
 def _usage_threshold_context(sid: str, tpath: str) -> str:
-    """In-window net-token threshold line (all sessions). Fires once net(main +
-    agent) crosses threshold_start, then again every threshold_step above the
-    last-injected watermark. Watermark tracked per session under state/. Empty
-    below the first threshold."""
+    """In-window token threshold line (all sessions). `main` = window occupancy
+    (last assistant turn's usage totals — same metric as statusline `total` and
+    the rotate/fuse thresholds, NOT cumulative net-spend); `agent` = cumulative
+    subagent_tokens. Fires once (main + agent) crosses threshold_start, then
+    again every threshold_step above the last-injected watermark. Watermark
+    tracked per session under state/. Empty below the first threshold."""
     if not sid or not tpath:
         return ""
     try:
@@ -3339,8 +3341,9 @@ def _usage_threshold_context(sid: str, tpath: str) -> str:
         step = int(cu.get("threshold_step", 50_000) or 0)
         if start <= 0 or step <= 0:
             return ""
-        main_net, agent_net = usage.session_net(tpath)
-        total = main_net + agent_net
+        main_occ = _window_tokens_from_transcript(tpath)
+        agent_net = usage.agent_tokens_from_transcript(tpath)
+        total = main_occ + agent_net
         if total < start:
             return ""
         # Current tier = highest crossed threshold (start + k*step).
@@ -3356,7 +3359,7 @@ def _usage_threshold_context(sid: str, tpath: str) -> str:
         if tier <= last:
             return ""
         state_file.write_text(str(tier))
-        return usage.threshold_line(main_net, agent_net)
+        return usage.threshold_line(main_occ, agent_net)
     except Exception:
         return ""
 

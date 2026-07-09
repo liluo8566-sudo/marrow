@@ -1,9 +1,13 @@
-"""Usage rendering + transcript net-token scan (single source for all sessions).
+"""Usage rendering + agent-token transcript scan (single source for all
+sessions).
 
 Consumers: SessionStart Plan Used line, turn_inject in-window threshold line,
 cortex 亮牌 gate, lie_down deny guard. The collector (usage_snapshot) writes the
-ct_rate_limit kv this module reads; the transcript scan here is the one net/agent
-scanner (turn_inject + the deny guard share it — no second copy in hooks.py).
+ct_rate_limit kv this module reads. Window OCCUPANCY (the `main` figure in the
+threshold line — same metric as statusline `total` and the rotate/fuse
+thresholds) is scanned by hooks._window_tokens_from_transcript, not here — no
+second occupancy scanner. This module owns only the agent-token scan (shared
+by turn_inject) and the line renderers.
 """
 from __future__ import annotations
 
@@ -21,30 +25,6 @@ _SUBAGENT_RE = re.compile(r"subagent_tokens[:>]?\s*([0-9,]+)")
 # transcript scan (shared)
 # --------------------------------------------------------------------------- #
 
-def net_tokens_from_transcript(tpath: str) -> int:
-    """Net spend = SUM over every assistant usage of (cache_creation + output).
-    Excludes cache_read (a hit is ~free) and plain input. Mirrors
-    cortex.transcript.net_tokens. 0 on any missing/unreadable transcript."""
-    if not tpath:
-        return 0
-    try:
-        lines = open(tpath, encoding="utf-8").read().splitlines()
-    except OSError:
-        return 0
-    total = 0
-    for line in lines:
-        try:
-            o = json.loads(line)
-        except ValueError:
-            continue
-        msg = o.get("message")
-        u = msg.get("usage") if isinstance(msg, dict) else None
-        if u:
-            total += (u.get("cache_creation_input_tokens", 0)
-                      + u.get("output_tokens", 0))
-    return total
-
-
 def agent_tokens_from_transcript(tpath: str) -> int:
     """Accumulated subagent (Task tool) token total, scanned off user/attachment
     lines' `subagent_tokens` markers. Mirrors ~/.claude/statusline.py. 0 on any
@@ -61,11 +41,6 @@ def agent_tokens_from_transcript(tpath: str) -> int:
             for m in _SUBAGENT_RE.finditer(line):
                 total += int(m.group(1).replace(",", ""))
     return total
-
-
-def session_net(tpath: str) -> tuple[int, int]:
-    """(main_net, agent_net) for one session transcript."""
-    return net_tokens_from_transcript(tpath), agent_tokens_from_transcript(tpath)
 
 
 # --------------------------------------------------------------------------- #
