@@ -1781,7 +1781,7 @@ _KIND_ABBREV = {
 
 
 def _meme_date(ts: str) -> str:
-    """Meme creation date as 'MM-DD' (Melbourne local), or 'YYYY' if >1y old.
+    """Meme creation date as 'MM-DD' (configured local timezone), or 'YYYY' if >1y old.
     Empty on missing/unparseable timestamp."""
     if not ts:
         return ""

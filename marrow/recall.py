@@ -1515,7 +1515,7 @@ def recall_fusion(
     # Diary: vec-only lane (no kw scan for long-form prose). Build candidates
     # gated by _VEC_ONLY_FLOOR; scored with w_diary_vec, no bm25/recency.
     # When a time window is active (since and/or until), convert to
-    # Melbourne-local dates and filter diary rows to that range.
+    # configured-local-timezone dates and filter diary rows to that range.
     _diary_since_date: str | None = None
     _diary_until_date: str | None = None
     _diary_window_error = False
@@ -1525,7 +1525,7 @@ def recall_fusion(
             if since:
                 _diary_since_date = _u2d(since)
             if until:
-                # `until` is the EXCLUSIVE end boundary (start of the Melbourne
+                # `until` is the EXCLUSIVE end boundary (start of the configured-local-timezone
                 # day AFTER the requested until-day, see timecue.melb_day_range).
                 # Converting it straight to a local date yields until+1 and the
                 # `date <= ?` filter then leaks the following day. Step back 1s
@@ -1912,7 +1912,7 @@ def fetch_window_digests(
 ) -> list[dict]:
     """Return session_digests rows whose ts falls in [since_utc, until_utc).
 
-    Falls back to matching the date column against Melbourne-local dates in
+    Falls back to matching the date column against configured-local-timezone dates in
     the window when ts is missing/malformed. Newest first.
     Each row: {"kind": "digest", "id": sid, "date": ..., "content": text[:150]}.
     """
@@ -1928,7 +1928,7 @@ def fetch_window_digests(
     ).fetchall()
 
     if not rows:
-        # Fallback: match date column against Melbourne-local dates in window
+        # Fallback: match date column against configured-local-timezone dates in window
         try:
             _s = _dt.fromisoformat(since_utc.replace("Z", "+00:00"))
             _e = _dt.fromisoformat(until_utc.replace("Z", "+00:00"))

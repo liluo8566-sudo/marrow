@@ -58,7 +58,7 @@ def recall(
     """Recall events from db. Call when the user mention the past that you don't know.
     e.g. 你记得我上周说xxx？
     context=True attaches ±1 adjacent same-session turns.
-    since/until: Melbourne-local YYYY-MM-DD day strings.
+    since/until: configured-local-timezone YYYY-MM-DD day strings.
     Diary: query='diary' + since/until."""
     from .timecue import melb_day_range
     since_utc: str | None = None
@@ -103,7 +103,7 @@ def recall(
             _recall_mod.bump_recall_counts(event_ids, db=_DB)
     except Exception:
         pass
-    # Convert UTC timestamps to Melbourne local time at the read boundary.
+    # Convert UTC timestamps to configured local timezone at the read boundary.
     # `when` is computed from the raw UTC string before conversion.
     # `_context` rows come straight from fetch_event_context (raw DB content —
     # unlike the main rows, which recall_with_config -> recall_fusion already
@@ -161,8 +161,8 @@ def _like_escape(s: str) -> str:
 
 
 def _tl_resolve(conn, match: str | None, date: str | None) -> list[dict]:
-    """Find role='tl' rows by content substring (`match`) and/or Melbourne-local
-    day (`date`, YYYY-MM-DD). Returns [{event_id, line}] rendered with Melbourne
+    """Find role='tl' rows by content substring (`match`) and/or configured-local-timezone
+    day (`date`, YYYY-MM-DD). Returns [{event_id, line}] rendered with configured local timezone
     hh:mm, newest first, capped at 20. Raises ValueError on a malformed date."""
     clauses = ["role='tl'"]
     params: list = []
@@ -180,13 +180,13 @@ def _tl_resolve(conn, match: str | None, date: str | None) -> list[dict]:
         f" WHERE {' AND '.join(clauses)}"
         " ORDER BY COALESCE(ts_start, timestamp) DESC LIMIT 20", params
     ).fetchall()
-    from .timeline import _hhmm_melb
+    from .timeline import _hhmm_local
     from . import tl_writer
     out = []
     for r in rows:
         ts_start = r["ts_start"] or r["timestamp"]
-        hhmm_start = _hhmm_melb(ts_start)
-        hhmm_end = _hhmm_melb(r["ts_end"]) if r["ts_end"] else None
+        hhmm_start = _hhmm_local(ts_start)
+        hhmm_end = _hhmm_local(r["ts_end"]) if r["ts_end"] else None
         out.append({
             "event_id": r["id"],
             "line": tl_writer.render_line(hhmm_start, hhmm_end, r["content"]),
@@ -263,13 +263,13 @@ def _tl_clear(event_id: int | None, sid: str | None,
         if not rows:
             return {"ok": True, "cleared": 0}
 
-        from .timeline import _hhmm_melb
+        from .timeline import _hhmm_local
         from . import tl_writer
         lines = []
         for r in rows:
             ts_start = r["ts_start"] or r["timestamp"]
-            hhmm_start = _hhmm_melb(ts_start)
-            hhmm_end = _hhmm_melb(r["ts_end"]) if r["ts_end"] else None
+            hhmm_start = _hhmm_local(ts_start)
+            hhmm_end = _hhmm_local(r["ts_end"]) if r["ts_end"] else None
             lines.append(tl_writer.render_line(hhmm_start, hhmm_end, r["content"]))
         ids = [r["id"] for r in rows]
 
@@ -319,7 +319,7 @@ def tl(
     date: str | None = None,
 ) -> dict:
     """Add/update/clear/query timeline.
-    - 'query': find rows by match (content substring) and/or date (Melbourne
+    - 'query': find rows by match (content substring) and/or date (configured local timezone
       YYYY-MM-DD) -> [{event_id, line}]. Use it to look up an event_id.
     - 'update'/'clear': address a row by event_id, OR by match (+optional date)
       when you don't have the id. e.g. update match='千层' date='2026-07-05'.

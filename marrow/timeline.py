@@ -19,19 +19,17 @@ Format (FINAL spec, plan 4A-3):
   Budget ~4000 chars (safety net).
 
 Tone labels reuse top_sections._tone / _vband / _aband (no duplication).
-All DB timestamps are UTC; Melbourne on render via timeutil.
+All DB timestamps are UTC; configured local timezone on render via timeutil.
 """
 from __future__ import annotations
 
 import datetime as _dt
 import re as _re
 import sqlite3
-from zoneinfo import ZoneInfo
 from .top_sections import _tone, _vband, _aband, _wmean
 from . import config as _config
 
 _TZ = _config.get_tz()
-_MELB_TZ = ZoneInfo("Australia/Melbourne")
 # Matches leading HH:MM in a LIFE line (e.g. "21:40 买了b5精华")
 _LIFE_TS_RE = _re.compile(r"^(\d{2}:\d{2})(?:-\d{2}:\d{2})?(?:\s+|(?=【))(.*)", _re.DOTALL)
 _CUTOFF_H = 6          # 6AM local day boundary
@@ -42,7 +40,7 @@ _OPEN_EXPIRY_DAYS = 7  # open episodes older than this are hidden
 
 # ── helpers ─────────────────────────────────────────────────────────────────
 
-def _now_melb() -> _dt.datetime:
+def _now_local() -> _dt.datetime:
     return _dt.datetime.now(_TZ)
 
 
@@ -55,12 +53,12 @@ def _day_start_utc(local_date: _dt.date) -> _dt.datetime:
 
 
 def _local_date_from_utc(utc_iso: str) -> _dt.date:
-    """UTC ISO → Melbourne local date with 6AM cutoff."""
+    """UTC ISO → local date (configured tz) with 6AM cutoff."""
     s = (utc_iso or "").strip().replace("Z", "+00:00")
     try:
         d = _dt.datetime.fromisoformat(s)
     except ValueError:
-        return _now_melb().date()
+        return _now_local().date()
     if d.tzinfo is None:
         d = d.replace(tzinfo=_dt.timezone.utc)
     local = d.astimezone(_TZ)
@@ -71,12 +69,12 @@ def _local_date_from_utc(utc_iso: str) -> _dt.date:
 
 
 def _calendar_date_from_utc(utc_iso: str) -> _dt.date:
-    """UTC ISO → Melbourne calendar date without the 6AM cutoff."""
+    """UTC ISO → local calendar date (configured tz) without the 6AM cutoff."""
     s = (utc_iso or "").strip().replace("Z", "+00:00")
     try:
         d = _dt.datetime.fromisoformat(s)
     except ValueError:
-        return _now_melb().date()
+        return _now_local().date()
     if d.tzinfo is None:
         d = d.replace(tzinfo=_dt.timezone.utc)
     return d.astimezone(_TZ).date()
@@ -97,8 +95,8 @@ def _utc_iso(d: _dt.datetime) -> str:
     return d.astimezone(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _hhmm_melb(utc_iso: str) -> str:
-    """UTC ISO → Melbourne HH:MM display."""
+def _hhmm_local(utc_iso: str) -> str:
+    """UTC ISO → local HH:MM display (configured tz)."""
     s = (utc_iso or "").strip().replace("Z", "+00:00")
     try:
         d = _dt.datetime.fromisoformat(s)
@@ -133,7 +131,7 @@ def _period_diary_date(utc_iso: str) -> tuple[_dt.date, str]:
     try:
         d = _dt.datetime.fromisoformat(s)
     except ValueError:
-        today = _now_melb().date()
+        today = _now_local().date()
         return today, "ND"
     if d.tzinfo is None:
         d = d.replace(tzinfo=_dt.timezone.utc)
@@ -438,9 +436,9 @@ def _query_self_rows_24h(conn: sqlite3.Connection,
     out: list[dict] = []
     for r in rows:
         ts_start = r["ts_start"] or r["ts"]
-        hhmm = _hhmm_melb(ts_start)
+        hhmm = _hhmm_local(ts_start)
         end = r["ts_end"]
-        rng = f"{hhmm}-{_hhmm_melb(end)}" if end else hhmm
+        rng = f"{hhmm}-{_hhmm_local(end)}" if end else hhmm
         body = (r["body"] or "").strip()
         out.append({
             "id": r["id"],
@@ -552,18 +550,18 @@ def _render_24h(digests: list[dict],
             span_start_utc = _parse_utc(span[0] or "")
             span_end_utc = _parse_utc(span[1] or "")
         if span_start_utc is None or span_end_utc is None:
-            context_date = context_dt.astimezone(_MELB_TZ).date()
+            context_date = context_dt.astimezone(_TZ).date()
             span_start = span_end = None
             dates = (context_date, context_date - _dt.timedelta(days=1))
         else:
-            span_start = span_start_utc.astimezone(_MELB_TZ)
-            span_end = span_end_utc.astimezone(_MELB_TZ)
+            span_start = span_start_utc.astimezone(_TZ)
+            span_end = span_end_utc.astimezone(_TZ)
             days = (span_end.date() - span_start.date()).days
             dates = tuple(span_start.date() + _dt.timedelta(days=i)
                           for i in range(days + 1))
 
         candidates = [
-            _dt.datetime(d.year, d.month, d.day, h, mi, 0, tzinfo=_MELB_TZ)
+            _dt.datetime(d.year, d.month, d.day, h, mi, 0, tzinfo=_TZ)
             for d in dates
         ]
         if span_start is not None and span_end is not None:
@@ -585,7 +583,7 @@ def _render_24h(digests: list[dict],
         if sd["sid"] == current_sid:
             continue
         ts = sd.get("ts") or ""
-        sess_hhmm = _hhmm_melb(ts)
+        sess_hhmm = _hhmm_local(ts)
         kind = (sd.get("kind") or "casual").lower()
         life_raw = sd.get("life_lines") or ""
         life_items = [x.strip() for x in life_raw.splitlines() if x.strip()]
@@ -614,7 +612,7 @@ def _render_24h(digests: list[dict],
             "sid": None,
             "event_id": ev["id"],
             "line_index": None,
-            "hhmm": _hhmm_melb(ts),
+            "hhmm": _hhmm_local(ts),
             "text": content,
         })
 
@@ -629,7 +627,7 @@ def _render_24h(digests: list[dict],
             "sid": None,
             "event_id": sr["id"],
             "line_index": None,
-            "hhmm": sr.get("hhmm") or _hhmm_melb(sr.get("ts") or ""),
+            "hhmm": sr.get("hhmm") or _hhmm_local(sr.get("ts") or ""),
             "text": composed,
             "self_row": True,
         })
@@ -693,15 +691,15 @@ def render_timeline(conn: sqlite3.Connection,
                     inject_cap: int | None = None) -> str:
     """Render the ## Timeline block.
 
-    Uses UTC boundaries for DB queries; Melbourne local for display.
+    Uses UTC boundaries for DB queries; configured local timezone for display.
     Never naive datetime. Returns empty string if DB is empty/cold.
     When inject_cap is set, Zone A is truncated to that many entries.
     """
     now_utc = _dt.datetime.now(_dt.timezone.utc)
     now_utc_iso = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
-    now_melb = now_utc.astimezone(_TZ)
+    now_local = now_utc.astimezone(_TZ)
     yesterday_start_utc = _dt.datetime.combine(
-        (now_melb - _dt.timedelta(days=1)).date(),
+        (now_local - _dt.timedelta(days=1)).date(),
         _dt.time.min,
         tzinfo=_TZ,
     ).astimezone(_dt.timezone.utc)
@@ -736,7 +734,7 @@ def render_timeline(conn: sqlite3.Connection,
         lines_24h = lines_24h[:inject_cap]
 
     # ── zone B: 3 diary days before zone A start ──────────────────────────────
-    zone_a_start_date = (now_melb - _dt.timedelta(days=1)).date()
+    zone_a_start_date = (now_local - _dt.timedelta(days=1)).date()
     zone_b_dates = [zone_a_start_date - _dt.timedelta(days=d) for d in range(1, 4)]
     diary_data = _query_diary_zone_b(conn, zone_b_dates)
 

@@ -17,9 +17,10 @@ import datetime as _dt
 import os
 import re
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
-_MELB = ZoneInfo("Australia/Melbourne")
+from . import config as _config
+
+_TZ = _config.get_tz()
 _WORD_MAX = 8
 _BODY_MAX = 30
 _LABEL_RE = re.compile(r"^\s*(【[^】]*】)?(.*)$", re.DOTALL)
@@ -76,10 +77,10 @@ def _norm_hhmm(s: str) -> str:
     return f"{h:02d}:{m:02d}"
 
 
-def _hhmm_to_utc(hhmm: str, base_date: _dt.date, now_melb: _dt.datetime) -> str:
+def _hhmm_to_utc(hhmm: str, base_date: _dt.date, now_local: _dt.datetime) -> str:
     h, m = int(hhmm[:2]), int(hhmm[3:5])
     local = _dt.datetime(base_date.year, base_date.month, base_date.day,
-                         h, m, tzinfo=_MELB)
+                         h, m, tzinfo=_TZ)
     return local.astimezone(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -131,18 +132,18 @@ def tl_add(conn, timerange: str, body: str,
     content = f"【{label}】{body} [{imp}]" if label else f"{body} [{imp}]"
 
     hhmm_start, hhmm_end = _parse_timerange(timerange)
-    now_melb = _dt.datetime.now(_MELB)
-    base_date = now_melb.date()
-    ts_start = _hhmm_to_utc(hhmm_start, base_date, now_melb)
-    now_utc = now_melb.astimezone(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now_local = _dt.datetime.now(_TZ)
+    base_date = now_local.date()
+    ts_start = _hhmm_to_utc(hhmm_start, base_date, now_local)
+    now_utc = now_local.astimezone(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     if ts_start > now_utc:
         base_date -= _dt.timedelta(days=1)
-        ts_start = _hhmm_to_utc(hhmm_start, base_date, now_melb)
+        ts_start = _hhmm_to_utc(hhmm_start, base_date, now_local)
     ts_end = None
     if hhmm_end is not None:
-        ts_end = _hhmm_to_utc(hhmm_end, base_date, now_melb)
+        ts_end = _hhmm_to_utc(hhmm_end, base_date, now_local)
         if ts_end < ts_start:  # range crosses midnight
-            ts_end = _hhmm_to_utc(hhmm_end, base_date + _dt.timedelta(days=1), now_melb)
+            ts_end = _hhmm_to_utc(hhmm_end, base_date + _dt.timedelta(days=1), now_local)
 
     if not sid:
         from .timeline import _query_current_sid
@@ -185,16 +186,16 @@ def tl_update(conn, event_id: int, timerange: str | None = None,
     if ev["role"] != "tl":
         raise TlError(f"event_id {event_id} is not a tl row (role={ev['role']!r})")
 
-    now_melb = _dt.datetime.now(_MELB)
+    now_local = _dt.datetime.now(_TZ)
     ts_start = ev["ts_start"] or ev["timestamp"]
     ts_end = ev["ts_end"]
     if timerange is not None:
         hhmm_start, hhmm_end = _parse_timerange(timerange)
-        base_date = now_melb.date()
-        ts_start = _hhmm_to_utc(hhmm_start, base_date, now_melb)
-        ts_end = _hhmm_to_utc(hhmm_end, base_date, now_melb) if hhmm_end else None
+        base_date = now_local.date()
+        ts_start = _hhmm_to_utc(hhmm_start, base_date, now_local)
+        ts_end = _hhmm_to_utc(hhmm_end, base_date, now_local) if hhmm_end else None
         if ts_end and ts_end < ts_start:
-            ts_end = _hhmm_to_utc(hhmm_end, base_date + _dt.timedelta(days=1), now_melb)
+            ts_end = _hhmm_to_utc(hhmm_end, base_date + _dt.timedelta(days=1), now_local)
 
     label_part, body_part = _split_content(ev["content"])
     if body is not None:
@@ -221,9 +222,9 @@ def tl_update(conn, event_id: int, timerange: str | None = None,
             " VALUES ('events', ?, 'tl_update', ?)",
             (ev["session_id"], f"event_id={event_id}"),
         )
-    from .timeline import _hhmm_melb
-    hhmm_start = _hhmm_melb(ts_start)
-    hhmm_end = _hhmm_melb(ts_end) if ts_end else None
+    from .timeline import _hhmm_local
+    hhmm_start = _hhmm_local(ts_start)
+    hhmm_end = _hhmm_local(ts_end) if ts_end else None
     _sync_dashboard_line(event_id, hhmm_start, hhmm_end, new_content)
     return {"ok": True, "event_id": event_id}
 

@@ -47,7 +47,7 @@ _ID_RE = re.compile(r"<!-- id:(?P<id>\d+) -->")
 
 
 def _today_melb() -> str:
-    """Return today's date as YYYY-MM-DD in Melbourne local time."""
+    """Return today's date as YYYY-MM-DD in configured local timezone."""
     import datetime
     return datetime.datetime.now(datetime.timezone.utc).astimezone(_MELB_TZ).strftime("%Y-%m-%d")
 
@@ -165,7 +165,7 @@ def _parse(md_text: str) -> list[dict]:
             continue
         # Bare text line (non-empty, not `- ` prefixed, not H5) while cur is
         # None inside a section → treat as new milestone typed by Lumi without
-        # using H5 format. date = today (Melbourne local), pinned = 1.
+        # using H5 format. date = today (configured local timezone), pinned = 1.
         # _bare_line=True signals write-back to replace the whole line with
         # the canonical H5 form instead of just appending an anchor.
         # Skip lines that carry an existing `<!-- id:N -->` anchor — those are
@@ -324,7 +324,7 @@ def reconcile_milestones(conn: sqlite3.Connection,
             else:
                 if row["date"] is None:
                     # Unanchored single-bracket Me row (##### [label]) carries
-                    # no date and no anchor. Insert with today's Melbourne date
+                    # no date and no anchor. Insert with today's configured-local-timezone date
                     # and write anchor back — same path as bare-text inserts.
                     row["date"] = _today_melb()
                 # Safety net: exact-match dedup. Prevents runaway loop if the

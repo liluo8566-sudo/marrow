@@ -1,7 +1,7 @@
 """Time-cue parser: detect natural-language date references in prompt text.
 
-Converts Melbourne-local cues (昨天, 上周X, N天前, etc.) to UTC ISO windows.
-All output timestamps are UTC ISO strings; all day boundaries computed in Melbourne time.
+Converts configured-local-timezone cues (昨天, 上周X, N天前, etc.) to UTC ISO windows.
+All output timestamps are UTC ISO strings; all day boundaries computed in the configured local timezone.
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ def _melb_now(now: datetime | None) -> datetime:
 
 
 def _day_bounds(local_date, tz: ZoneInfo = _MELB) -> tuple[datetime, datetime]:
-    """Return (start, end) aware UTC datetimes for a Melbourne calendar day."""
+    """Return (start, end) aware UTC datetimes for a configured-local-timezone calendar day."""
     start = datetime(local_date.year, local_date.month, local_date.day,
                      0, 0, 0, tzinfo=tz)
     end = start + timedelta(days=1)
@@ -44,7 +44,7 @@ def _fmt(dt: datetime) -> str:
 
 
 def melb_day_range(date_str: str) -> tuple[str, str]:
-    """Convert YYYY-MM-DD Melbourne day to (since_utc, until_utc) ISO strings."""
+    """Convert YYYY-MM-DD configured-local-timezone day to (since_utc, until_utc) ISO strings."""
     from datetime import date as _date
     d = _date.fromisoformat(date_str)
     s, e = _day_bounds(d)

@@ -1,7 +1,7 @@
 """Timezone conversion helpers for read-out boundaries.
 
-DB stores timestamps as UTC ISO strings. These helpers convert to Melbourne
-local time at read boundaries only — storage is never modified.
+DB stores timestamps as UTC ISO strings. These helpers convert to the
+configured local timezone at read boundaries only — storage is never modified.
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ _MELB = _config.get_tz()
 def format_recall_ts(s: str, *, now: datetime.datetime | None = None) -> str:
     """Return '[MM-DD Day · Xd ago]' label for a UTC ISO timestamp string.
 
-    Absolute part: MM-DD Day in Melbourne local time (e.g. 06-08 Mon).
+    Absolute part: MM-DD Day in configured local timezone (e.g. 06-08 Mon).
     Relative part: <1h -> 'Xm ago' or 'just now'; <24h -> 'Xh ago';
                    <14d -> 'Xd ago'; <8w -> 'Xw ago'; else 'Xmo ago'.
     `now` defaults to datetime.now(timezone.utc) — injectable for tests.
@@ -52,8 +52,8 @@ def format_recall_ts(s: str, *, now: datetime.datetime | None = None) -> str:
 def reltime_short(s: str, *, now: datetime.datetime | None = None) -> str:
     """Return a short time label for a UTC ISO timestamp — no 'ago' suffix.
 
-    <24h -> 'Xh'; <7d -> 'Xd'; 7d-365d -> 'MM-DD' (Melbourne local);
-    >=365d -> 'YYYY' (Melbourne local year). Distinct from format_recall_ts's
+    <24h -> 'Xh'; <7d -> 'Xd'; 7d-365d -> 'MM-DD' (configured local timezone);
+    >=365d -> 'YYYY' (configured local timezone year). Distinct from format_recall_ts's
     longer '[MM-DD Day · Xd ago]' label — used where a compact single token
     is needed (event-row recall header short format).
     `now` defaults to datetime.now(timezone.utc) — injectable for tests.
@@ -80,7 +80,7 @@ def reltime_short(s: str, *, now: datetime.datetime | None = None) -> str:
 
 
 def utc_iso_to_local_date(s: str) -> str:
-    """Parse a UTC ISO string and return YYYY-MM-DD in Melbourne local time.
+    """Parse a UTC ISO string and return YYYY-MM-DD in configured local timezone.
 
     Falls back to slicing the first 10 chars if parsing fails (preserves
     existing behaviour for already-local or malformed strings).
@@ -97,7 +97,7 @@ def utc_iso_to_local_date(s: str) -> str:
 
 
 def utc_iso_to_local_datetime(s: str) -> str:
-    """Parse a UTC ISO string and return YYYY-MM-DD HH:MM in Melbourne local time.
+    """Parse a UTC ISO string and return YYYY-MM-DD HH:MM in configured local timezone.
 
     Falls back to slicing the first 16 chars (replacing T with space) on error.
     """
