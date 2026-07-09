@@ -2,4 +2,4 @@
 description: Cortex — write the handoff now, then rotate to a fresh window.
 ---
 
-Append to handoff.md now (format follow md), call lie_down(rotate=True) when you done.
+Append your section to handoff.md now — follow the format and style of the preceding sections. Call lie_down(rotate=True) when done.

@@ -1276,7 +1276,7 @@ def lie_down(rotate: bool = False, next_wake_min: float | None = None) -> dict:
     rotate=True respawns a FRESH window on the next wake (use it as the last
     lie_down of a full window; you decide when it's full — no auto rotate).
     Only rotate=True (or a lie_down when the window is already at the ~150k fuse
-    line) requires a handoff (碎碎念) written this window first — a PreToolUse
+    line) requires your handoff section appended this window first — a PreToolUse
     guard denies those until it's saved. Also clears due self_schedule + records
     tokens."""
     args = ["--rotate"] if rotate else []
