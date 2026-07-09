@@ -1101,11 +1101,11 @@ def session_start() -> int:
                 pass
 
             # Cortex handoff (碎碎念): fresh window only (new process = fresh;
-            # a resume skips). Injected here, not in the wakeup note.
+            # a resume skips). Content is no longer injected here — the user's
+            # cortex CLAUDE.md `@handoff.md` imports it directly. Page-turn
+            # (stale-date archive + fresh template) still runs as a side effect.
             if os.environ.get("MARROW_CORTEX") and not is_resume:
-                hd = _cortex_handoff_block()
-                if hd:
-                    parts.append(hd)
+                _cortex_handoff_page_turn_if_stale()
 
             try:
                 from . import schedule as _sched
@@ -3326,29 +3326,26 @@ def _cortex_page_turn(p: Path, old_text: str) -> None:
         pass
 
 
-def _cortex_handoff_block() -> str:
-    """Handoff note content for a fresh cortex window. Empty if absent/unreadable.
-    Daily file: a stale (before-today) L1 date is injected as-is this one last
-    time, then the file is archived and replaced by a fresh dated template copy
-    for tomorrow's read. No parsable date -> inject as-is, never page-turn."""
+def _cortex_handoff_page_turn_if_stale() -> None:
+    """Daily file side effect for a fresh cortex window: a stale (before-today)
+    L1 date triggers archive + fresh dated template copy for tomorrow's read.
+    No parsable date or unreadable file -> no-op. No content is returned; the
+    user's cortex CLAUDE.md `@handoff.md` import is the sole read path now."""
     p = _cortex_handoff_path()
     if p is None:
-        return ""
+        return
     try:
         text = p.read_text(encoding="utf-8").strip()
     except OSError:
-        return ""
+        return
     if not text:
-        return ""
-    title = (config.load().get("cortex", {}) or {}).get(
-        "handoff_title", "Handoff")
-    block = f"{title}:\n{text}"
+        return
     date_str = _handoff_l1_date(text)
-    if date_str is not None:
-        today = datetime.now(config.get_tz()).date().isoformat()
-        if date_str < today:
-            _cortex_page_turn(p, text)
-    return block
+    if date_str is None:
+        return
+    today = datetime.now(config.get_tz()).date().isoformat()
+    if date_str < today:
+        _cortex_page_turn(p, text)
 
 
 def _window_tokens_from_transcript(tpath: str) -> int:

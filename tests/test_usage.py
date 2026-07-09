@@ -1,8 +1,8 @@
 """Usage rendering + agent-token transcript scan (marrow/usage.py) and the
-turn_inject threshold line / cortex lie_down deny guard / SessionStart handoff
-block. The threshold line's `main` figure is WINDOW OCCUPANCY (last assistant
-usage totals, hooks._window_tokens_from_transcript — same metric as statusline
-`total` and the rotate/fuse thresholds), not cumulative net-spend."""
+turn_inject threshold line / cortex lie_down deny guard / cortex handoff
+page-turn. The threshold line's `main` figure is WINDOW OCCUPANCY (last
+assistant usage totals, hooks._window_tokens_from_transcript — same metric as
+statusline `total` and the rotate/fuse thresholds), not cumulative net-spend."""
 from __future__ import annotations
 
 import io
@@ -265,21 +265,6 @@ def test_deny_skips_non_cortex(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# SessionStart cortex handoff block
-# --------------------------------------------------------------------------- #
-
-def test_handoff_block_reads_file(tmp_path, monkeypatch):
-    hp = _handoff(tmp_path, monkeypatch, content="carry this forward")
-    block = hooks._cortex_handoff_block()
-    assert "carry this forward" in block
-
-
-def test_handoff_block_empty_when_absent(tmp_path, monkeypatch):
-    monkeypatch.setattr(hooks, "_cortex_handoff_path", lambda: tmp_path / "none.md")
-    assert hooks._cortex_handoff_block() == ""
-
-
-# --------------------------------------------------------------------------- #
 # daily handoff page-turn
 # --------------------------------------------------------------------------- #
 
@@ -309,12 +294,20 @@ def _page_turn_setup(tmp_path, monkeypatch, l1_date=None, template="# Title [YYY
     return home, hp
 
 
+def test_page_turn_returns_no_content(tmp_path, monkeypatch):
+    """SessionStart must not surface handoff content — the page-turn is a pure
+    side effect; the user's cortex CLAUDE.md `@handoff.md` import is the read
+    path now."""
+    home, hp = _page_turn_setup(tmp_path, monkeypatch, l1_date="2026-07-01")
+    assert hooks._cortex_handoff_page_turn_if_stale() is None
+
+
 def test_page_turn_same_day_noop(tmp_path, monkeypatch):
     today = datetime.now(config.get_tz()).date().isoformat()
     home, hp = _page_turn_setup(tmp_path, monkeypatch, l1_date=today)
-    block = hooks._cortex_handoff_block()
-    assert "yesterday's content" in block
+    hooks._cortex_handoff_page_turn_if_stale()
     assert hp.exists()
+    assert "yesterday's content" in hp.read_text(encoding="utf-8")
     assert not (home / "handoff_archive").exists()
 
 
@@ -322,10 +315,8 @@ def test_page_turn_cross_day_archives_and_refreshes(tmp_path, monkeypatch):
     old_mtime = time.time() - 86400
     home, hp = _page_turn_setup(tmp_path, monkeypatch, l1_date="2026-07-01")
     os.utime(hp, (old_mtime, old_mtime))
-    block = hooks._cortex_handoff_block()
-    # injected text is the OLD content
-    assert "yesterday's content" in block
-    # archive file exists
+    hooks._cortex_handoff_page_turn_if_stale()
+    # archive file exists, holds the OLD content
     archived = home / "handoff_archive" / "2026-07-01.md"
     assert archived.exists()
     assert "yesterday's content" in archived.read_text(encoding="utf-8")
@@ -340,8 +331,7 @@ def test_page_turn_cross_day_archives_and_refreshes(tmp_path, monkeypatch):
 
 def test_page_turn_unparsable_date_no_op(tmp_path, monkeypatch):
     home, hp = _page_turn_setup(tmp_path, monkeypatch, l1_date=None)
-    block = hooks._cortex_handoff_block()
-    assert "yesterday's content" in block
+    hooks._cortex_handoff_page_turn_if_stale()
     assert hp.exists()
     assert not (home / "handoff_archive").exists()
     assert "yesterday's content" in hp.read_text(encoding="utf-8")
@@ -352,6 +342,6 @@ def test_page_turn_collision_suffix(tmp_path, monkeypatch):
     archive_dir = home / "handoff_archive"
     archive_dir.mkdir(parents=True, exist_ok=True)
     (archive_dir / "2026-07-01.md").write_text("existing", encoding="utf-8")
-    hooks._cortex_handoff_block()
+    hooks._cortex_handoff_page_turn_if_stale()
     assert (archive_dir / "2026-07-01.md").read_text(encoding="utf-8") == "existing"
     assert (archive_dir / "2026-07-01-2.md").exists()

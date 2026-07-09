@@ -296,13 +296,13 @@ wishlist_path = ""
 # = tools return a "not configured" error.
 venv_python = ""
 repo_root = ""
-# Handoff (碎碎念) note file under <home>. Injected at SessionStart on a fresh
-# cortex window (new process = fresh; resume skips). Written by the session.
-# Daily file with lazy page-turn: a stale (yesterday-or-older) L1 date is
-# injected as-is once more, then archived to <home>/<handoff_archive_dir>/
-# and replaced by a fresh copy of <home>/<handoff_template_file>.
+# Handoff (碎碎念) note file under <home>. Read via the cortex CLAUDE.md
+# `@handoff.md` memory import, not injected by SessionStart. Written by the
+# session. Daily file with lazy page-turn on a fresh cortex-window
+# SessionStart: a stale (yesterday-or-older) L1 date triggers archive to
+# <home>/<handoff_archive_dir>/ and replacement by a fresh copy of
+# <home>/<handoff_template_file>.
 handoff_file = "handoff.md"
-handoff_title = "Handoff"
 handoff_archive_dir = "handoff_archive"
 handoff_template_file = "handoff_template.md"
 # lie_down PreToolUse guard: deny (write your 碎碎念 first) when rotate=True OR
