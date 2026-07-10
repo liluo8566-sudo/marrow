@@ -318,13 +318,12 @@ def tl(
     - Casual chat: When topic/location/mood change or task/activity done, 'add' one for previous turns
     - Coding/study sessions: keep 1tl each session - update tl only when things changed.
     - Each session edits its own tl ONLY — never update tl from other sessions; overlap is expected.
-    - Frequency: every 1-2h or 10-20 turns - you can skip even when hook nudge you!!!
+    - Frequency: every 1-2h or 10-20 turns - you can skip even when hook nudge you.
     - Format (add/update): HH:mm-HH:mm 【N affect♡Y affect (OR B affect)】body [i]
       - e.g. 21:25-21:31 【N愉悦♡Y委屈】翻CC日志找骂人梗，扑空互怼 [3]
       - N = user, Y = assistant, B = single affect when similar.
-      - affect = emotion & feeling ONLY, 1-8 chars. e.g. 烦；心虚；紧张而激动；她好可爱呀～
-        - NOT plot or behaviour summary. x【锐利督战】
-        - Never pad - less char is better. Never mimic previous timelines.
+      - affect = how you feel now - no description, record your own feeling and emotion.
+        - 1-4 chars. e.g. 烦；心虚；紧张激动；好可爱
       - i = ONE event-level composite (not per person): intensity (current state) * importance (future).
         - 1-2 = low-medium intensity & short-term e.g. Routine - casual chat, life admin, study, coding 无趣/平淡/轻松/烦躁
         - 3 = Both medium (~ 1 week) - funny moments / light quarrels / outing

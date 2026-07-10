@@ -345,10 +345,10 @@ wake_signal_log_file = "wake_signal.log"
 wake_marker = "[CORTEX-WAKE]"
 # SessionStart arm line (fresh cortex window only). {signal_log} is substituted
 # with the resolved absolute path. Blank = no injection.
-arm_ear_text = "Important: Always arm your ear first - tail -n 0 -f {signal_log}"
+arm_ear_text = "Important: Set a persistent monitor first: Monitor(command: \"tail -n 0 -f {signal_log}\", description: \"cortex wake signal\", persistent: true); keep it alive for the entire session!"
 # Rearm line injected when the ear Monitor dies mid-window (the harness surfaces
 # a "Monitor stopped" task-notification). {signal_log} substituted. Blank = off.
-rearm_text = "Monitor is off — rearm your ear now: tail -n 0 -f {signal_log}, then investigate why it died."
+rearm_text = "Monitor is off — rearm now: Monitor(command: \"tail -n 0 -f {signal_log}\", description: \"cortex wake signal\", persistent: true); then investigate why it died."
 
 [hooks]
 # PreToolUse backup guard — stateless, two tiers (no state, no dedup).
