@@ -279,3 +279,18 @@ def test_switch_off_lie_down_deny_inactive(monkeypatch):
     monkeypatch.delenv("MARROW_CORTEX", raising=False)
     inp = {"tool_name": "mcp__marrow__lie_down", "tool_input": {"rotate": True}}
     assert cortex_bridge._cortex_lie_down_deny(inp) is None
+
+
+def test_cortex_boot_rules_reads_file(monkeypatch, tmp_path):
+    """cortex_boot_rules returns the boot-rules file contents (stripped) when it
+    exists under <[cortex].home>/<boot_rules_file>."""
+    _force_enabled(monkeypatch, True,
+                   extra={"home": str(tmp_path), "boot_rules_file": "boot_rules.md"})
+    (tmp_path / "boot_rules.md").write_text("  sleep after 23:00\n")
+    assert cortex_bridge.cortex_boot_rules() == "sleep after 23:00"
+
+
+def test_cortex_boot_rules_absent_returns_empty(monkeypatch, tmp_path):
+    """No boot-rules file -> empty string (SessionStart injects nothing)."""
+    _force_enabled(monkeypatch, True, extra={"home": str(tmp_path)})
+    assert cortex_bridge.cortex_boot_rules() == ""

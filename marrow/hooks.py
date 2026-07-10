@@ -1106,6 +1106,11 @@ def session_start() -> int:
             # (stale-date archive + fresh template) still runs as a side effect.
             if cortex_bridge.enabled() and os.environ.get("MARROW_CORTEX") and not is_resume:
                 cortex_bridge._cortex_handoff_page_turn_if_stale()
+                # Sleep/wake boot rules (user-authored, optional): inject the
+                # file's contents into a fresh cortex window when it exists.
+                boot_rules = cortex_bridge.cortex_boot_rules()
+                if boot_rules:
+                    parts.append(boot_rules)
 
             try:
                 from . import schedule as _sched

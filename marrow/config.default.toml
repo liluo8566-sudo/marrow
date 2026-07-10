@@ -329,6 +329,10 @@ repo_root = ""
 handoff_file = "handoff.md"
 handoff_archive_dir = "handoff_archive"
 handoff_template_file = "handoff_template.md"
+# Sleep/wake boot rules under <home> (user-authored, optional). Contents are
+# injected into a fresh cortex window at SessionStart when the file exists;
+# absent = nothing injected. Not page-turned — a stable rules file.
+boot_rules_file = "boot_rules.md"
 # lie_down PreToolUse guard: deny (write your 碎碎念 first) when rotate=True OR
 # window occupancy >= force_tokens (15万 fuse line) and no handoff was written
 # this window (handoff mtime after the window's first transcript line).

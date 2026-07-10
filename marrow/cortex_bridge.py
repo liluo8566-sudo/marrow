@@ -388,6 +388,32 @@ def _cortex_handoff_path():
         return None
 
 
+def _cortex_boot_rules_path():
+    """<[cortex].home>/<[cortex].boot_rules_file> — the sleep/wake rules a fresh
+    cortex window reads at SessionStart (the user authors this file herself; it
+    may not exist). None on config error."""
+    try:
+        cx = config.load().get("cortex", {}) or {}
+        home = (cx.get("home") or "~/.config/marrow/cortex")
+        name = (cx.get("boot_rules_file") or "boot_rules.md")
+        return Path(home).expanduser() / name
+    except Exception:
+        return None
+
+
+def cortex_boot_rules() -> str:
+    """Contents of the cortex boot-rules file for SessionStart injection (fresh
+    cortex window only). Empty string when the file is absent/unreadable/empty,
+    so a missing file simply injects nothing."""
+    p = _cortex_boot_rules_path()
+    if p is None:
+        return ""
+    try:
+        return p.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
 _HANDOFF_DATE_RE = _re.compile(
     r"\[(\d{4}-\d{2}-\d{2})\]|(\d{4}-\d{2}-\d{2})\s*$")
 
