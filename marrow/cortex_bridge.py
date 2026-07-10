@@ -348,7 +348,7 @@ def _cortex_lie_down_deny(inp: dict) -> str | None:
     if written:
         return None
     return (cx.get("handoff_deny_text")
-            or "Write your 碎碎念 (handoff) first, then call lie_down again.")
+            or "Write your handoff first, then call lie_down again.")
 
 
 def _window_spawn_epoch(tpath: str) -> float | None:

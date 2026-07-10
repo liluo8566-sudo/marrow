@@ -195,7 +195,7 @@ def test_threshold_inject_agent_tokens_do_not_trigger(tmp_path, monkeypatch, cap
 # cortex lie_down deny guard
 # --------------------------------------------------------------------------- #
 
-def _handoff(tmp_path, monkeypatch, home_name="cortex", content="碎碎念", mtime=None):
+def _handoff(tmp_path, monkeypatch, home_name="cortex", content="handoff-note", mtime=None):
     home = tmp_path / home_name
     home.mkdir(parents=True, exist_ok=True)
     hp = home / "handoff.md"
