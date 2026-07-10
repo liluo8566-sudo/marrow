@@ -71,7 +71,7 @@ def test_reconcile_inserts_unanchored(db, tmp_path):
     # Format = H5 paragraph: `##### [date] subject\ndescription`.
     new_block = (
         "##### [2026-05-22] Round 2 milestone\n"
-        "added by Lumi\n\n"
+        "added by user\n\n"
     )
     text = text.replace("## Me\n\n", "## Me\n\n" + new_block)
     md.write_text(text, encoding="utf-8")
@@ -231,7 +231,7 @@ def test_candidate_drop_deletes_and_tombstones(tmp_path):
 
 
 def test_candidate_row_deleted_drops_and_tombstones(tmp_path):
-    """Lumi rm's the bullet line in Obsidian → drop + tombstone, even with
+    """User rm's the bullet line in Obsidian → drop + tombstone, even with
     no emoji vote. Trail marker `<!-- cand:milestone:ids=[N] -->` records
     that the row was rendered last round, so absence == intent to drop.
     """
@@ -245,7 +245,7 @@ def test_candidate_row_deleted_drops_and_tombstones(tmp_path):
         rid = cur.lastrowid
     dash = tmp_path / "dashboard.md"
     # No `- [...] <!-- id:N -->` row in the candidate block — only the trail
-    # marker survives, meaning Lumi deleted the bullet line.
+    # marker survives, meaning the user deleted the bullet line.
     dash.write_text(
         "<!-- marrow:top:start -->\n"
         "## Milestone candidate [0]\n"
@@ -393,7 +393,7 @@ def test_reconcile_deletes_h5_block(db, tmp_path):
 def test_reconcile_ignores_legacy_bullets(db, tmp_path):
     """A stale `- [date] ...` bullet must NOT be absorbed into the
     preceding H5 block's description. Legacy bullets are skipped — the
-    reconcile leaves DB rows untouched until Lumi rewrites the block in
+    reconcile leaves DB rows untouched until the user rewrites the block in
     H5 form (or a fresh render rewrites them).
     """
     folder = tmp_path / "ny"
@@ -468,7 +468,7 @@ def test_reconcile_unanchored_writes_id_back_and_dedups(db, tmp_path):
     text = md.read_text(encoding="utf-8")
     new_block = (
         "##### [2026-05-22] Round 2 milestone\n"
-        "added by Lumi\n\n"
+        "added by user\n\n"
     )
     text = text.replace("## Me\n\n", "## Me\n\n" + new_block)
     md.write_text(text, encoding="utf-8")

@@ -99,7 +99,7 @@ def test_cli_get_session_model_missing_prints_empty(db, capsys) -> None:
 
 
 def test_cli_list_recent_sessions_tab_separated(db, capsys) -> None:
-    repo.upsert_session("sid-x", "claude-opus-4-8[1m]", "wx", title="lumi", db=db)
+    repo.upsert_session("sid-x", "claude-opus-4-8[1m]", "wx", title="user", db=db)
     rc = cli.main(["list-recent-sessions", "--db", db, "--limit", "5"])
     assert rc == 0
     out = capsys.readouterr().out.strip().split("\n")

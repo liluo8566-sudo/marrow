@@ -105,7 +105,7 @@ def test_user_edit_preserved(store, tmp_path):
 
 
 def test_db_changed_md_untouched_does_not_overwrite(store, tmp_path):
-    """md always wins. DB row changes → existing block stays as-is. Lumi
+    """md always wins. DB row changes → existing block stays as-is. The user
     must delete the block to let the next inserter pass re-emit fresh data.
     """
     path = str(tmp_path / "p.md")
@@ -452,7 +452,7 @@ def test_write_failure_does_not_corrupt_baseline(store, tmp_path, monkeypatch):
     """If _atomic_write raises (ENOSPC / EACCES / SIGTERM mid-write), md_index
     must keep its prior baseline — never the body that failed to land. Today
     the inserter would have recorded the new hash before the write attempt,
-    making the next refresh think Lumi's old on-disk content was a user edit
+    making the next refresh think the user's old on-disk content was a user edit
     against fresh DB rows.
     """
     from marrow import inserter

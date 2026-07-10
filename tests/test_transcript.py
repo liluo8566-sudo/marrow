@@ -411,7 +411,7 @@ def test_pure_bridge_time_sticker_header_rows_are_dropped():
     assert transcript._is_harness_row(
         "[time: 2026-06-28 Sun 17:07 | gap: 0m]") is True
     assert transcript._is_harness_row(
-        "[sticker: emoji=⭐, set=lumi_stickers_by_Stellan_CYC_bot]") is True
+        "[sticker: emoji=⭐, set=user_stickers_by_assistant_bot]") is True
     assert transcript._is_harness_row(
         "[time: 2026-06-28 Sun 17:07 | gap: 0m]\n"
         "[sticker: emoji=⭐, set=x]") is True

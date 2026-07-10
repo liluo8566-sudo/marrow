@@ -10,7 +10,7 @@ For each candidate sid, _classify returns spawn|skip per these preconditions
 followed by a 7-state table:
 
   P1. bridge owns sessionend timing  -> skip
-  P2. session_block latest = archive -> skip (Lumi archived; cleared = run)
+  P2. session_block latest = archive -> skip (user archived; cleared = run)
   P3. manual_skip latest = skip      -> skip (manual_skip; skip_cleared = run)
   P4. end_row.summary in {worktree=1, mm_minus_blocked, headless=1,
       subagent=1} -> skip (alt close path)

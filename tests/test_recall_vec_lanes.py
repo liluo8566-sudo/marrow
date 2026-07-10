@@ -182,7 +182,7 @@ def test_events_lane_embed_strips_time_and_sticker_markers(db):
 def test_events_lane_embed_strips_sticker_line_mixed_with_dialogue(db):
     _make_event(
         db,
-        "[sticker: emoji=⭐, set=lumi_stickers_by_Stellan_CYC_bot]\n"
+        "[sticker: emoji=⭐, set=user_stickers_by_assistant_bot]\n"
         "？狗男人怎么接不住我的梗",
     )
     captured = {}

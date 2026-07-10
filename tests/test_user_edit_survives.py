@@ -4,7 +4,7 @@ Pre-fix bugs (now closed):
 - mw refresh called MdIndex.sync_file which overwrote the content_hash
   baseline. The dashboard inserter then saw `stored == cur_hash` and
   walked into the "no edit since last auto-write" branch → fresh DB
-  body overwrote Lumi's edit. Fixed by sync_file_observe.
+  body overwrote the user's edit. Fixed by sync_file_observe.
 - dashboard.tasks block was RECONCILED but reconcile_tasks ignored
   title text edits. Fixed by extending reconcile_tasks.
 - dashboard.affect had no append mechanism: hash-skip preserved the
@@ -48,7 +48,7 @@ def env(tmp_path, monkeypatch):
 
 
 def test_dashboard_affect_edit_survives_mw_refresh(env):
-    """The exact failure Lumi reported: edit affect text in md, run
+    """The exact failure the user reported: edit affect text in md, run
     `mw refresh`. Edit must survive."""
     db, dash = env
     # First refresh — bootstraps dashboard.md.
@@ -56,15 +56,15 @@ def test_dashboard_affect_edit_survives_mw_refresh(env):
     text = dash.read_text(encoding="utf-8")
     assert "原描述" in text, "fixture should render initial affect"
     # Hand-edit the description.
-    edited = text.replace("原描述", "Lumi 的手改")
+    edited = text.replace("原描述", "user 的手改")
     dash.write_text(edited, encoding="utf-8")
     # Run mw refresh again — Bug 1 path (sync_file → write_dashboard).
     assert cli.main(["refresh", "--db", db]) == 0
     final = dash.read_text(encoding="utf-8")
-    assert "Lumi 的手改" in final, \
+    assert "user 的手改" in final, \
         "affect description edit must survive mw refresh"
     assert "原描述" not in final, \
-        "old description must not resurface (DB absorbed Lumi's edit)"
+        "old description must not resurface (DB absorbed the user's edit)"
 
 
 def test_dashboard_alerts_block_is_db_authoritative(tmp_path, monkeypatch):
@@ -93,14 +93,14 @@ def test_dashboard_alerts_block_is_db_authoritative(tmp_path, monkeypatch):
     text = dash.read_text(encoding="utf-8")
     edited = text.replace(
         "- warn: recall returned 0",
-        "- warn: recall returned 0 (lumi investigating)",
+        "- warn: recall returned 0 (user investigating)",
     )
     dash.write_text(edited, encoding="utf-8")
 
     # Second refresh — display-only block snaps back to DB content.
     assert cli.main(["refresh", "--db", db]) == 0
     final = dash.read_text(encoding="utf-8")
-    assert "lumi investigating" not in final, \
+    assert "user investigating" not in final, \
         "alerts is display-only; user edit must NOT survive refresh"
     assert "- warn: recall returned 0" in final, \
         "DB-driven alert content must always be re-emitted"
@@ -255,7 +255,7 @@ def test_dashboard_user_edit_survives_watcher_sync(env, tmp_path):
         "<edited>", 1,
     ) if "原描述" in text else text
     if "原描述" in text:
-        edited = text.replace("原描述", "Lumi 改")
+        edited = text.replace("原描述", "user 改")
     else:
         pytest.skip("fixture did not render expected affect text")
     dash.write_text(edited, encoding="utf-8")
@@ -273,13 +273,13 @@ def test_dashboard_user_edit_survives_watcher_sync(env, tmp_path):
     finally:
         conn.close()
     final = dash.read_text(encoding="utf-8")
-    assert "Lumi 改" in final, \
+    assert "user 改" in final, \
         "affect edit must survive sync_file_observe → write_dashboard"
 
 
 def test_task_title_edit_persists_across_refresh(env):
     """Title rewrite '123' → '321'-style edit. mw refresh absorbs it into
-    DB via reconcile_tasks; the rendered body shows Lumi's text; a later
+    DB via reconcile_tasks; the rendered body shows the user's text; a later
     new task lands without clobbering the kept edit."""
     db, dash = env
     assert cli.main(["refresh", "--db", db]) == 0

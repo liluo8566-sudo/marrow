@@ -1,4 +1,4 @@
-from marrow import migrate, storage
+from marrow import config, migrate, storage
 
 S_2026 = """# 2026
 
@@ -151,7 +151,7 @@ def test_import_timeline_tombstone_blocks_revive(tmp_path):
     conn = storage.init_db(str(tmp_path / "tl3.db"))
     s1 = migrate.import_timeline(conn, S_TL, apply=True)
     assert s1["inserted"] == 4
-    # Lumi drops the first Me row: delete + tombstone with natural-key hash.
+    # User drops the first Me row: delete + tombstone with natural-key hash.
     row = conn.execute(
         "SELECT id, scope, date, title FROM milestones WHERE scope='me'"
         " ORDER BY id LIMIT 1"
@@ -188,7 +188,9 @@ def test_import_timeline_backfill_description_only_when_empty(tmp_path):
     assert row["description"].startswith("我诞生")
 
 
-def test_parse_milestones_timeline_me_and_us():
+def test_parse_milestones_timeline_me_and_us(monkeypatch):
+    monkeypatch.setattr(config, "load",
+                         lambda: {"persona": {"birth_year": 1995}})
     rows = migrate.parse_milestones_timeline(S_TL)
     me = [r for r in rows if r["scope"] == "me"]
     us = [r for r in rows if r["scope"] == "us"]
