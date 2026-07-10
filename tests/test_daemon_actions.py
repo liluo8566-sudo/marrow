@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-from marrow import config, daemon, storage
+from marrow import config, cortex_bridge, daemon, storage
 
 
 @pytest.fixture()
@@ -14,6 +14,7 @@ def env(tmp_path, monkeypatch):
     db = str(tmp_path / "t.db")
     storage.init_db(db).close()
     monkeypatch.setattr(daemon, "_DB", db)
+    monkeypatch.setattr(cortex_bridge, "_DB", db)
     monkeypatch.setattr(config, "db_path", lambda: db)
     monkeypatch.setattr(daemon.subprocess, "run", lambda *a, **k: None)
     return db
@@ -550,8 +551,8 @@ def test_alert_resolve_requires_id(env):
 # ── first untick/list ────────────────────────────────────────────────────────
 
 def test_first_untick_removes_row(env):
-    daemon.first("tick", item="gym-reminder", note="x", sid="s1")
-    out = daemon.first("untick", item="gym-reminder")
+    cortex_bridge.first("tick", item="gym-reminder", note="x", sid="s1")
+    out = cortex_bridge.first("untick", item="gym-reminder")
     assert out == {"ok": True, "item": "gym-reminder"}
     conn = storage.connect(env)
     try:
@@ -561,29 +562,29 @@ def test_first_untick_removes_row(env):
 
 
 def test_first_untick_missing_item_reports_false(env):
-    out = daemon.first("untick", item="nope")
+    out = cortex_bridge.first("untick", item="nope")
     assert out == {"ok": False, "item": "nope"}
 
 
 def test_first_list_shows_acks(env):
-    daemon.first("tick", item="a", note="n1", sid="s1")
-    daemon.first("tick", item="b", note="n2", sid="s2")
-    rows = daemon.first("list")
+    cortex_bridge.first("tick", item="a", note="n1", sid="s1")
+    cortex_bridge.first("tick", item="b", note="n2", sid="s2")
+    rows = cortex_bridge.first("list")
     assert {r["item"] for r in rows} == {"a", "b"}
 
 
 def test_first_unknown_action(env):
-    out = daemon.first("bogus")
+    out = cortex_bridge.first("bogus")
     assert out["ok"] is False
 
 
 def test_first_tick_rejects_bad_status(env):
-    out = daemon.first("tick", item="x", note="n", sid="s1", status="bogus")
+    out = cortex_bridge.first("tick", item="x", note="n", sid="s1", status="bogus")
     assert out["ok"] is False
 
 
 def test_first_tick_status_tried_stored(env):
-    daemon.first("tick", item="x", note="blocked", sid="s1", status="tried")
+    cortex_bridge.first("tick", item="x", note="blocked", sid="s1", status="tried")
     conn = storage.connect(env)
     try:
         row = conn.execute(
