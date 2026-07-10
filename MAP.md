@@ -146,7 +146,7 @@ Three runtimes:
 
 ### 6.3 Hook call sites (hooks.py, all gated `cortex_bridge.enabled()` unless noted)
 - SessionStart (hooks.py) — fresh cortex window only (`enabled() and MARROW_CORTEX and not is_resume`) → `_cortex_handoff_page_turn_if_stale()`: stale (before-today) L1 date on handoff.md triggers archive + fresh dated template copy. Content itself is no longer injected here — cortex's own CLAUDE.md `@handoff.md` import is the read path.
-- PreToolUse lie_down deny (hooks.py) — `_cortex_lie_down_deny(inp)`: denies `mcp__marrow__lie_down` until the 碎碎念 (handoff) is written this window, but only when the call wants rotate OR window occupancy is at `[cortex].force_tokens` (150k default fuse line); a plain lie_down under the line always passes. Cortex-session-only inside the function (checks MARROW_CORTEX itself).
+- PreToolUse lie_down deny (hooks.py) — `_cortex_lie_down_deny(inp)`: denies `mcp__marrow__lie_down` until the handoff is written this window, but only when the call wants rotate OR window occupancy is at `[cortex].force_tokens` (150k default fuse line); a plain lie_down under the line always passes. Cortex-session-only inside the function (checks MARROW_CORTEX itself).
 - kickout immunity B8 (hooks.py) — `cortex_bridge.is_cortex_session()`, env-only by design (no `enabled()` gate — cortex identity, not organ-install state) → cortex window skips the anti-late-night nudge entirely (own bulletin/schedule).
 - turn_inject 100k 亮牌 (hooks.py) — `_cortex_show_context(tpath)`, gated `enabled()`: cortex-only (checks MARROW_CORTEX itself) window-occupancy nudge at `[cortex_rotate].show_tokens` (100k soft, ahead of the 150k fuse), text from `[cortex_rotate].show_text`.
 

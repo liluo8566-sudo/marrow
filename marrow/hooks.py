@@ -1100,7 +1100,7 @@ def session_start() -> int:
             except Exception:
                 pass
 
-            # Cortex handoff (碎碎念): fresh window only (new process = fresh;
+            # Cortex handoff: fresh window only (new process = fresh;
             # a resume skips). Content is no longer injected here — the user's
             # cortex CLAUDE.md `@handoff.md` imports it directly. Page-turn
             # (stale-date archive + fresh template) still runs as a side effect.
@@ -2956,7 +2956,7 @@ def pretool_use() -> int:
             return 0
 
         # Cortex lie_down handoff gate — deny a rotate/full-window lie_down until
-        # the 碎碎念 (handoff) is written this window. Plain lie_down passes.
+        # the handoff is written this window. Plain lie_down passes.
         lie_down_deny: str | None = None
         try:
             if cortex_bridge.enabled():

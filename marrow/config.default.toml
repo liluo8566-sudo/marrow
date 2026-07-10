@@ -240,7 +240,7 @@ im_quiet_text = ""
 [cortex_rotate]
 # Cortex-only (MARROW_CORTEX=1) window-occupancy 亮牌. When window tokens reach
 # show_tokens (10万 soft, ahead of the 15万 fuse) turn_inject appends a one-line
-# nudge to wrap up, write the 碎碎念 (handoff), and lie_down(rotate=True). Normal
+# nudge to wrap up, write the handoff, and lie_down(rotate=True). Normal
 # sessions never see this. Empty text = inert.
 show_tokens = 100000
 show_text = "Context ≥100k - If not actively chatting with user, handoff within 3 turns and lie_down(rotate=True) to clear.  If mid-conversation: carry on, the 150k fuse is the backstop."
@@ -320,7 +320,7 @@ wishlist_path = ""
 # = tools return a "not configured" error.
 venv_python = ""
 repo_root = ""
-# Handoff (碎碎念) note file under <home>. Read via the cortex CLAUDE.md
+# Handoff note file under <home>. Read via the cortex CLAUDE.md
 # `@handoff.md` memory import, not injected by SessionStart. Written by the
 # session. Daily file with lazy page-turn on a fresh cortex-window
 # SessionStart: a stale (yesterday-or-older) L1 date triggers archive to
@@ -329,7 +329,7 @@ repo_root = ""
 handoff_file = "handoff.md"
 handoff_archive_dir = "handoff_archive"
 handoff_template_file = "handoff_template.md"
-# lie_down PreToolUse guard: deny (write your 碎碎念 first) when rotate=True OR
+# lie_down PreToolUse guard: deny (write your handoff first) when rotate=True OR
 # window occupancy >= force_tokens (15万 fuse line) and no handoff was written
 # this window (handoff mtime after the window's first transcript line).
 force_tokens = 150000

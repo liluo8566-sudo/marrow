@@ -319,7 +319,7 @@ def register(marrow_tool, db: str | None = None) -> None:
 
 
 def _cortex_lie_down_deny(inp: dict) -> str | None:
-    """Deny lie_down until the 碎碎念 (handoff) is written this window, when the
+    """Deny lie_down until the handoff is written this window, when the
     session asked to rotate OR the window is at the fuse line (force_tokens).
     A plain lie_down under the line is allowed. Cortex window only. None = allow."""
     if not os.environ.get("MARROW_CORTEX"):
@@ -377,7 +377,7 @@ def _window_spawn_epoch(tpath: str) -> float | None:
 
 
 def _cortex_handoff_path():
-    """<[cortex].home>/<[cortex].handoff_file> — the 碎碎念 file a fresh cortex
+    """<[cortex].home>/<[cortex].handoff_file> — the handoff file a fresh cortex
     window reads at SessionStart. None on config error."""
     try:
         cx = config.load().get("cortex", {}) or {}
