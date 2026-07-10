@@ -3303,12 +3303,25 @@ def turn_inject() -> int:
         except Exception:
             return ""
 
+    def _tl_fragment() -> str:
+        try:
+            from . import tl_sync as _tls
+            conn = storage.connect(config.db_path())
+            try:
+                frag = _tls.render_update(conn, sid)
+            finally:
+                conn.close()
+            return f"\n\n{frag}" if frag else ""
+        except Exception:
+            return ""
+
     if channel == "wx":
         # WX bridge injects its own time — skip the time stamp only; the
-        # schedule fragment and kickout nudge still apply.
+        # schedule + tl fragments and kickout nudge still apply.
         wx_sched = _sched_fragment()
+        wx_tl = _tl_fragment()
         wx_kick = f"\n\n{kickout_ctx}" if kickout_ctx else ""
-        wx_ctx = f"{wx_sched}{wx_kick}".strip()
+        wx_ctx = f"{wx_sched}{wx_tl}{wx_kick}".strip()
         if wx_ctx:
             json.dump(
                 {"hookSpecificOutput": {
@@ -3346,6 +3359,7 @@ def turn_inject() -> int:
         pass
 
     sched_ctx = _sched_fragment()
+    tl_ctx = _tl_fragment()
 
     # Absorbed global turn-inject: per-turn care directive (config-lives).
     care_ctx = ""
@@ -3362,7 +3376,7 @@ def turn_inject() -> int:
     show_full = f"\n\n{show_ctx}" if show_ctx else ""
     usage_ctx = _usage_threshold_context(sid, tpath)
     usage_full = f"\n\n{usage_ctx}" if usage_ctx else ""
-    ctx = (f"# Context — {now_str}{delta}{sched_ctx}{care_ctx}"
+    ctx = (f"# Context — {now_str}{delta}{sched_ctx}{tl_ctx}{care_ctx}"
            f"{kickout_full}{show_full}{usage_full}")
     json.dump(
         {"hookSpecificOutput": {

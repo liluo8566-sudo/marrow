@@ -263,9 +263,17 @@ deny = ["general-purpose"]
 [tl_nudge]
 # Per-session hint after N assistant turns with no tl_add call. Text lives in
 # marrow/data/tl_nudge.txt (or point text_file at your own).
+# {last_tl} placeholder in the text = local HH:mm of this session's most recent
+# tl row (or "n/a" if none); resolved at fire time. Works in custom text_file too.
 enabled = true
 threshold = 10
 text_file = ""
+
+[tl_sync]
+# Cross-window tl surfacing: each prompt injects a `## TL update` block with tl
+# rows written by other live sessions since this session last saw them.
+# false = no cross-window tl injection.
+enabled = true
 
 [day_para]
 # Day-paragraph writer (marrow.day_para): one 100-150 char overview per day,

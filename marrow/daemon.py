@@ -317,6 +317,7 @@ def tl(
       Single row: no DB backup, deleted line returned. 2+ rows: DB backup + deleted lines (capped at 20).
     - Casual chat: When topic/location/mood change or task/activity done, 'add' one for previous turns
     - Coding/study sessions: keep 1tl each session - update tl only when things changed.
+    - Each session edits its own tl ONLY — never update tl from other sessions; overlap is expected.
     - Frequency: every 1-2h or 10-20 turns - you can skip even when hook nudge you!!!
     - Format (add/update): HH:mm-HH:mm 【N affect♡Y affect (OR B affect)】body [i]
       - e.g. 21:25-21:31 【N愉悦♡Y委屈】翻CC日志找骂人梗，扑空互怼 [3]

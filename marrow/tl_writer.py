@@ -152,6 +152,11 @@ def tl_add(conn, timerange: str, body: str,
         import secrets
         sid = "self:" + secrets.token_hex(4)
 
+    from . import tl_sync
+    prev_hhmm = tl_sync.last_tl_hhmm(conn, sid)
+    prev_hint = (f" (previous tl this session: {prev_hhmm})"
+                 if prev_hhmm != "n/a" else " (first tl this session)")
+
     with conn:
         cur = conn.execute(
             "INSERT INTO events (session_id, timestamp, role, content, channel,"
@@ -168,7 +173,7 @@ def tl_add(conn, timerange: str, body: str,
         from . import tl_nudge
         tl_nudge.reset(sid)
     return {"ok": True, "event_id": event_id,
-            "line": render_line(hhmm_start, hhmm_end, content)}
+            "line": render_line(hhmm_start, hhmm_end, content) + prev_hint}
 
 
 def tl_update(conn, event_id: int, timerange: str | None = None,
