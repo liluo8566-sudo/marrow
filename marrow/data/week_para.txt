@@ -1,5 +1,5 @@
 
-Please update the weekly overview based on following info.
+Please update the weekly overview based on timeline  info.
 - Old weekly overview & recent timelines - inserted into your context already
 - Use mcp tool - ??? to get today-2's timeline （我认为应该直接注入而不是现场搜，因为这明确就是一定会用到的
 

@@ -155,6 +155,48 @@ def test_lie_down_runs_module_from_any_cwd(env, monkeypatch, tmp_path):
     assert captured["cmd"][1:] == ["-m", "cortex.lie_down"]
 
 
+def _fake_lie_down_run(monkeypatch, tmp_path, stdout):
+    fake_py = tmp_path / "python"
+    fake_root = tmp_path / "repo"
+    monkeypatch.setattr(config, "load", lambda: {
+        "cortex": {"venv_python": str(fake_py), "repo_root": str(fake_root)},
+    })
+
+    class _P:
+        returncode = 0
+        stderr = ""
+
+    _P.stdout = stdout
+    monkeypatch.setattr(cortex_bridge.subprocess, "run",
+                        lambda cmd, cwd=None, **kw: _P())
+
+
+def test_lie_down_surfaces_next_wake(env, monkeypatch, tmp_path):
+    """next_wake in the subprocess JSON is echoed into the tool's text."""
+    _fake_lie_down_run(monkeypatch, tmp_path,
+                       '{"tokens": 42, "next_wake": "14:35"}')
+    out = cortex_bridge.lie_down()
+    assert out["ok"] is True
+    assert out["next_wake"] == "14:35"
+    assert out["text"] == "next wake ≈ 14:35"
+
+
+def test_lie_down_no_next_wake_field(env, monkeypatch, tmp_path):
+    """Old cortex build (no next_wake) — no crash, no next_wake surfaced."""
+    _fake_lie_down_run(monkeypatch, tmp_path, '{"tokens": 42}')
+    out = cortex_bridge.lie_down()
+    assert out["ok"] is True
+    assert "next_wake" not in out
+
+
+def test_lie_down_non_json_stdout(env, monkeypatch, tmp_path):
+    """Non-JSON stdout (legacy plain line) tolerated silently."""
+    _fake_lie_down_run(monkeypatch, tmp_path, "lie_down tokens=42 rotated=False")
+    out = cortex_bridge.lie_down()
+    assert out["ok"] is True
+    assert "next_wake" not in out
+
+
 def test_say_runs_module(env, monkeypatch, tmp_path):
     fake_py = tmp_path / "python"
     fake_root = tmp_path / "repo"
@@ -283,39 +325,93 @@ def test_switch_off_lie_down_deny_inactive(monkeypatch):
 
 
 
-def test_wake_emoji_reads_config(monkeypatch):
-    """wake_emoji reflects [cortex].wake_emoji (stripped)."""
-    _force_enabled(monkeypatch, True, extra={"wake_emoji": "  ☀️ "})
-    assert cortex_bridge.wake_emoji() == "☀️"
+# ── wake v2 (Item 1-3) ────────────────────────────────────────────────────────
 
-
-def test_wake_instructions_substitutes_config_paths(monkeypatch, tmp_path):
-    """cortex_wake_instructions substitutes {note}/{signal_log} with paths
-    resolved under [cortex].home (config-routed, no hardcoded /Users paths)."""
+def test_arm_ear_text_substitutes_signal_log(monkeypatch, tmp_path):
+    """arm_ear_text substitutes {signal_log} with the path resolved under home."""
     _force_enabled(monkeypatch, True, extra={
         "home": str(tmp_path),
-        "wake_instructions": "read {note}; tail {signal_log}",
+        "arm_ear_text": "arm: tail {signal_log}",
     })
-    out = cortex_bridge.cortex_wake_instructions()
-    assert out == f"read {tmp_path/'wakeup_note.md'}; tail {tmp_path/'wake_signal.log'}"
+    assert cortex_bridge.arm_ear_text() == f"arm: tail {tmp_path/'wake_signal.log'}"
 
 
-def test_wake_instructions_absolute_path_override(monkeypatch, tmp_path):
-    """An absolute wakeup_note_file/signal-log override is used as-is."""
-    note = tmp_path / "custom_note.md"
+def test_arm_ear_text_absolute_override(monkeypatch, tmp_path):
+    """An absolute wake_signal_log_file override is used as-is."""
+    log = tmp_path / "custom.log"
     _force_enabled(monkeypatch, True, extra={
         "home": str(tmp_path),
-        "wakeup_note_file": str(note),
-        "wake_instructions": "read {note}",
+        "wake_signal_log_file": str(log),
+        "arm_ear_text": "tail {signal_log}",
     })
-    assert cortex_bridge.cortex_wake_instructions() == f"read {note}"
+    assert cortex_bridge.arm_ear_text() == f"tail {log}"
 
 
-def test_wake_instructions_empty_template_returns_none(monkeypatch, tmp_path):
-    """Empty instruction template -> None (caller injects nothing)."""
+def test_arm_ear_text_blank_returns_none(monkeypatch, tmp_path):
+    """Blank arm text -> None (caller injects nothing)."""
     _force_enabled(monkeypatch, True,
-                   extra={"home": str(tmp_path), "wake_instructions": ""})
-    assert cortex_bridge.cortex_wake_instructions() is None
+                   extra={"home": str(tmp_path), "arm_ear_text": ""})
+    assert cortex_bridge.arm_ear_text() is None
+
+
+def test_wake_marker_reads_config(monkeypatch):
+    """wake_marker reflects [cortex].wake_marker (stripped)."""
+    _force_enabled(monkeypatch, True, extra={"wake_marker": "  [CORTEX-WAKE] "})
+    assert cortex_bridge.wake_marker() == "[CORTEX-WAKE]"
+
+
+def test_wakeup_note_text_reads_file(monkeypatch, tmp_path):
+    """wakeup_note_text returns the note file contents (stripped)."""
+    (tmp_path / "wakeup_note.md").write_text("  do the thing  ", encoding="utf-8")
+    _force_enabled(monkeypatch, True, extra={"home": str(tmp_path)})
+    assert cortex_bridge.wakeup_note_text() == "do the thing"
+
+
+def test_wakeup_note_text_missing_returns_none(monkeypatch, tmp_path):
+    """Missing note file -> None (no crash)."""
+    _force_enabled(monkeypatch, True, extra={"home": str(tmp_path)})
+    assert cortex_bridge.wakeup_note_text() is None
+
+
+def test_wakeup_note_text_empty_returns_none(monkeypatch, tmp_path):
+    """Empty note file -> None (caller injects nothing)."""
+    (tmp_path / "wakeup_note.md").write_text("   \n", encoding="utf-8")
+    _force_enabled(monkeypatch, True, extra={"home": str(tmp_path)})
+    assert cortex_bridge.wakeup_note_text() is None
+
+
+def test_rearm_text_substitutes_signal_log(monkeypatch, tmp_path):
+    """rearm_text substitutes {signal_log}."""
+    _force_enabled(monkeypatch, True, extra={
+        "home": str(tmp_path),
+        "rearm_text": "rearm: tail {signal_log}",
+    })
+    assert cortex_bridge.rearm_text() == f"rearm: tail {tmp_path/'wake_signal.log'}"
+
+
+def test_rearm_text_blank_returns_none(monkeypatch, tmp_path):
+    """Blank rearm text -> None."""
+    _force_enabled(monkeypatch, True,
+                   extra={"home": str(tmp_path), "rearm_text": ""})
+    assert cortex_bridge.rearm_text() is None
+
+
+def test_is_monitor_death_matches_notification():
+    """Fires on the harness Monitor-stopped task-notification shape."""
+    prompt = ('<task-notification>\n<task-id>bwkjxl09h</task-id>\n'
+              '<summary>Monitor event: "ear"</summary>\n'
+              '<event>[Monitor stopped — too much output.]</event>\n'
+              '</task-notification>')
+    assert cortex_bridge.is_monitor_death(prompt) is True
+
+
+def test_is_monitor_death_silent_on_normal_chat():
+    """Never fires on ordinary chat, or on a live (non-stopped) monitor event."""
+    assert cortex_bridge.is_monitor_death("聊聊天，顺便说下 Monitor 怎么用") is False
+    assert cortex_bridge.is_monitor_death("") is False
+    live = ('<task-notification>\n<summary>Monitor event: "ear"</summary>\n'
+            '<event>[CORTEX-WAKE] 2026-07-11 wake</event>\n</task-notification>')
+    assert cortex_bridge.is_monitor_death(live) is False
 
 
 def test_boot_rules_helpers_removed():

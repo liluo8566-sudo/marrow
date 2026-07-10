@@ -1106,6 +1106,11 @@ def session_start() -> int:
             # (stale-date archive + fresh template) still runs as a side effect.
             if cortex_bridge.enabled() and os.environ.get("MARROW_CORTEX") and not is_resume:
                 cortex_bridge._cortex_handoff_page_turn_if_stale()
+                # Arm the ear on a fresh cortex window: one-shot reminder to start
+                # the signal-log tail. Blank config text = no injection.
+                _arm = cortex_bridge.arm_ear_text()
+                if _arm:
+                    parts.append(_arm)
 
             try:
                 from . import schedule as _sched
@@ -1916,20 +1921,32 @@ def user_prompt_submit() -> int:
     if _is_worktree_session(cwd or "") or is_subagent:
         return 0
 
-    # Cortex wake trigger: a fresh cortex window is launched with JUST the wake
-    # emoji as its first prompt (no readable text in the user's face). When that
-    # exact emoji lands inside a cortex window (MARROW_CORTEX set), inject the
-    # full wake instructions as additionalContext and stop (no recall for a wake
-    # prompt). Text + paths are config-routed in cortex_bridge.
+    # Cortex wake-turn / monitor-death injections (cortex window only). The ear
+    # Monitor tails the wake-signal log and surfaces a marker line as a user turn
+    # (wake), or the harness surfaces a "Monitor stopped" task-notification when
+    # the ear dies. Both are handled here and stop before recall; ordinary chat
+    # turns fall through untouched. Text + paths are config-routed.
     if cortex_bridge.is_cortex_session():
-        _emoji = cortex_bridge.wake_emoji()
         _prompt = (inp.get("prompt") or "").strip() if isinstance(inp, dict) else ""
-        if _emoji and _prompt == _emoji:
-            _instr = cortex_bridge.cortex_wake_instructions()
-            if _instr:
+        # Monitor death → rearm the ear. Checked first: the death notification is
+        # a distinct harness shape, never a wake marker.
+        if cortex_bridge.is_monitor_death(_prompt):
+            _re_txt = cortex_bridge.rearm_text()
+            if _re_txt:
                 json.dump({"hookSpecificOutput": {
                     "hookEventName": "UserPromptSubmit",
-                    "additionalContext": _instr,
+                    "additionalContext": _re_txt,
+                }}, sys.stdout)
+            return 0
+        # Wake turn → inject the full wakeup note. Marker match only; missing or
+        # empty note injects nothing (never crashes).
+        _marker = cortex_bridge.wake_marker()
+        if _marker and _marker in _prompt:
+            _note = cortex_bridge.wakeup_note_text()
+            if _note:
+                json.dump({"hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": _note,
                 }}, sys.stdout)
             return 0
 

@@ -334,24 +334,21 @@ handoff_template_file = "handoff_template.md"
 # this window (handoff mtime after the window's first transcript line).
 force_tokens = 150000
 handoff_deny_text = "Write your handoff note first — call lie_down again after saving it."
-# Wake instruction injection (UserPromptSubmit). A fresh cortex window is
-# launched with JUST an emoji as its first prompt (cortex-side wake.wake_prompt)
-# so nothing readable shows in the user's face. When that exact emoji is
-# submitted inside a cortex window (MARROW_CORTEX set), this hook injects the
-# full wake instructions as additionalContext. wake_emoji must match the
-# cortex-side wake.wake_prompt so the two sides can't drift. Paths for the note
-# and signal log default to <home>/<file> (override with an absolute path).
-wake_emoji = "☀️"
+# Wake pipeline (v2). The ear is a Monitor tailing wake_signal_log_file; cortex
+# appends wake_marker-prefixed lines to it, which surface as user turns. Paths
+# for the note and signal log default to <home>/<file> (override with an
+# absolute path).
 wakeup_note_file = "wakeup_note.md"
 wake_signal_log_file = "wake_signal.log"
-# The instruction text injected on the emoji. {note} / {signal_log} are
-# substituted with the resolved absolute paths. Placeholder wording — author the
-# final copy freely; keep the three actions (read the note, arm the ear once,
-# choose next wake).
-wake_instructions = """You just woke. Do this now:
-1. Read {note} — this is your wakeup note; act on what it says.
-2. Arm your ear ONCE per window: if no Monitor is already tailing the signal log, start one — `tail -n 0 -f {signal_log}` — and keep it running across turns. Never start a second one if one is already running.
-3. Before you sleep, choose your next wake to fit your plan: lie_down(next_wake_min=N) with N in 11-55; only fall back to the dice (omit N) when you have no preference."""
+# Marker prefixing a wake signal line. A UserPromptSubmit carrying it inside a
+# cortex window is a wake turn: the hook injects the full wakeup-note text.
+wake_marker = "[CORTEX-WAKE]"
+# SessionStart arm line (fresh cortex window only). {signal_log} is substituted
+# with the resolved absolute path. Blank = no injection.
+arm_ear_text = "Important: Always arm your ear first - tail -n 0 -f {signal_log}"
+# Rearm line injected when the ear Monitor dies mid-window (the harness surfaces
+# a "Monitor stopped" task-notification). {signal_log} substituted. Blank = off.
+rearm_text = "Monitor is off — rearm your ear now: tail -n 0 -f {signal_log}, then investigate why it died."
 
 [hooks]
 # PreToolUse backup guard — stateless, two tiers (no state, no dedup).

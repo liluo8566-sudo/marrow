@@ -268,7 +268,20 @@ def lie_down(rotate: bool = False, next_wake_min: float | None = None) -> dict:
     args = ["--rotate"] if rotate else []
     if next_wake_min is not None:
         args += ["--next-wake-min", str(next_wake_min)]
-    return _run_cortex_module("cortex.lie_down", args or None)
+    out = _run_cortex_module("cortex.lie_down", args or None)
+    # Surface the chosen wake time (cortex.lie_down prints JSON with a
+    # "next_wake":"HH:MM" field). Old cortex builds omit it — tolerate silently.
+    if out.get("ok"):
+        try:
+            import json as _json
+            data = _json.loads(out.get("stdout") or "{}")
+            nw = data.get("next_wake")
+            if nw:
+                out["next_wake"] = nw
+                out["text"] = f"next wake ≈ {nw}"
+        except (ValueError, TypeError):
+            pass
+    return out
 
 
 def wait(minutes: float) -> dict:
@@ -402,29 +415,68 @@ def _cortex_path(key: str, default_name: str) -> Path:
     return p if p.is_absolute() else _cortex_home() / raw
 
 
-def wake_emoji() -> str:
-    """The single-emoji launch prompt that triggers wake-instruction injection.
-    Must match the cortex-side wake.wake_prompt (kept in config on both sides so
-    they can't drift). Empty -> feature off (no emoji matches)."""
-    cx = config.load().get("cortex", {}) or {}
-    return str(cx.get("wake_emoji") or "").strip()
-
-
-def cortex_wake_instructions() -> str | None:
-    """Wake instructions injected as UserPromptSubmit additionalContext when the
-    emoji is submitted in a cortex window. {note}/{signal_log} are substituted
-    with resolved absolute paths (config-routed, never hardcoded). None when
-    disabled/misconfigured (empty template) so the caller injects nothing."""
+def arm_ear_text() -> str | None:
+    """SessionStart arm line for a fresh cortex window: the one-shot reminder to
+    start the ear tail. {signal_log} is substituted with the resolved absolute
+    path (config-routed). None when disabled/blanked so the caller injects
+    nothing."""
     try:
         cx = config.load().get("cortex", {}) or {}
-        tmpl = str(cx.get("wake_instructions") or "").strip()
+        tmpl = str(cx.get("arm_ear_text") or "").strip()
         if not tmpl:
             return None
-        note = _cortex_path("wakeup_note_file", "wakeup_note.md")
         signal_log = _cortex_path("wake_signal_log_file", "wake_signal.log")
-        return tmpl.replace("{note}", str(note)).replace("{signal_log}", str(signal_log))
+        return tmpl.replace("{signal_log}", str(signal_log))
     except Exception:
         return None
+
+
+def wake_marker() -> str:
+    """Marker prefixing a cortex wake signal line ([cortex].wake_marker). A
+    UserPromptSubmit carrying it is a wake turn (full wakeup-note inject)."""
+    cx = config.load().get("cortex", {}) or {}
+    return str(cx.get("wake_marker") or "").strip()
+
+
+def wakeup_note_text() -> str | None:
+    """Full text of the wakeup note (config wakeup_note_file, resolved under
+    home). None when the file is missing/empty so the caller injects nothing."""
+    try:
+        note = _cortex_path("wakeup_note_file", "wakeup_note.md")
+        text = note.read_text(encoding="utf-8").strip()
+        return text or None
+    except OSError:
+        return None
+
+
+def rearm_text() -> str | None:
+    """Rearm line injected when the ear Monitor dies mid-window ([cortex].
+    rearm_text). {signal_log} substituted with the resolved absolute path. None
+    when blanked so the caller injects nothing."""
+    try:
+        cx = config.load().get("cortex", {}) or {}
+        tmpl = str(cx.get("rearm_text") or "").strip()
+        if not tmpl:
+            return None
+        signal_log = _cortex_path("wake_signal_log_file", "wake_signal.log")
+        return tmpl.replace("{signal_log}", str(signal_log))
+    except Exception:
+        return None
+
+
+# Monitor-death signature (Item 3). Verified against live cortex/synapse
+# transcripts (~/.claude/projects/**/*.jsonl): a Monitor that exits or is
+# killed arrives as a user-turn wrapped in <task-notification>…</task-notification>
+# whose <event> body is `[Monitor stopped — …]`. Matching on both the
+# task-notification wrapper AND the literal "Monitor stopped" event marker is
+# conservative — normal chat never contains this harness-generated pair.
+def is_monitor_death(prompt: str) -> bool:
+    """True when the incoming prompt is the harness notification for a Monitor
+    (the ear tail) that stopped. Conservative two-token match — never fires on
+    ordinary chat."""
+    if not prompt:
+        return False
+    return "<task-notification>" in prompt and "Monitor stopped" in prompt
 
 
 _HANDOFF_DATE_RE = _re.compile(
