@@ -114,7 +114,7 @@ def first(
     sid: str | None = None,
     status: str = "done",
 ) -> dict | list[dict]:
-    """(pending — not registered; original description saved in CC-Lab/docs/notes/ct-organ-descriptions.md)
+    """(pending — not registered; original description saved in CC-Lab/docs/notes/ct-first-goal-reconnect.md)
     Respond to the Cortex First section (notes/concerns injected into context).
     'tick' each item you acted on + a tiny note (1-10 chars), e.g. 处理好啦；等会儿再跟进。
     status='tried' when attempted but unsolved — note what blocked.
@@ -179,7 +179,7 @@ def goal(
     value: str | None = None,
     unit: str | None = None,
 ) -> dict | list[dict]:
-    """(pending — not registered; original description saved in CC-Lab/docs/notes/ct-organ-descriptions.md)
+    """(pending — not registered; original description saved in CC-Lab/docs/notes/ct-first-goal-reconnect.md)
     Timetrack weekly goals e.g. study, sleep, exercise.
     action='set': create / update goals
     e.g. 'sleep goal 8h' → key='sleep' value='8' unit='h';
