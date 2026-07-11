@@ -262,9 +262,8 @@ def _run_cortex_module(module: str, extra_args: list[str] | None = None) -> dict
 
 
 def lie_down(rotate: bool = False, next_wake_min: float | None = None) -> dict:
-    """Sleep and set the next wake: lie_down(next_wake_min=N) [N=11-55],
-    omit = dice. rotate=True = fresh window on next wake (last lie_down of a
-    full window; write your handoff section first — guarded)."""
+    """Set the next wake before you sleep: lie_down(next_wake_min=N) [N=1-240].
+    NOTE: TTL=60min - be aware of cold start cost (~100k)."""
     args = ["--rotate"] if rotate else []
     if next_wake_min is not None:
         args += ["--next-wake-min", str(next_wake_min)]
@@ -285,8 +284,10 @@ def lie_down(rotate: bool = False, next_wake_min: float | None = None) -> dict:
 
 
 def wait(minutes: float) -> dict:
-    """Stay awake: wait(minutes=N) [N=11-55] holds the silence timeout once,
-    e.g. you expect a reply soon. Max twice per wake."""
+    """You can stay awake if you want: wait(N) [N=1-55]. Max 2 waits unless
+    user reply before time is up. Default 20mins timer after each user reply.
+    Hint: Feel free to play around while waiting. Last lie_down of this
+    session: handoff.md + rotate=True"""
     return _run_cortex_module("cortex.wait", ["--minutes", str(minutes)])
 
 
