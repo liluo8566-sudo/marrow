@@ -365,14 +365,18 @@ def _cortex_lie_down_deny(inp: dict) -> str | None:
 
 
 def _window_spawn_epoch(tpath: str) -> float | None:
-    """Wall-clock start of this window = the first transcript line's timestamp
-    (a resume opens a new file; a fresh window's first line is its birth). Falls
-    back to the file's own ctime, then None."""
+    """Wall-clock start of this window = the first timestamp in the transcript
+    (a resume opens a new file; a fresh window's first line is its birth).
+    Leading metadata lines carry no timestamp, so scan up to the first ~50 lines
+    for one. Falls back to the file's birthtime (never mtime — the transcript is
+    a live file appended every turn), then None."""
     if not tpath:
         return None
     try:
         with open(tpath, encoding="utf-8") as f:
-            for line in f:
+            for i, line in enumerate(f):
+                if i >= 50:
+                    break
                 m = _re.search(r'"timestamp":"([^"]+)"', line)
                 if m:
                     try:
@@ -380,12 +384,11 @@ def _window_spawn_epoch(tpath: str) -> float | None:
                             m.group(1).replace("Z", "+00:00")).timestamp()
                     except ValueError:
                         break
-                break
     except OSError:
         return None
     try:
-        return os.path.getmtime(tpath)
-    except OSError:
+        return os.stat(tpath).st_birthtime
+    except (OSError, AttributeError):
         return None
 
 

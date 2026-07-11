@@ -265,6 +265,66 @@ def test_deny_skips_non_cortex(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# _window_spawn_epoch — real cortex transcripts open with timestamp-less
+# metadata lines; the timestamp appears further down.
+# --------------------------------------------------------------------------- #
+
+def test_spawn_epoch_skips_leading_metadata(tmp_path):
+    """First lines are metadata with no timestamp; spawn = the first timestamp
+    a few lines down, not the fallback."""
+    from datetime import datetime
+    c = lambda o: json.dumps(o, separators=(",", ":"))  # compact, like real transcripts
+    jl = tmp_path / "meta.jsonl"
+    jl.write_text("\n".join([
+        c({"type": "last-prompt", "content": "x"}),
+        c({"type": "mode"}),
+        c({"type": "permission-mode"}),
+        c({"type": "file-history-snapshot"}),
+        c({"timestamp": "2026-07-08T10:00:00+00:00", "type": "user"}),
+        c({"message": {"usage": {"input_tokens": 10}}}),
+    ]) + "\n")
+    expected = datetime.fromisoformat("2026-07-08T10:00:00+00:00").timestamp()
+    assert cortex_bridge._window_spawn_epoch(str(jl)) == expected
+
+
+def test_spawn_epoch_falls_back_to_birthtime_not_mtime(tmp_path):
+    """No timestamp anywhere → birthtime fallback, which must NOT grow as the
+    live file is appended to (mtime would)."""
+    jl = tmp_path / "no_ts.jsonl"
+    jl.write_text(json.dumps({"type": "mode"}) + "\n")
+    first = cortex_bridge._window_spawn_epoch(str(jl))
+    assert first is not None
+    time.sleep(0.02)
+    with open(jl, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"type": "user"}) + "\n")
+    assert cortex_bridge._window_spawn_epoch(str(jl)) == first
+
+
+def test_spawn_epoch_missing_file_is_none():
+    assert cortex_bridge._window_spawn_epoch("/no/such/file.jsonl") is None
+
+
+def test_allow_rotate_after_metadata_transcript(tmp_path, monkeypatch):
+    """Deny-loop regression: a transcript with leading metadata + a spawn line,
+    handoff written after that spawn timestamp → guard allows."""
+    monkeypatch.setenv("MARROW_CORTEX", "1")
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    c = lambda o: json.dumps(o, separators=(",", ":"))  # compact, like real transcripts
+    jl = tmp_path / "meta_big.jsonl"
+    jl.write_text("\n".join([
+        c({"type": "last-prompt"}),
+        c({"type": "file-history-snapshot"}),
+        c({"timestamp": "2026-07-08T10:00:00+00:00", "type": "user"}),
+        c({"message": {"usage": {"input_tokens": 10_000}}}),
+    ]) + "\n")
+    spawn = datetime.fromisoformat("2026-07-08T10:00:00+00:00").timestamp()
+    _handoff(tmp_path, monkeypatch, mtime=spawn + 5)
+    inp = {"tool_name": "mcp__marrow__lie_down", "transcript_path": str(jl),
+           "tool_input": {"rotate": True}}
+    assert cortex_bridge._cortex_lie_down_deny(inp) is None
+
+
+# --------------------------------------------------------------------------- #
 # daily handoff page-turn
 # --------------------------------------------------------------------------- #
 
