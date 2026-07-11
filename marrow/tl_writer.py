@@ -4,9 +4,10 @@ One call -> a single events row (role='tl', channel=platform). No affect table
 write: the affect phrase lives verbatim inside content, importance lives in
 events.imp. Render/reconcile treat these rows by their tl:e:<event_id> anchor.
 
-Format: HH:mm[-HH:mm] 【N word♡Y word】body [i]
-  N = user affect, Y = assistant affect. word <=8 chars.
-  Single-side rows: just 【N word】 or 【Y word】.
+Format: HH:mm[-HH:mm] 【<u> word♡<a> word】body [i]
+  <u> = user marker (config persona.user_marker), <a> = assistant marker
+  (persona.assistant_marker). affect word <=8 chars.
+  Single-side rows: just 【<u> word】 or 【<a> word】.
   i = composite 1-5 (events.imp), one value for the whole row, not per side,
   rendered at the end as " [i]".
   body <=50 chars (config: tl.body_max).
@@ -88,11 +89,12 @@ def _hhmm_to_utc(hhmm: str, base_date: _dt.date, now_local: _dt.datetime) -> str
 
 
 def _compose_label(n_word, y_word) -> str:
+    p = _config.persona()
     seg = []
     if n_word:
-        seg.append(f"N{n_word}")
+        seg.append(f"{p['user_marker']}{n_word}")
     if y_word:
-        seg.append(f"Y{y_word}")
+        seg.append(f"{p['assistant_marker']}{y_word}")
     return "♡".join(seg)
 
 

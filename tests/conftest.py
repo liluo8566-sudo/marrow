@@ -58,6 +58,19 @@ def _redirect_marrow_data_dir(tmp_path_factory):
 
 
 @pytest.fixture(autouse=True)
+def _persona_markers(monkeypatch):
+    """Pin timeline persona markers to N/Y so existing 【N…♡Y…】 fixtures
+    stay valid. The redirected tmp config has no config.toml, so persona()
+    would otherwise return the code defaults (U/A)."""
+    from marrow import config
+
+    real = config.persona
+    monkeypatch.setattr(config, "persona",
+                        lambda: {**real(),
+                                 "user_marker": "N", "assistant_marker": "Y"})
+
+
+@pytest.fixture(autouse=True)
 def _disable_hooks_popen_detach(monkeypatch, request):
     if "no_popen_patch" in request.keywords:
         return

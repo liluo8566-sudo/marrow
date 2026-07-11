@@ -293,7 +293,6 @@ def _tl_clear(event_id: int | None, sid: str | None,
     return result
 
 
-@marrow_tool()
 def tl(
     action: str,
     timerange: str | None = None,
@@ -319,9 +318,9 @@ def tl(
     - Coding/study sessions: keep 1tl each session - update tl only when things changed.
     - Each session edits its own tl ONLY — never update tl from other sessions; overlap is expected.
     - Frequency: every 1-2h or 10-20 turns - you can skip even when hook nudge you.
-    - Format (add/update): HH:mm-HH:mm 【N affect♡Y affect (OR B affect)】body [i]
-      - e.g. 21:25-21:31 【N愉悦♡Y委屈】翻CC日志找骂人梗，扑空互怼 [3]
-      - N = user, Y = assistant, B = single affect when similar.
+    - Format (add/update): HH:mm-HH:mm 【{u} affect♡{a} affect (OR B affect)】body [i]
+      - e.g. 21:25-21:31 【{u}愉悦♡{a}委屈】翻CC日志找骂人梗，扑空互怼 [3]
+      - {u} = user, {a} = assistant, B = single affect when similar.
       - affect = how you feel now - no description, record your own feeling and emotion.
         - 1-4 chars. e.g. 烦；心虚；紧张激动；好可爱
       - i = ONE event-level composite (not per person): intensity (current state) * importance (future).
@@ -424,6 +423,14 @@ def tl(
                     "matches": hits}
         event_id = hits[0]["event_id"]
     return _tl_clear(event_id=event_id, sid=sid, before=before, after=after)
+
+
+# Inject persona markers into the tl docstring before MCP registration reads it.
+_tl_persona = config.persona()
+tl.__doc__ = (tl.__doc__ or "").replace(
+    "{u}", _tl_persona["user_marker"]).replace(
+    "{a}", _tl_persona["assistant_marker"])
+tl = marrow_tool()(tl)
 
 
 # ── sticker ──────────────────────────────────────────────────────────────────

@@ -191,6 +191,10 @@ cosine_threshold = 0.85
 # Fork users: fill these in your ~/.config/marrow/config.toml.
 user_name = "User"
 assistant_name = "Assistant"
+# Single-char initials prefixed to affect words in timeline labels
+# (【<user_marker>affect♡<assistant_marker>affect】). Keep short.
+user_marker = "U"
+assistant_marker = "A"
 user_aliases = []
 assistant_aliases = []
 # User's birth year, used by migrate.py to convert `[Age N]` milestone

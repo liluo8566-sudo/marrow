@@ -91,12 +91,16 @@ def persona() -> dict:
     raw = load().get("persona", {})
     uname = (raw.get("user_name") or "").strip() or "User"
     aname = (raw.get("assistant_name") or "").strip() or "Assistant"
+    umark = (raw.get("user_marker") or "").strip() or "U"
+    amark = (raw.get("assistant_marker") or "").strip() or "A"
     def _strlist(key: str) -> list[str]:
         return [s.strip() for s in raw.get(key, [])
                 if isinstance(s, str) and s.strip()]
     return {
         "user_name": uname,
         "assistant_name": aname,
+        "user_marker": umark,
+        "assistant_marker": amark,
         "user_aliases": _strlist("user_aliases"),
         "assistant_aliases": _strlist("assistant_aliases"),
         "relationship_terms": _strlist("relationship_terms"),
