@@ -273,7 +273,7 @@ def _write_extract_row(db: str, sid: str, summary: str) -> None:
 def test_retry_failed_alert_silent_on_first_fail(db_env):
     """Contract: a one-off fail (prior_fails=0) MUST NOT alert. Only the
     SECOND failure (catchup retry also blew up) crosses the threshold.
-    Prevents single-shot noise — matches Lumi's spec."""
+    Prevents single-shot noise — matches the user's spec."""
     db, _ = db_env
     from marrow import sessionend_async
     sid = "first-fail-only"
@@ -324,7 +324,7 @@ def test_retry_failed_alert_fires_on_second_fail(db_env):
 def test_retry_failed_alert_collapses_multi_sid_to_one_row(db_env):
     """Type-level fingerprint dedup: N distinct sids that each cross threshold
     must produce exactly 1 alert row (hit_count bumps), not N rows. Prevents
-    the dashboard flood Lumi saw with per-sid fingerprints."""
+    the dashboard flood the user saw with per-sid fingerprints."""
     db, _ = db_env
     from marrow import sessionend_async
     sids = ["multi-a-aaaa", "multi-b-bbbb", "multi-c-cccc"]

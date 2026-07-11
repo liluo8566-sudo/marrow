@@ -143,16 +143,16 @@ def test_iter_top_blocks_round_trip_through_dashboard_parser(db):
 
 
 def test_tasks_title_edit_absorbed_into_db(db, tmp_path):
-    # Tasks block is RECONCILED: reconcile_tasks absorbs Lumi's title edit
-    # back into the DB before render, so the next render reproduces her
+    # Tasks block is RECONCILED: reconcile_tasks absorbs the user's title edit
+    # back into the DB before render, so the next render reproduces the
     # edited title rather than clobbering it.
     dash = tmp_path / "dashboard.md"
     state = tmp_path / "state"
     conn = storage.connect(db)
     try:
         dashboard.write_dashboard(str(dash), conn, state_dir=str(state), db=db)
-        # Lumi free-form edits the task title (not a tick/untick/delete)
-        t = dash.read_text().replace("Essay 370", "Essay 370 EDITED BY LUMI")
+        # User free-form edits the task title (not a tick/untick/delete)
+        t = dash.read_text().replace("Essay 370", "Essay 370 EDITED BY USER")
         dash.write_text(t)
         dashboard.write_dashboard(str(dash), conn, state_dir=str(state), db=db)
         result = dash.read_text()
@@ -163,9 +163,9 @@ def test_tasks_title_edit_absorbed_into_db(db, tmp_path):
                   __import__("marrow.repo", fromlist=["x"]).open_alerts(conn)]
     finally:
         conn.close()
-    assert "EDITED BY LUMI" in result, \
+    assert "EDITED BY USER" in result, \
         "title edit must survive re-render via DB absorption"
-    assert db_title == "Essay 370 EDITED BY LUMI"
+    assert db_title == "Essay 370 EDITED BY USER"
     assert not any("dashboard" in m.lower() and "hand-edited" in m.lower()
                    for m in alerts)
     assert not list(Path(state).glob("dashboard*.bak"))
@@ -183,7 +183,7 @@ def test_alerts_hand_edit_does_not_survive_refresh(db, tmp_path):
         text = dash.read_text()
         edited = text.replace(
             "- warn: recall returned 0",
-            "- warn: recall returned 0 (lumi noted: investigating)",
+            "- warn: recall returned 0 (user noted: investigating)",
         )
         assert edited != text
         dash.write_text(edited)
@@ -191,7 +191,7 @@ def test_alerts_hand_edit_does_not_survive_refresh(db, tmp_path):
         result = dash.read_text()
     finally:
         conn.close()
-    assert "lumi noted: investigating" not in result
+    assert "user noted: investigating" not in result
     assert "- warn: recall returned 0" in result
 
 
@@ -278,10 +278,11 @@ def test_tick_in_md_moves_row_to_completed(db, tmp_path):
 
 def test_dashboard_write_failure_preserves_baseline(db, tmp_path, monkeypatch):
     """Outcome 1: if _atomic_write raises, md_index must keep the prior
-    baseline so the next refresh still recognises Lumi's edits as user edits.
-    Today the dashboard records hashes BEFORE the write — a SIGTERM /
+    baseline so the next refresh still recognises the user's edits as user
+    edits. Today the dashboard records hashes BEFORE the write — a SIGTERM /
     ENOSPC mid-write leaves md_index pointing at content that never landed,
-    a permanent hash desync that makes the next refresh overwrite Lumi's text.
+    a permanent hash desync that makes the next refresh overwrite the user's
+    text.
     """
     from marrow import dashboard as dash_mod
 

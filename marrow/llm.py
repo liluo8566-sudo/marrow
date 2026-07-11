@@ -29,7 +29,7 @@ _ISOLATION = ["--setting-sources", "", "--strict-mcp-config"]
 
 # Prefixes of policy-refusal prose (defense-in-depth; primary signal is
 # stop_reason=="refusal"). Keep short — match intent, not wording. CN entries
-# are case-invariant so lower() match is fine for both. Lumi's content is
+# are case-invariant so lower() match is fine for both. The user's content is
 # mostly CN; EN-only fingerprints would miss the common refusal path.
 _REFUSAL_FINGERPRINTS = (
     "i'm not able to",
@@ -156,43 +156,6 @@ def _snapshot_window_tokens(window: int) -> None:
     _write_kv_rows([("window_tokens", str(window))])
 
 
-def _cortex_stream_timer():
-    """Env-driven stream-event timing probe for cortex wakes (wake latency
-    diagnosis). Returns a callback appending one line per notable stage to
-    CORTEX_WAKE_TIMING_LOG, or None when cortex did not request it. Best-effort:
-    never raises into the stream loop. spawned -> first_event isolates claude
-    CLI startup cost (MCP/env load) before the first token."""
-    path = os.environ.get("CORTEX_WAKE_TIMING_LOG")
-    if not path:
-        return None
-    path = os.path.expanduser(path)
-    wake_id = os.environ.get("CORTEX_WAKE_ID", "?")
-    origin = time.monotonic()
-    seen: set[str] = set()
-
-    def _emit(ev: dict, mono: float) -> None:
-        try:
-            etype = ev.get("type", "?")
-            if etype == "__spawned__":
-                label = "spawned"
-            elif "first" not in seen:
-                seen.add("first")
-                label = "first_event"
-            else:
-                sub = ev.get("subtype")
-                key = f"{etype}/{sub}" if sub else etype
-                if key in seen:
-                    return
-                seen.add(key)
-                label = f"ev.{key}"
-            ms = (mono - origin) * 1000.0
-            with open(path, "a") as f:
-                f.write(f"{_utcnow_iso()} wake={wake_id} stream.{label} +{ms:.0f}ms\n")
-        except Exception:
-            pass
-
-    return _emit
-
 
 class LLMClient:
     def __init__(self, cfg: dict | None = None, on_alert=None):
@@ -245,40 +208,15 @@ class LLMClient:
                      resume_sid: str | None = None,
                      timeout: float | None = None,
                      max_tokens: int | None = None) -> dict:
-        """Full-environment resumed session for cortex (C3, Decided 07-03):
-        no isolation flags — persona/rules/MCP/agents load like a real
-        session. Always injects MARROW_CORTEX=1 (identity marker, e.g. B8
-        kickout immunity) and MARROW_CHANNEL=ct so this session's turns get
-        full marrow memory (events/recall/tl) attributed to the cortex
-        channel, same as any other session. cwd defaults to [cortex].home;
-        resume_sid=None starts a fresh
-        session (daily rebirth). Single attempt — no chain/retry, caller
-        (cortex pacemaker) owns retry policy. `timeout` (s) overrides the
-        provider default so the caller's config is the single source of truth
-        for the call budget (cortex derives its outer kill from the same value).
-        `max_tokens` (>0) caps the per-wake CURRENT WINDOW SIZE — the latest
-        turn's (input+cache_read+cache_creation), i.e. the same figure the
-        caller reasons about via the statusline "total" (Decided 07-04, not
-        cumulative consumption across turns): accumulated mid-stream (usage
-        deduped by requestId — a single turn streams as several assistant
-        lines each repeating identical usage), breach terminates the
-        subprocess and returns capped=True so the caller rebirths. Returns
-        {"text": str, "session_id": str | None} (+ capped / total_tokens
-        [= final window size] when a cap is active).
-        """
-        spec = self.specs.get("claude_cli_cortex")
-        if not spec:
-            raise LLMError("no claude_cli_cortex provider configured")
-        cortex_cfg = self.cfg.get("cortex", {})
-        run_cwd = os.path.expanduser(
-            cwd or cortex_cfg.get("home") or "~/.config/marrow/cortex")
-        Path(run_cwd).mkdir(parents=True, exist_ok=True)
-        tier = cortex_cfg.get("tier", "top")
-        model = cortex_cfg.get("model") or self.tiers.get(tier) or self.tiers.get("top")
-        effort = cortex_cfg.get("effort") or ""
-        return self._run_claude_cortex(
-            spec, model, prompt, cwd=run_cwd, resume_sid=resume_sid,
-            timeout=timeout, effort=effort, max_tokens=max_tokens)
+        """Cross-repo entry point for the cortex runner. The cortex repo spawns
+        marrow's venv python and calls `LLMClient().call_cortex(...)`
+        (~/CC-Lab/cortex/cortex/wake.py) — this method name + signature are a
+        stable contract. Full-env resumed cortex session lives in cortex_bridge
+        (organs extracted there); this thin delegate keeps the caller working."""
+        from . import cortex_bridge
+        return cortex_bridge.call_cortex(
+            self, prompt, cwd=cwd, resume_sid=resume_sid,
+            timeout=timeout, max_tokens=max_tokens)
 
     def _run(self, spec: dict, model: str, prompt: str) -> str:
         kind = spec.get("kind")
@@ -309,62 +247,6 @@ class LLMClient:
         result = self._parse_claude(raw, "stream-json")
         self._log_usage(self._extract_usage(raw, "stream-json"), model, "stream-json")
         return result
-
-    def _run_claude_cortex(self, spec: dict, model: str, prompt: str, *,
-                            cwd: str, resume_sid: str | None,
-                            timeout: float | None = None,
-                            effort: str = "",
-                            max_tokens: int | None = None) -> dict:
-        """Stream-json runner with NO isolation flags (cortex full-env, C3).
-        Mirrors _run_claude_stream's spawn/timeout/kill contract exactly —
-        only the isolation flags, env var, cwd, --resume, and --effort differ.
-        When max_tokens>0, accumulates per-wake usage mid-stream (deduped by
-        requestId) and terminates cleanly when the current turn's window
-        size breaches the cap (capped=True). Env-driven stream-event timing
-        is attached best-effort for wake-latency diagnosis."""
-        timeout = timeout if timeout is not None else spec.get("timeout_s", 600)
-        cmd = [_claude_bin(), "--output-format", "stream-json",
-               "--input-format", "stream-json", "--verbose", "--model", model,
-               "--permission-mode", "bypassPermissions"]
-        if effort:
-            cmd.extend(["--effort", effort])
-        if resume_sid:
-            cmd.extend(["--resume", resume_sid])
-        env = {**os.environ, "MARROW_CORTEX": "1", "MARROW_CHANNEL": "ct"}
-        on_event = _cortex_stream_timer()
-        cap_active = bool(max_tokens and max_tokens > 0)
-        extra: dict = {}
-        if on_event is not None:
-            extra["on_event"] = on_event
-        sink = None
-        if cap_active:
-            sink = {"in": 0, "out": 0, "cache_read": 0, "cache_write": 0,
-                    "window": 0, "capped": False, "by_request": {},
-                    "has_usage": False}
-            extra["max_tokens"] = max_tokens
-            extra["usage_sink"] = sink
-        raw = self._stream_subprocess(cmd, prompt, timeout, env, cwd=cwd, **extra)
-        if sink is not None and sink["capped"]:
-            self._log_usage(self._sink_usage(sink), model, "stream-json",
-                             window=sink["window"])
-            self._log_cortex_cap(sink, max_tokens, model)
-            _snapshot_window_tokens(sink["window"])
-            return {"text": "", "session_id": None, "capped": True,
-                    "total_tokens": sink["window"]}
-        text = self._parse_claude(raw, "stream-json")
-        session_id = self._extract_session_id(raw)
-        if sink is not None:
-            if sink["has_usage"]:
-                self._log_usage(self._sink_usage(sink), model, "stream-json",
-                                 window=sink["window"])
-            else:
-                self._log_usage(self._extract_usage(raw, "stream-json"),
-                                 model, "stream-json")
-            _snapshot_window_tokens(sink["window"])
-            return {"text": text, "session_id": session_id,
-                    "total_tokens": sink["window"]}
-        self._log_usage(self._extract_usage(raw, "stream-json"), model, "stream-json")
-        return {"text": text, "session_id": session_id}
 
     @staticmethod
     def _add_event_usage(sink: dict, ev: dict) -> None:
@@ -419,27 +301,6 @@ class LLMClient:
         return {"input_tokens": sink["in"], "output_tokens": sink["out"],
                 "cache_read_input_tokens": sink["cache_read"],
                 "cache_creation_input_tokens": sink["cache_write"]}
-
-    def _log_cortex_cap(self, sink: dict, cap: int, model: str) -> None:
-        """One audit line marking a per-wake token-cap breach. Reports the
-        breaching turn's window size (input+cache_read+cache_creation — the
-        figure compared against cap) alongside the deduped cumulative usage
-        fields (true consumption across the wake so far) so a breach is
-        auditable without ambiguity about what tripped it. Best-effort."""
-        try:
-            conn = storage.connect()
-            with conn:
-                conn.execute(
-                    "INSERT INTO audit_log (target_table, action, summary)"
-                    " VALUES (?, ?, ?)",
-                    ("llm_usage", "llm_cortex_cap",
-                     f"model={model} capped window={sink['window']} cap={cap} "
-                     f"cumulative(in={sink['in']} out={sink['out']} "
-                     f"cache_read={sink['cache_read']} cache_write={sink['cache_write']})"),
-                )
-            conn.close()
-        except Exception:
-            pass
 
     @staticmethod
     def _stream_subprocess(cmd: list[str], prompt: str, timeout: float,

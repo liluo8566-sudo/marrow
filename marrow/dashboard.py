@@ -145,7 +145,7 @@ def write_dashboard(path: str, conn, *, state_dir: str,
     # Empty path means dashboard is not configured — skip silently.
     if not path:
         return
-    # Reconcile md edits BEFORE render so Lumi's ✅/❌ + tick/untick flow back.
+    # Reconcile md edits BEFORE render so the user's ✅/❌ + tick/untick flow back.
     # Fail-soft: a reconcile error must never block dashboard refresh.
     if os.path.exists(path):
         try:
@@ -209,7 +209,7 @@ def write_dashboard(path: str, conn, *, state_dir: str,
 
     # Write first, record hashes only on success. If _atomic_write raises
     # (ENOSPC, EACCES, SIGTERM mid-write), md_index keeps its prior baseline
-    # so the next refresh still recognises Lumi's edits as user edits.
+    # so the next refresh still recognises the user's edits as user edits.
     _atomic_write(path, new)
     store = MdIndex(conn)
     for bid, h in pending:

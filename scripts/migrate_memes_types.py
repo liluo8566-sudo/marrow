@@ -4,8 +4,8 @@ Usage:
   python scripts/migrate_memes_types.py --dry-run
   python scripts/migrate_memes_types.py --apply
 
-Rules (Lumi 2026-05-24):
-- ids 1..5: type → fact, pinned=1 (Lumi's own protocol/setup notes)
+Rules (decided 2026-05-24):
+- ids 1..5: type → fact, pinned=1 (the user's own protocol/setup notes)
 - all other ids: delete (legacy memes table was full of junk —
   rhetorical quotes, mis-classified entities, one-off phrases)
 

@@ -83,7 +83,7 @@ def render_milestone(conn: sqlite3.Connection) -> str:
     Two H5-heading flavours:
     - Standard (Us + dated Me): `##### [YYYY-MM-DD] subject`
     - Historical Me (year-only date AND title starts with `Age `):
-      `##### [<title>]` — the title itself (e.g. `Age 0-10 | Shanghai`)
+      `##### [<title>]` — the title itself (e.g. `Age 0-10 | Hometown`)
       is the human-readable bracket; the raw year is not surfaced.
       Round-trip stays safe because reconcile reads the row's id from
       the inline `<!-- id:N -->` anchor and pulls date from DB.

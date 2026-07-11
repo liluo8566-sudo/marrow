@@ -30,7 +30,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from . import config, repo, storage, top_sections, transcript
+from . import config, cortex_bridge, repo, storage, top_sections, transcript
 from .popen_detach import popen_detach, popen_detach_lazy
 from .timeutil import (
     utc_iso_to_local_date,
@@ -1100,18 +1100,24 @@ def session_start() -> int:
             except Exception:
                 pass
 
-            # Cortex handoff (碎碎念): fresh window only (new process = fresh;
-            # a resume skips). Injected here, not in the wakeup note.
-            if os.environ.get("MARROW_CORTEX") and not is_resume:
-                hd = _cortex_handoff_block()
-                if hd:
-                    parts.append(hd)
+            # Cortex handoff: fresh window only (new process = fresh;
+            # a resume skips). Content is no longer injected here — the user's
+            # cortex CLAUDE.md `@handoff.md` imports it directly. Page-turn
+            # (stale-date archive + fresh template) still runs as a side effect.
+            if cortex_bridge.enabled() and os.environ.get("MARROW_CORTEX") and not is_resume:
+                cortex_bridge._cortex_handoff_page_turn_if_stale()
+                # Arm the ear on a fresh cortex window: one-shot reminder to start
+                # the signal-log tail. Blank config text = no injection.
+                _arm = cortex_bridge.arm_ear_text()
+                if _arm:
+                    parts.append(_arm)
 
             try:
                 from . import schedule as _sched
-                sched_content, _ = _sched.refresh_daily()
-                if sched_content:
-                    parts.append(sched_content)
+                if _sched.is_enabled():
+                    sched_content, _ = _sched.refresh_daily()
+                    if sched_content:
+                        parts.append(sched_content)
             except Exception:
                 pass
 
@@ -1148,6 +1154,18 @@ def session_end() -> int:
     tpath = inp.get("transcript_path")
     if not tpath:
         return 0
+
+    # Cortex window really closing (not /clear, which also fires SessionEnd
+    # but leaves the window alive): end the wake now instead of waiting for
+    # a 20-min fallback to discover the dead window. Best-effort, never
+    # blocks the rest of session_end.
+    if cortex_bridge.is_cortex_session():
+        reason = inp.get("reason")
+        if reason != "clear":
+            try:
+                cortex_bridge.cortex_window_closed(tpath)
+            except Exception:  # noqa: BLE001 — never block session_end
+                pass
 
     cwd = inp.get("cwd") or ""
     early_sid = (inp.get("session_id") or "").strip()
@@ -1914,6 +1932,43 @@ def user_prompt_submit() -> int:
     is_subagent = bool(tpath and "/tasks/" in tpath)
     if _is_worktree_session(cwd or "") or is_subagent:
         return 0
+
+    # Cortex wake-turn / monitor-death injections (cortex window only). The ear
+    # Monitor tails the wake-signal log and surfaces a marker line as a user turn
+    # (wake), or the harness surfaces a "Monitor stopped" task-notification when
+    # the ear dies. Both are handled here and stop before recall; ordinary chat
+    # turns fall through untouched. Text + paths are config-routed.
+    if cortex_bridge.is_cortex_session():
+        _prompt = (inp.get("prompt") or "").strip() if isinstance(inp, dict) else ""
+        # Monitor death → rearm the ear. Checked first: the death notification is
+        # a distinct harness shape, never a wake marker.
+        if cortex_bridge.is_monitor_death(_prompt):
+            _re_txt = cortex_bridge.rearm_text()
+            if _re_txt:
+                json.dump({"hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": _re_txt,
+                }}, sys.stdout)
+            return 0
+        # Wake turn → inject the full wakeup note. Marker match only; missing or
+        # empty note injects nothing (never crashes).
+        _marker = cortex_bridge.wake_marker()
+        if _marker and _marker in _prompt:
+            _note = cortex_bridge.wakeup_note_text()
+            if _note:
+                json.dump({"hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": _note,
+                }}, sys.stdout)
+            return 0
+        # Real user message (NOT a machine line down the ear channel) → user-wake
+        # reset: flip awake, kill the pending alarm + sentinel, spawn a watchdog.
+        # Best-effort; never blocks the prompt or the recall below.
+        if not cortex_bridge.is_machine_line(_prompt):
+            try:
+                cortex_bridge._cortex_user_wake_reset(inp if isinstance(inp, dict) else {})
+            except Exception:
+                pass
 
     # cwd exclude gate — opt-out per-dir via config.toml [recall].exclude_cwds.
     _ex_cwds = config.load().get("recall", {}).get("exclude_cwds", []) or []
@@ -2717,7 +2772,7 @@ def _git_revert_guard(inp: dict) -> str | None:
         cwd = inp.get("cwd") or ""
         if (
             "/.claude/worktrees/" in cwd
-            or "/.claude/worktrees/" in cmd
+            or ".claude/worktrees/" in cmd
             or _is_worktree_session(cwd)
         ):
             return ""
@@ -2938,10 +2993,11 @@ def pretool_use() -> int:
             return 0
 
         # Cortex lie_down handoff gate — deny a rotate/full-window lie_down until
-        # the 碎碎念 (handoff) is written this window. Plain lie_down passes.
+        # the handoff is written this window. Plain lie_down passes.
         lie_down_deny: str | None = None
         try:
-            lie_down_deny = _cortex_lie_down_deny(inp)
+            if cortex_bridge.enabled():
+                lie_down_deny = cortex_bridge._cortex_lie_down_deny(inp)
         except Exception:  # noqa: BLE001 — fail-open, never blocks the hook
             lie_down_deny = None
         if lie_down_deny:
@@ -3180,9 +3236,11 @@ def _kickout_context(channel: str, now: datetime) -> str:
     """B8 anti-late-night deterministic nudge, config-first ([kickout] in
     config.toml — see config.default.toml for the live windows/text). Cortex
     is immune (MARROW_CORTEX=1, own bulletin/schedule, not this hook's rules)."""
-    if os.environ.get("MARROW_CORTEX"):
+    if cortex_bridge.is_cortex_session():
         return ""
     kc = config.load().get("kickout", {}) or {}
+    if not kc.get("enabled", True):
+        return ""
     now_min = now.hour * 60 + now.minute
     if channel == "cli":
         if _in_time_window(now_min, kc.get("cli_wind_down_start", "21:30"),
@@ -3196,91 +3254,6 @@ def _kickout_context(channel: str, now: datetime) -> str:
                             kc.get("im_quiet_end", "06:00")):
             return kc.get("im_quiet_text", "")
     return ""
-
-
-def _window_spawn_epoch(tpath: str) -> float | None:
-    """Wall-clock start of this window = the first transcript line's timestamp
-    (a resume opens a new file; a fresh window's first line is its birth). Falls
-    back to the file's own ctime, then None."""
-    if not tpath:
-        return None
-    try:
-        with open(tpath, encoding="utf-8") as f:
-            for line in f:
-                m = _re.search(r'"timestamp":"([^"]+)"', line)
-                if m:
-                    try:
-                        return datetime.fromisoformat(
-                            m.group(1).replace("Z", "+00:00")).timestamp()
-                    except ValueError:
-                        break
-                break
-    except OSError:
-        return None
-    try:
-        return os.path.getmtime(tpath)
-    except OSError:
-        return None
-
-
-def _cortex_lie_down_deny(inp: dict) -> str | None:
-    """Deny lie_down until the 碎碎念 (handoff) is written this window, when the
-    session asked to rotate OR the window is at the fuse line (force_tokens).
-    A plain lie_down under the line is allowed. Cortex window only. None = allow."""
-    if not os.environ.get("MARROW_CORTEX"):
-        return None
-    if inp.get("tool_name") != "mcp__marrow__lie_down":
-        return None
-    ti = inp.get("tool_input", {}) or {}
-    tpath = inp.get("transcript_path") or ""
-    cx = config.load().get("cortex", {}) or {}
-    force = int(cx.get("force_tokens", 150_000) or 0)
-    wants_rotate = bool(ti.get("rotate"))
-    occupancy = _window_tokens_from_transcript(tpath)
-    if not wants_rotate and not (force > 0 and occupancy >= force):
-        return None  # plain lie_down under the line — allow
-    # Guard fires: require a handoff written after this window's spawn.
-    p = _cortex_handoff_path()
-    spawn = _window_spawn_epoch(tpath)
-    written = False
-    if p is not None and spawn is not None:
-        try:
-            written = p.stat().st_mtime >= spawn and bool(
-                p.read_text(encoding="utf-8").strip())
-        except OSError:
-            written = False
-    if written:
-        return None
-    return (cx.get("handoff_deny_text")
-            or "Write your 碎碎念 (handoff) first, then call lie_down again.")
-
-
-def _cortex_handoff_path():
-    """<[cortex].home>/<[cortex].handoff_file> — the 碎碎念 file a fresh cortex
-    window reads at SessionStart. None on config error."""
-    try:
-        cx = config.load().get("cortex", {}) or {}
-        home = (cx.get("home") or "~/.config/marrow/cortex")
-        name = (cx.get("handoff_file") or "handoff.md")
-        return Path(home).expanduser() / name
-    except Exception:
-        return None
-
-
-def _cortex_handoff_block() -> str:
-    """Handoff note content for a fresh cortex window. Empty if absent/unreadable."""
-    p = _cortex_handoff_path()
-    if p is None:
-        return ""
-    try:
-        text = p.read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
-    if not text:
-        return ""
-    title = (config.load().get("cortex", {}) or {}).get(
-        "handoff_title", "阿屿の碎碎念")
-    return f"{title}:\n{text}"
 
 
 def _window_tokens_from_transcript(tpath: str) -> int:
@@ -3305,24 +3278,6 @@ def _window_tokens_from_transcript(tpath: str) -> int:
             total = (u.get("input_tokens", 0) + u.get("cache_read_input_tokens", 0)
                      + u.get("cache_creation_input_tokens", 0) + u.get("output_tokens", 0))
     return total
-
-
-def _cortex_show_context(tpath: str) -> str:
-    """Cortex-only (MARROW_CORTEX=1) window-occupancy 亮牌 at show_tokens (10万
-    soft, ahead of the 15万 fuse). Empty for normal sessions, below threshold,
-    or with the text blanked out."""
-    if not os.environ.get("MARROW_CORTEX"):
-        return ""
-    cr = config.load().get("cortex_rotate", {}) or {}
-    text = (cr.get("show_text") or "").strip()
-    if not text:
-        return ""
-    show = int(cr.get("show_tokens", 100_000) or 0)
-    if show <= 0:
-        return ""
-    if _window_tokens_from_transcript(tpath) >= show:
-        return text
-    return ""
 
 
 def _usage_threshold_context(sid: str, tpath: str) -> str:
@@ -3394,12 +3349,38 @@ def turn_inject() -> int:
     now = datetime.now(timezone.utc).astimezone(tz)
     kickout_ctx = _kickout_context(channel, now)
 
+    def _sched_fragment() -> str:
+        try:
+            from . import schedule as _sched
+            inj = _sched.check_and_inject(sid)
+            return f"\n\n{inj}" if inj else ""
+        except Exception:
+            return ""
+
+    def _tl_fragment() -> str:
+        try:
+            from . import tl_sync as _tls
+            conn = storage.connect(config.db_path())
+            try:
+                frag = _tls.render_update(conn, sid)
+            finally:
+                conn.close()
+            return f"\n\n{frag}" if frag else ""
+        except Exception:
+            return ""
+
     if channel == "wx":
-        if kickout_ctx:
+        # WX bridge injects its own time — skip the time stamp only; the
+        # schedule + tl fragments and kickout nudge still apply.
+        wx_sched = _sched_fragment()
+        wx_tl = _tl_fragment()
+        wx_kick = f"\n\n{kickout_ctx}" if kickout_ctx else ""
+        wx_ctx = f"{wx_sched}{wx_tl}{wx_kick}".strip()
+        if wx_ctx:
             json.dump(
                 {"hookSpecificOutput": {
                     "hookEventName": "UserPromptSubmit",
-                    "additionalContext": kickout_ctx,
+                    "additionalContext": wx_ctx,
                 }},
                 sys.stdout,
             )
@@ -3431,14 +3412,8 @@ def turn_inject() -> int:
     except Exception:
         pass
 
-    sched_ctx = ""
-    try:
-        from . import schedule as _sched
-        sched_inj = _sched.check_and_inject(sid)
-        if sched_inj:
-            sched_ctx = f"\n\n{sched_inj}"
-    except Exception:
-        pass
+    sched_ctx = _sched_fragment()
+    tl_ctx = _tl_fragment()
 
     # Absorbed global turn-inject: per-turn care directive (config-lives).
     care_ctx = ""
@@ -3451,11 +3426,11 @@ def turn_inject() -> int:
         pass
 
     kickout_full = f"\n\n{kickout_ctx}" if kickout_ctx else ""
-    show_ctx = _cortex_show_context(tpath)
+    show_ctx = cortex_bridge._cortex_show_context(tpath) if cortex_bridge.enabled() else ""
     show_full = f"\n\n{show_ctx}" if show_ctx else ""
     usage_ctx = _usage_threshold_context(sid, tpath)
     usage_full = f"\n\n{usage_ctx}" if usage_ctx else ""
-    ctx = (f"# Context — {now_str}{delta}{sched_ctx}{care_ctx}"
+    ctx = (f"# Context — {now_str}{delta}{sched_ctx}{tl_ctx}{care_ctx}"
            f"{kickout_full}{show_full}{usage_full}")
     json.dump(
         {"hookSpecificOutput": {

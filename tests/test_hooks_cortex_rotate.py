@@ -31,9 +31,25 @@ def _ctx(capsys):
     return json.loads(out)["hookSpecificOutput"]["additionalContext"]
 
 
+def _enable_cortex(monkeypatch):
+    """turn_inject's 亮牌 injection is gated on [cortex].enabled; force it on so
+    these MARROW_CORTEX contract tests exercise the active path."""
+    real = config.load
+
+    def _patched():
+        cfg = dict(real())
+        cx = dict(cfg.get("cortex", {}))
+        cx["enabled"] = True
+        cfg["cortex"] = cx
+        return cfg
+
+    monkeypatch.setattr(config, "load", _patched)
+
+
 def test_show_fires_over_threshold(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("MARROW_CORTEX", "1")
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    _enable_cortex(monkeypatch)
     show = config.load()["cortex_rotate"]["show_tokens"]
     jl = _transcript(tmp_path, show + 1)
     _stdin(monkeypatch, {"session_id": "s1", "transcript_path": str(jl)})
@@ -44,6 +60,7 @@ def test_show_fires_over_threshold(tmp_path, monkeypatch, capsys):
 def test_show_silent_below_threshold(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("MARROW_CORTEX", "1")
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    _enable_cortex(monkeypatch)
     show = config.load()["cortex_rotate"]["show_tokens"]
     jl = _transcript(tmp_path, show - 1000)
     _stdin(monkeypatch, {"session_id": "s1", "transcript_path": str(jl)})
@@ -54,6 +71,7 @@ def test_show_silent_below_threshold(tmp_path, monkeypatch, capsys):
 def test_show_absent_for_normal_session(tmp_path, monkeypatch, capsys):
     monkeypatch.delenv("MARROW_CORTEX", raising=False)
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    _enable_cortex(monkeypatch)
     show = config.load()["cortex_rotate"]["show_tokens"]
     jl = _transcript(tmp_path, show + 50_000)
     _stdin(monkeypatch, {"session_id": "s1", "transcript_path": str(jl)})

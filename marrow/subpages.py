@@ -81,7 +81,7 @@ class SubPageConfig:
     path: str                         # absolute path to the .md file
     state_dir: str                    # dir for sub-page state (reserved)
     read_only: bool = False           # always overwrite full file
-    # md->DB reconcile callback. Runs BEFORE render so Lumi's md edits flow
+    # md->DB reconcile callback. Runs BEFORE render so the user's md edits flow
     # back to DB and the freshly-rendered block reflects them. None = skip.
     reconcile: Callable[[sqlite3.Connection, "Path"], object] | None = None
     subpages: list["SubPageConfig"] = field(default_factory=list)
@@ -116,7 +116,7 @@ def write_subpage(cfg: SubPageConfig, conn: sqlite3.Connection,
     path, key = cfg.path, cfg.key
     Path(cfg.state_dir).mkdir(parents=True, exist_ok=True)
 
-    # Run reconcile BEFORE the writer so the new render reflects Lumi's edits.
+    # Run reconcile BEFORE the writer so the new render reflects the user's edits.
     if cfg.reconcile is not None and os.path.exists(path) and not cfg.read_only:
         try:
             _rpt = cfg.reconcile(conn, Path(path))

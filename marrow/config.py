@@ -142,5 +142,5 @@ sub_pages_state_path = db_pages_state_path
 
 
 def get_tz() -> ZoneInfo:
-    tz_name = load().get("core", {}).get("timezone", "Australia/Melbourne")
+    tz_name = load().get("core", {}).get("timezone", "Asia/Shanghai")
     return ZoneInfo(tz_name)

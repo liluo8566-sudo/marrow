@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import glob
-import hashlib
+import json as _json
 import os
+import re as _re
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +16,9 @@ _CADENCE_DEFAULT = str(Path.home() / "CC-Lab" / "cadence" / ".build" / "debug" /
 _DAILY_PATH = str(config.DATA_DIR / "daily.md")
 _SNAPSHOT_DIR = config.DATA_DIR / "schedule-snapshots"
 _TIMEOUT = 5
+_MAX_CHARS = 8000
+
+_DEFAULT_FLAG_NOTE = "Only follow up overdue flagged 🚩 tasks — no push on others."
 
 _REM_GLOB_BASE = str(
     Path.home() / "Library" / "Group Containers"
@@ -25,10 +29,42 @@ _CAL_DB = str(
     / "group.com.apple.calendar" / "Calendar.sqlitedb"
 )
 
+_PRIORITY_LABELS = {1: "⚡"}
+
+
+def _schedule_cfg() -> dict:
+    return config.load().get("schedule", {}) or {}
+
+
+def is_enabled() -> bool:
+    val = _schedule_cfg().get("enabled", True)
+    return bool(val)
+
 
 def _cadence_bin() -> str:
-    cfg = config.load()
-    return cfg.get("schedule", {}).get("cadence_bin", "") or _CADENCE_DEFAULT
+    return _schedule_cfg().get("cadence_bin", "") or _CADENCE_DEFAULT
+
+
+def _flag_note() -> str:
+    note = _schedule_cfg().get("flag_note", "")
+    return note if note else _DEFAULT_FLAG_NOTE
+
+
+def _cal_exclude() -> set[str]:
+    val = _schedule_cfg().get("cal_exclude", [])
+    if not isinstance(val, list):
+        return set()
+    return {str(v) for v in val}
+
+
+def _cal_keep_re():
+    pattern = _schedule_cfg().get("cal_keep", "")
+    if not pattern:
+        return None
+    try:
+        return _re.compile(pattern)
+    except _re.error:
+        return None
 
 
 def get_data_mtime() -> float:
@@ -62,95 +98,140 @@ def _run_cadence(args: list[str], binary: str) -> str:
         return ""
 
 
-import re
-
-_REM_LIST_RE = re.compile(r"^\[.+\]$")
-_REM_ITEM_RE = re.compile(r"^  [❗🚩⚡]*\[?\d+\]")
-_NOTE_MAX_LINES = 3
+def _clean_list(name: str) -> str:
+    """Strip trailing emoji/whitespace from a list or calendar name."""
+    return name.strip()
 
 
-_PRIORITY_LABELS = {1: "❗", 5: "⚡"}
-_NOTE_TRIM = 3
+def _hm(iso: str) -> str:
+    """Extract HH:MM from an ISO datetime string, or '' on failure."""
+    if not iso or len(iso) < 16:
+        return ""
+    return iso[11:16]
 
 
-def _filter_rems_by_date(json_text: str, today_str: str) -> tuple[str, str]:
-    if not json_text:
-        return "", ""
+def _glyphs(prio: int, flagged: bool) -> str:
+    g = _PRIORITY_LABELS.get(prio, "")
+    if flagged:
+        g += "🚩"
+    return g
+
+
+def _rem_line(r: dict, today_str: str) -> tuple[str, str, str]:
+    """Return (bucket, sort_key, line).
+
+    bucket: overdue | timed | untimed | done. sort_key orders within a bucket.
+    Line ends with the reminder id in brackets, after any glyphs, e.g.
+    '- [List] HH:MM title 🚩 [151]'.
+    """
+    lst = _clean_list(r.get("list", "Inbox"))
+    title = r.get("title", "")
+    prio = r.get("priority", 0)
+    flagged = bool(r.get("flagged", False))
+    glyph = _glyphs(prio, flagged)
+    suffix = f" {glyph}" if glyph else ""
+    rid = r.get("id")
+    id_tag = f" [{rid}]" if rid is not None else ""
+
+    if r.get("completed"):
+        comp = r.get("completion_date", "")
+        hm = _hm(comp)
+        tag = f" [Done {hm}]" if hm else " [Done]"
+        line = f"- [{lst}] {title}{tag}{suffix}{id_tag}"
+        return "done", comp, line
+
+    due = r.get("due_date", "")
+    due_day = due[:10] if due else ""
+    hm = _hm(due)
+    timed = due and hm and hm != "00:00"
+
+    if due_day and due_day < today_str:
+        line = f"- [{lst}] {title} [Overdue]{suffix}{id_tag}"
+        return "overdue", due, line
+    if timed:
+        line = f"- [{lst}] {hm} {title}{suffix}{id_tag}"
+        return "timed", hm, line
+    line = f"- [{lst}] {title}{suffix}{id_tag}"
+    return "untimed", title, line
+
+
+def _render_reminders(rem_json: str, done_json: str, today_str: str) -> list[str]:
+    overdue: list[tuple[str, str]] = []
+    timed: list[tuple[str, str]] = []
+    untimed: list[tuple[str, str]] = []
+    done: list[tuple[str, str]] = []
+
     try:
-        import json as _json
-        items = _json.loads(json_text)
+        items = _json.loads(rem_json) if rem_json else []
     except (ValueError, TypeError):
-        return "", ""
-
-    today_items: dict[str, list[str]] = {}
-    overdue_items: dict[str, list[str]] = {}
-
+        items = []
     for r in items:
         if r.get("completed"):
             continue
         due = r.get("due_date", "")
-        if not due:
+        due_day = due[:10] if due else ""
+        # only dated reminders: overdue (past) + today; skip future + no-due
+        if not due_day or due_day > today_str:
             continue
-        due_day = due[:10]
-        lst = r.get("list", "Inbox")
-        title = r.get("title", "")
-        rid = r.get("id", 0)
-        prio = r.get("priority", 0)
-        flagged = r.get("flagged", False)
-        notes = r.get("notes", "")
-
-        prefix = _PRIORITY_LABELS.get(prio, "")
-        flag = "🚩" if flagged else ""
-        line = f"  {prefix}{flag}[{rid}] {title}"
-
-        note_lines: list[str] = []
-        if notes:
-            for i, nl in enumerate(notes.splitlines()):
-                if i >= _NOTE_TRIM:
-                    note_lines.append("      ...")
-                    break
-                note_lines.append(f"      {nl}")
-
-        entry = [line] + note_lines
-
-        if due_day == today_str:
-            today_items.setdefault(lst, []).extend(entry)
-        elif due_day < today_str:
-            overdue_items.setdefault(lst, []).extend(entry)
-
-    def _render(groups: dict[str, list[str]]) -> str:
-        parts: list[str] = []
-        for lst in sorted(groups):
-            parts.append(f"[{lst}]")
-            parts.extend(groups[lst])
-            parts.append("")
-        return "\n".join(parts).rstrip()
-
-    return _render(today_items), _render(overdue_items)
-
-
-def _trim_rem_notes(text: str) -> str:
-    if not text:
-        return text
-    out: list[str] = []
-    note_lines = 0
-    for line in text.splitlines():
-        if _REM_LIST_RE.match(line) or _REM_ITEM_RE.match(line):
-            note_lines = 0
-            out.append(line)
-        elif not line.strip():
-            note_lines = 0
-            if out and out[-1].strip():
-                out.append(line)
+        bucket, key, line = _rem_line(r, today_str)
+        if bucket == "overdue":
+            overdue.append((key, line))
+        elif bucket == "timed":
+            timed.append((key, line))
         else:
-            note_lines += 1
-            if note_lines <= _NOTE_MAX_LINES:
-                out.append(line)
-            elif note_lines == _NOTE_MAX_LINES + 1:
-                out.append("      ...")
-    while out and not out[-1].strip():
-        out.pop()
-    return "\n".join(out)
+            untimed.append((key, line))
+
+    try:
+        done_items = _json.loads(done_json) if done_json else []
+    except (ValueError, TypeError):
+        done_items = []
+    for r in done_items:
+        comp = r.get("completion_date", "")
+        if not comp or comp[:10] != today_str:
+            continue
+        _b, key, line = _rem_line(r, today_str)
+        done.append((key, line))
+
+    lines: list[str] = []
+    for key, line in sorted(overdue, key=lambda x: x[0]):
+        lines.append(line)
+    for key, line in sorted(timed, key=lambda x: x[0]):
+        lines.append(line)
+    for key, line in sorted(untimed, key=lambda x: x[0]):
+        lines.append(line)
+    for key, line in sorted(done, key=lambda x: x[0]):
+        lines.append(line)
+    return lines
+
+
+def _render_calendar(cal_json: str, today_str: str) -> list[str]:
+    try:
+        events = _json.loads(cal_json) if cal_json else []
+    except (ValueError, TypeError):
+        events = []
+    exclude = _cal_exclude()
+    keep_re = _cal_keep_re()
+    rows: list[tuple[str, str]] = []
+    for e in events:
+        cal = _clean_list(e.get("calendar", ""))
+        title = e.get("title", "")
+        if cal in exclude:
+            if not (keep_re and keep_re.search(title)):
+                continue
+        if e.get("all_day"):
+            # skip all-day Scheduled Reminders duplicates; keep other all-day
+            if cal == "Scheduled Reminders":
+                continue
+            rows.append(("", f"- [{cal}] {title} [all-day]"))
+            continue
+        start = e.get("start", "")
+        end = e.get("end", "")
+        if start[:10] != today_str:
+            continue
+        s_hm = _hm(start)
+        e_hm = _hm(end)
+        rows.append((s_hm, f"- [{cal}] {s_hm}-{e_hm} {title}"))
+    return [line for _k, line in sorted(rows, key=lambda x: x[0])]
 
 
 def render_daily(cadence_bin: str | None = None) -> str:
@@ -164,42 +245,36 @@ def render_daily(cadence_bin: str | None = None) -> str:
     day_name = now.strftime("%A")
     time_str = now.strftime("%H:%M")
 
-    cal = _run_cadence(["cal", "read", today, "--human"], binary)
+    cal_json = _run_cadence(["cal", "read", today, "--json"], binary)
     rem_json = _run_cadence(["rem", "read", "--all"], binary)
-    rem_today_text, rem_overdue_text = _filter_rems_by_date(rem_json, today)
+    done_json = _run_cadence(["rem", "read", "--done"], binary)
 
-    if not cal and not rem_today_text and not rem_overdue_text:
+    rem_lines = _render_reminders(rem_json, done_json, today)
+    cal_lines = _render_calendar(cal_json, today)
+
+    if not rem_lines and not cal_lines:
         return ""
 
-    parts = [f"## Daily Schedule  {today} {day_name} | now {time_str}"]
+    parts = [
+        f"## Daily Schedule  {today} {day_name} | now {time_str}",
+        _flag_note(),
+    ]
+    body: list[str] = []
+    body.extend(rem_lines)
+    body.append("---")
+    body.extend(cal_lines)
+    parts.append("\n".join(body))
 
-    if cal:
-        lines = [l for l in cal.splitlines() if "[Scheduled Reminders]" not in l]
-        cleaned: list[str] = []
-        i = 0
-        while i < len(lines):
-            if i + 1 < len(lines) and lines[i + 1].strip().startswith("---"):
-                block = [lines[i], lines[i + 1]]
-                i += 2
-                while i < len(lines) and lines[i].strip() and not (i + 1 < len(lines) and lines[i + 1].strip().startswith("---")):
-                    block.append(lines[i])
-                    i += 1
-                if len(block) > 2:
-                    cleaned.extend(block)
-            else:
-                if lines[i].strip():
-                    cleaned.append(lines[i])
-                i += 1
-        if cleaned:
-            parts.append(f"### Calendar\n" + "\n".join(cleaned))
-    if rem_today_text:
-        parts.append(f"### Today's Reminders\n{rem_today_text}")
-    if rem_overdue_text:
-        parts.append(f"### Overdue\n{rem_overdue_text}")
-
-    out = "\n\n".join(parts)
-    if len(out) > 8000:
-        out = out[:7900] + "\n... (truncated)"
+    out = "\n".join(parts)
+    if len(out) > _MAX_CHARS:
+        out = out[: _MAX_CHARS - 100] + "\n... (truncated)"
+        try:
+            from . import repo
+            repo.add_alert("info", "schedule", "render_truncated",
+                           message=f"render_daily exceeded {_MAX_CHARS} chars",
+                           source="schedule.py", db=config.db_path())
+        except Exception:
+            pass
     return out
 
 
@@ -230,37 +305,96 @@ def refresh_daily(cadence_bin: str | None = None, daily_path: str | None = None)
     return content, changed
 
 
+# --- structured diff -------------------------------------------------------
+
+def _split_sections(content: str) -> tuple[list[str], list[str]]:
+    """Return (rem_lines, cal_lines) from rendered daily content."""
+    lines = content.splitlines()
+    rem: list[str] = []
+    cal: list[str] = []
+    seen_sep = False
+    for ln in lines:
+        if ln.startswith("## ") or ln == _flag_note() or not ln.strip():
+            continue
+        if ln.strip() == "---":
+            seen_sep = True
+            continue
+        if not ln.startswith("- "):
+            continue
+        (cal if seen_sep else rem).append(ln)
+    return rem, cal
+
+
+_TRAILING_ID_RE = _re.compile(r"\s*\[(\d+)\]\s*$")
+
+
+def _rem_identity(line: str) -> str:
+    """Stable identity of a rem line.
+
+    Prefers the trailing reminder id `[id]`; rows without one (shouldn't
+    happen for real cadence data, kept for robustness) fall back to
+    list + title, ignoring time/tag/status decorations.
+    """
+    m = _TRAILING_ID_RE.search(line)
+    if m:
+        return f"id:{m.group(1)}"
+
+    s = line
+    # strip leading '- '
+    s = s[2:] if s.startswith("- ") else s
+    # drop trailing glyphs and status tags
+    s = _re.sub(r"\s*[❗⚡🚩]+\s*$", "", s)
+    s = _re.sub(r"\s*\[(Done[^\]]*|Overdue|all-day)\]\s*", " ", s)
+    # drop a leading HH:MM after the list bracket
+    s = _re.sub(r"(\]\s*)\d{2}:\d{2}\s+", r"\1", s)
+    return s.strip()
+
+
 def compute_diff(old_content: str, new_content: str) -> str:
+    """Structured diff keyed on reminder identity + calendar line-set.
+
+    Reminders: done / new / changed. Calendar: added / removed lines.
+    """
     if not old_content or not new_content:
         return ""
 
-    old_lines = set(old_content.splitlines())
-    new_lines = set(new_content.splitlines())
-    added = new_lines - old_lines
-    removed = old_lines - new_lines
+    old_rem, old_cal = _split_sections(old_content)
+    new_rem, new_cal = _split_sections(new_content)
+
+    old_map = {_rem_identity(l): l for l in old_rem}
+    new_map = {_rem_identity(l): l for l in new_rem}
 
     parts: list[str] = []
-    for line in sorted(removed):
-        line = line.strip()
-        if line and not line.startswith("#") and not line.startswith("--") and "| now " not in line:
-            parts.append(f"-{line[:60]}")
-    for line in sorted(added):
-        line = line.strip()
-        if line and not line.startswith("#") and not line.startswith("--") and "| now " not in line:
-            parts.append(f"+{line[:60]}")
+
+    for ident, line in new_map.items():
+        old_line = old_map.get(ident)
+        is_done = "[Done" in line
+        if old_line is None:
+            parts.append(f"+{line[2:]}" if line.startswith("- ") else f"+{line}")
+        elif old_line != line:
+            tag = "✓" if is_done else "~"
+            parts.append(f"{tag}{line[2:]}" if line.startswith("- ") else f"{tag}{line}")
+
+    for ident, line in old_map.items():
+        if ident not in new_map:
+            parts.append(f"-{line[2:]}" if line.startswith("- ") else f"-{line}")
+
+    old_cal_set = set(old_cal)
+    new_cal_set = set(new_cal)
+    for line in new_cal:
+        if line not in old_cal_set:
+            parts.append(f"+{line[2:]}" if line.startswith("- ") else f"+{line}")
+    for line in old_cal:
+        if line not in new_cal_set:
+            parts.append(f"-{line[2:]}" if line.startswith("- ") else f"-{line}")
 
     if not parts:
         return ""
-    out = " | ".join(parts[:8])
-    if len(parts) > 8:
-        out += f" | +{len(parts) - 8} more"
-    return out[:500]
-
-
-def _hash(content: str) -> str:
-    import re
-    stable = re.sub(r"\| now \d{2}:\d{2}", "| now --:--", content)
-    return hashlib.sha256(stable.encode("utf-8")).hexdigest()[:16]
+    header = "Schedule update:"
+    body = "\n".join(parts[:20])
+    if len(parts) > 20:
+        body += f"\n… +{len(parts) - 20} more"
+    return f"{header}\n{body}"
 
 
 def _snapshot_dir() -> Path:
@@ -272,8 +406,12 @@ def _mtime_path(session_id: str) -> Path:
     return _snapshot_dir() / f"{session_id}.mtime"
 
 
-def _hash_path(session_id: str) -> Path:
-    return _snapshot_dir() / f"{session_id}.hash"
+def _content_path(session_id: str) -> Path:
+    return _snapshot_dir() / f"{session_id}.content"
+
+
+def _date_path(session_id: str) -> Path:
+    return _snapshot_dir() / f"{session_id}.date"
 
 
 def check_and_inject(
@@ -281,13 +419,28 @@ def check_and_inject(
     cadence_bin: str | None = None,
     daily_path: str | None = None,
 ) -> str | None:
+    if not is_enabled():
+        return None
+
     daily_path = daily_path or _DAILY_PATH
     binary = cadence_bin or _cadence_bin()
 
-    data_mt = get_data_mtime()
-    mt_file = _mtime_path(session_id)
-    hash_file = _hash_path(session_id)
+    tz = config.get_tz()
+    today = datetime.now(timezone.utc).astimezone(tz).strftime("%Y-%m-%d")
 
+    mt_file = _mtime_path(session_id)
+    content_file = _content_path(session_id)
+    date_file = _date_path(session_id)
+
+    prev_date = ""
+    try:
+        if date_file.exists():
+            prev_date = date_file.read_text().strip()
+    except OSError:
+        pass
+    date_rolled = bool(prev_date) and prev_date != today
+
+    data_mt = get_data_mtime()
     last_mt = 0.0
     try:
         if mt_file.exists():
@@ -295,47 +448,29 @@ def check_and_inject(
     except (ValueError, OSError):
         pass
 
-    if last_mt and abs(data_mt - last_mt) < 0.01:
+    # Date rollover forces a full re-render BEFORE the mtime early-exit.
+    if not date_rolled and last_mt and abs(data_mt - last_mt) < 0.01:
         return None
 
     old_content = ""
-    if os.path.isfile(daily_path):
-        try:
-            with open(daily_path, "r", encoding="utf-8") as f:
-                old_content = f.read()
-        except OSError:
-            pass
+    try:
+        if content_file.exists():
+            old_content = content_file.read_text()
+    except OSError:
+        pass
 
     content, _ = refresh_daily(binary, daily_path)
     if not content:
         return None
 
-    try:
-        mt_file.write_text(str(data_mt))
-    except OSError:
-        pass
+    for f, val in ((mt_file, str(data_mt)), (content_file, content), (date_file, today)):
+        try:
+            f.write_text(val)
+        except OSError:
+            pass
 
-    content_hash = _hash(content)
-
-    old_hash = ""
-    try:
-        if hash_file.exists():
-            old_hash = hash_file.read_text().strip()
-    except OSError:
-        pass
-
-    try:
-        hash_file.write_text(content_hash)
-    except OSError:
-        pass
-
-    if not old_hash:
+    # First injection this session, or forced full re-render on date change.
+    if not old_content or date_rolled:
         return content
 
-    if content_hash == old_hash:
-        return None
-
-    diff = compute_diff(old_content, content)
-    if diff:
-        return f"Schedule update: {diff}\n\n{content}"
-    return content
+    return compute_diff(old_content, content) or None

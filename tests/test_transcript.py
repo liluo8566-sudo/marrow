@@ -411,7 +411,7 @@ def test_pure_bridge_time_sticker_header_rows_are_dropped():
     assert transcript._is_harness_row(
         "[time: 2026-06-28 Sun 17:07 | gap: 0m]") is True
     assert transcript._is_harness_row(
-        "[sticker: emoji=⭐, set=lumi_stickers_by_Stellan_CYC_bot]") is True
+        "[sticker: emoji=⭐, set=user_stickers_by_assistant_bot]") is True
     assert transcript._is_harness_row(
         "[time: 2026-06-28 Sun 17:07 | gap: 0m]\n"
         "[sticker: emoji=⭐, set=x]") is True
@@ -474,3 +474,64 @@ def test_clean_drops_empty_content_after_stripping(tmp_path):
     ])
     rows = transcript.clean(jl)
     assert [r["content"] for r in rows] == ["real answer"]
+
+
+# ── control-command rows (/clear /model ...) dropped at write side ───────────
+
+def _cmd(name, args=""):
+    return (f"<command-name>{name}</command-name>\n"
+            f"            <command-message>{name.lstrip('/')}</command-message>\n"
+            f"            <command-args>{args}</command-args>")
+
+
+def test_control_command_row_detected():
+    assert transcript._is_control_command_row(_cmd("/clear")) is True
+    assert transcript._is_control_command_row(_cmd("/model")) is True
+    assert transcript._is_control_command_row(_cmd("/compact")) is True
+    # empty <command-args> and whitespace-only args both count as control junk
+    assert transcript._is_control_command_row(_cmd("/effort", "   ")) is True
+
+
+def test_custom_command_with_body_is_kept():
+    # /goal, /diagnose etc carry real user text in <command-args> → not junk.
+    assert transcript._is_control_command_row(
+        _cmd("/goal", "implement the widget and test it")) is False
+    assert transcript._is_control_command_row(
+        _cmd("/diagnose", "看handover第一条，从flow开始")) is False
+
+
+def test_plain_dialogue_is_not_command_row():
+    assert transcript._is_control_command_row("just a normal message") is False
+    assert transcript._is_control_command_row(
+        "discussing <command-name> tags in the abstract") is False
+
+
+def test_clean_drops_control_command_keeps_custom_command(tmp_path):
+    jl = _w(tmp_path / "c.jsonl", [
+        {"type": "user", "sessionId": "s1", "timestamp": "t",
+         "message": {"role": "user", "content": _cmd("/clear")}},
+        {"type": "user", "sessionId": "s1", "timestamp": "t",
+         "message": {"role": "user", "content": _cmd("/model")}},
+        {"type": "user", "sessionId": "s1", "timestamp": "t",
+         "message": {"role": "user",
+                     "content": _cmd("/goal", "real spec text here")}},
+        {"type": "assistant", "sessionId": "s1", "timestamp": "t",
+         "message": {"role": "assistant", "model": "claude-opus-4-7",
+                     "content": [{"type": "text", "text": "ok"}]}},
+    ])
+    rows = transcript.clean(jl)
+    # control /clear + /model dropped; /goal (real body) kept + "ok" assistant.
+    assert len(rows) == 2
+    assert rows[0]["content"].startswith("/goal") and "real spec text here" in rows[0]["content"]
+    assert rows[1]["content"] == "ok"
+
+
+# ── shared media-marker strip helper ────────────────────────────────────────
+
+def test_strip_media_markers():
+    assert transcript.strip_media_markers(
+        '[time: 12:30] hey <image path="/stk/a.png"/> there') == "hey there"
+    assert transcript.strip_media_markers(
+        '[sticker: wink]\nreal words') == "real words"
+    assert transcript.strip_media_markers("plain text") == "plain text"
+    assert transcript.strip_media_markers("") == ""

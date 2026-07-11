@@ -164,7 +164,7 @@ def _parse(md_text: str) -> list[dict]:
             body.append(s)
             continue
         # Bare text line (non-empty, not `- ` prefixed, not H5) while cur is
-        # None inside a section → treat as new milestone typed by Lumi without
+        # None inside a section → treat as new milestone typed by the user without
         # using H5 format. date = today (configured local timezone), pinned = 1.
         # _bare_line=True signals write-back to replace the whole line with
         # the canonical H5 form instead of just appending an anchor.
@@ -245,7 +245,7 @@ def reconcile_milestones(conn: sqlite3.Connection,
     Contract:
     - Row with `<!-- id:N -->` -> match on id; update if title/desc/theme/
       pinned/date changed.
-    - Row without anchor -> insert (new milestone written by Lumi).
+    - Row without anchor -> insert (new milestone written by the user).
     - DB row whose id is missing from md -> delete.
     - No-op when md == current state: no writes, no audit.
     - Failures surface via rpt.conflicts -> alert in caller. No md backup
@@ -261,7 +261,7 @@ def reconcile_milestones(conn: sqlite3.Connection,
     md_rows = _parse(md_text)
     # Reconcile operates on pinned=1 only — the confirmed subpage set.
     # pinned=0 candidates live outside the md ↔ db sync loop; daily.py
-    # writes them, dashboard renders them, Lumi promotes via pinned=1.
+    # writes them, dashboard renders them, the user promotes via pinned=1.
     db_rows = {
         r["id"]: dict(r) for r in conn.execute(
             "SELECT id, scope, date, title, description, theme, pinned, updated_at "
@@ -316,7 +316,7 @@ def reconcile_milestones(conn: sqlite3.Connection,
                     rpt.unchanged += 1
                 seen.add(rid)
             elif rid is not None and rid not in db_rows:
-                # Anchored id not in DB -> Lumi referenced a deleted row.
+                # Anchored id not in DB -> the user referenced a deleted row.
                 # Treat as conflict; do not auto-create with a forced id.
                 rpt.conflicts.append(
                     f"anchored id {rid} not in db: {row['title'][:40]}"
@@ -438,7 +438,7 @@ _CAND_TRAIL_RE = re.compile(r"<!-- cand:milestone:ids=\[([0-9,\s]*)\] -->")
 def _milestone_natkey_hash(scope: str, date: str, title: str) -> str:
     """Identity hash for anti-revive tombstones — `milestones|scope|date|title`.
     Mirrors migrate._milestone_natural_key so the generic backfill path and
-    sonnet-candidate writes both skip rows Lumi has dropped.
+    sonnet-candidate writes both skip rows the user has dropped.
     """
     nk = f"milestones|{scope}|{date}|{title}"
     return hashlib.sha256(nk.encode()).hexdigest()
@@ -607,7 +607,7 @@ def reconcile_milestone_candidates(conn: sqlite3.Connection,
             if row is None:
                 continue
             if row["pinned"]:
-                # Lumi may have promoted the row by copying its anchor into
+                # The user may have promoted the row by copying its anchor into
                 # the milestone subpage — the candidate-block row vanishing
                 # is then expected, not a drop. Skip.
                 continue
@@ -621,8 +621,8 @@ def reconcile_milestone_candidates(conn: sqlite3.Connection,
 _TASK_ROW_RE = re.compile(
     r"^- \[(?P<check>[ x])\] (?P<body>.*?)\s*<!-- id:(?P<id>\d+) -->\s*$"
 )
-# Same row shape minus the `<!-- id:N -->` anchor — used to detect rows Lumi
-# typed into the dashboard by hand. INSERTed by reconcile_tasks so the next
+# Same row shape minus the `<!-- id:N -->` anchor — used to detect rows the
+# user typed into the dashboard by hand. INSERTed by reconcile_tasks so the next
 # render replaces them with the canonical anchored body.
 _TASK_ROW_NOID_RE = re.compile(
     r"^- \[(?P<check>[ x])\] (?P<body>.+?)\s*$"
@@ -683,8 +683,8 @@ def _parse_task_row_body(body: str, db_title: str | None,
         if db_title_v and text == db_title_v:
             return (db_title_v, None)
         return None
-    # db had no next_step. Title may legitimately contain `: ` (e.g. Lumi's
-    # task 148 title = "mw-phase 3: Almost done") — never split a body that
+    # db had no next_step. Title may legitimately contain `: ` (e.g. the
+    # user's task 148 title = "mw-phase 3: Almost done") — never split a body that
     # already matches db_title.
     if db_title_v and text == db_title_v:
         return (db_title_v, None)
@@ -959,8 +959,8 @@ def _insert_unanchored_tasks(conn: sqlite3.Connection,
             continue
         status = "done" if check == "x" else "active"
         # Dedup: refuse to insert another active task with the same
-        # (category, title) — keeps repeated mw refresh idempotent if Lumi
-        # forgot to delete her hand-typed line. Silent — no alert; the next
+        # (category, title) — keeps repeated mw refresh idempotent if the
+        # user forgot to delete their hand-typed line. Silent — no alert; the next
         # render rewrites the hand-typed line as the canonical anchored row.
         dup = conn.execute(
             "SELECT id FROM tasks "
@@ -969,7 +969,7 @@ def _insert_unanchored_tasks(conn: sqlite3.Connection,
         ).fetchone()
         if dup is not None:
             continue
-        # Cosine dedup across all active tasks (cross-category — Lumi may
+        # Cosine dedup across all active tasks (cross-category — the user may
         # have hand-typed the category wrong, so don't trust it as a
         # partitioning key here).
         from . import semantic_dedup as _sd
@@ -1271,7 +1271,7 @@ def reconcile_affect(conn: sqlite3.Connection,
     # are absent from pending_lines → user removed them.
     # Note: no zero-anchor guard here — affect has rendered anchors since
     # 2026-Q1, so a real legacy-md first-render is no longer plausible,
-    # and Lumi's `delete all Pending rows → mass-resolve` IS the intended
+    # and the user's `delete all Pending rows → mass-resolve` IS the intended
     # gesture (test_reconcile_affect_delete_line_marks_resolved).
     deleted_resolved: set[int] = set()
     if md_mtime_iso is not None:
@@ -1398,7 +1398,7 @@ def reconcile_alerts(conn: sqlite3.Connection,
                      dashboard_path: str | Path) -> ReconcileReport:
     """Absorb md-side alert deletions back into the alerts table.
 
-    Each rendered alert bullet carries `<!-- id:alert.N -->`. If Lumi
+    Each rendered alert bullet carries `<!-- id:alert.N -->`. If the user
     removes a bullet from the dashboard md, that row is treated as
     `resolved=1` — the md-side delete IS the resolve gesture. Idempotent;
     no-op when md is absent or the Alerts block is missing.

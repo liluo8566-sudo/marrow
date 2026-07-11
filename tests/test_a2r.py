@@ -58,6 +58,21 @@ def test_turn_inject_emits_care_text(monkeypatch, capsys):
     assert "Care first" in ctx  # from config.default.toml [turn_inject].care_text
 
 
+def test_turn_inject_wx_emits_schedule_no_time_line(monkeypatch, capsys):
+    """WX branch: schedule fragment injected, but no '# Context — <time>' line."""
+    monkeypatch.setenv("MARROW_CHANNEL", "wx")
+    monkeypatch.setattr(hooks, "_kickout_context", lambda channel, now: "")
+    from marrow import schedule as _sched
+    monkeypatch.setattr(_sched, "check_and_inject", lambda sid: "Schedule update:\n+[X] a")
+    _stdin(monkeypatch, {"session_id": "wx1", "transcript_path": "/x/a.jsonl"})
+    rc = hooks.turn_inject()
+    assert rc == 0
+    ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+    assert "Schedule update:" in ctx
+    assert "# Context —" not in ctx
+    assert "since last reply" not in ctx
+
+
 # ── B8: anti-late-night kickout nudge (turn_inject) ──────────────────────────
 
 def _freeze_melb(monkeypatch, hour, minute):

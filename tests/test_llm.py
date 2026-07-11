@@ -5,6 +5,7 @@ import time
 import pytest
 
 from marrow.llm import LLMClient, LLMError
+from marrow import cortex_bridge
 
 CFG = {
     "llm": {
@@ -367,8 +368,8 @@ def test_run_claude_cortex_snapshots_window_tokens(monkeypatch, tmp_path):
     monkeypatch.setattr("marrow.llm._claude_bin", lambda: bin_)
     c = LLMClient({"llm": {"claude_cli_cortex": {"kind": "claude_cli", "timeout_s": 5}},
                    "tiers": {}, "cortex": {}})
-    out = c._run_claude_cortex(
-        {"kind": "claude_cli", "timeout_s": 5}, "m", "hi",
+    out = cortex_bridge.run_claude_cortex(
+        c, {"kind": "claude_cli", "timeout_s": 5}, "m", "hi",
         cwd=str(tmp_path), resume_sid=None, max_tokens=150000)
     assert out.get("capped") is not True
     read_conn = _real_connect(db)
@@ -790,7 +791,7 @@ def test_run_claude_cortex_cap_breach_returns_capped(monkeypatch, tmp_path):
     c = LLMClient(CORTEX_CFG)
     monkeypatch.setattr(c, "_log_usage", lambda *a, **k: None)
     cap_rows = []
-    monkeypatch.setattr(c, "_log_cortex_cap",
+    monkeypatch.setattr(cortex_bridge, "_log_cortex_cap",
                         lambda sink, cap, model: cap_rows.append((sink["window"], cap)))
 
     def fake_stream(cmd, prompt, timeout, env, cwd=None,

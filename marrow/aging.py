@@ -2,7 +2,7 @@
 
 No LLM. Triggered by deploy/mw-aging.plist (Sun 12:00 local).
 
-Memes are permanent — no aging/DELETE pass (Lumi 2026-07-06).
+Memes are permanent — no aging/DELETE pass (decided 2026-07-06).
 
 Passes (single txn):
 1. archive_tasks — status='active' AND 0 mentions in events over last 30d

@@ -49,7 +49,7 @@ def test_tick_sets_done(conn, tmp_path):
     tid = _insert_task(conn, "Write notes")
     dash = _render_dashboard(conn, tmp_path)
     text = dash.read_text()
-    # Simulate Lumi ticking the checkbox.
+    # Simulate the user ticking the checkbox.
     text = text.replace(f"- [ ] [Study] Write notes", f"- [x] [Study] Write notes")
     dash.write_text(text)
 
@@ -70,7 +70,7 @@ def test_untick_sets_active(conn, tmp_path):
                        updated_at=after_cutoff)
     dash = _render_dashboard(conn, tmp_path)
     text = dash.read_text()
-    # Simulate Lumi un-ticking.
+    # Simulate the user un-ticking.
     text = text.replace(
         f"- [x] [Study] Review slides <!-- id:{tid} -->",
         f"- [ ] [Study] Review slides <!-- id:{tid} -->",
@@ -100,7 +100,7 @@ def _swap_title(text: str, tid: int, old: str, new: str) -> str:
 def test_title_edit_updates_db(conn, tmp_path):
     tid = _insert_task(conn, "123")
     dash = _render_dashboard(conn, tmp_path)
-    # Lumi rewrites the title — leave the anchor + check intact.
+    # User rewrites the title — leave the anchor + check intact.
     dash.write_text(_swap_title(dash.read_text(), tid, "] 123 [", "] 321 ["))
 
     rpt = reconcile.reconcile_tasks(conn, dash)
@@ -112,7 +112,7 @@ def test_title_edit_updates_db(conn, tmp_path):
 
 def test_title_edit_then_render_preserves_edit(conn, tmp_path):
     """End-to-end: hand-edit title in md, write_dashboard reconciles +
-    re-renders. Re-rendered body must show Lumi's edited title."""
+    re-renders. Re-rendered body must show the user's edited title."""
     tid = _insert_task(conn, "old title")
     dash = _render_dashboard(conn, tmp_path)
     dash.write_text(
@@ -150,8 +150,8 @@ def test_title_edit_with_next_step_suffix(conn, tmp_path):
 def test_next_step_edit_only(conn, tmp_path):
     """Edit the next_step text inline — title stays, DB next_step updates.
 
-    Repro for Lumi's task #148: title contains `: ` and the next_step text
-    is the part Lumi wants to rewrite; suffix match fails but prefix match
+    Repro for the user's task #148: title contains `: ` and the next_step text
+    is the part the user wants to rewrite; suffix match fails but prefix match
     on `<title>: ` should still absorb the edit.
     """
     tid = _insert_task(conn, "mw-phase 3: Almost done")
@@ -173,7 +173,7 @@ def test_next_step_edit_only(conn, tmp_path):
 
 
 def test_next_step_cleared(conn, tmp_path):
-    """Lumi deletes the `: <next_step>` segment entirely → next_step NULL."""
+    """User deletes the `: <next_step>` segment entirely → next_step NULL."""
     tid = _insert_task(conn, "mw-phase 3")
     conn.execute("UPDATE tasks SET next_step=? WHERE id=?", ("foo bar", tid))
     conn.commit()
@@ -405,7 +405,7 @@ def test_unanchored_default_category_when_bracket_missing(conn, tmp_path):
 def test_unanchored_dedup_against_active_title(conn, tmp_path):
     """Hand-typed line that matches an existing active task → skip insert,
     silently. No info-level alert: the next render replaces the hand-typed
-    line with the canonical anchored row, so the dedup is invisible to Lumi.
+    line with the canonical anchored row, so the dedup is invisible to the user.
     """
     _insert_task(conn, "dup title", category="Project")
     dash = _render_dashboard(conn, tmp_path)

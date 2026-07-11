@@ -202,7 +202,7 @@ def test_no_silent_death_alert_ever(db_env):
 
 
 def test_classify_user_archived_skips(db_env):
-    """Regression: session_block / manual_skip means Lumi explicitly closed
+    """Regression: session_block / manual_skip means the user explicitly closed
     the sid. _classify must return skip — these are NOT spawn candidates."""
     db, _ = db_env
     old_ts = _ago_ts(31 * 60)

@@ -80,7 +80,7 @@ def test_validation_word_and_body_limits(conn):
     with pytest.raises(tl_writer.TlError):
         tl_writer.tl_add(conn, _hhmm(1), "b", n_word="123456789", sid="s")
     with pytest.raises(tl_writer.TlError):
-        tl_writer.tl_add(conn, _hhmm(1), "x" * 31, n_word="愉悦", sid="s")
+        tl_writer.tl_add(conn, _hhmm(1), "x" * 51, n_word="愉悦", sid="s")
     with pytest.raises(tl_writer.TlError):
         tl_writer.tl_add(conn, _hhmm(1), "b", sid="s")  # no word
 

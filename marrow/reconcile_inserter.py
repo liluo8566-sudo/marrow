@@ -47,7 +47,7 @@ _MEME_TYPE_WHITELIST = frozenset({"paw", "fact", "meme", "news", "event", "other
 
 # Separators accepted in hand-typed rows, longest first so `——` never
 # half-matches `—`. Plain ` - ` requires surrounding spaces (CJK keyboards
-# rarely produce ` — ` without effort — 0613 Lumi).
+# rarely produce ` — ` without effort — decided 0613).
 _BARE_SEPS = (" → ", " —— ", " — ", " - ")
 
 

@@ -14,11 +14,11 @@ _ENTITY_KINDS = {"person", "pref", "place"}
 _MILESTONE_SCOPES = {"me", "us"}
 
 # Memes type enum (v2). Six values:
-#   paw    — Lumi/dyad-exclusive inside jokes (绿茶豹, 大笨鸭子)
-#   meme   — public/network memes (not Lumi's invention)
+#   paw    — user/dyad-exclusive inside jokes
+#   meme   — public/network memes (not the user's invention)
 #   news   — topical public news
 #   event  — PUBLIC events (earthquake, election, public concert)
-#   fact   — Lumi's OWN persistent configuration/setup facts
+#   fact   — the user's OWN persistent configuration/setup facts
 #   others — catch-all reserved slot
 _MEMES_TYPES = {"paw", "meme", "news", "event", "fact", "others"}
 
@@ -242,7 +242,7 @@ def write_milestone_cand(conn, raw: str, date: str,
         ).fetchone()
         if exists:
             continue
-        # Anti-revive: skip if Lumi has already dropped this milestone
+        # Anti-revive: skip if the user has already dropped this milestone
         # (reconcile writes a tombstone keyed on milestones|scope|date|title).
         nk = f"milestones|{scope}|{m_date}|{title}"
         nh = hashlib.sha256(nk.encode()).hexdigest()

@@ -8,7 +8,10 @@ import json
 import re
 import sqlite3
 
-BIRTH_YEAR = 1995
+
+def _birth_year() -> int:
+    from . import config
+    return int(config.load().get("persona", {}).get("birth_year", 0) or 0)
 
 
 def parse_events_2026(text: str) -> list[dict]:
@@ -126,7 +129,7 @@ def parse_milestones_timeline(text: str) -> list[dict]:
             if m:
                 flush()
                 cur = {"scope": "me",
-                       "date": str(BIRTH_YEAR + int(m.group(1))),
+                       "date": str(_birth_year() + int(m.group(1))),
                        "title": s[1:-1].strip(), "description": "",
                        "theme": None, "pinned": 1}
             elif cur and s and not s.startswith(">"):
@@ -151,7 +154,7 @@ def _hash(table: str, row: dict) -> str:
 def _milestone_natural_key(row: dict) -> str:
     """Stable identity for a timeline row: scope|date|title.
 
-    Used by import_timeline so re-import after Lumi pins/edits a row
+    Used by import_timeline so re-import after the user pins/edits a row
     does not duplicate. The generic _insert uses full-row hash which
     flips on pinned/description changes — wrong for backfill.
     """
@@ -168,7 +171,7 @@ def _insert(conn: sqlite3.Connection, table: str, rows: list[dict],
         ).fetchone():
             skip += 1
             continue
-        # Anti-revive: milestones rows Lumi has dropped (reconcile writes a
+        # Anti-revive: milestones rows the user has dropped (reconcile writes a
         # tombstone keyed on milestones|scope|date|title) must not come back
         # via backfill. Counted as skip — invisible to caller stats shape.
         if table == "milestones":
@@ -230,12 +233,12 @@ def import_timeline(conn: sqlite3.Connection, text: str, *,
     this curated md, so the subpage shows them directly without going
     through the dashboard ✅/❌ vote loop.
 
-    Re-runnable after Lumi pins/edits without duplication.
+    Re-runnable after the user pins/edits without duplication.
     Existing rows: backfill description only if currently NULL/empty
-    AND parser found one (never overwrite Lumi's hand-edit).
+    AND parser found one (never overwrite the user's hand-edit).
     New rows: INSERT with parser values + (scope, date, title) hash.
     Tombstones (audit_log action='tombstone' on milestones, with the
-    same natural-key hash recorded in summary) block re-insert — Lumi
+    same natural-key hash recorded in summary) block re-insert — the user's
     drops stay dropped across reruns.
 
     Returns counts: {inserted, backfilled, skipped, tombstoned}.

@@ -4,7 +4,7 @@ Wired by ``hooks._maybe_set_session_title``: each user_prompt_submit
 fires this module as a detached subprocess (``python -m marrow.title``)
 when the session is eligible, so the LLM call never blocks the hook.
 
-Length rule: 8 CJK chars OR 8 ASCII tokens — matches Lumi's '≤8字'
+Length rule: 8 CJK chars OR 8 ASCII tokens — matches the user's '≤8字'
 across languages. The prompt asks the model to follow the dominant
 language of the user messages, so cn chats get cn titles and en chats
 get en titles. cli + wx use the same path; cc's internal summary is

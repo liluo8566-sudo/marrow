@@ -41,20 +41,20 @@ def test_subpage_hand_edit_survives_refresh_all(env):
     body = profile.read_text(encoding="utf-8")
     profile.write_text(
         body
-        + "\n<!-- id:profile.lumi.note -->\n- private note from lumi\n",
+        + "\n<!-- id:profile.user.note -->\n- private note from user\n",
         encoding="utf-8",
     )
 
     # Second refresh — must NOT clobber the appended block.
     assert cli.main(["refresh", "--all", "--db", db]) == 0
     after = profile.read_text(encoding="utf-8")
-    assert "id:profile.lumi.note" in after
-    assert "private note from lumi" in after
+    assert "id:profile.user.note" in after
+    assert "private note from user" in after
 
     # Third refresh — same invariant.
     assert cli.main(["refresh", "--all", "--db", db]) == 0
     after2 = profile.read_text(encoding="utf-8")
-    assert "private note from lumi" in after2
+    assert "private note from user" in after2
 
 
 def test_subpage_existing_block_edit_survives(env):
@@ -74,9 +74,9 @@ def test_subpage_existing_block_edit_survives(env):
     assert cli.main(["refresh", "--all", "--db", db]) == 0
     # Now edit the body verbatim.
     raw = profile.read_text(encoding="utf-8").replace("- original",
-                                                       "- edited by lumi")
+                                                       "- edited by user")
     profile.write_text(raw, encoding="utf-8")
     assert cli.main(["refresh", "--all", "--db", db]) == 0
     final = profile.read_text(encoding="utf-8")
-    assert "- edited by lumi" in final
+    assert "- edited by user" in final
     assert "- original" not in final

@@ -405,25 +405,21 @@ def _embed_pending_lane(
     rows = conn.execute(cfg["pending_sql"], (batch,)).fetchall()
     if not rows:
         return 0
-    _media_tag = re.compile(r'\s*<(?:image|file)\s+path="[^"]*?"[^>]*>\s*')
+    from .transcript import strip_media_markers as _strip_media
+    _media_tag = re.compile(r'\s*<(?:image|file|gif)\s+path="[^"]*?"[^>]*>\s*')
     if lane == "events":
         # Events lane only — mirror the consumption-point shaping recall
-        # already applies to row content before it reaches the user
-        # (recall_fusion row passthrough, recall.py ~line 1817): strip the
-        # wx time-anchor prefix and bare [sticker: ...] marker lines, so the
+        # applies to row content before it reaches the user (recall_fusion row
+        # passthrough): strip wx time-anchor prefix, bare [sticker: ...] lines,
+        # and media tags via the shared transcript.strip_media_markers so the
         # embedded vector matches what recall actually surfaces. Other lanes
-        # (memes/entities/...) don't carry bridge markers.
-        _time_prefix = re.compile(r"^\[time:[^\]]+\]\s*")
-        _sticker_line = re.compile(r"^\[sticker:[^\]\n]*\]\n?", re.M)
-
+        # (memes/entities/...) don't carry bridge markers → media tags only.
         def _shape(text: str) -> str:
-            t = _time_prefix.sub("", text or "")
-            return _sticker_line.sub("", t)
+            return _strip_media(text or "")
     else:
         def _shape(text: str) -> str:
-            return text or ""
-    pairs = [(r["id"], _media_tag.sub(" ", _shape(r["text"])).strip())
-             for r in rows]
+            return _media_tag.sub(" ", text or "").strip()
+    pairs = [(r["id"], _shape(r["text"])) for r in rows]
     # Guard: if shaping strips a row down to empty, skip embedding it — leave
     # it for the whole-row junk logic (transcript._is_harness_row / repair
     # script). Should not happen post-repair (bare marker rows are junk-
@@ -795,9 +791,9 @@ def _fts_terms(q: str) -> list[str]:
 
     - ASCII alnum runs ≥3 chars kept whole (one trigram MATCH covers it).
     - CJK runs split into sliding 3-char windows aligned with the trigram
-      tokenizer — a long CJK prompt like (老公你知道鸭子梗么) yields windows
-      that include (鸭子梗), letting the OR query hit a row whose body
-      contains (鸭子梗) without requiring the full prompt to appear verbatim.
+      tokenizer — a long CJK prompt like (你知道这个梗么) yields windows
+      that include (这个梗), letting the OR query hit a row whose body
+      contains (这个梗) without requiring the full prompt to appear verbatim.
     - Anything <3 chars dropped (trigram MATCH returns 0 on short queries —
       this is the "OT" pathology gate).
 
@@ -1275,7 +1271,7 @@ def recall_fusion(
         return []
 
     # Stopword filter: strip config-driven tokens before FTS + vec.
-    # List is empty by default; populated by Lumi after reviewing candidates.
+    # List is empty by default; populated by the user after reviewing candidates.
     try:
         from . import config as _cfg
         _sw = _cfg.load().get("recall", {}).get("stopwords", []) or []
@@ -1845,9 +1841,9 @@ def recall_fusion(
     # `budget_chars` (when set) is a defensive cumulative backstop only.
     out: list[dict] = []
     used = 0
+    from .transcript import strip_media_markers as _strip_media
     for _, row in picks[:limit]:
-        content = re.sub(r"^\[time:[^\]]+\]\s*", "", row["content"] or "")
-        content = re.sub(r'\s*<(?:image|file)\s+path="[^"]*?"[^>]*>\s*', " ", content).strip()
+        content = _strip_media(row["content"] or "")
         if budget_chars is not None and used + len(content) > budget_chars:
             break
         out.append({**row, "content": content})

@@ -1451,6 +1451,20 @@ def test_git_revert_worktree_substring_compound_bypass_still_denies(
     assert "permissionDecisionReason" in out
 
 
+def test_git_revert_relative_worktree_path_in_cmd_silent(env, monkeypatch, capsys):
+    # Relative worktree path in the command (no leading slash) must still hit
+    # the worktree/agent-cleanup exemption — cwd itself is not a worktree.
+    cmd = (
+        'git merge --no-ff some-branch -m "x" '
+        "&& git worktree remove .claude/worktrees/agent-foo "
+        "&& git branch -d some-branch"
+    )
+    rc = _pretool(monkeypatch, "Bash", {"command": cmd})
+    assert rc == 0
+    out = _out(capsys)["hookSpecificOutput"]
+    assert "permissionDecision" not in out
+
+
 def test_git_revert_disabled_via_config(env, monkeypatch, capsys):
     base_cfg = config.load()
     base_cfg.setdefault("hooks", {})["git_revert_guard"] = False

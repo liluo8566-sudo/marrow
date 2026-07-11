@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 
 from . import storage, config
 
-_SUBAGENT_RE = re.compile(r"subagent_tokens[:>]?\s*([0-9,]+)")
+_SUBAGENT_RE = re.compile(r"subagent_tokens[:>]?\s*([0-9][0-9,]*)")
 
 
 # --------------------------------------------------------------------------- #
@@ -39,7 +39,10 @@ def agent_tokens_from_transcript(tpath: str) -> int:
     for line in lines:
         if '"type":"user"' in line or '"type":"attachment"' in line:
             for m in _SUBAGENT_RE.finditer(line):
-                total += int(m.group(1).replace(",", ""))
+                try:
+                    total += int(m.group(1).replace(",", ""))
+                except ValueError:
+                    continue
     return total
 
 

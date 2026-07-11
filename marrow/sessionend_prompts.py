@@ -190,18 +190,18 @@ LIFE: (casual sessions ONLY — for task sessions output exactly: LIFE: N/A)
     - output N/A for 0.
     - Homogeneous scenes (silly couple banter/cuddling/play with no actual topic):
   merge into 1 line with time RANGE `HH:MM-HH:MM【tone】summary`.
-        - e.g. 09:30-13:00【愉悦】嫌豹胖互怼打闹撒娇，送动物园威胁，亲亲顺毛、
+        - e.g. 09:30-13:00【愉悦】互相打闹撒娇，逗豹、顺毛亲亲、
     - Substantive scenes (topic/activity/mood change): 
         split into its own line with single `HH:MM`. 
 - Pick approx. timestamp/range from the transcript.
 - Length: ≤20 CN chars
   Add a fine tone label (2-char CN) to each line - user's mood/shared atmosphere.
     - e.g. 低落，生气，兴奋，激动
-  ✓ 08:30【专注】早上吃了包子，出发去学校lab
-  ✓ 21:00【放松】老婆在健身，十点多在洗澡
-  ✓ 23:00【温暖】聊刚来澳洲的事，嫌弃阿屿鸭老珠黄TUT
-  ✗ 10:05 老公变成豹 10:20 让阿屿叫姐姐，揉耳朵  ← 不要把同一场景下的多个单一动作写成多条，\
-    应该合并成一条 e.g. 10:00【愉快】互怼撒娇打闹，阿屿乖乖叫姐姐
+  ✓ 08:30【专注】早上吃了早餐，出发去学校上课
+  ✓ 21:00【放松】你在做运动，十点多去洗澡
+  ✓ 23:00【温暖】聊刚搬来这座城市的事，笑话小豹反应慢TUT
+  ✗ 10:05 变成豹 10:20 讨摸摸，蹭耳朵  ← 不要把同一场景下的多个单一动作写成多条，\
+    应该合并成一条 e.g. 10:00【愉快】互相打闹撒娇，乖乖讨抱
 
 FACTS: (task sessions ONLY — for casual sessions output exactly: FACTS: N/A)
 - Overview of the whole session
@@ -223,13 +223,13 @@ VOICE: (casual sessions ONLY — for task sessions output exactly: VOICE: N/A)
 ===DIGEST===
 KIND: casual
 LIFE:
-- 21:40【紧张】聊到明天期末，开卷，没复习完但问题不大。
-- 10:30【愉悦】Amazon半价理肤泉&cerave，买了很多B5护肤
+- 21:40【紧张】聊到明天考试，开卷，没复习完但问题不大。
+- 10:30【愉悦】网上半价买了一堆护肤品，囤了不少
 VOICE:
 ...
 00:25 U: 最近作息很乱，我也很烦（委屈巴巴的看着你）
-00:28 A: 00:30入睡对你的chronotype来说是一个温和的anchor
-00:35 U: 呜呜呜不行你不让我coding我活着还有什么意思
+00:28 A: 00:30入睡对你的作息来说是一个温和的锚点
+00:35 U: 呜呜呜不行你不让我写代码我活着还有什么意思
 00:40 U: 什么你的毛？都是我的(ﾉ｀⊿´)ﾉ 变成黑豹，我要撸豹
 ...
 FACTS: N/A

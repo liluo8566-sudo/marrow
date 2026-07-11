@@ -88,6 +88,35 @@ _WX_DOT_SENTINEL_RE = re.compile(r"^\.\s*$", re.M)
 # (hooks._WX_TIME_PREFIX_RE, recall needle build). See test_wx_boilerplate_strip.
 
 
+# ── media / bridge-marker strip (shared consumption-point shaper) ────────────
+# Applied where stored event content is surfaced or embedded: strip the wx
+# time-anchor prefix, bare [sticker: ...] marker lines, and <image|file|gif
+# path="..."/> media tags down to whitespace. Recall (embed + row passthrough)
+# and the cortex Replay renderer share this so the same row reads identically
+# everywhere. NOT a row-drop — leaves surrounding dialogue intact.
+_MEDIA_TAG_RE = re.compile(r'\s*<(?:image|file|gif)\s+path="[^"]*?"[^>]*>\s*')
+_WX_TIME_PREFIX_RE = re.compile(r"^\[time:[^\]]+\]\s*")
+_STICKER_LINE_RE = re.compile(r"^\[sticker:[^\]\n]*\]\n?", re.M)
+
+
+def strip_media_markers(text: str) -> str:
+    """Strip media tags + wx bridge markers from stored event content.
+
+    Removes (in order):
+      1. Leading ``[time: ...]`` wx anchor prefix.
+      2. ``[sticker: ...]`` marker lines.
+      3. ``<image|file|gif path="..."/>`` media tags (→ single space).
+
+    Returns the result stripped of leading/trailing whitespace. Safe on plain
+    text — every pattern is specific enough to be a no-op.
+    """
+    if not text:
+        return ""
+    text = _WX_TIME_PREFIX_RE.sub("", text)
+    text = _STICKER_LINE_RE.sub("", text)
+    return _MEDIA_TAG_RE.sub(" ", text).strip()
+
+
 def strip_wx_boilerplate(text: str) -> str:
     """Strip synapse-wx bridge boilerplate from a prompt or event body.
 
@@ -124,6 +153,31 @@ _STICKER_TAG_ONLY_RE = re.compile(
 _BRIDGE_MARKER_ONLY_RE = re.compile(
     r'^(?:\s*\[(?:time|sticker):[^\]\n]*\]\s*)+$'
 )
+# CC slash-command control row. Raw content is a <command-name>/foo</command-name>
+# block; <command-args> carries the user-authored body. A CONTROL command
+# (/clear /model /compact /mcp /effort ...) submits with EMPTY args and produces
+# no dialogue — pure harness noise. A CUSTOM command that carries real text
+# (/goal <spec>, /diagnose <text>, /teach <text>) fills <command-args> and must
+# survive. So the discriminator is: command block AND empty (or whitespace-only)
+# args. Checked on the RAW content string, before strip_harness_markers()
+# collapses the block down to a bare "/foo" that would otherwise be archived.
+_COMMAND_NAME_TAG_RE = re.compile(r'<command-name>.*?</command-name>', re.DOTALL)
+_COMMAND_ARGS_INNER_RE = re.compile(
+    r'<command-args>(.*?)</command-args>', re.DOTALL)
+
+
+def _is_control_command_row(raw: str) -> bool:
+    """True iff *raw* (unstripped record content) is a CC control-command block
+    with empty args — a /clear, /model, /compact, ... submission carrying no
+    user text. Custom commands with a non-empty <command-args> body return
+    False (kept). No <command-name> at all → False (ordinary dialogue)."""
+    if not isinstance(raw, str) or "<command-name>" not in raw:
+        return False
+    if not _COMMAND_NAME_TAG_RE.search(raw):
+        return False
+    args = _COMMAND_ARGS_INNER_RE.search(raw)
+    # Command block present. Junk iff there is no args tag or its body is blank.
+    return not (args and args.group(1).strip())
 
 
 def _is_harness_row(text: str) -> bool:
@@ -271,7 +325,10 @@ def rows_from_records(records: list[dict], *, channel: str = "cli",
         if u and u not in active:
             continue
         msg = o.get("message") or {}
-        text = _text(msg.get("content"))
+        raw_content = msg.get("content")
+        if _is_control_command_row(_raw_content_str(raw_content)):
+            continue
+        text = _text(raw_content)
         if not text:
             continue
         if _is_harness_row(text):

@@ -36,9 +36,8 @@
 - Atomic write every rendered md (temp + replace). Every scheduled job: try/except + alert on fail.
 - Data under `~/.config/marrow/`, code under `~/CC-Lab/marrow/`. Hook scripts ≤100 lines.
 - Stub policy: each phase builds only what it uses. Placeholder tables OK; stub classes banned.
-- Prompt/subagent template change: notify Lumi.
+- Prompt/subagent template change: notify user.
 
 ## Safety nets
-> Baseline: Lumi never manually clears markers, never triggers catchup, never retries. No silent fail. Token bounded. Originals recoverable.
 - Required nets: backup · retry · catchup · failure-alert · concurrent-write lock · atomic write · idempotency · timeout brake · edit safety · drift sweep · claude.md render guard · affect heartbeat · affect neutral fallback · affect catchup.
 - Shipped → PROGRESS. Pending → FUTURE.

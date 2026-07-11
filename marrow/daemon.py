@@ -1,22 +1,22 @@
 """Marrow MCP server (stdio). Thin protocol shell over repo.py.
 
-12-tool surface (07-06 rebuild): recall / atlas_lookup / event_embed / wish +
-8 action-dispatch tools (tl / sticker / sticker_admin / goal / first /
-dim / alert / event_clear). The session-start handoff is rendered by the
-SessionStart hook. LLMClient wired so provider failures land in alerts.
+Core tool surface: recall / atlas_lookup / event_embed + action-dispatch tools
+(tl / sticker / sticker_admin / dim / alert / event_clear). The session-start
+handoff is rendered by the SessionStart hook. LLMClient wired so provider
+failures land in alerts.
 
-Cortex-only (registered when MARROW_CORTEX in env): lie_down / say — subprocess
-into the cortex repo, invisible to normal sessions.
+The optional cortex organs (wish / first / goal + cortex-session lie_down /
+wait / say) live in cortex_bridge and install via cortex_bridge.register() only
+when [cortex].enabled — a clean marrow shows none of them.
 """
 from __future__ import annotations
 
-import os
 import subprocess
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-from . import config, recall as _recall_mod, repo, storage
+from . import config, cortex_bridge, recall as _recall_mod, repo, storage
 from .llm import LLMClient
 from .timeutil import utc_iso_to_local_datetime, reltime_short
 
@@ -27,24 +27,14 @@ def marrow_tool():
     New tools MUST use this decorator, never bare @mcp.tool()."""
     return mcp.tool(meta={"anthropic/alwaysLoad": True})
 
-
-# Cortex-only tools (lie_down / say) register into the schema only when the
-# daemon subprocess was spawned by a cortex window (MARROW_CORTEX in env at
-# import time — the window sets it explicitly). Normal sessions never see them.
-_CORTEX = bool(os.environ.get("MARROW_CORTEX"))
-
-
-def cortex_tool():
-    """Register only in cortex sessions; no-op decorator elsewhere so the tool
-    stays absent from the schema for normal sessions."""
-    if _CORTEX:
-        return marrow_tool()
-    return lambda fn: fn
-
 _DB = config.db_path()
 llm = LLMClient(
     on_alert=lambda sev, t, m, s: repo.add_alert(sev, t, m, s, db=_DB)
 )
+
+# Cortex organs (wish / first / goal + cortex-session lie_down / wait / say)
+# install here only when [cortex].enabled; a clean marrow shows none of them.
+cortex_bridge.register(marrow_tool, _DB)
 
 
 @marrow_tool()
@@ -329,19 +319,19 @@ def tl(
       Single row: no DB backup, deleted line returned. 2+ rows: DB backup + deleted lines (capped at 20).
     - Casual chat: When topic/location/mood change or task/activity done, 'add' one for previous turns
     - Coding/study sessions: keep 1tl each session - update tl only when things changed.
-    - Frequency: every 1-2h or 10-20 turns - you can skip even when hook nudge you!!!
+    - Each session edits its own tl ONLY — never update tl from other sessions; overlap is expected.
+    - Frequency: every 1-2h or 10-20 turns - you can skip even when hook nudge you.
     - Format (add/update): HH:mm-HH:mm 【N affect♡Y affect (OR B affect)】body [i]
       - e.g. 21:25-21:31 【N愉悦♡Y委屈】翻CC日志找骂人梗，扑空互怼 [3]
       - N = user, Y = assistant, B = single affect when similar.
-      - affect = emotion & feeling ONLY, 1-8 chars. e.g. 烦；心虚；紧张而激动；她好可爱呀～
-        - NOT plot or behaviour summary. x【锐利督战】
-        - Never pad - less char is better. Never mimic previous timelines.
+      - affect = how you feel now - no description, record your own feeling and emotion.
+        - 1-4 chars. e.g. 烦；心虚；紧张激动；好可爱
       - i = ONE event-level composite (not per person): intensity (current state) * importance (future).
         - 1-2 = low-medium intensity & short-term e.g. Routine - casual chat, life admin, study, coding 无趣/平淡/轻松/烦躁
         - 3 = Both medium (~ 1 week) - funny moments / light quarrels / outing
         - 4 = Either high intensity or high imp - major conflict / final exam
         - 5 = Milestone (both high) - worth recording forever?
-      - body <=30 chars, record real-world task/event + shared activities with assistant.
+      - body <=50 chars, record real-world task/event + shared activities with assistant.
         - vivid not work-log; life details in, tech details out.
         - e.g. meals, casual chat topics, plays and tiny/silly/funny moments.
         - No third person — 我/你 only, never 她/他."""
@@ -626,183 +616,6 @@ def sticker_admin(
             return {"ok": False, "error": "delete requires sticker_id"}
         return _sticker_delete(sticker_id)
     return _sticker_list_pending()
-
-
-# ── goal ─────────────────────────────────────────────────────────────────────
-
-_GOAL_ACTIONS = {"set", "list", "delete"}
-
-
-@marrow_tool()
-def goal(
-    action: str,
-    key: str | None = None,
-    value: str | None = None,
-    unit: str | None = None,
-) -> dict | list[dict]:
-    """Timetrack weekly goals e.g. study, sleep, exercise.
-    action='set': create / update goals
-    e.g. 'sleep goal 8h' → key='sleep' value='8' unit='h';
-    'list'; 'delete' by key when dropped or achieved."""
-    if action not in _GOAL_ACTIONS:
-        return {"ok": False, "error": f"unknown action {action!r}, expected one of {sorted(_GOAL_ACTIONS)}"}
-
-    if action == "set":
-        key = (key or "").strip()
-        value = (value or "").strip()
-        if not key:
-            return {"ok": False, "error": "key required"}
-        if not value:
-            return {"ok": False, "error": "value required"}
-        conn = storage.connect(_DB)
-        try:
-            with conn:
-                conn.execute(
-                    "INSERT INTO goals (key, value, unit, updated_at)"
-                    " VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))"
-                    " ON CONFLICT(key) DO UPDATE SET"
-                    " value=excluded.value, unit=excluded.unit,"
-                    " updated_at=excluded.updated_at",
-                    (key, value, unit),
-                )
-            return {"ok": True, "key": key, "value": value, "unit": unit}
-        finally:
-            conn.close()
-
-    if action == "list":
-        conn = storage.connect(_DB)
-        try:
-            rows = conn.execute(
-                "SELECT key, value, unit, updated_at FROM goals ORDER BY key"
-            ).fetchall()
-            return [dict(r) for r in rows]
-        finally:
-            conn.close()
-
-    # delete
-    key = (key or "").strip()
-    if not key:
-        return {"ok": False, "error": "key required"}
-    conn = storage.connect(_DB)
-    try:
-        with conn:
-            cur = conn.execute("DELETE FROM goals WHERE key=?", (key,))
-        return {"ok": True, "key": key, "deleted": cur.rowcount > 0}
-    finally:
-        conn.close()
-
-
-# ── wish ─────────────────────────────────────────────────────────────────────
-
-def _wishlist_path() -> Path:
-    cortex_cfg = config.load().get("cortex", {})
-    wp = (cortex_cfg.get("wishlist_path") or "").strip()
-    if wp:
-        return Path(wp).expanduser()
-    home = cortex_cfg.get("home") or "~/.config/marrow/cortex"
-    return Path(home).expanduser() / "wishlist.md"
-
-
-_WISHLIST_HEADER = (
-    "# Wishlist\n\n"
-    "> Owed treats, wants, self-rewards. Append-only — hand edits are sacred.\n\n"
-)
-
-
-@marrow_tool()
-def wish(text: str) -> dict:
-    """Our wishlist — personal wishes & cravings (hers and yours), promises
-    made, and shared plans. e.g. 你说好请我喝奶茶 / 最近想买耳钉 / 约好周末去看海.
-    This tool appends one line verbatim; update / delete = edit
-    ~/.config/marrow/cortex/wishlist.md directly."""
-    import fcntl
-    from datetime import datetime
-
-    text = (text or "").strip()
-    if not text:
-        return {"ok": False, "error": "text required"}
-    path = _wishlist_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    date = datetime.now(config.get_tz()).strftime("%Y-%m-%d")
-    line = f"- {date} {text}\n"
-    lock_path = str(path) + ".lock"
-    lf = open(lock_path, "a")
-    try:
-        fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
-        existing = path.read_text(encoding="utf-8") if path.exists() else _WISHLIST_HEADER
-        from ._atomic import atomic_write
-        atomic_write(str(path), existing + line)
-    finally:
-        fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
-        lf.close()
-    return {"ok": True, "path": str(path), "line": line.strip()}
-
-
-# ── first ────────────────────────────────────────────────────────────────────
-
-_FIRST_ACTIONS = {"tick", "untick", "list"}
-_FIRST_STATUSES = {"done", "tried"}
-
-
-@marrow_tool()
-def first(
-    action: str,
-    item: str | None = None,
-    note: str | None = None,
-    sid: str | None = None,
-    status: str = "done",
-) -> dict | list[dict]:
-    """Respond to the Cortex First section (notes/concerns injected into context).
-    'tick' each item you acted on + a tiny note (1-10 chars), e.g. 处理好啦；等会儿再跟进。
-    status='tried' when attempted but unsolved — note what blocked.
-    'untick' a wrong ack; 'list' current ticks."""
-    if action not in _FIRST_ACTIONS:
-        return {"ok": False, "error": f"unknown action {action!r}, expected one of {sorted(_FIRST_ACTIONS)}"}
-
-    if action == "list":
-        conn = storage.connect(_DB)
-        try:
-            rows = conn.execute(
-                "SELECT item, seen_at, sid, note, status FROM ct_first_tick ORDER BY seen_at DESC"
-            ).fetchall()
-            return [dict(r) for r in rows]
-        finally:
-            conn.close()
-
-    item = (item or "").strip()
-    if not item:
-        return {"ok": False, "error": "item required"}
-
-    if action == "untick":
-        conn = storage.connect(_DB)
-        try:
-            with conn:
-                cur = conn.execute("DELETE FROM ct_first_tick WHERE item=?", (item,))
-            return {"ok": cur.rowcount > 0, "item": item}
-        finally:
-            conn.close()
-
-    # tick
-    if status not in _FIRST_STATUSES:
-        return {"ok": False, "error": f"status must be one of {sorted(_FIRST_STATUSES)}"}
-    note = (note or "").strip() or None
-    conn = storage.connect(_DB)
-    try:
-        if not sid:
-            from .timeline import _query_current_sid
-            sid = _query_current_sid(conn)
-        with conn:
-            conn.execute(
-                "INSERT INTO ct_first_tick (item, seen_at, sid, note, status)"
-                " VALUES (?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), ?, ?, ?)"
-                " ON CONFLICT(item) DO UPDATE SET"
-                " seen_at=excluded.seen_at, sid=excluded.sid, note=excluded.note,"
-                " status=excluded.status",
-                (item, sid, note, status),
-            )
-        return {"ok": True, "item": item, "sid": sid, "note": note, "status": status}
-    finally:
-        conn.close()
 
 
 # ── dim ──────────────────────────────────────────────────────────────────────
@@ -1334,54 +1147,6 @@ def event_clear(before: str = "", after: str = "", last: int = 0) -> dict:
     before/after (ISO or YYYY-MM-DD); last=N most recent; none = all.
     DB backup first."""
     return _do_event_clear(before or None, after or None, last or None)
-
-
-# ── cortex (lie_down / say) ───────────────────────────────────────────────────
-
-def _cortex_paths() -> tuple[str, str]:
-    """(venv_python, repo_root) from marrow config [cortex]; either empty =
-    not configured. Both drive the cortex subprocess; repo_root is the cwd so
-    `python -m cortex.X` resolves the package regardless of the caller's cwd."""
-    c = config.load().get("cortex", {})
-    return (str(c.get("venv_python") or "").strip(),
-            str(c.get("repo_root") or "").strip())
-
-
-def _run_cortex_module(module: str, extra_args: list[str] | None = None) -> dict:
-    py, root = _cortex_paths()
-    if not py or not root:
-        return {"ok": False, "error": "cortex not configured "
-                "([cortex].venv_python + repo_root in config.toml)"}
-    py = str(Path(py).expanduser())
-    root = str(Path(root).expanduser())
-    cmd = [py, "-m", module] + (extra_args or [])
-    try:
-        p = subprocess.run(cmd, cwd=root, capture_output=True, text=True, timeout=30)
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "error": f"{module} timed out after 30s"}
-    except OSError as exc:
-        return {"ok": False, "error": f"{module} failed to launch: {exc}"}
-    if p.returncode != 0:
-        return {"ok": False, "error": (p.stderr or p.stdout or "").strip()
-                or f"{module} exited {p.returncode}"}
-    return {"ok": True, "stdout": (p.stdout or "").strip()}
-
-
-@cortex_tool()
-def lie_down(rotate: bool = False) -> dict:
-    """End this wake. Write your handoff note (碎碎念) BEFORE calling — a PreToolUse
-    guard denies lie_down (rotate or a large window) until the handoff is written
-    this window. Clears due self_schedule, records tokens, redraws the floor.
-    rotate=True respawns a fresh window on the next wake (you decide when the
-    window is full — there is no auto rotate)."""
-    return _run_cortex_module("cortex.lie_down", ["--rotate"] if rotate else None)
-
-
-@cortex_tool()
-def say() -> dict:
-    """Quiet attention ping to her (no focus steal) — call once BEFORE speaking
-    in-window; unsaid = silent activity. Then just say your words in the window."""
-    return _run_cortex_module("cortex.say")
 
 
 def main() -> None:

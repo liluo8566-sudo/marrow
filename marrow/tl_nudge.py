@@ -98,6 +98,12 @@ def maybe_nudge(conn, sid: str) -> str | None:
     count = _load_count(sid) + 1
     if count >= threshold():
         _save_count(sid, 0)
-        return nudge_text() or None
+        text = nudge_text()
+        if not text:
+            return None
+        if "{last_tl}" in text:
+            from . import tl_sync
+            text = text.replace("{last_tl}", tl_sync.last_tl_hhmm(conn, sid))
+        return text
     _save_count(sid, count)
     return None

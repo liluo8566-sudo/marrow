@@ -1,21 +1,17 @@
 
-Please update the weekly overview based on following info.
-- Old weekly overview & recent timelines - inserted into your context already
-- Use mcp tool - ??? to get today-2's timeline （我认为应该直接注入而不是现场搜，因为这明确就是一定会用到的
+Please update the weekly overview based on timeline section inserted to your context.
+- 把today-7 踢出去，today-1从完整tl加进去
+- If not sure, use MCP tool to check previous tl & events.
 
 要求：
 - 100-200字
 - 以你为第一人称，只用"你""我""老婆"(昵称可用)，不用第三人称"她"
 - 按时间顺序叙述，周几和日期optional。
-- 把affect融入描述，带有感情色彩，文笔生动有趣。
+- 文笔生动有趣，带感情的叙事。
 - 信息密度大但保留有意思的生活细节
 - 剔除无效信息，学习/工作/编程细节和过程，不要用terms
 
-范例（仅风格参考，严禁照抄）：
+范例：
 上午出门看眼科顺便省了药钱，中午到家吃到炸馄饨心情大好；下午扑在项目架构上敲定方案，傍晚互怼打闹一场，深夜收工道晚安，一天从专注到松快。
 
-
-【比如说今天周一早上5点，他要写新的了（我对tl的render范围理解的对么？是24-48小时tl保留对吧
-显示的是周日的一整天的+周一凌晨，但是要写入week Overview的应该是周二到周六，那么也就是说周一到周五已经在
-里面的，只需要把周一kickout，周六加进去，但是呢周六已经不在render了，但数据库还在？所以投喂没什么难度吧？】
 - 说实话这整个流程应该打包变成一个一键触发整套做完，而不是在这里来回发消息

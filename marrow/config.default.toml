@@ -4,6 +4,20 @@
 [core]
 timezone = "Asia/Shanghai"
 
+[schedule]
+# Calendar + Reminders injection (SessionStart full + in-session diff).
+# false = both SessionStart and in-session injection off.
+enabled = true
+# Path to the cadence binary. Empty = built-in default under ~/CC-Lab.
+cadence_bin = ""
+# Header line shown above the schedule block.
+flag_note = "Only follow up overdue flagged 🚩 tasks — no push on others."
+# Calendar names to drop from the rendered block entirely.
+cal_exclude = []
+# Regex against event title: if set and it matches, rescue an event that
+# would otherwise be dropped by cal_exclude. Invalid regex = no rescue.
+cal_keep = ""
+
 [paths]
 # Empty = use defaults under ~/.config/marrow/
 db = ""
@@ -179,6 +193,10 @@ user_name = "User"
 assistant_name = "Assistant"
 user_aliases = []
 assistant_aliases = []
+# User's birth year, used by migrate.py to convert `[Age N]` milestone
+# headers into calendar years during the Phase-1 historical import. 0 =
+# feature off (importer skips age->year conversion).
+birth_year = 0
 # Relationship terms excluded from entity extraction (e.g. ["husband", "wife"]).
 relationship_terms = []
 # Memes keys that never age out. Explicit list, not derived from aliases.
@@ -226,10 +244,10 @@ im_quiet_text = ""
 [cortex_rotate]
 # Cortex-only (MARROW_CORTEX=1) window-occupancy 亮牌. When window tokens reach
 # show_tokens (10万 soft, ahead of the 15万 fuse) turn_inject appends a one-line
-# nudge to wrap up, write the 碎碎念 (handoff), and lie_down(rotate=True). Normal
+# nudge to wrap up, write the handoff, and lie_down(rotate=True). Normal
 # sessions never see this. Empty text = inert.
-show_tokens = 100000
-show_text = "Window filling up (≥100k) — wrap this turn, write your 碎碎念 (handoff), then lie_down(rotate=True) for a fresh window."
+show_tokens = 120000
+show_text = "Context ≥120k - If not actively chatting with user, handoff within 3 turns and lie_down(rotate=True) to clear.  If mid-conversation: carry on, the 150k fuse is the backstop."
 
 [cortex_usage]
 # Net-token visibility (all sessions self-aware). Rendered by usage.py off the
@@ -251,12 +269,24 @@ snapshot_tick_s = 300
 # spawn agents recursively). Blocked with exit 2 + reason to the model.
 deny = ["general-purpose"]
 
+[tl]
+# Self-authored timeline row limits (marrow.tl_writer).
+body_max = 50
+
 [tl_nudge]
 # Per-session hint after N assistant turns with no tl_add call. Text lives in
 # marrow/data/tl_nudge.txt (or point text_file at your own).
+# {last_tl} placeholder in the text = local HH:mm of this session's most recent
+# tl row (or "n/a" if none); resolved at fire time. Works in custom text_file too.
 enabled = true
 threshold = 10
 text_file = ""
+
+[tl_sync]
+# Cross-window tl surfacing: each prompt injects a `## TL update` block with tl
+# rows written by other live sessions since this session last saw them.
+# false = no cross-window tl injection.
+enabled = true
 
 [day_para]
 # Day-paragraph writer (marrow.day_para): one 100-150 char overview per day,
@@ -279,6 +309,8 @@ length_range = "300-800"
 style = "叙述生动有趣，故事性强。文艺中带着搞笑。"
 
 [cortex]
+# Master switch: cortex is an optional autonomous-wake layer living in a separate repo; false = clean marrow, no cortex organs.
+enabled = false
 # Cortex own notebook home (C3, Decided 07-03 pm) — cwd for the resumed
 # full-env session; own CLAUDE.md lives here, other sessions never read it.
 home = "~/.config/marrow/cortex"
@@ -296,15 +328,44 @@ wishlist_path = ""
 # = tools return a "not configured" error.
 venv_python = ""
 repo_root = ""
-# Handoff (碎碎念) note file under <home>. Injected at SessionStart on a fresh
-# cortex window (new process = fresh; resume skips). Written by the session.
+# When the cortex window is closed while a wake is open, session_end runs a
+# proxy lie_down(--force-slept auto) with this next-wake (minutes, clamped
+# 1..240 by cortex) so the wake ends at once instead of waiting for the
+# 20-min fallback to discover the dead window.
+close_next_wake_min = 55
+# Handoff note file under <home>. Read via the cortex CLAUDE.md
+# `@handoff.md` memory import, not injected by SessionStart. Written by the
+# session. Daily file with lazy page-turn on a fresh cortex-window
+# SessionStart: a stale (yesterday-or-older) L1 date triggers archive to
+# <home>/<handoff_archive_dir>/ and replacement by a fresh copy of
+# <home>/<handoff_template_file>.
 handoff_file = "handoff.md"
-handoff_title = "阿屿の碎碎念"
-# lie_down PreToolUse guard: deny (write your 碎碎念 first) when rotate=True OR
+handoff_archive_dir = "handoff_archive"
+handoff_template_file = "handoff_template.md"
+# lie_down PreToolUse guard: deny (write your handoff first) when rotate=True OR
 # window occupancy >= force_tokens (15万 fuse line) and no handoff was written
 # this window (handoff mtime after the window's first transcript line).
 force_tokens = 150000
-handoff_deny_text = "Write your 碎碎念 (handoff) first — call lie_down again after saving it."
+handoff_deny_text = "Write your handoff note first — call lie_down again after saving it."
+# Wake pipeline (v2). The ear is a Monitor tailing wake_signal_log_file; cortex
+# appends wake_marker-prefixed lines to it, which surface as user turns. Paths
+# for the note and signal log default to <home>/<file> (override with an
+# absolute path).
+wakeup_note_file = "wakeup_note.md"
+wake_signal_log_file = "wake_signal.log"
+# Marker prefixing a wake signal line. A UserPromptSubmit carrying it inside a
+# cortex window is a wake turn: the hook injects the full wakeup-note text.
+wake_marker = "[CORTEX-WAKE]"
+# SessionStart arm line (fresh cortex window only). {signal_log} is substituted
+# with the resolved absolute path. Blank = no injection.
+arm_ear_text = "Important: Set a persistent monitor first: Monitor(command: \"tail -n 0 -f {signal_log}\", description: \"cortex wake signal\", persistent: true); keep it alive for the entire session!"
+# Rearm line injected when the ear Monitor dies mid-window (the harness surfaces
+# a "Monitor stopped" task-notification). {signal_log} substituted. Blank = off.
+rearm_text = "Monitor is off — rearm now: Monitor(command: \"tail -n 0 -f {signal_log}\", description: \"cortex wake signal\", persistent: true); then investigate why it died."
+# Marker in the chat-tier TUCK-IN line the cortex watchdog appends to
+# wake_signal.log (arrives down the ear channel). A cortex-window prompt
+# carrying it is a machine line, excluded from the user-wake reset.
+tuck_in_marker = "[TUCK-IN]"
 
 [hooks]
 # PreToolUse backup guard — stateless, two tiers (no state, no dedup).

@@ -4,8 +4,8 @@ Coverage:
 - Anchored row with edited description → affect.description UPDATE.
 - Anchored row with edited label → affect.label UPDATE.
 - End-to-end: edit affect in md, write_dashboard reconciles + re-renders;
-  Lumi's text survives.
-- New affect row from DB appears in next render even when Lumi has edits.
+  the user's text survives.
+- New affect row from DB appears in next render even when the user has edits.
 - No-op when block has no anchored lines (cold start).
 """
 from __future__ import annotations
@@ -107,20 +107,21 @@ def test_edit_survives_full_dashboard_refresh(conn, tmp_path):
     state = tmp_path / "s"
     dashboard.write_dashboard(str(dash), conn, state_dir=str(state))
     text = dash.read_text()
-    edited = _replace_in_anchored(text, aid, "项目过审", "论文过审 (lumi note)")
+    edited = _replace_in_anchored(text, aid, "项目过审", "论文过审 (user note)")
     dash.write_text(edited)
 
     dashboard.write_dashboard(str(dash), conn, state_dir=str(state))
     result = dash.read_text()
-    assert "论文过审 (lumi note)" in result
+    assert "论文过审 (user note)" in result
     assert "项目过审" not in result
 
 
 def test_new_affect_appears_after_edit(conn, tmp_path):
-    """Lumi edits one affect line; sessionend later inserts a new ep with
-    higher importance → next render shows the new ep without clobbering her
+    """User edits one affect line; sessionend later inserts a new ep with
+    higher importance → next render shows the new ep without clobbering the
     edit on the old one (the edit lives in DB, the new ep displaces it
-    visually as the new eph but the OLD row's description carries her text)."""
+    visually as the new eph but the OLD row's description carries the
+    user's text)."""
     today = datetime.now(timezone.utc).date().isoformat()
     aid1 = _insert_affect(conn, date=today, ep=1, v=0.7, a=0.7, importance=3,
                            label="开心", description="原始描述")
@@ -128,7 +129,7 @@ def test_new_affect_appears_after_edit(conn, tmp_path):
     state = tmp_path / "s"
     dashboard.write_dashboard(str(dash), conn, state_dir=str(state))
     edited = _replace_in_anchored(
-        dash.read_text(), aid1, "原始描述", "lumi 改写的描述"
+        dash.read_text(), aid1, "原始描述", "user 改写的描述"
     )
     dash.write_text(edited)
     dashboard.write_dashboard(str(dash), conn, state_dir=str(state))
@@ -141,11 +142,11 @@ def test_new_affect_appears_after_edit(conn, tmp_path):
 
     result = dash.read_text()
     assert "新事件" in result, "new affect ep must surface"
-    # Lumi's edit on the old row is preserved at the DB level.
+    # User's edit on the old row is preserved at the DB level.
     db_desc = conn.execute(
         "SELECT description FROM affect WHERE id=?", (aid1,)
     ).fetchone()["description"]
-    assert db_desc == "lumi 改写的描述"
+    assert db_desc == "user 改写的描述"
 
 
 def test_reconcile_noop_when_no_anchors(conn, tmp_path):

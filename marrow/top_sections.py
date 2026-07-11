@@ -433,7 +433,7 @@ def render_top(conn: sqlite3.Connection,
                *, dashboard_path: str | None = None) -> str:
     """Concatenate all dashboard top sections.
 
-    Order: Alerts → Tasks → Timeline → Content → Affect-last (Lumi 06/11; affect block kept ONLY as the aff: anchor edit/delete entry, parked at bottom).
+    Order: Alerts → Tasks → Timeline → Content → Affect-last (decided 06/11; affect block kept ONLY as the aff: anchor edit/delete entry, parked at bottom).
     Milestone-cand block retired from dashboard — cand pipeline is broken
     (≈0 yield); its home gets redesigned with the cand fix.
     """
