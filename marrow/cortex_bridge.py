@@ -263,13 +263,13 @@ def _run_cortex_module(module: str, extra_args: list[str] | None = None) -> dict
     return {"ok": True, "stdout": (p.stdout or "").strip()}
 
 
-def lie_down(rotate: bool = False, next_wake_min: float | None = None) -> dict:
+def lie_down(next_wake_min: float, rotate: bool = False) -> dict:
     """Set the next wake before you sleep: lie_down(next_wake_min=N) [N=1-240].
     NOTE: TTL=60min - be aware of cold start cost (~100k)."""
-    args = ["--rotate"] if rotate else []
-    if next_wake_min is not None:
-        args += ["--next-wake-min", str(next_wake_min)]
-    out = _run_cortex_module("cortex.lie_down", args or None)
+    args = ["--next-wake-min", str(next_wake_min)]
+    if rotate:
+        args += ["--rotate"]
+    out = _run_cortex_module("cortex.lie_down", args)
     # Surface the chosen wake time (cortex.lie_down prints JSON with a
     # "next_wake":"HH:MM" field). Old cortex builds omit it — tolerate silently.
     if out.get("ok"):
@@ -483,6 +483,223 @@ def is_monitor_death(prompt: str) -> bool:
     if not prompt:
         return False
     return "<task-notification>" in prompt and "Monitor stopped" in prompt
+
+
+def tuck_in_marker() -> str:
+    """Marker inside the chat-tier TUCK-IN line the cortex watchdog appends to
+    wake_signal.log (surfaces down the ear channel). A prompt carrying it is a
+    machine line, not a real user message — excluded from the user-wake reset."""
+    cx = config.load().get("cortex", {}) or {}
+    return str(cx.get("tuck_in_marker") or "[TUCK-IN]").strip()
+
+
+def is_machine_line(prompt: str) -> bool:
+    """True when the incoming cortex-window prompt is a machine line arriving
+    down the ear channel (wake marker / monitor death / tuck-in), NOT a real
+    user message. The user-wake reset must fire ONLY on real user messages."""
+    if not prompt:
+        return True
+    p = prompt
+    m = wake_marker()
+    if m and m in p:
+        return True
+    if is_monitor_death(p):
+        return True
+    tm = tuck_in_marker()
+    if tm and tm in p:
+        return True
+    return False
+
+
+# ── user-wake reset (Item 3): a real user message in a cortex window flips the
+# session awake, kills the pending alarm + sentinel, and (re)spawns the watchdog.
+# marrow venv cannot import cortex, so wake_state.json is manipulated directly
+# with the SAME flock + atomic-replace protocol as cortex.wake_state. ──────────
+
+def _cortex_wake_state_path() -> Path:
+    return _cortex_path("wake_state_file", "wake_state.json")
+
+
+def _cortex_watchdog_pidfile() -> Path:
+    return _cortex_path("watchdog_pidfile", "watchdog.pid")
+
+
+import contextlib as _contextlib
+import fcntl as _fcntl
+import json as _json_ws
+
+
+@_contextlib.contextmanager
+def _wake_state_lock(p: Path):
+    """Blocking exclusive flock on <wake_state>.lock, byte-compatible with
+    cortex.wake_state._flock (same sibling .lock, same protocol). Best-effort:
+    an unacquirable lock still proceeds (matches cortex's fallback)."""
+    lp = p.with_suffix(".lock")
+    fd = None
+    got = False
+    try:
+        lp.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(lp), os.O_CREAT | os.O_RDWR, 0o644)
+        deadline = time.monotonic() + 5.0
+        while True:
+            try:
+                _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+                got = True
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.02)
+        yield
+    finally:
+        if fd is not None:
+            if got:
+                with _contextlib.suppress(OSError):
+                    _fcntl.flock(fd, _fcntl.LOCK_UN)
+            with _contextlib.suppress(OSError):
+                os.close(fd)
+
+
+def _wake_state_load(p: Path) -> dict:
+    try:
+        if p.exists():
+            return _json_ws.loads(p.read_text())
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
+def _wake_state_save(p: Path, data: dict) -> None:
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(p.suffix + f".tmp.{os.getpid()}")
+    tmp.write_text(_json_ws.dumps(data, ensure_ascii=False, indent=2))
+    os.replace(tmp, p)
+
+
+def _clear_floor_deadline() -> None:
+    """Clear the pending floor deadline (next_floor_due_at) on the single-row
+    ct_pacemaker_state JSON: None floor = not due, so the killed alarm never
+    re-fires. cortex load_state / triggers tolerate None (floor due when now >=
+    None is treated as 'no floor set' -> waits for the next lie_down redraw)."""
+    import sqlite3
+    dbp = config.db_path()
+    try:
+        conn = sqlite3.connect(dbp, timeout=30)
+    except sqlite3.Error:
+        return
+    try:
+        row = conn.execute(
+            "SELECT state FROM ct_pacemaker_state WHERE id = 1").fetchone()
+        if not row:
+            return
+        try:
+            obj = _json_ws.loads(row[0])
+        except (ValueError, TypeError):
+            return
+        if obj.get("next_floor_due_at") is None:
+            return
+        obj["next_floor_due_at"] = None
+        conn.execute(
+            "UPDATE ct_pacemaker_state SET state = ? WHERE id = 1",
+            (_json_ws.dumps(obj),))
+        conn.commit()
+    except sqlite3.Error:
+        pass
+    finally:
+        conn.close()
+
+
+def _kill_pid(pid_val) -> None:
+    try:
+        pid = int(pid_val)
+    except (TypeError, ValueError):
+        return
+    if pid <= 0 or pid == os.getpid():
+        return
+    import signal as _signal
+    try:
+        os.kill(pid, _signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def _pid_alive(pid_val) -> bool:
+    try:
+        pid = int(pid_val)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _spawn_watchdog_if_absent() -> None:
+    """(Re)spawn the cortex watchdog if its pidfile is missing or the pid is
+    dead. Uses the cortex venv/repo subprocess (marrow cannot import cortex)."""
+    pf = _cortex_watchdog_pidfile()
+    try:
+        alive = pf.exists() and _pid_alive(pf.read_text().strip())
+    except OSError:
+        alive = False
+    if alive:
+        return
+    py, root = _cortex_paths()
+    if not py or not root:
+        return
+    py = str(Path(py).expanduser())
+    root = str(Path(root).expanduser())
+    log = pf.with_suffix(".log")
+    try:
+        log.parent.mkdir(parents=True, exist_ok=True)
+        f = open(log, "a")
+        proc = subprocess.Popen(
+            [py, "-m", "cortex.watchdog"],
+            cwd=root, stdout=f, stderr=f, stdin=subprocess.DEVNULL,
+            start_new_session=True, env={**os.environ},
+        )
+        pf.parent.mkdir(parents=True, exist_ok=True)
+        pf.write_text(str(proc.pid))
+    except OSError:
+        pass
+
+
+def _cortex_user_wake_reset(inp: dict) -> None:
+    """Real user message in a cortex window -> flip awake, kill the pending
+    alarm (floor deadline + sentinel), zero the wait/silence state, mark the
+    user reply, and ensure a watchdog is alive. Fast + idempotent: already-awake
+    + watchdog-alive collapses to cheap no-op writes. Cortex session only; the
+    caller has already excluded machine lines (is_machine_line)."""
+    if not os.environ.get("MARROW_CORTEX"):
+        return
+    p = _cortex_wake_state_path()
+    tpath = inp.get("transcript_path") if isinstance(inp, dict) else None
+    sentinel_pid = None
+    with _wake_state_lock(p):
+        d = _wake_state_load(p)
+        was_awake = bool(d.get("awake"))
+        if not was_awake:
+            from datetime import timezone as _tz
+            d["awake"] = True
+            d["awake_since"] = datetime.now(_tz.utc).isoformat()
+            d["wake_log_id"] = None
+            if tpath:
+                d["transcript"] = str(tpath)
+        d["user_replied_this_wake"] = True
+        d["wait_count"] = 0
+        d.pop("silence_wait_until", None)
+        d.pop("tuck_pending", None)
+        sentinel_pid = d.pop("sentinel_pid", None)
+        _wake_state_save(p, d)
+    # Kill the pending alarm: floor deadline + the exact-time sentinel.
+    _clear_floor_deadline()
+    _kill_pid(sentinel_pid)
+    _spawn_watchdog_if_absent()
 
 
 _HANDOFF_DATE_RE = _re.compile(

@@ -353,6 +353,10 @@ arm_ear_text = "Important: Set a persistent monitor first: Monitor(command: \"ta
 # Rearm line injected when the ear Monitor dies mid-window (the harness surfaces
 # a "Monitor stopped" task-notification). {signal_log} substituted. Blank = off.
 rearm_text = "Monitor is off — rearm now: Monitor(command: \"tail -n 0 -f {signal_log}\", description: \"cortex wake signal\", persistent: true); then investigate why it died."
+# Marker in the chat-tier TUCK-IN line the cortex watchdog appends to
+# wake_signal.log (arrives down the ear channel). A cortex-window prompt
+# carrying it is a machine line, excluded from the user-wake reset.
+tuck_in_marker = "[TUCK-IN]"
 
 [hooks]
 # PreToolUse backup guard — stateless, two tiers (no state, no dedup).

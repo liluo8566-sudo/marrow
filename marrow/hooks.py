@@ -1949,6 +1949,14 @@ def user_prompt_submit() -> int:
                     "additionalContext": _note,
                 }}, sys.stdout)
             return 0
+        # Real user message (NOT a machine line down the ear channel) → user-wake
+        # reset: flip awake, kill the pending alarm + sentinel, spawn a watchdog.
+        # Best-effort; never blocks the prompt or the recall below.
+        if not cortex_bridge.is_machine_line(_prompt):
+            try:
+                cortex_bridge._cortex_user_wake_reset(inp if isinstance(inp, dict) else {})
+            except Exception:
+                pass
 
     # cwd exclude gate — opt-out per-dir via config.toml [recall].exclude_cwds.
     _ex_cwds = config.load().get("recall", {}).get("exclude_cwds", []) or []

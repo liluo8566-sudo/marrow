@@ -148,11 +148,13 @@ def test_lie_down_runs_module_from_any_cwd(env, monkeypatch, tmp_path):
         return _P()
 
     monkeypatch.setattr(cortex_bridge.subprocess, "run", _fake_run)
-    out = cortex_bridge.lie_down()
+    out = cortex_bridge.lie_down(next_wake_min=20)
     assert out["ok"] is True
     assert captured["cwd"] == str(fake_root)
     assert captured["cmd"][0] == str(fake_py)
-    assert captured["cmd"][1:] == ["-m", "cortex.lie_down"]
+    # next_wake_min is required and always threaded into the CLI args.
+    assert captured["cmd"][1:] == ["-m", "cortex.lie_down",
+                                   "--next-wake-min", "20"]
 
 
 def _fake_lie_down_run(monkeypatch, tmp_path, stdout):
@@ -175,7 +177,7 @@ def test_lie_down_surfaces_next_wake(env, monkeypatch, tmp_path):
     """next_wake in the subprocess JSON is echoed into the tool's text."""
     _fake_lie_down_run(monkeypatch, tmp_path,
                        '{"tokens": 42, "next_wake": "14:35"}')
-    out = cortex_bridge.lie_down()
+    out = cortex_bridge.lie_down(next_wake_min=20)
     assert out["ok"] is True
     assert out["next_wake"] == "14:35"
     assert out["text"] == "next wake ≈ 14:35"
@@ -184,7 +186,7 @@ def test_lie_down_surfaces_next_wake(env, monkeypatch, tmp_path):
 def test_lie_down_no_next_wake_field(env, monkeypatch, tmp_path):
     """Old cortex build (no next_wake) — no crash, no next_wake surfaced."""
     _fake_lie_down_run(monkeypatch, tmp_path, '{"tokens": 42}')
-    out = cortex_bridge.lie_down()
+    out = cortex_bridge.lie_down(next_wake_min=20)
     assert out["ok"] is True
     assert "next_wake" not in out
 
@@ -192,7 +194,7 @@ def test_lie_down_no_next_wake_field(env, monkeypatch, tmp_path):
 def test_lie_down_non_json_stdout(env, monkeypatch, tmp_path):
     """Non-JSON stdout (legacy plain line) tolerated silently."""
     _fake_lie_down_run(monkeypatch, tmp_path, "lie_down tokens=42 rotated=False")
-    out = cortex_bridge.lie_down()
+    out = cortex_bridge.lie_down(next_wake_min=20)
     assert out["ok"] is True
     assert "next_wake" not in out
 
@@ -222,8 +224,7 @@ def test_say_runs_module(env, monkeypatch, tmp_path):
 
 def test_cortex_tool_not_configured(env, monkeypatch):
     monkeypatch.setattr(config, "load", lambda: {"cortex": {}})
-    run_fn = cortex_bridge.lie_down
-    out = run_fn()
+    out = cortex_bridge.lie_down(next_wake_min=20)
     assert out["ok"] is False
     assert "not configured" in out["error"]
 
