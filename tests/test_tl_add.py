@@ -101,6 +101,22 @@ def test_render_new_format_with_anchor(conn):
     assert f"e={r['event_id']}" in md  # trail marker
 
 
+def test_render_canonicalizes_letters_with_config_override(conn, monkeypatch):
+    """Render normalizes label letters to the configured tl.user_letter /
+    tl.assistant_letter, even though the row was written with hardcoded
+    N/Y (e.g. by a still-running old-code window)."""
+    r = _add(conn, body="翻日志扑空")
+    from marrow import config as _config
+    monkeypatch.setattr(_config, "load",
+                        lambda: {"tl": {"user_letter": "S", "assistant_letter": "Q"}})
+    md = timeline.render_timeline(conn)
+    assert f"【S愉悦♡Q委屈】翻日志扑空 [3] <!-- tl:e:{r['event_id']} -->" in md
+    # DB content itself is untouched by render (canonicalization is display-only)
+    assert conn.execute("SELECT content FROM events WHERE id=?",
+                        (r["event_id"],)).fetchone()["content"] == \
+        "【N愉悦♡Y委屈】翻日志扑空 [3]"
+
+
 def test_no_self_rows_render_unchanged(conn):
     """Byte-identical fallback: DB with no self rows renders exactly as before
     the self-row branch (self query returns [], adds nothing)."""

@@ -39,6 +39,43 @@ def _assistant_letter() -> str:
 _LABEL_RE = re.compile(r"^\s*(【[^】]*】)?(.*)$", re.DOTALL)
 _TRAIL_IMP_RE = re.compile(r"\s*\[\d\]\s*$")
 
+# Anchored letter positions inside a tl label: start-of-label, right after ♡,
+# right after "| " (old two-side format). Never matches inside a word/body.
+_LABEL_LETTER_RE = re.compile(r"(^|♡|\|\s*)([NY])")
+
+
+def canonicalize_label_letters(text: str) -> str:
+    """Rewrite legacy hardcoded N/Y label letters to the configured
+    tl.user_letter / tl.assistant_letter, anchored to label positions only
+    (start-of-label, right after ♡, right after '| '). Body text and
+    everything outside the leading 【...】 label segment is untouched.
+
+    No-op when configured letters are still the default N/Y (upstream-safe)
+    and naturally idempotent (rows already carrying the configured letters
+    have no N/Y left at anchor positions to match).
+
+    Shared by scripts/migrate_tl_letters.py (rewrites events.content) and
+    timeline.py render (canonicalizes display without touching the DB).
+    """
+    if not text:
+        return text
+    u, a = _user_letter(), _assistant_letter()
+    if u == "N" and a == "Y":
+        return text
+    m = re.search(r"【([^】]*)】", text)
+    if not m:
+        return text
+    label = m.group(1)
+
+    def _sub(mm: re.Match) -> str:
+        letter = mm.group(2)
+        return mm.group(1) + (u if letter == "N" else a)
+
+    new_label = _LABEL_LETTER_RE.sub(_sub, label)
+    if new_label == label:
+        return text
+    return text[:m.start(1)] + new_label + text[m.end(1):]
+
 
 class TlError(ValueError):
     """Validation failure surfaced to the MCP caller."""

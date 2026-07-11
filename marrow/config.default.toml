@@ -371,6 +371,13 @@ rearm_text = "Monitor is off — rearm now: Monitor(command: \"tail -n 0 -f {sig
 # carrying it is a machine line, excluded from the user-wake reset.
 tuck_in_marker = "[TUCK-IN]"
 
+[qidu]
+# Qidu book-server — powers the book_* MCP tools (Phase 3 划线/批注系统).
+# Both empty = tools return a "not configured" error, never fall back to
+# localhost:3210 (the deprecated pre-Phase-3 cyberboss address).
+api_base = ""
+token = ""
+
 [hooks]
 # PreToolUse backup guard — stateless, two tiers (no state, no dedup).
 # Silent: rm/mv/sed scoped to tmp/scratchpad/worktrees; a destructive command

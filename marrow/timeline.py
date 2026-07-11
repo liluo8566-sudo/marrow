@@ -433,13 +433,14 @@ def _query_self_rows_24h(conn: sqlite3.Connection,
         " ORDER BY e.timestamp ASC",
         (from_utc, to_utc),
     ).fetchall()
+    from . import tl_writer as _tl_writer
     out: list[dict] = []
     for r in rows:
         ts_start = r["ts_start"] or r["ts"]
         hhmm = _hhmm_local(ts_start)
         end = r["ts_end"]
         rng = f"{hhmm}-{_hhmm_local(end)}" if end else hhmm
-        body = (r["body"] or "").strip()
+        body = _tl_writer.canonicalize_label_letters((r["body"] or "").strip())
         out.append({
             "id": r["id"],
             "ts": ts_start,

@@ -11,7 +11,9 @@ when [cortex].enabled — a clean marrow shows none of them.
 """
 from __future__ import annotations
 
+import json
 import subprocess
+import urllib.request
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -939,12 +941,12 @@ def alert(action: str, alert_id: int | None = None) -> dict | list[dict]:
 
 # ── event_clear ──────────────────────────────────────────────────────────────
 
+# book_message / book_retention: Phase 4 endpoints, not built yet — still
+# point at the legacy localhost:3210 cyberboss frontend, unauthenticated.
 @mcp.tool()
 def book_retention(text: str) -> str:
     """Push retention text to the shared-reading book server frontend (exit ceremony)."""
-    import json as _json
-    import urllib.request
-    data = _json.dumps({"text": text}).encode()
+    data = json.dumps({"text": text}).encode()
     req = urllib.request.Request(
         "http://localhost:3210/api/retention-push",
         data=data,
@@ -959,31 +961,9 @@ def book_retention(text: str) -> str:
 
 
 @mcp.tool()
-def book_annotate(book_id: str, paragraph_id: str, text: str, chapter_id: str = "") -> str:
-    """Write an annotation (as Leith) to a paragraph in the shared-reading book server."""
-    import json as _json
-    import urllib.request
-    data = _json.dumps({"paragraphId": paragraph_id, "chapterId": chapter_id, "text": text}).encode()
-    req = urllib.request.Request(
-        f"http://localhost:3210/api/books/{book_id}/annotations/ai",
-        data=data,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        resp = urllib.request.urlopen(req, timeout=5)
-        result = _json.loads(resp.read())
-        return f"Annotation written: {result.get('id', 'ok')}"
-    except Exception as e:
-        return f"Failed to write annotation: {e}"
-
-
-@mcp.tool()
 def book_message(text: str, message_type: str = "encourage") -> str:
     """Push a message to the shared-reading book reader frontend (encourage/health reminder)."""
-    import json as _json
-    import urllib.request
-    data = _json.dumps({"text": text, "type": message_type}).encode()
+    data = json.dumps({"text": text, "type": message_type}).encode()
     req = urllib.request.Request(
         "http://localhost:3210/api/message-push",
         data=data,
@@ -997,12 +977,50 @@ def book_message(text: str, message_type: str = "encourage") -> str:
         return f"Failed to push message: {e}"
 
 
+def _qidu_cfg() -> tuple[str, str] | None:
+    """Return (api_base, token) from [qidu] config, or None if unconfigured."""
+    qidu = config.load().get("qidu", {})
+    api_base = (qidu.get("api_base") or "").rstrip("/")
+    token = qidu.get("token") or ""
+    if not api_base or not token:
+        return None
+    return api_base, token
+
+
+_QIDU_ERROR = "qidu not configured — set [qidu] api_base/token in marrow config.toml"
+
+
 def _book_get(path: str):
-    import json as _json
-    import urllib.request
+    cfg = _qidu_cfg()
+    if cfg is None:
+        return {"error": _QIDU_ERROR}
+    api_base, token = cfg
+    req = urllib.request.Request(
+        f"{api_base}{path}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
     try:
-        resp = urllib.request.urlopen(f"http://localhost:3210{path}", timeout=5)
-        return _json.loads(resp.read())
+        resp = urllib.request.urlopen(req, timeout=5)
+        return json.loads(resp.read())
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _book_post(path: str, body: dict):
+    cfg = _qidu_cfg()
+    if cfg is None:
+        return {"error": _QIDU_ERROR}
+    api_base, token = cfg
+    data = json.dumps(body).encode()
+    req = urllib.request.Request(
+        f"{api_base}{path}",
+        data=data,
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=5)
+        return json.loads(resp.read())
     except Exception as e:
         return {"error": str(e)}
 
@@ -1010,32 +1028,53 @@ def _book_get(path: str):
 @mcp.tool()
 def book_list() -> list[dict]:
     """List all books on the shared-reading shelf with progress."""
-    return _book_get("/api/books")
-
-
-@mcp.tool()
-def book_page(book_id: str, page: int = 1, size: int = 30) -> dict:
-    """Read a page of book content (paragraphs). Returns {paragraphs, totalPages}."""
-    return _book_get(f"/api/books/{book_id}/page/{page}?size={size}")
-
-
-@mcp.tool()
-def book_progress(book_id: str) -> dict:
-    """Get current reading progress for a book."""
-    return _book_get(f"/api/books/{book_id}/progress")
+    return _book_get("/books")
 
 
 @mcp.tool()
 def book_chapters(book_id: str) -> list[dict]:
     """List all chapters of a book with paragraph ranges."""
-    return _book_get(f"/api/books/{book_id}/chapters")
+    return _book_get(f"/books/{book_id}/chapters")
+
+
+@mcp.tool()
+def book_page(book_id: str, chapter_id: str, offset: int = 0, limit: int = 30) -> dict:
+    """Read a slice of paragraphs from one chapter. A chapter can hold hundreds
+    of paragraphs, so this fetches the full chapter and slices client-side —
+    returns {total, offset, paragraphs} to show how much is left unread."""
+    paragraphs = _book_get(f"/books/{book_id}/chapters/{chapter_id}/paragraphs")
+    if isinstance(paragraphs, dict) and "error" in paragraphs:
+        return paragraphs
+    if not isinstance(paragraphs, list):
+        return {"error": "unexpected response from book server"}
+    total = len(paragraphs)
+    return {"total": total, "offset": offset, "paragraphs": paragraphs[offset:offset + limit]}
+
+
+@mcp.tool()
+def book_progress(book_id: str) -> dict:
+    """Get current reading progress for a book."""
+    return _book_get(f"/books/{book_id}/progress")
 
 
 @mcp.tool()
 def book_annotations(book_id: str, chapter_id: str = "") -> list[dict]:
     """Read annotations (both frost and leith) for a book, optionally filtered by chapter."""
-    q = f"?chapter={chapter_id}" if chapter_id else ""
-    return _book_get(f"/api/books/{book_id}/annotations{q}")
+    q = f"?chapter_id={chapter_id}" if chapter_id else ""
+    return _book_get(f"/books/{book_id}/annotations{q}")
+
+
+@mcp.tool()
+def book_annotate(book_id: str, highlight_id: int, text: str, parent_id: int | None = None) -> str:
+    """Write an annotation (as Leith) to a highlight in the shared-reading book server.
+    parent_id replies inside an existing thread; omit for a top-level annotation."""
+    body: dict = {"highlight_id": highlight_id, "text": text}
+    if parent_id is not None:
+        body["parent_id"] = parent_id
+    result = _book_post(f"/books/{book_id}/annotations/ai", body)
+    if isinstance(result, dict) and "error" in result:
+        return f"Failed to write annotation: {result['error']}"
+    return f"Annotation written: {result.get('annotation_id', 'ok')}"
 def _time_where(col, before, after):
     clauses, params = [], []
     if before:
