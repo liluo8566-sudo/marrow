@@ -272,6 +272,10 @@ deny = ["general-purpose"]
 [tl]
 # Self-authored timeline row limits (marrow.tl_writer).
 body_max = 50
+# Label letters composing 【N word♡Y word】body [i]. Parsing is
+# letter-agnostic — change these to any short prefix you like.
+user_letter = "N"
+assistant_letter = "Y"
 
 [tl_nudge]
 # Per-session hint after N assistant turns with no tl_add call. Text lives in

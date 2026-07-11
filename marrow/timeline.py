@@ -494,7 +494,8 @@ def _render_24h(digests: list[dict],
     """Flat 24h film-strip, newest first, filtered per rendered line.
 
     self_rows (role='tl', tl_add) render PRIMARY with a tl:e anchor and
-    the 【N word♡Y word】body [i] format; life_lines are the history fallback.
+    the 【N word♡Y word】body [i] format (letters configurable via
+    tl.user_letter / tl.assistant_letter); life_lines are the history fallback.
     """
     if event_spans is None:
         event_spans = {}

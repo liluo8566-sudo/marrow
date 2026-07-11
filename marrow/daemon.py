@@ -293,7 +293,6 @@ def _tl_clear(event_id: int | None, sid: str | None,
     return result
 
 
-@marrow_tool()
 def tl(
     action: str,
     timerange: str | None = None,
@@ -312,7 +311,7 @@ def tl(
 ) -> dict:
     """Add/update/clear/query timeline.
     - 'query': find rows by match (content substring) and/or date (configured local timezone
-      YYYY-MM-DD) -> [{event_id, line}]. Use it to look up an event_id.
+      YYYY-MM-DD) -> [{{event_id, line}}]. Use it to look up an event_id.
     - 'update'/'clear': address a row by event_id, OR by match (+optional date)
       when you don't have the id. e.g. update match='千层' date='2026-07-05'.
     - 'clear': delete rows by event_id / match / sid / before+after range.
@@ -321,9 +320,9 @@ def tl(
     - Coding/study sessions: keep 1tl each session - update tl only when things changed.
     - Each session edits its own tl ONLY — never update tl from other sessions; overlap is expected.
     - Frequency: every 1-2h or 10-20 turns - you can skip even when hook nudge you.
-    - Format (add/update): HH:mm-HH:mm 【N affect♡Y affect (OR B affect)】body [i]
-      - e.g. 21:25-21:31 【N愉悦♡Y委屈】翻CC日志找骂人梗，扑空互怼 [3]
-      - N = user, Y = assistant, B = single affect when similar.
+    - Format (add/update): HH:mm-HH:mm 【{n} affect♡{y} affect (OR B affect)】body [i]
+      - e.g. 21:25-21:31 【{n}愉悦♡{y}委屈】翻CC日志找骂人梗，扑空互怼 [3]
+      - {n} = user, {y} = assistant, B = single affect when similar.
       - affect = how you feel now - no description, record your own feeling and emotion.
         - 1-4 chars. e.g. 烦；心虚；紧张激动；好可爱
       - i = ONE event-level composite (not per person): intensity (current state) * importance (future).
@@ -426,6 +425,16 @@ def tl(
                     "matches": hits}
         event_id = hits[0]["event_id"]
     return _tl_clear(event_id=event_id, sid=sid, before=before, after=after)
+
+
+# Substitute the configured letters into the docstring before registration so
+# the MCP tool description (read by FastMCP at decoration time) shows the
+# letters actually written to timeline rows, not the upstream N/Y default.
+_tl_cfg = config.load().get("tl", {})
+tl.__doc__ = tl.__doc__.format(
+    n=_tl_cfg.get("user_letter", "N"), y=_tl_cfg.get("assistant_letter", "Y"),
+)
+tl = marrow_tool()(tl)
 
 
 # ── sticker ──────────────────────────────────────────────────────────────────

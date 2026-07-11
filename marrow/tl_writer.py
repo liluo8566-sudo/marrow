@@ -6,6 +6,8 @@ events.imp. Render/reconcile treat these rows by their tl:e:<event_id> anchor.
 
 Format: HH:mm[-HH:mm] 【N word♡Y word】body [i]
   N = user affect, Y = assistant affect. word <=8 chars.
+  Letters are configurable via tl.user_letter / tl.assistant_letter
+  (default "N" / "Y"); parsing is letter-agnostic.
   Single-side rows: just 【N word】 or 【Y word】.
   i = composite 1-5 (events.imp), one value for the whole row, not per side,
   rendered at the end as " [i]".
@@ -26,6 +28,14 @@ _WORD_MAX = 8
 
 def _body_max() -> int:
     return int(_config.load().get("tl", {}).get("body_max", 50))
+
+
+def _user_letter() -> str:
+    return str(_config.load().get("tl", {}).get("user_letter", "N"))
+
+
+def _assistant_letter() -> str:
+    return str(_config.load().get("tl", {}).get("assistant_letter", "Y"))
 _LABEL_RE = re.compile(r"^\s*(【[^】]*】)?(.*)$", re.DOTALL)
 _TRAIL_IMP_RE = re.compile(r"\s*\[\d\]\s*$")
 
@@ -90,9 +100,9 @@ def _hhmm_to_utc(hhmm: str, base_date: _dt.date, now_local: _dt.datetime) -> str
 def _compose_label(n_word, y_word) -> str:
     seg = []
     if n_word:
-        seg.append(f"N{n_word}")
+        seg.append(f"{_user_letter()}{n_word}")
     if y_word:
-        seg.append(f"Y{y_word}")
+        seg.append(f"{_assistant_letter()}{y_word}")
     return "♡".join(seg)
 
 
@@ -126,8 +136,8 @@ def tl_add(conn, timerange: str, body: str,
     if len(body) > body_max:
         raise TlError(f"body exceeds {body_max} chars: {len(body)}")
 
-    n_word = _check_word(n_word, "N")
-    y_word = _check_word(y_word, "Y")
+    n_word = _check_word(n_word, _user_letter())
+    y_word = _check_word(y_word, _assistant_letter())
     if not n_word and not y_word:
         raise TlError("at least one of n_word / y_word required")
     imp = _clamp_1_5(importance, "importance", 3)
@@ -214,8 +224,8 @@ def tl_update(conn, event_id: int, timerange: str | None = None,
         body_max = _body_max()
         if len(body_part) > body_max:
             raise TlError(f"body exceeds {body_max} chars")
-    n_word = _check_word(n_word, "N")
-    y_word = _check_word(y_word, "Y")
+    n_word = _check_word(n_word, _user_letter())
+    y_word = _check_word(y_word, _assistant_letter())
     if n_word or y_word:
         label_part = f"【{_compose_label(n_word, y_word)}】"
     imp = _clamp_1_5(importance, "importance", ev["imp"] or 3)
