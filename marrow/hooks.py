@@ -3416,12 +3416,10 @@ def turn_inject() -> int:
     kickout_full = f"\n\n{kickout_ctx}" if kickout_ctx else ""
     show_ctx = cortex_bridge._cortex_show_context(tpath) if cortex_bridge.enabled() else ""
     show_full = f"\n\n{show_ctx}" if show_ctx else ""
-    window_info = cortex_bridge._cortex_window_info() if cortex_bridge.enabled() else ""
-    window_full = f"\n\n{window_info}" if window_info else ""
     usage_ctx = _usage_threshold_context(sid, tpath)
     usage_full = f"\n\n{usage_ctx}" if usage_ctx else ""
     ctx = (f"# Context — {now_str}{delta}{sched_ctx}{tl_ctx}{care_ctx}"
-           f"{window_full}{kickout_full}{show_full}{usage_full}")
+           f"{kickout_full}{show_full}{usage_full}")
     json.dump(
         {"hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
