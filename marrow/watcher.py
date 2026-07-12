@@ -62,11 +62,26 @@ def _setup_logger() -> logging.Logger:
 
 
 def _resolve_roots() -> tuple[list[str], list[str]]:
-    """Returns (file_roots, dir_roots) — both as absolute strings."""
+    """Returns (file_roots, dir_roots) — both as absolute strings.
+
+    daybrief lives at config.daybrief_path(); the db_pages recursive dir root
+    already covers it once the file sits inside db_pages (NY migration). When
+    daybrief_path points elsewhere (DATA_DIR default / pre-migration), add it
+    as an explicit file root so its hand-edits still reach sync_file_observe.
+    """
     cfg = config.load()
     dash = str(Path(cfg["paths"]["dashboard"]).resolve())
     db_pages = str(Path(cfg["paths"]["db_pages"]).resolve())
-    return [dash], [db_pages]
+    file_roots = [dash]
+    try:
+        daybrief_raw = (config.daybrief_path() or "").strip()
+    except KeyError:
+        daybrief_raw = ""
+    if daybrief_raw:
+        daybrief = str(Path(daybrief_raw).resolve())
+        if daybrief != db_pages and not daybrief.startswith(db_pages + os.sep):
+            file_roots.append(daybrief)
+    return file_roots, [db_pages]
 
 
 class _Debouncer:

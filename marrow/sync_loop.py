@@ -95,6 +95,20 @@ _DASHBOARD_DB_SOURCES: list[tuple[str, str]] = [
     ("diary",           "updated_at"),
 ]
 
+# Timeline-only subset feeding daybrief.md. Restricted to what
+# reconcile_timeline / render_timeline actually touch: session_digests (ts —
+# always populated, unlike the mostly-NULL updated_at), diary, events
+# (created_at catches new tl lines; in-place tl edits ride collect_tick's
+# 30min render), affect (open-episode rows the plan calls "episodes").
+# Usage / rate-limit kv is EXCLUDED on purpose — Status-zone freshness rides
+# collect_tick, not the 5s loop, so its per-render churn cannot defeat the gate.
+_DAYBRIEF_DB_SOURCES: list[tuple[str, str]] = [
+    ("session_digests", "ts"),
+    ("diary",           "updated_at"),
+    ("events",          "created_at"),
+    ("affect",          "updated_at"),
+]
+
 
 def last_db_mtime_subpage(conn: sqlite3.Connection, key: str) -> float | None:
     """Return max db timestamp for a named subpage key, or None if unknown/empty."""
@@ -107,6 +121,11 @@ def last_db_mtime_subpage(conn: sqlite3.Connection, key: str) -> float | None:
 def last_db_mtime_dashboard(conn: sqlite3.Connection) -> float | None:
     """Return max db timestamp across all dashboard-feeding tables."""
     return _max_any(conn, _DASHBOARD_DB_SOURCES)
+
+
+def last_db_mtime_daybrief(conn: sqlite3.Connection) -> float | None:
+    """Return max db timestamp across the timeline-only daybrief sources."""
+    return _max_any(conn, _DAYBRIEF_DB_SOURCES)
 
 
 # ---------------------------------------------------------------------------
@@ -417,5 +436,30 @@ def build_targets(folder: str,
         render_fn=_dash_render,
         has_md_to_db=True,
     ))
+
+    # Daybrief target — timeline zone is bidirectional. render_fn is
+    # daybrief.update, which reconciles md hand-edits BEFORE rendering (P2),
+    # so the loop must NOT reconcile again. db_mtime_fn is the timeline-only
+    # subset. Missing file (fresh install) is skipped gracefully: _process
+    # returns on stat() FileNotFoundError, and update() guards os.path.exists.
+    try:
+        daybrief_path = (_config.daybrief_path() or "").strip()
+    except KeyError:
+        daybrief_path = ""
+    if daybrief_path:
+        def _daybrief_db_mtime(c: sqlite3.Connection) -> float | None:
+            return last_db_mtime_daybrief(c)
+
+        def _daybrief_render(c: sqlite3.Connection) -> None:
+            from . import daybrief
+            daybrief.update(c)
+
+        targets.append(SyncTarget(
+            name="daybrief",
+            md_path=daybrief_path,
+            db_mtime_fn=_daybrief_db_mtime,
+            render_fn=_daybrief_render,
+            has_md_to_db=True,
+        ))
 
     return targets

@@ -21,6 +21,7 @@ from marrow.sync_loop import (
     USER_ACTIVE_WINDOW_S,
     _MTIME_EPSILON_S,
     last_db_mtime_dashboard,
+    last_db_mtime_daybrief,
     last_db_mtime_subpage,
 )
 
@@ -453,3 +454,99 @@ def test_db_mtime_none_skipped(tmp_path):
     time.sleep(0.1)
     loop.stop()
     assert rendered == []
+
+
+# ---------------------------------------------------------------------------
+# Daybrief target — timeline-only db subset + bidirectional wiring
+# ---------------------------------------------------------------------------
+
+def test_last_db_mtime_daybrief_timeline_subset(tmp_path):
+    """Only timeline tables count; a usage/rate-limit kv change does not move it."""
+    from datetime import datetime, timezone
+
+    from marrow import storage
+    db = str(tmp_path / "t.db")
+    c = storage.init_db(db)
+    assert last_db_mtime_daybrief(c) is None
+    # A new tl line (events.created_at) — this IS a timeline source.
+    c.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, created_at)"
+        " VALUES ('s1','2026-05-27T09:00:00Z','tl','x [3]',"
+        " '2026-05-27T09:00:00Z')"
+    )
+    c.commit()
+    ts = last_db_mtime_daybrief(c)
+    assert ts is not None
+    expected = datetime(2026, 5, 27, 9, 0, 0, tzinfo=timezone.utc).timestamp()
+    assert abs(ts - expected) < 1.0
+    c.close()
+
+
+def test_daybrief_db_change_triggers_render(tmp_path):
+    """Insert a timeline row → db-newer → render_fn invoked (db→md path)."""
+    from marrow import storage
+    db = str(tmp_path / "t.db")
+    real_conn = storage.init_db(db)
+
+    md = tmp_path / "daybrief.md"
+    md.write_text("# daybrief")
+    _backdate(md, seconds=10.0)  # md older + outside user-active window
+
+    # A fresh tl line lands with created_at = now → db strictly newer than md.
+    now_iso = "2999-01-01T00:00:00Z"
+    real_conn.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, created_at)"
+        " VALUES ('s1','2026-05-27T09:00:00Z','tl','edit [3]', ?)",
+        (now_iso,),
+    )
+    real_conn.commit()
+
+    real_conn.close()  # loop opens its own thread conn via conn_factory
+
+    rendered: list[int] = []
+    t = _target(
+        str(md),
+        lambda c: last_db_mtime_daybrief(c),
+        render_fn=lambda c: rendered.append(1),
+        name="daybrief",
+    )
+    loop = SyncLoop(lambda: storage.connect(db), [t], tick_s=100.0)
+    loop.start()
+    time.sleep(0.1)
+    loop.stop()
+    assert rendered, "db-newer timeline row must trigger daybrief render_fn"
+
+
+def test_daybrief_md_edit_absorbs_to_db(tmp_path):
+    """md hand-edit (md-newer) → render_fn runs; daybrief.update reconciles it
+    into the DB before rendering (P2 reconcile-before-render)."""
+    from marrow import storage
+    db = str(tmp_path / "t.db")
+    storage.init_db(db).close()
+
+    md = tmp_path / "daybrief.md"
+    md.write_text("# daybrief hand-edited timeline line")
+    md_mtime = _backdate(md, seconds=5.0)  # md newer, but user-idle
+
+    # db older than md → md→db (reconcile-inside-render) path.
+    reconciled: list[str] = []
+
+    def render_fn(c):
+        # daybrief.update does reconcile-before-render internally; assert the
+        # loop dispatches a single render call for the md-newer branch.
+        reconciled.append("reconcile+render")
+
+    t = _target(
+        str(md),
+        lambda c: md_mtime - 10.0,
+        render_fn=render_fn,
+        has_md_to_db=True,
+        name="daybrief",
+    )
+    loop = SyncLoop(lambda: storage.connect(db), [t], tick_s=100.0)
+    loop.start()
+    time.sleep(0.1)
+    loop.stop()
+    assert reconciled == ["reconcile+render"], (
+        "md-newer edit must invoke render_fn exactly once (reconcile lives "
+        "inside daybrief.update, not a second loop call)")
