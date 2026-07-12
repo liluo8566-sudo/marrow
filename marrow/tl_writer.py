@@ -204,6 +204,10 @@ def tl_update(conn, event_id: int, timerange: str | None = None,
         hhmm_start, hhmm_end = _parse_timerange(timerange)
         base_date = now_local.date()
         ts_start = _hhmm_to_utc(hhmm_start, base_date, now_local)
+        now_utc = now_local.astimezone(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if ts_start > now_utc:
+            base_date -= _dt.timedelta(days=1)
+            ts_start = _hhmm_to_utc(hhmm_start, base_date, now_local)
         ts_end = _hhmm_to_utc(hhmm_end, base_date, now_local) if hhmm_end else None
         if ts_end and ts_end < ts_start:
             ts_end = _hhmm_to_utc(hhmm_end, base_date + _dt.timedelta(days=1), now_local)
