@@ -129,7 +129,7 @@ def render(conn: sqlite3.Connection, existing: str | None = None) -> str:
 
 
 def _out_path() -> str:
-    return str(config.DATA_DIR / "daybrief.md")
+    return str(config.daybrief_path())
 
 
 def update(conn: sqlite3.Connection | None = None) -> str:

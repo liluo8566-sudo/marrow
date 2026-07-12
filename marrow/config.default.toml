@@ -28,6 +28,9 @@ offsite_backup_dir = ""
 # Dashboard renders here. Empty lets the installer fill a private default.
 # e.g. "~/Documents/my-vault/dashboard.md"
 dashboard = ""
+# daybrief.md renders here. Empty = <DATA_DIR>/daybrief.md (back-compat).
+# e.g. "~/Documents/my-vault/db-pages/daybrief.md"
+daybrief = ""
 # DB-rendered pages folder (milestone.md, diary.md, ...).
 # Default is private and works without manual path setup.
 # e.g. "~/Documents/my-vault/db-pages". Name signals "rendered from DB".

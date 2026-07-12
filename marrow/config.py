@@ -55,6 +55,7 @@ def load() -> dict:
         str(_mpaths.dashboard_md) if _mpaths.dashboard_md != Path("") else
         str(DATA_DIR / "dashboard.md")
     )
+    daybrief = paths.get("daybrief") or str(DATA_DIR / "daybrief.md")
     # `db_pages` = folder of md files rendered from DB (was `sub_pages` until
     # 2026-05-24). Name signals provenance: rendered-from-DB vs hand-written
     # notes elsewhere in the Obsidian vault. Legacy `sub_pages` key still read
@@ -75,6 +76,7 @@ def load() -> dict:
     paths["backup_dir"] = backup
     paths["offsite_backup_dir"] = offsite
     paths["dashboard"] = str(Path(dash).expanduser()) if dash else dash
+    paths["daybrief"] = str(Path(daybrief).expanduser())
     paths["db_pages"] = str(Path(sub).expanduser())
     paths["db_pages_state"] = str(Path(sub_state).expanduser())
     # Legacy keys kept synchronised so any caller still using sub_pages_path()
@@ -125,6 +127,10 @@ def anchor_keys_set() -> frozenset[str]:
 
 def dashboard_path() -> str:
     return load()["paths"]["dashboard"]
+
+
+def daybrief_path() -> str:
+    return load()["paths"]["daybrief"]
 
 
 def db_path() -> str:

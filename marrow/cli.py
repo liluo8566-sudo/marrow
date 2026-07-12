@@ -540,6 +540,12 @@ def cmd_refresh(args) -> int:
             state_dir=str(config.DATA_DIR / "state"), db=db,
         )
         msg = "dashboard refreshed"
+        from . import daybrief
+        try:
+            daybrief.update(conn)
+            msg += " + daybrief"
+        except Exception as e:
+            print(f"mw: daybrief refresh failed: {e}", file=sys.stderr)
         if args.all:
             try:
                 subpages.write_all_subpages(
