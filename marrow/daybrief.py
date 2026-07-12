@@ -10,20 +10,19 @@ now lives here in marrow.
 """
 from __future__ import annotations
 
-import re
+import os
 import sqlite3
 from datetime import datetime, timezone
 
-from . import config, schedule, timeline, usage
+from . import config, repo, schedule, timeline, usage
 from ._atomic import atomic_write
+from .md_index import MdIndex, _hash
+from .reconcile import emit_conflict_alerts, reconcile_timeline
 
-# Human-read file: tl reconcile anchors (line + trailing render-state) carry
-# no function here — dashboard.py needs them, daybrief does not. Strip only
-# in this post-processing step; timeline.py itself is untouched.
-# Line anchors: <!-- tl:{sid} -->, <!-- tl:{sid}:{seq} -->,
-# <!-- tl:{sid}:{seq}:{idx} -->, <!-- tl:d:{date} -->, <!-- tl:e:{event_id} -->
-_TL_LINE_ANCHOR_RE = re.compile(r"[ \t]*<!--\s*tl:[^>]*?-->")
-_TL_TRAIL_RE = re.compile(r"\n?<!--\s*tl-rendered:[^>]*?-->")
+# Timeline zone id marker — lets md_index/watcher track the block by the same
+# `<!-- id:... -->` convention the dashboard uses. Stamped on the H2 line so
+# reconcile_timeline still locates `## Timeline` and Obsidian hides the comment.
+_TIMELINE_BLOCK_ID = "daybrief.timeline"
 
 STATUS_START = "<!-- marrow:status:start -->"
 STATUS_END = "<!-- marrow:status:end -->"
@@ -72,27 +71,40 @@ def _remcal_body() -> str:
     return "### Rem & Cal\n" + (body or "(no schedule data)")
 
 
-def _strip_tl_anchors(content: str) -> str:
-    """Remove tl reconcile anchors (line + trailing render-state comment) for
-    the human-read daybrief. Line content is unchanged; only the trailing
-    HTML-comment markers are dropped, trailing whitespace tidied."""
-    content = _TL_TRAIL_RE.sub("", content)
-    lines = [_TL_LINE_ANCHOR_RE.sub("", ln).rstrip() for ln in content.splitlines()]
-    return "\n".join(lines)
+def _stamp_block_id(body: str) -> str:
+    """Prepend the id marker on its own line above the `## Timeline` heading so
+    md_index/watcher track the block; idempotent. Mirrors top_sections."""
+    marker = f"<!-- id:{_TIMELINE_BLOCK_ID} -->"
+    if marker in body:
+        return body
+    lines = body.splitlines()
+    for i, ln in enumerate(lines):
+        if ln.startswith("## "):
+            lines.insert(i, marker)
+            return "\n".join(lines)
+    return f"{marker}\n{body}"
 
 
-def _timeline_body(conn: sqlite3.Connection) -> str:
-    """render_timeline content with its leading '## Timeline' header stripped
-    (same treatment as schedule's header) and tl anchors removed — line
-    content otherwise identical to the dashboard."""
+def _extract_timeline_zone(existing: str | None) -> str | None:
+    """Old timeline zone body between the marker pair, for carry_trail_t."""
+    if not existing:
+        return None
+    s = existing.find(TIMELINE_START)
+    e = existing.find(TIMELINE_END)
+    if s == -1 or e == -1 or e < s:
+        return None
+    return existing[s + len(TIMELINE_START): e].strip("\n")
+
+
+def _timeline_body(conn: sqlite3.Connection, existing: str | None) -> str:
+    """render_timeline output verbatim — H2 header, line anchors and trail all
+    kept — with the id marker stamped and the render timestamp carried over an
+    unchanged block (carry_trail_t). Identical to the dashboard timeline zone."""
     content = timeline.render_timeline(conn)
     if not content:
         return "### Timeline\n(no timeline yet)"
-    lines = content.splitlines()
-    if lines and lines[0].startswith("## Timeline"):
-        lines = lines[1:]
-    body = _strip_tl_anchors("\n".join(lines)).strip("\n")
-    return "### Timeline\n" + (body or "(no timeline yet)")
+    body = _stamp_block_id(content)
+    return timeline.carry_trail_t(body, _extract_timeline_zone(existing))
 
 
 def render(conn: sqlite3.Connection, existing: str | None = None) -> str:
@@ -113,7 +125,7 @@ def render(conn: sqlite3.Connection, existing: str | None = None) -> str:
         REMCAL_END,
         "",
         TIMELINE_START,
-        _timeline_body(conn),
+        _timeline_body(conn, existing),
         TIMELINE_END,
         "",
         FIRST_START,
@@ -140,14 +152,35 @@ def update(conn: sqlite3.Connection | None = None) -> str:
         from . import storage
         conn = storage.connect(config.db_path())
     try:
+        from pathlib import Path
         path = _out_path()
+        db = config.db_path()
+        # Reconcile md hand-edits BEFORE render so timeline edits flow to DB.
+        # Fail-soft: a reconcile error must never block the refresh.
+        if os.path.exists(path):
+            try:
+                _rpt = reconcile_timeline(conn, Path(path), db=db)
+                emit_conflict_alerts(_rpt, "daybrief:timeline", db=db)
+            except Exception as e:
+                repo.add_alert(
+                    "warn", "daybrief", "daybrief_reconcile:timeline",
+                    source="daybrief.py", db=db,
+                    message=f"timeline reconcile failed: {e}; falling through to render",
+                )
         existing = None
         try:
             with open(path, "r", encoding="utf-8") as f:
                 existing = f.read()
         except OSError:
             pass
-        atomic_write(path, render(conn, existing))
+        new = render(conn, existing)
+        atomic_write(path, new)
+        # Record the timeline block hash AFTER the write so the watcher's
+        # sync_file_observe has a baseline. Timeline is reconcile-driven
+        # (always overwrite), so the fresh body IS the resolved state.
+        zone = _extract_timeline_zone(new)
+        if zone is not None:
+            MdIndex(conn).record_block(path, _TIMELINE_BLOCK_ID, _hash(zone))
         return path
     finally:
         if own:

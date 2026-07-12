@@ -182,7 +182,7 @@ def write_dashboard(path: str, conn, *, state_dir: str,
                 message=f"alerts reconcile failed: {e}; falling through to render",
             )
         try:
-            _rpt = reconcile_timeline(conn, Path(path))
+            _rpt = reconcile_timeline(conn, Path(path), db=db)
             emit_conflict_alerts(_rpt, "dashboard:timeline", db=db)
         except Exception as e:
             repo.add_alert(

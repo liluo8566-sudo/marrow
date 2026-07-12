@@ -1623,7 +1623,8 @@ def _reconcile_self_edit(conn, rpt, eid, raw_text, row, now_iso) -> None:
 
 
 def reconcile_timeline(conn: sqlite3.Connection,
-                       dashboard_path: str | Path) -> ReconcileReport:
+                       dashboard_path: str | Path,
+                       *, db: str | None = None) -> ReconcileReport:
     """Absorb timeline edits from the dashboard ## Timeline block back into DB.
 
     Anchors:
@@ -1769,6 +1770,9 @@ def reconcile_timeline(conn: sqlite3.Connection,
         return rpt
 
     now_iso = _now()
+    # db-win skips: DB row newer than the render gate AND md text still differs
+    # → md is stale, DB kept. Collected here, one summary alert per run below.
+    db_win_skips: list[str] = []
     with conn:
         for (sid, seq, ln), new_text in sid_edits.items():
             row = conn.execute(
@@ -1780,6 +1784,9 @@ def reconcile_timeline(conn: sqlite3.Connection,
                 rpt.conflicts.append(f"tl:sid {sid!r}:{seq} not in session_digests")
                 continue
             if md_mtime_iso and (row["mts"] or "") > md_mtime_iso:
+                _life = (row["life_lines"] or "").splitlines()
+                if ln is not None and 0 <= ln < len(_life) and _life[ln] != new_text:
+                    db_win_skips.append(f"{sid}:{seq}:{ln}")
                 rpt.unchanged += 1
                 continue
             if ln is None:
@@ -2115,4 +2122,12 @@ def reconcile_timeline(conn: sqlite3.Connection,
             else:
                 rpt.unchanged += 1
 
+    if db_win_skips:
+        from . import repo as _repo
+        _repo.add_alert(
+            "warn", "timeline", "timeline_reconcile:db_win",
+            source="reconcile.py", db=db,
+            message=(f"{len(db_win_skips)} stale md line(s) kept DB text "
+                     f"(first {db_win_skips[0]})"),
+        )
     return rpt
