@@ -62,6 +62,16 @@ def test_book_annotate_missing_config_returns_error(no_qidu_cfg):
     assert "not configured" in out
 
 
+def test_book_message_missing_config_returns_error(no_qidu_cfg):
+    out = daemon.book_message("加油鸭", book_id="bk-1")
+    assert "not configured" in out
+
+
+def test_book_retention_missing_config_returns_error(no_qidu_cfg):
+    out = daemon.book_retention("回来吧", book_id="bk-1", session_id=7)
+    assert "not configured" in out
+
+
 # ── GET tools: URL + auth header ────────────────────────────────────────────
 
 def test_book_list_url_and_auth(qidu_cfg, monkeypatch):
@@ -145,4 +155,46 @@ def test_book_annotate_http_error_returns_message(qidu_cfg, monkeypatch):
     monkeypatch.setattr(daemon.urllib.request, "urlopen", fake_urlopen)
     out = daemon.book_annotate("bk-1", highlight_id=42, text="text")
     assert "Failed to write annotation" in out
+    assert "connection refused" in out
+
+
+# ── book_message / book_retention POST body ─────────────────────────────────
+
+def test_book_message_posts_body(qidu_cfg, monkeypatch):
+    captured = _capture_request(monkeypatch, json.dumps({"ok": True}).encode())
+    out = daemon.book_message("坚持读书鸭", message_type="encourage", book_id="bk-1")
+    assert captured["method"] == "POST"
+    assert captured["url"] == "http://example.com/api/push/message"
+    assert captured["headers"]["Authorization"] == "Bearer tok-123"
+    body = json.loads(captured["data"])
+    assert body == {"text": "坚持读书鸭", "message_type": "encourage", "book_id": "bk-1"}
+    assert out == "Message pushed to reader frontend."
+
+
+def test_book_message_http_error_returns_message(qidu_cfg, monkeypatch):
+    def fake_urlopen(req, timeout=5):
+        raise OSError("connection refused")
+    monkeypatch.setattr(daemon.urllib.request, "urlopen", fake_urlopen)
+    out = daemon.book_message("text", book_id="bk-1")
+    assert "Failed to push message" in out
+    assert "connection refused" in out
+
+
+def test_book_retention_posts_body(qidu_cfg, monkeypatch):
+    captured = _capture_request(monkeypatch, json.dumps({"ok": True}).encode())
+    out = daemon.book_retention("回来吧", book_id="bk-1", session_id=7)
+    assert captured["method"] == "POST"
+    assert captured["url"] == "http://example.com/api/push/retention"
+    assert captured["headers"]["Authorization"] == "Bearer tok-123"
+    body = json.loads(captured["data"])
+    assert body == {"text": "回来吧", "book_id": "bk-1", "session_id": 7}
+    assert out == "Retention message pushed to reader frontend."
+
+
+def test_book_retention_http_error_returns_message(qidu_cfg, monkeypatch):
+    def fake_urlopen(req, timeout=5):
+        raise OSError("connection refused")
+    monkeypatch.setattr(daemon.urllib.request, "urlopen", fake_urlopen)
+    out = daemon.book_retention("text", book_id="bk-1", session_id=1)
+    assert "Failed to push retention" in out
     assert "connection refused" in out

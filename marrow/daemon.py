@@ -941,42 +941,6 @@ def alert(action: str, alert_id: int | None = None) -> dict | list[dict]:
 
 # ── event_clear ──────────────────────────────────────────────────────────────
 
-# book_message / book_retention: Phase 4 endpoints, not built yet — still
-# point at the legacy localhost:3210 cyberboss frontend, unauthenticated.
-@mcp.tool()
-def book_retention(text: str) -> str:
-    """Push retention text to the shared-reading book server frontend (exit ceremony)."""
-    data = json.dumps({"text": text}).encode()
-    req = urllib.request.Request(
-        "http://localhost:3210/api/retention-push",
-        data=data,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        urllib.request.urlopen(req, timeout=5)
-        return "Retention message pushed to reader frontend."
-    except Exception as e:
-        return f"Failed to push retention: {e}"
-
-
-@mcp.tool()
-def book_message(text: str, message_type: str = "encourage") -> str:
-    """Push a message to the shared-reading book reader frontend (encourage/health reminder)."""
-    data = json.dumps({"text": text, "type": message_type}).encode()
-    req = urllib.request.Request(
-        "http://localhost:3210/api/message-push",
-        data=data,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        urllib.request.urlopen(req, timeout=5)
-        return "Message pushed to reader frontend."
-    except Exception as e:
-        return f"Failed to push message: {e}"
-
-
 def _qidu_cfg() -> tuple[str, str] | None:
     """Return (api_base, token) from [qidu] config, or None if unconfigured."""
     qidu = config.load().get("qidu", {})
@@ -1075,6 +1039,28 @@ def book_annotate(book_id: str, highlight_id: int, text: str, parent_id: int | N
     if isinstance(result, dict) and "error" in result:
         return f"Failed to write annotation: {result['error']}"
     return f"Annotation written: {result.get('annotation_id', 'ok')}"
+
+
+@mcp.tool()
+def book_message(text: str, message_type: str = "encourage", book_id: str = "") -> str:
+    """Push an encourage/health companion message to the shared-reading reader
+    frontend. book_id is copied from the signal text."""
+    result = _book_post("/push/message", {"text": text, "message_type": message_type, "book_id": book_id})
+    if isinstance(result, dict) and "error" in result:
+        return f"Failed to push message: {result['error']}"
+    return "Message pushed to reader frontend."
+
+
+@mcp.tool()
+def book_retention(text: str, book_id: str = "", session_id: int = 0) -> str:
+    """Push retention text to the shared-reading reader frontend (exit ceremony).
+    book_id/session_id are copied from the signal text."""
+    result = _book_post("/push/retention", {"text": text, "book_id": book_id, "session_id": session_id})
+    if isinstance(result, dict) and "error" in result:
+        return f"Failed to push retention: {result['error']}"
+    return "Retention message pushed to reader frontend."
+
+
 def _time_where(col, before, after):
     clauses, params = [], []
     if before:
