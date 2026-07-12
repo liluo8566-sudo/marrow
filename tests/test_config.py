@@ -31,7 +31,8 @@ def test_db_pages_path_defaults_under_config_dir(monkeypatch, tmp_path):
     from marrow import paths as _mpaths
     monkeypatch.setattr(_mpaths, "paths", _mpaths.Paths(
         marrow_db=tmp_path / "marrow.db", ny_root=Path(""),
-        dashboard_md=Path(""), drift_pending_dir=tmp_path / "drift_pending",
+        dashboard_md=Path(""), daybrief_md=Path(""),
+        drift_pending_dir=tmp_path / "drift_pending",
         drift_backup_dir=tmp_path / "drift_backup", dir_tree_md=tmp_path / "dir_tree.md",
         logs_dir=tmp_path / "logs", state_dir=tmp_path / "state",
     ))
