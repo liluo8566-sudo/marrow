@@ -490,6 +490,11 @@ def build_targets(folder: str,
         daybrief_path = (_config.daybrief_path() or "").strip()
     except KeyError:
         daybrief_path = ""
+    # HOTFIX 2026-07-12: daybrief pulled from the 5s loop — watcher-process
+    # renders emit empty Rem&Cal (cadence subprocess fails inside watcher,
+    # root cause pending) and clobber collect_tick's good render. collect_tick
+    # stays the sole daybrief renderer until fixed.
+    daybrief_path = ""
     if daybrief_path:
         def _daybrief_db_mtime(c: sqlite3.Connection) -> float | None:
             return last_db_mtime_daybrief(c)
