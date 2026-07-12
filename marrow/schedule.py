@@ -87,14 +87,38 @@ def get_data_mtime() -> float:
     return best
 
 
+_FAIL_LOG = config.DATA_DIR / "logs" / "cadence_fail.log"
+
+
+def _log_fail(kind: str, args: list[str], rc: int | None, err: str) -> None:
+    try:
+        _FAIL_LOG.parent.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().astimezone().isoformat(timespec="seconds")
+        with open(_FAIL_LOG, "a") as f:
+            f.write(f"{ts} kind={kind} rc={rc} args={' '.join(args)}"
+                    f" err={(err or '').strip()[:500]!r}\n")
+    except OSError:
+        pass
+
+
 def _run_cadence(args: list[str], binary: str) -> str:
     try:
         r = subprocess.run(
             [binary] + args,
             capture_output=True, text=True, timeout=_TIMEOUT,
         )
-        return r.stdout.strip() if r.returncode == 0 else ""
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        if r.returncode == 0:
+            out = r.stdout.strip()
+            if not out:
+                _log_fail("empty", args, 0, r.stderr)
+            return out
+        _log_fail("exit", args, r.returncode, r.stderr or r.stdout)
+        return ""
+    except subprocess.TimeoutExpired as exc:
+        _log_fail("timeout", args, None, str(exc))
+        return ""
+    except (FileNotFoundError, OSError) as exc:
+        _log_fail("oserror", args, None, str(exc))
         return ""
 
 

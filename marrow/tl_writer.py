@@ -119,7 +119,8 @@ def tl_add(conn, timerange: str, body: str,
            n_word: str | None = None,
            y_word: str | None = None,
            importance: int | None = None,
-           sid: str | None = None) -> dict:
+           sid: str | None = None,
+           date: str | None = None) -> dict:
     """Insert one self timeline row (events only) in a single txn."""
     body = (body or "").strip()
     if not body:
@@ -139,12 +140,19 @@ def tl_add(conn, timerange: str, body: str,
 
     hhmm_start, hhmm_end = _parse_timerange(timerange)
     now_local = _dt.datetime.now(_TZ)
-    base_date = now_local.date()
-    ts_start = _hhmm_to_utc(hhmm_start, base_date, now_local)
-    now_utc = now_local.astimezone(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    if ts_start > now_utc:
-        base_date -= _dt.timedelta(days=1)
+    if date:
+        try:
+            base_date = _dt.date.fromisoformat(date)
+        except ValueError as exc:
+            raise TlError(f"bad date {date!r}: {exc}")
         ts_start = _hhmm_to_utc(hhmm_start, base_date, now_local)
+    else:
+        base_date = now_local.date()
+        ts_start = _hhmm_to_utc(hhmm_start, base_date, now_local)
+        now_utc = now_local.astimezone(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if ts_start > now_utc:
+            base_date -= _dt.timedelta(days=1)
+            ts_start = _hhmm_to_utc(hhmm_start, base_date, now_local)
     ts_end = None
     if hhmm_end is not None:
         ts_end = _hhmm_to_utc(hhmm_end, base_date, now_local)

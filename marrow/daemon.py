@@ -308,6 +308,7 @@ def tl(
     date: str | None = None,
 ) -> dict:
     """Add/update/clear/query timeline.
+    - 'add': optional date=YYYY-MM-DD backdates the row (explicit date wins over auto day-guess).
     - 'query': find rows by match (content substring) and/or date (configured local timezone
       YYYY-MM-DD) -> [{event_id, line}]. Use it to look up an event_id.
     - 'update'/'clear': address a row by event_id, OR by match (+optional date)
@@ -352,7 +353,7 @@ def tl(
                 return tl_writer.tl_add(
                     conn, timerange, body,
                     n_word=n_word, y_word=y_word,
-                    importance=importance, sid=sid,
+                    importance=importance, sid=sid, date=date,
                 )
             except tl_writer.TlError as exc:
                 return {"ok": False, "error": str(exc)}
