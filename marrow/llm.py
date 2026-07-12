@@ -115,7 +115,7 @@ def _snapshot_rate_limit(ev: dict) -> None:
     type=="rate_limit_event", payload nested under "rate_limit_info" —
     fields seen: status ("allowed"), resetsAt (unix epoch seconds),
     rateLimitType ("five_hour" only, ever), overageStatus,
-    overageResetsAt, isUsingOverage. No requestId on this frame (no dedupe
+    overageResetsAt, isUsingOverage. No request_id on this frame (no dedupe
     needed) — latest frame always wins.
 
     NOTE (verified, not assumed): this stream frame carries NO utilization
@@ -256,12 +256,12 @@ class LLMClient:
 
         A single API turn streams as MULTIPLE assistant lines (thinking
         block, tool_use block, text block, ...) and every line repeats the
-        SAME usage under the SAME top-level `requestId` — summing them
+        SAME usage under the SAME top-level `request_id` — summing them
         naively over-counts real consumption ~Nx (live-confirmed 07-04).
-        Dedupe by requestId: a repeat requestId replaces (not adds to) its
+        Dedupe by request_id: a repeat request_id replaces (not adds to) its
         prior contribution to the cumulative fields — "last-seen wins"
         (the repeats are identical in practice, so this is a no-op delta,
-        but stays correct if they ever aren't). Events without a requestId
+        but stays correct if they ever aren't). Events without a request_id
         (only expected from synthetic/test input) are never deduped.
 
         `in/out/cache_read/cache_write` are the cumulative deduped sums —
@@ -279,7 +279,7 @@ class LLMClient:
         o = usage.get("output_tokens") or 0
         cr = usage.get("cache_read_input_tokens") or 0
         cw = usage.get("cache_creation_input_tokens") or 0
-        req_id = ev.get("requestId")
+        req_id = ev.get("request_id")
         prior = sink["by_request"].get(req_id) if req_id is not None else None
         if prior is not None:
             pi, po, pcr, pcw = prior
@@ -314,7 +314,7 @@ class LLMClient:
         `on_event(ev, mono)` (optional) receives every parsed event plus a
         synthetic {"type":"__spawned__"} right after Popen for latency probes.
         `max_tokens`+`usage_sink` (optional) accumulate per-event usage
-        (deduped by requestId, see `_add_event_usage`) and break the stream
+        (deduped by request_id, see `_add_event_usage`) and break the stream
         cleanly on breach (sink['capped']=True). Breach compares against
         sink['window'] — the CURRENT turn's context size
         (input+cache_read+cache_creation), not a cumulative sum across

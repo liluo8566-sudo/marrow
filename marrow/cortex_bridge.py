@@ -1062,7 +1062,7 @@ def call_cortex(client, prompt: str, *, cwd: str | None = None,
     turn's (input+cache_read+cache_creation), i.e. the same figure the
     caller reasons about via the statusline "total" (Decided 07-04, not
     cumulative consumption across turns): accumulated mid-stream (usage
-    deduped by requestId — a single turn streams as several assistant
+    deduped by request_id — a single turn streams as several assistant
     lines each repeating identical usage), breach terminates the
     subprocess and returns capped=True so the caller rebirths. Returns
     {"text": str, "session_id": str | None} (+ capped / total_tokens
@@ -1093,7 +1093,7 @@ def run_claude_cortex(client, spec: dict, model: str, prompt: str, *,
     Mirrors _run_claude_stream's spawn/timeout/kill contract exactly —
     only the isolation flags, env var, cwd, --resume, and --effort differ.
     When max_tokens>0, accumulates per-wake usage mid-stream (deduped by
-    requestId) and terminates cleanly when the current turn's window
+    request_id) and terminates cleanly when the current turn's window
     size breaches the cap (capped=True). Env-driven stream-event timing
     is attached best-effort for wake-latency diagnosis."""
     from .llm import _claude_bin, _snapshot_window_tokens
