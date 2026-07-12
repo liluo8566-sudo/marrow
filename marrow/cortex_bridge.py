@@ -73,28 +73,80 @@ _WISHLIST_HEADER = (
 )
 
 
-def wish(text: str) -> dict:
+_HEADING_RE = _re.compile(r"^(#{2,3})\s+(.*)$")
+
+
+def _insert_at_section_end(existing: str, section: str, line: str) -> str:
+    """Insert `line` after the last non-empty line of the first heading (##
+    or ###) whose text contains `section` (case-insensitive substring), and
+    before the next heading of same-or-higher level. Falls back to plain
+    append when no heading matches."""
+    if existing and not existing.endswith("\n"):
+        existing += "\n"
+    lines = existing.splitlines(keepends=True)
+    needle = section.strip().lower()
+    start = None
+    start_level = None
+    for i, ln in enumerate(lines):
+        m = _HEADING_RE.match(ln.rstrip("\n"))
+        if m and needle in m.group(2).strip().lower():
+            start = i
+            start_level = len(m.group(1))
+            break
+    if start is None:
+        return existing + line
+
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        m = _HEADING_RE.match(lines[j].rstrip("\n"))
+        if m and len(m.group(1)) <= start_level:
+            end = j
+            break
+
+    last_content = start
+    for j in range(start + 1, end):
+        if lines[j].strip():
+            last_content = j
+    insert_at = last_content + 1
+    return "".join(lines[:insert_at]) + line + "".join(lines[insert_at:])
+
+
+def wish(text: str, section: str | None = None, due: str | None = None) -> dict:
     """Our wishlist — personal wishes & cravings (hers and yours), promises
     made, and shared plans. e.g. 你说好请我喝奶茶 / 最近想买耳钉 / 约好周末去看海.
-    This tool appends one line verbatim; update / delete = edit
-    ~/.config/marrow/cortex/wishlist.md directly."""
+    Line format: `[] YY/MM/DD text` (date format configurable via
+    [cortex].wish_date_format, default %y/%m/%d) + ` [due]` if due given. section = a
+    heading substring (## or ###, e.g. 心愿单/约定/种草) to insert at that
+    section's end; omit to append at end of file. Markdown structure
+    (headings, subsections) is user-managed — this tool only adds lines,
+    never edits existing content: ~/.config/marrow/cortex/wishlist.md."""
     import fcntl
     from datetime import datetime
 
     text = (text or "").strip()
+    if text.startswith("- "):
+        text = text[2:].strip()
     if not text:
         return {"ok": False, "error": "text required"}
     path = _wishlist_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    date = datetime.now(config.get_tz()).strftime("%Y-%m-%d")
-    line = f"- {date} {text}\n"
+    date_fmt = config.load().get("cortex", {}).get("wish_date_format", "%y/%m/%d")
+    date = datetime.now(config.get_tz()).strftime(date_fmt)
+    due = (due or "").strip()
+    suffix = f" [{due}]" if due else ""
+    line = f"[] {date} {text}{suffix}\n"
     lock_path = str(path) + ".lock"
     lf = open(lock_path, "a")
     try:
         fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
         existing = path.read_text(encoding="utf-8") if path.exists() else _WISHLIST_HEADER
+        section = (section or "").strip()
+        new_content = (
+            _insert_at_section_end(existing, section, line)
+            if section else existing + line
+        )
         from ._atomic import atomic_write
-        atomic_write(str(path), existing + line)
+        atomic_write(str(path), new_content)
     finally:
         fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
         lf.close()
