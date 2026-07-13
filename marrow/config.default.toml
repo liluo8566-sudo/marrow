@@ -385,10 +385,10 @@ resume_ear_text = "⏯️ The session has been resumed - re-arm a fresh monitor 
 # window must stay read-only: arm no ear, touch no wake_state, never rotate.
 # {signal_log} substituted with the resolved absolute path. Blank = off.
 retired_ear_text = "⏯️ This is an archived session - ignore all task/monitor. Do not call any tool."
-# Marker in the chat-tier TUCK-IN line the cortex watchdog appends to
-# wake_signal.log (arrives down the ear channel). A cortex-window prompt
-# carrying it is a machine line, excluded from the user-wake reset.
-tuck_in_marker = "[TUCK-IN]"
+# Marker in the free-round line the cortex watchdog appends to wake_signal.log
+# (arrives down the ear channel). A cortex-window prompt carrying it is a machine
+# line, excluded from the user-wake reset — must match cortex tuck_in_text.
+tuck_in_marker = "[NEW ROUND]"
 # Markers that identify an auto-compact continuation injection. Claude Code
 # replays the archived transcript as a user-role turn; without this it is
 # misread as a real user message and silently kills the pending wake alarm.

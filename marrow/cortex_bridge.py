@@ -677,11 +677,11 @@ def is_monitor_death(prompt: str) -> bool:
 
 
 def tuck_in_marker() -> str:
-    """Marker inside the chat-tier TUCK-IN line the cortex watchdog appends to
+    """Marker inside the free-round line the cortex watchdog appends to
     wake_signal.log (surfaces down the ear channel). A prompt carrying it is a
     machine line, not a real user message — excluded from the user-wake reset."""
     cx = config.load().get("cortex", {}) or {}
-    return str(cx.get("tuck_in_marker") or "[TUCK-IN]").strip()
+    return str(cx.get("tuck_in_marker") or "[NEW ROUND]").strip()
 
 
 _HARNESS_TAG_RE = _re.compile(r"^<[a-z][a-z0-9_-]*>")
