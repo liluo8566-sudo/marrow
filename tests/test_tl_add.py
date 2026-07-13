@@ -35,7 +35,7 @@ def _hhmm(hours_ago: float) -> str:
 def _add(conn, sid="sess-1", body="body orig", **kw):
     return tl_writer.tl_add(
         conn, f"{_hhmm(2)}-{_hhmm(1.9)}", body,
-        n_word="愉悦", y_word="委屈",
+        user_word="愉悦", assistant_word="委屈",
         sid=sid, **kw,
     )
 
@@ -76,17 +76,17 @@ def test_explicit_importance_sets_events_imp(conn):
 
 def test_validation_word_and_body_limits(conn):
     # word cap is 8 chars now; 7-char word is valid
-    tl_writer.tl_add(conn, _hhmm(1), "b", n_word="1234567", sid="s")
+    tl_writer.tl_add(conn, _hhmm(1), "b", user_word="1234567", sid="s")
     with pytest.raises(tl_writer.TlError):
-        tl_writer.tl_add(conn, _hhmm(1), "b", n_word="123456789", sid="s")
+        tl_writer.tl_add(conn, _hhmm(1), "b", user_word="123456789", sid="s")
     with pytest.raises(tl_writer.TlError):
-        tl_writer.tl_add(conn, _hhmm(1), "x" * 51, n_word="愉悦", sid="s")
+        tl_writer.tl_add(conn, _hhmm(1), "x" * 51, user_word="愉悦", sid="s")
     with pytest.raises(tl_writer.TlError):
         tl_writer.tl_add(conn, _hhmm(1), "b", sid="s")  # no word
 
 
 def test_single_moment_no_end(conn):
-    r = tl_writer.tl_add(conn, _hhmm(1), "moment", n_word="愉悦", sid="s")
+    r = tl_writer.tl_add(conn, _hhmm(1), "moment", user_word="愉悦", sid="s")
     ev = conn.execute("SELECT ts_end FROM events WHERE id=?",
                       (r["event_id"],)).fetchone()
     assert ev["ts_end"] is None
@@ -169,7 +169,7 @@ def test_seg_digest_suppresses_life_lines_for_self_sid(conn):
 def test_tl_update_changes_body_and_label(conn):
     r = _add(conn, body="orig")
     tl_writer.tl_update(conn, r["event_id"], body="updated",
-                        n_word="温柔", y_word="委屈",
+                        user_word="温柔", assistant_word="委屈",
                         importance=4)
     ev = conn.execute("SELECT content, imp FROM events WHERE id=?",
                       (r["event_id"],)).fetchone()
@@ -196,7 +196,7 @@ def test_tl_update_rewrites_rendered_dashboard_line(conn, monkeypatch, tmp_path)
     dash.write_text(md, encoding="utf-8")
     monkeypatch.setattr(tl_writer, "_dashboard_path", lambda: dash)
 
-    tl_writer.tl_update(conn, eid, body="updated", n_word="温柔", y_word="委屈")
+    tl_writer.tl_update(conn, eid, body="updated", user_word="温柔", assistant_word="委屈")
 
     new_md = dash.read_text(encoding="utf-8")
     assert f"【N温柔♡Y委屈】updated [3] <!-- tl:e:{eid} -->" in new_md

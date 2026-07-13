@@ -575,7 +575,9 @@ def _run_extraction(conn, sid: str, date: str,
                 assistant_name=persona["assistant_name"],
                 user_terms=user_terms,
                 assistant_terms=assistant_terms,
-                mid_time=mid_hhmm),
+                mid_time=mid_hhmm,
+                u=persona["user_marker"],
+                a=persona["assistant_marker"]),
             tier="mid",
         )
     except (LLMError, ValueError, RuntimeError) as e:

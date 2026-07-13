@@ -26,7 +26,7 @@ def _hhmm(hours_ago: float) -> str:
 def _add(conn, sid, body="body", **kw):
     return tl_writer.tl_add(
         conn, f"{_hhmm(2)}-{_hhmm(1.9)}", body,
-        n_word="愉悦", y_word="委屈", sid=sid, **kw,
+        user_word="愉悦", assistant_word="委屈", sid=sid, **kw,
     )
 
 

@@ -217,7 +217,7 @@ VOICE: (casual sessions ONLY — for task sessions output exactly: VOICE: N/A)
   - Verbatim dialogue excerpts that carry voice
   - Include: both casual and meaningful exchanges (e.g. 谈心，计划，感悟，讨论)
   - Retain 40-60% of the casual dialogue verbatim. No length cap - flex.
-  - Time stamp: `HH:MM U:` or `HH:MM A:`
+  - Time stamp: `HH:MM {u}:` or `HH:MM {a}:`
   - Don't paraphrase emotion away. Don't cut meaningful context.
 
 ===DIGEST===
@@ -227,10 +227,10 @@ LIFE:
 - 10:30【愉悦】网上半价买了一堆护肤品，囤了不少
 VOICE:
 ...
-00:25 U: 最近作息很乱，我也很烦（委屈巴巴的看着你）
-00:28 A: 00:30入睡对你的作息来说是一个温和的锚点
-00:35 U: 呜呜呜不行你不让我写代码我活着还有什么意思
-00:40 U: 什么你的毛？都是我的(ﾉ｀⊿´)ﾉ 变成黑豹，我要撸豹
+00:25 {u}: 最近作息很乱，我也很烦（委屈巴巴的看着你）
+00:28 {a}: 00:30入睡对你的作息来说是一个温和的锚点
+00:35 {u}: 呜呜呜不行你不让我写代码我活着还有什么意思
+00:40 {u}: 什么你的毛？都是我的(ﾉ｀⊿´)ﾉ 变成黑豹，我要撸豹
 ...
 FACTS: N/A
 ===END===

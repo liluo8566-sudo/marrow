@@ -39,10 +39,10 @@ class TlError(ValueError):
 
 def _check_body_plain(body: str) -> None:
     """Reject a body carrying an affect block or trailing importance marker —
-    those parts are assembled server-side from n_word/y_word/importance."""
+    those parts are assembled server-side from user_word/assistant_word/importance."""
     if "【" in body or "】" in body or _TRAIL_IMP_RE.search(body):
         raise TlError(
-            "body is plain text — affect goes in n_word/y_word, "
+            "body is plain text — affect goes in user_word/assistant_word, "
             "importance in importance")
 
 
@@ -97,13 +97,13 @@ def _hhmm_to_utc(hhmm: str, base_date: _dt.date, now_local: _dt.datetime) -> str
     return local.astimezone(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _compose_label(n_word, y_word) -> str:
+def _compose_label(user_word, assistant_word) -> str:
     p = _config.persona()
     seg = []
-    if n_word:
-        seg.append(f"{p['user_marker']}{n_word}")
-    if y_word:
-        seg.append(f"{p['assistant_marker']}{y_word}")
+    if user_word:
+        seg.append(f"{p['user_marker']}{user_word}")
+    if assistant_word:
+        seg.append(f"{p['assistant_marker']}{assistant_word}")
     return "♡".join(seg)
 
 
@@ -125,8 +125,8 @@ def _platform() -> str:
 # ── write path ───────────────────────────────────────────────────────────────
 
 def tl_add(conn, timerange: str, body: str,
-           n_word: str | None = None,
-           y_word: str | None = None,
+           user_word: str | None = None,
+           assistant_word: str | None = None,
            importance: int | None = None,
            sid: str | None = None,
            date: str | None = None) -> dict:
@@ -139,13 +139,13 @@ def tl_add(conn, timerange: str, body: str,
     if len(body) > body_max:
         raise TlError(f"body exceeds {body_max} chars: {len(body)}")
 
-    n_word = _check_word(n_word, "N")
-    y_word = _check_word(y_word, "Y")
-    if not n_word and not y_word:
-        raise TlError("at least one of n_word / y_word required")
+    user_word = _check_word(user_word, "user")
+    assistant_word = _check_word(assistant_word, "assistant")
+    if not user_word and not assistant_word:
+        raise TlError("at least one of user_word / assistant_word required")
     imp = _clamp_1_5(importance, "importance", 3)
 
-    label = _compose_label(n_word, y_word)
+    label = _compose_label(user_word, assistant_word)
     content = f"【{label}】{body} [{imp}]" if label else f"{body} [{imp}]"
 
     hhmm_start, hhmm_end = _parse_timerange(timerange)
@@ -202,8 +202,8 @@ def tl_add(conn, timerange: str, body: str,
 
 def tl_update(conn, event_id: int, timerange: str | None = None,
               body: str | None = None,
-              n_word: str | None = None,
-              y_word: str | None = None,
+              user_word: str | None = None,
+              assistant_word: str | None = None,
               importance: int | None = None,
               date: str | None = None) -> dict:
     """Update an existing self row in place. Only provided fields change."""
@@ -263,10 +263,10 @@ def tl_update(conn, event_id: int, timerange: str | None = None,
         body_max = _body_max()
         if len(body_part) > body_max:
             raise TlError(f"body exceeds {body_max} chars")
-    n_word = _check_word(n_word, "N")
-    y_word = _check_word(y_word, "Y")
-    if n_word or y_word:
-        label_part = f"【{_compose_label(n_word, y_word)}】"
+    user_word = _check_word(user_word, "user")
+    assistant_word = _check_word(assistant_word, "assistant")
+    if user_word or assistant_word:
+        label_part = f"【{_compose_label(user_word, assistant_word)}】"
     imp = _clamp_1_5(importance, "importance", ev["imp"] or 3)
     new_content = f"{label_part}{body_part} [{imp}]"
 

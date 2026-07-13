@@ -603,7 +603,7 @@ def test_tl_silence_removed_from_actions():
 def test_tl_add_refuses_when_silenced(env, monkeypatch):
     from marrow import tl_nudge
     monkeypatch.setattr(tl_nudge, "is_silent", lambda sid: True)
-    out = daemon.tl("add", timerange="10:00", body="test", n_word="calm")
+    out = daemon.tl("add", timerange="10:00", body="test", user_word="calm")
     assert out == {"ok": False, "silenced": True,
                    "error": "session is silenced (/tl-)"}
     assert _event_count(env) == 0

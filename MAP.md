@@ -55,7 +55,7 @@ Three runtimes:
 
 ### 2.5 tl_add/tl_update self-authored timeline (tl_writer.py, A2r)
 - One MCP call → one `events` row, `role='tl'`, `channel`=platform (MARROW_CHANNEL env, default cli). No affect-table write: affect phrase lives verbatim in content, importance in `events.imp`.
-- Format: `HH:mm[-HH:mm] 【N word·i | Y word·i】body` — N/Y word ≤8 chars each, body ≤50 chars (config: `tl.body_max`), i = per-side intensity 1-5 (`n_intensity`/`y_intensity`), `importance` param = row-level composite (default max of the two sides). At least one of n_word/y_word required.
+- Format: `HH:mm[-HH:mm] 【user_word·i | assistant_word·i】body` — user_word/assistant_word ≤8 chars each, body ≤50 chars (config: `tl.body_max`), i = per-side intensity 1-5 (`n_intensity`/`y_intensity`), `importance` param = row-level composite (default max of the two sides). At least one of user_word/assistant_word required.
 - `tl_add`/`tl_update` allowed under `MARROW_CORTEX=1` (B3m 07-08) — cortex writes timeline like any channel, `channel=ct`.
 - `tl_update` only accepts `role='tl'` event ids; only passed fields change (label/body/timerange/imp independently updatable).
 - Retire chain: v29 migration (`storage:_migrate_to_v29`) backfilled every prior `channel='self'` row to `role='tl'`, folded its affect-table label into content as `【label】body`, dropped the `channel='self'` marker entirely (channel now always a real platform value).

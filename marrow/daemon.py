@@ -296,8 +296,8 @@ def tl(
     action: Annotated[str, Field(description="add / update / clear / query. update: only provided fields change. clear: 1 row = no DB backup, deleted line returned; 2+ rows = DB backup + deleted lines capped at 20.")],
     timerange: Annotated[str | None, Field(description="'HH:mm-HH:mm'.")] = None,
     body: Annotated[str | None, Field(description="Plain text <=30 chars. Real-world task/event + shared activities, vivid not work-log — life details in, tech details out (meals, chat topics, plays, tiny/silly/funny moments). 以assistant第一人称描述（我），user=“你”, never third person.")] = None,
-    n_word: Annotated[str | None, Field(description="n = user; 1-4 chars: user's mood right now. e.g. 烦/心虚/紧张激动/好可爱. Single side fine. On update, providing either n_word or y_word replaces the whole label.")] = None,
-    y_word: Annotated[str | None, Field(description="y = assistant; 1-4 chars: how you feel right now. Same rules as n_word.")] = None,
+    user_word: Annotated[str | None, Field(description="User's mood right now; 1-4 chars. e.g. 烦/心虚/紧张激动/好可爱. Single side fine. On update, providing either user_word or assistant_word replaces the whole label.")] = None,
+    assistant_word: Annotated[str | None, Field(description="How you feel right now. Same rules as user_word.")] = None,
     importance: Annotated[int | None, Field(ge=1, le=5, description="ONE event-level composite (not per person): intensity (current) * importance (future). 1-2 = low-medium & short-term, routine (casual chat, life admin, study, coding); 3 = both medium ~1 week (funny moments, light quarrels, outing); 4 = either high (major conflict, final exam); 5 = milestone (both high — worth recording forever). Omitted -> 3 on add, kept on update.")] = None,
     sid: Annotated[str | None, Field(description="Session id. add: overrides the auto-resolved current session for the row. clear: delete all tl rows for this session (mutually exclusive with event_id and before/after).")] = None,
     event_id: Annotated[int | None, Field(description="Target tl row id for update/clear. Get it from a 'query' call.")] = None,
@@ -307,7 +307,7 @@ def tl(
     date: Annotated[str | None, Field(description="Optional YYYY-MM-DD, backdates the row.")] = None,
 ) -> dict:
     """Summarise each session into tl lines.
-    Pass PARTS (timerange/n_word/y_word/body/importance) ONLY - code assemble rows.
+    Pass PARTS (timerange/user_word/assistant_word/body/importance) ONLY - code assemble rows.
     - Casual chat: when topic/location/mood change or task/activity done, add one for previous turns.
     - Coding/study sessions: keep 1 tl each session - update only when things changed.
     - Each session edits its own tl ONLY — never touch other sessions'; overlap is expected.
@@ -333,7 +333,7 @@ def tl(
             try:
                 return tl_writer.tl_add(
                     conn, timerange, body,
-                    n_word=n_word, y_word=y_word,
+                    user_word=user_word, assistant_word=assistant_word,
                     importance=importance, sid=sid, date=date,
                 )
             except tl_writer.TlError as exc:
@@ -379,7 +379,7 @@ def tl(
             try:
                 result = tl_writer.tl_update(
                     conn, event_id, timerange=timerange, body=body,
-                    n_word=n_word, y_word=y_word,
+                    user_word=user_word, assistant_word=assistant_word,
                     importance=importance,
                     date=date if explicit_id else None,
                 )
