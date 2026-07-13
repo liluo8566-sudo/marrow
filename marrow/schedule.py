@@ -6,6 +6,7 @@ import json as _json
 import os
 import re as _re
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -98,8 +99,9 @@ def _log_fail(kind: str, args: list[str], rc: int | None, err: str) -> None:
     try:
         _FAIL_LOG.parent.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().astimezone().isoformat(timespec="seconds")
+        caller = f"pid={os.getpid()} ppid={os.getppid()} argv0={sys.argv[0]}"
         with open(_FAIL_LOG, "a") as f:
-            f.write(f"{ts} kind={kind} rc={rc} args={' '.join(args)}"
+            f.write(f"{ts} kind={kind} rc={rc} {caller} args={' '.join(args)}"
                     f" err={(err or '').strip()[:500]!r}\n")
     except OSError:
         pass
