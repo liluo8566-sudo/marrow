@@ -206,9 +206,35 @@ def test_reset_flips_awake_and_marks_reply(cortex_env):
     d = _ws(home)
     assert d["awake"] is True
     assert d["user_replied_this_wake"] is True
+    # No ct_wake_log table in this fixture db -> the activation-row insert falls
+    # back to None (best-effort, never blocks the wake).
     assert d["wake_log_id"] is None
     assert d["transcript"] == "/x/y.jsonl"
     assert "wait_count" not in d  # no wait_until -> untouched (never written)
+
+
+def test_reset_logs_user_wake_row(cortex_env):
+    """BUG A (marrow side): a user-triggered wake writes its OWN wake=1 row
+    tagged 'user' (force_slept NULL) and binds it as wake_log_id, so the wakeup
+    note's 'Last wake' counts the user wake instead of a stale scheduled row."""
+    home, db = cortex_env
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE ct_wake_log (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, "
+        "wake INTEGER, dry_run INTEGER, reasons TEXT, force_slept TEXT)")
+    conn.commit()
+    conn.close()
+
+    cortex_bridge._cortex_user_wake_reset({"transcript_path": "/x/y.jsonl"})
+
+    conn = sqlite3.connect(db)
+    rows = conn.execute(
+        "SELECT id, reasons, force_slept FROM ct_wake_log WHERE wake=1").fetchall()
+    conn.close()
+    assert len(rows) == 1
+    assert rows[0][1] == "user"
+    assert rows[0][2] is None  # force_slept NULL -> auto-rate stats unaffected
+    assert _ws(home)["wake_log_id"] == rows[0][0]  # bound to the fresh row
 
 
 def test_reset_clears_silence_and_sentinel(cortex_env, monkeypatch):

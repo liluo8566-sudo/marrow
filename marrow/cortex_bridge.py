@@ -1065,6 +1065,36 @@ def _latest_wake_log_id() -> int | None:
         conn.close()
 
 
+def _log_user_wake_row() -> int | None:
+    """Insert a wake=1 activation row tagged 'user' for a user-triggered cortex
+    wake (a real user message flipping a dormant window awake), so the wakeup
+    note's "Last wake" segment counts it — the marrow user-wake path wrote NO
+    wake row before, so "Last wake" skipped every user wake (BUG A). Mirrors
+    cortex.integration.log_activation_wake_row (marrow venv cannot import
+    cortex). force_slept is NULL until a later lie_down sets it, so force_slept
+    auto-rate stats are unaffected. Best-effort: None on any error — never
+    raises, never blocks the wake. This write logs a machine wake row only; it
+    is NOT user activity for any silence/presence timer."""
+    import sqlite3
+    from datetime import timezone as _tz
+    try:
+        dbp = config.db_path()
+        conn = sqlite3.connect(dbp, timeout=30)
+    except sqlite3.Error:
+        return None
+    try:
+        ts = datetime.now(_tz.utc).isoformat()
+        cur = conn.execute(
+            "INSERT INTO ct_wake_log (ts, wake, dry_run, reasons) "
+            "VALUES (?, 1, 0, 'user')", (ts,))
+        conn.commit()
+        return int(cur.lastrowid)
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+
+
 def _cortex_user_wake_reset(inp: dict) -> None:
     """Real user message in a cortex window -> flip awake, kill the pending
     alarm (floor deadline + sentinel), mark the user reply, and ensure a
@@ -1093,7 +1123,10 @@ def _cortex_user_wake_reset(inp: dict) -> None:
             from datetime import timezone as _tz
             d["awake"] = True
             d["awake_since"] = datetime.now(_tz.utc).isoformat()
-            d["wake_log_id"] = _latest_wake_log_id()
+            # Log this user-triggered wake as its own ct_wake_log row so the
+            # wakeup note's "Last wake" counts it (BUG A). Fall back to the latest
+            # open row if the insert failed, so accounting still chains.
+            d["wake_log_id"] = _log_user_wake_row() or _latest_wake_log_id()
             if tpath:
                 d["transcript"] = str(tpath)
             flipped_awake = True
