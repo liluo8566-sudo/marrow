@@ -7,7 +7,10 @@ Deterministic, no LLM. Output feeds repo.archive_events (idempotent).
 from __future__ import annotations
 
 import json
+import logging
 import re
+
+logger = logging.getLogger(__name__)
 
 # Empty-model backstop: a spawn that exited before any assistant flush has
 # no model signal. Its first user / queue-operation content head matches a
@@ -368,7 +371,10 @@ def rows_from_records(records: list[dict], *, channel: str = "cli",
         if _is_harness_row(text):
             continue
         if _is_machine_marker_row(text, machine_markers):
-            continue  # cortex-injected machine line, never memory
+            # cortex-injected machine line, never memory. Trace each drop so a
+            # mis-tuned marker (over/under-filtering) is diagnosable.
+            logger.debug("transcript: dropped machine-marker row: %r", text[:60])
+            continue
         rows.append({
             "session_id": o.get("sessionId") or o.get("session_id") or "",
             "timestamp": o.get("timestamp", ""),
