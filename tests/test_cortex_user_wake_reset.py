@@ -35,6 +35,8 @@ def cortex_env(tmp_path, monkeypatch):
             "wake_state_file": "wake_state.json",
             "watchdog_pidfile": "watchdog.pid",
             "wake_marker": "[CORTEX-WAKE]", "tuck_in_marker": "[TUCK-IN]",
+            "machine_markers": ["[CORTEX-WAKE]", "[NEW ROUND]", "[TUCK-IN]",
+                                "[NIGHT]", "[FUSE]", "[CTL]", "[CMD"],
             "compact_markers": ["===== BEGIN ORIGINAL TRANSCRIPT",
                                 "===== END ORIGINAL TRANSCRIPT"],
             "compact_marker_head_chars": 200,
@@ -61,6 +63,23 @@ def test_is_machine_line_excludes_markers(cortex_env):
         "<task-notification>Monitor stopped — foo</task-notification>") is True
     assert cortex_bridge.is_machine_line("hey are you there?") is False
     assert cortex_bridge.is_machine_line("") is True
+
+
+def test_is_machine_line_new_marker_family(cortex_env):
+    """Phase 3: fuse / ctl / slash-command bodies self-identify (line-start),
+    so the user-wake reset never fires on them; real speech quoting a marker
+    mid-body is still a user message."""
+    assert cortex_bridge.is_machine_line(
+        "⚙️ [FUSE] Summarise this whole session into handoff.md") is True
+    assert cortex_bridge.is_machine_line(
+        "⚙️ [CTL] Wrap up this turn: lie_down(next_wake_min=90).") is True
+    assert cortex_bridge.is_machine_line(
+        "⚙️ [CMD ct-sleep] $ARGUMENTS is a number of minutes") is True
+    assert cortex_bridge.is_machine_line(
+        "⏳ [NIGHT] Night window is open — one full sleep now.") is True
+    # mid-body quote stays a real user message
+    assert cortex_bridge.is_machine_line(
+        "did the [FUSE] path fire last night?") is False
 
 
 # The real compact-injection banner captured from a live cortex transcript

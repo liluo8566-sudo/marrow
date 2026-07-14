@@ -319,7 +319,8 @@ def _run_cortex_module(module: str, extra_args: list[str] | None = None) -> dict
 
 
 def lie_down(next_wake_min: float, rotate: bool = False) -> dict:
-    """Set the next wake before you sleep: lie_down(next_wake_min=N) [N=1-240].
+    """Set the next wake before you sleep: lie_down(next_wake_min=N) [N=90-360].
+    rotate=True unlocks a short next_wake (N≥16) for a context-full quick turn.
     NOTE: TTL=60min - be aware of cold start cost (~100k)."""
     args = ["--next-wake-min", str(next_wake_min)]
     if rotate:
@@ -341,10 +342,10 @@ def lie_down(next_wake_min: float, rotate: bool = False) -> dict:
 
 
 def wait(minutes: float) -> dict:
-    """You can stay awake if you want: wait(N) [N=1-55]. Max 2 waits unless
-    user reply before time is up. Default 20mins timer after each user reply.
-    Hint: Feel free to play around while waiting. Last lie_down of this
-    session: handoff.md + rotate=True"""
+    """You can stay awake if you want: wait(N) [N=16-55], uncapped — renew as
+    many times as you like; a user reply resets the timer. Each expiry gives you
+    a fresh free round (play / wait / lie_down). Hint: feel free to play around
+    while waiting. Last lie_down of this session: handoff.md + rotate=True"""
     return _run_cortex_module("cortex.wait", ["--minutes", str(minutes)])
 
 
@@ -708,10 +709,33 @@ def is_compact_injection(prompt: str) -> bool:
     return any(str(m) in head for m in markers if m)
 
 
+_MARKER_LEAD_RE = _re.compile(r"^\s*(?:[\U00002190-\U0001faff️‍]\s*){0,3}")
+
+
+def machine_markers() -> tuple[str, ...]:
+    """Line-start machine-marker family ([cortex].machine_markers) — the wake
+    bell, free-round, night, fuse, ctl and ⚙️ [CMD ct-*] slash-command bodies.
+    Shared by the user-wake reset (below) and marrow.transcript ingestion."""
+    cx = config.load().get("cortex", {}) or {}
+    return tuple(str(m) for m in (cx.get("machine_markers") or []) if str(m))
+
+
+def _starts_with_machine_marker(prompt: str) -> bool:
+    """True iff *prompt* BEGINS with a machine marker after a tolerated leading
+    emoji/whitespace run (⚙️ [CMD ...], ⏳ [NEW ROUND] ...). Line-start only, so a
+    real message quoting a marker mid-body is never misread as machine."""
+    markers = machine_markers()
+    if not markers:
+        return False
+    head = _MARKER_LEAD_RE.sub("", prompt, count=1)
+    return any(head.startswith(m) for m in markers)
+
+
 def is_machine_line(prompt: str) -> bool:
     """True when the incoming cortex-window prompt is a machine line arriving
-    down the ear channel (wake marker / monitor death / tuck-in), NOT a real
-    user message. The user-wake reset must fire ONLY on real user messages."""
+    down the ear channel (wake bell / monitor death / free-round / night / fuse /
+    ctl / slash-command body), NOT a real user message. The user-wake reset must
+    fire ONLY on real user messages."""
     if not prompt:
         return True
     p = prompt
@@ -721,13 +745,16 @@ def is_machine_line(prompt: str) -> bool:
     # never opens a message with such a tag.
     if _HARNESS_TAG_RE.match(p.lstrip()):
         return True
+    # Critical markers always covered even if machine_markers is overridden.
     m = wake_marker()
     if m and m in p:
         return True
-    if is_monitor_death(p):
-        return True
     tm = tuck_in_marker()
     if tm and tm in p:
+        return True
+    if is_monitor_death(p):
+        return True
+    if _starts_with_machine_marker(p):
         return True
     if is_compact_injection(p):
         return True

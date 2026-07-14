@@ -180,6 +180,37 @@ def _is_control_command_row(raw: str) -> bool:
     return not (args and args.group(1).strip())
 
 
+# Leading decoration tolerated before a machine marker: whitespace + at most a
+# couple of pictographic glyphs and variation selectors (the ⚙️ / ⏳ / ☀️ that
+# prefix cortex lines). Bounded + narrow so real prose can't be stripped into a
+# false marker hit; the ASCII bracket then starts the marker itself.
+_MARKER_GLYPH = r"[\U00002190-\U0001faff️‍]"
+_MACHINE_MARKER_LEAD_RE = re.compile(rf"^\s*(?:{_MARKER_GLYPH}\s*){{0,3}}")
+
+
+def _load_machine_markers() -> tuple[str, ...]:
+    """Config-driven line-start machine markers ([cortex].machine_markers). Read
+    lazily so this deterministic module keeps no import-time config dependency;
+    empty/missing config -> no filtering."""
+    try:
+        from . import config
+        cx = config.load().get("cortex", {}) or {}
+        return tuple(str(m) for m in (cx.get("machine_markers") or []) if str(m))
+    except Exception:
+        return ()
+
+
+def _is_machine_marker_row(text: str, markers: tuple[str, ...]) -> bool:
+    """True iff *text* (a stripped user/assistant turn) BEGINS with a machine
+    marker — after tolerating a leading emoji/symbol run. Line-start match only:
+    a message merely quoting a marker mid-body keeps flowing (zero false positives
+    on real speech)."""
+    if not markers:
+        return False
+    head = _MACHINE_MARKER_LEAD_RE.sub("", text, count=1)
+    return any(head.startswith(m) for m in markers)
+
+
 def _is_harness_row(text: str) -> bool:
     """True iff *text* (already stripped) is entirely CC-harness junk.
 
@@ -303,7 +334,8 @@ def parse_records(jsonl_path: str) -> list[dict]:
 
 
 def rows_from_records(records: list[dict], *, channel: str = "cli",
-                      active: set[str] | None = None) -> list[dict]:
+                      active: set[str] | None = None,
+                      machine_markers: tuple[str, ...] | None = None) -> list[dict]:
     """Build event rows from parsed jsonl records — shared by clean() and the
     per-turn Stop hook.
 
@@ -315,6 +347,8 @@ def rows_from_records(records: list[dict], *, channel: str = "cli",
     """
     if active is None:
         active = _active_chain_uuids(records)
+    if machine_markers is None:
+        machine_markers = _load_machine_markers()
     rows: list[dict] = []
     for o in records:
         if o.get("type") not in ("user", "assistant"):
@@ -333,6 +367,8 @@ def rows_from_records(records: list[dict], *, channel: str = "cli",
             continue
         if _is_harness_row(text):
             continue
+        if _is_machine_marker_row(text, machine_markers):
+            continue  # cortex-injected machine line, never memory
         rows.append({
             "session_id": o.get("sessionId") or o.get("session_id") or "",
             "timestamp": o.get("timestamp", ""),

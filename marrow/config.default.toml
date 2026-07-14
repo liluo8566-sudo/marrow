@@ -254,7 +254,7 @@ im_quiet_text = ""
 # nudge to wrap up, write the handoff, and lie_down(rotate=True). Normal
 # sessions never see this. Empty text = inert.
 show_tokens = 120000
-show_text = "Context ≥120k - If not actively chatting with user, handoff within 3 turns and lie_down(rotate=True) to clear.  If mid-conversation: carry on, the 150k fuse is the backstop."
+show_text = "Context ≥120k - If not actively chatting with user, handoff within 3 turns and lie_down(rotate=True) to clear (rotate unlocks a short next_wake, ≥16min). If mid-conversation: carry on, the 150k fuse is the backstop."
 
 [cortex_usage]
 # Net-token visibility (all sessions self-aware). Rendered by usage.py off the
@@ -397,6 +397,14 @@ tuck_in_marker = "[NEW ROUND]"
 # ordinary chat never contains them.
 compact_markers = ["===== BEGIN ORIGINAL TRANSCRIPT", "===== END ORIGINAL TRANSCRIPT"]
 compact_marker_head_chars = 200
+# Line-start machine markers. Any transcript turn whose first non-space chars
+# begin with one of these is a cortex-injected machine line (wake bell, free
+# round, night close, fuse, ctl, slash-command body), NOT user/assistant speech,
+# so ingestion drops it from events/recall/tl. Exact line-start match only —
+# a real message merely quoting a marker keeps flowing. Emoji prefix (⚙️/⏳/☀️)
+# is tolerated automatically.
+machine_markers = ["[CORTEX-WAKE]", "[NEW ROUND]", "[TUCK-IN]", "[NIGHT]",
+                   "[FUSE]", "[CTL]", "[CMD"]
 # Audit log for destructive wake-state actions (sentinel kill / floor clear /
 # awake flip). Bare name resolves under cortex home. Never silently destroy a
 # scheduled alarm again.

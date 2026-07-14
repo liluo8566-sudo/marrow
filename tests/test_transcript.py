@@ -35,6 +35,53 @@ def _asst(model, text="reply", **kw):
     return o
 
 
+# ── machine-marker ingestion filter (Phase 3 item 1c) ────────────────────────
+
+_MARKERS = ("[CORTEX-WAKE]", "[NEW ROUND]", "[NIGHT]", "[FUSE]", "[CTL]", "[CMD")
+
+
+def _rows(records):
+    return transcript.rows_from_records(records, machine_markers=_MARKERS)
+
+
+def test_machine_marker_line_start_is_dropped():
+    recs = [
+        _user("⏳ [NEW ROUND] 15 min since the user's last message. Choose again."),
+        _user("[CORTEX-WAKE] 09:30"),
+        _asst("claude-opus-4-7", text="⚙️ [FUSE] Summarise this session"),
+        _user("⚙️ [CMD ct-sleep] $ARGUMENTS is a number"),
+    ]
+    assert _rows(recs) == []  # every machine line dropped, both roles
+
+
+def test_real_user_speech_is_kept():
+    recs = [_user("hey did the new round of tests pass?"),
+            _user("night night, going to bed")]
+    contents = [r["content"] for r in _rows(recs)]
+    assert contents == ["hey did the new round of tests pass?",
+                        "night night, going to bed"]
+
+
+def test_marker_quoted_mid_body_is_kept():
+    """Line-start match only — a message merely mentioning a marker keeps flowing
+    (zero false positives on real speech)."""
+    recs = [_user("the log line was [NEW ROUND] 15 min, is that a bug?")]
+    assert [r["content"] for r in _rows(recs)] == [
+        "the log line was [NEW ROUND] 15 min, is that a bug?"]
+
+
+def test_emoji_lead_before_marker_is_stripped_then_matched():
+    recs = [_user("☀️ [CORTEX-WAKE] 06:00"),
+            _user("⚙️  [CTL] Wrap up this turn: lie_down(next_wake_min=90).")]
+    assert _rows(recs) == []
+
+
+def test_no_markers_disables_filtering():
+    recs = [_user("[NEW ROUND] would normally drop")]
+    kept = transcript.rows_from_records(recs, machine_markers=())
+    assert [r["content"] for r in kept] == ["[NEW ROUND] would normally drop"]
+
+
 # ── clean(): keep human dialogue verbatim ────────────────────────────────────
 
 def test_keeps_user_and_assistant_text(tmp_path):
