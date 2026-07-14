@@ -20,10 +20,84 @@ Two autouse guards:
 """
 from __future__ import annotations
 
+import builtins
 import os
+from pathlib import Path
+
 os.environ.setdefault("WATCHDOG_USE_POLLING", "1")
 
 import pytest
+
+
+# ── hard wall: no test may WRITE under the real ~/.config/marrow/ tree ─────────
+_REAL_MARROW_DIR = Path(os.path.expanduser("~/.config/marrow")).resolve()
+_WRITE_MODE_CHARS = set("waxr+")  # any mode that can create/append/truncate
+
+
+def _is_write_mode(mode: str) -> bool:
+    m = str(mode)
+    if "r" in m and "+" not in m:
+        return False  # pure read (allowed — e.g. db_leak_guard side-channel)
+    return any(c in _WRITE_MODE_CHARS for c in m) and m != "r"
+
+
+def _under_real_marrow(target) -> bool:
+    try:
+        p = Path(os.fspath(target)).resolve()
+    except (TypeError, ValueError, OSError):
+        return False
+    return p == _REAL_MARROW_DIR or _REAL_MARROW_DIR in p.parents
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _forbid_real_marrow_writes():
+    """FAIL LOUDLY if any test opens a real ~/.config/marrow/ path for writing.
+
+    A non-isolated test (one that forgot to route its config/cortex paths into
+    tmp) would otherwise silently pollute the live wake_signal.log / wake_audit.log
+    / marrow.db — the 07-14 incident. This barrier turns that leak into an
+    immediate AssertionError instead of a silent pass. Reads are allowed."""
+    _real_open = builtins.open
+    _real_path_open = Path.open
+
+    def _guard(target):
+        if _under_real_marrow(target):
+            raise AssertionError(
+                f"test attempted a WRITE under the real ~/.config/marrow/ tree: "
+                f"{target!r} — this path must be isolated to tmp (see conftest "
+                f"_redirect_marrow_data_dir).")
+
+    def _open(file, mode="r", *a, **kw):
+        if _is_write_mode(mode):
+            _guard(file)
+        return _real_open(file, mode, *a, **kw)
+
+    def _path_open(self, mode="r", *a, **kw):
+        if _is_write_mode(mode):
+            _guard(self)
+        return _real_path_open(self, mode, *a, **kw)
+
+    # atomic_write (tempfile.mkstemp + os.replace) and the cortex flock lockfile
+    # (os.open O_CREAT) bypass builtins.open — guard the low-level calls too.
+    _real_os_open = os.open
+    _real_os_replace = os.replace
+
+    def _os_open(path, flags, *a, **kw):
+        if flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_APPEND):
+            _guard(path)
+        return _real_os_open(path, flags, *a, **kw)
+
+    def _os_replace(src, dst, *a, **kw):
+        _guard(dst)
+        return _real_os_replace(src, dst, *a, **kw)
+
+    mp = pytest.MonkeyPatch()
+    mp.setattr(builtins, "open", _open)
+    mp.setattr(Path, "open", _path_open)
+    mp.setattr(os, "open", _os_open)
+    mp.setattr(os, "replace", _os_replace)
+    yield
+    mp.undo()
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -44,6 +118,8 @@ def _redirect_marrow_data_dir(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("marrow-data")
     vault = tmp / "vault"
     (vault / "db-pages").mkdir(parents=True, exist_ok=True)
+    cortex_home = tmp / "cortex"
+    cortex_home.mkdir(parents=True, exist_ok=True)
     mp = pytest.MonkeyPatch()
     mp.setattr(config, "DATA_DIR", tmp)
     mp.setattr(config, "CONFIG_PATH", tmp / "config.toml")
@@ -53,6 +129,37 @@ def _redirect_marrow_data_dir(tmp_path_factory):
                lambda: str(vault / "db-pages"))
     mp.setattr(config, "sub_pages_path",
                lambda: str(vault / "db-pages"))
+
+    # cortex writes (wake_signal.log / wake_audit.log / wake_state.json /
+    # wishlist.md) resolve from [cortex].home — a config VALUE defaulting to the
+    # REAL ~/.config/marrow/cortex, NOT derived from DATA_DIR. Without this a
+    # test-rendered free-round note leaked into the live ear channel (07-14
+    # incident). Wrap config.load so every cortex file lands under tmp.
+    _real_load = config.load
+
+    def _load_isolated():
+        cfg = _real_load()
+        cx = dict(cfg.get("cortex", {}) or {})
+        cx["home"] = str(cortex_home)
+        cx["wishlist_path"] = ""  # derive from the tmp home
+        cfg["cortex"] = cx
+        return cfg
+
+    mp.setattr(config, "load", _load_isolated)
+
+    # marrow.paths singleton + hooks session-claim file also hardcode the real
+    # tree; redirect them so migrate/sessionstart_catchup/drift never leak.
+    from marrow import paths as _paths_mod
+    for _f in ("marrow_db", "drift_pending_dir", "drift_backup_dir",
+               "dir_tree_md", "logs_dir", "state_dir"):
+        setattr(_paths_mod.paths, _f, tmp / Path(getattr(_paths_mod.paths, _f)).name)
+    try:
+        from marrow import hooks as _hooks_mod
+        mp.setattr(_hooks_mod, "_SESSION_CLAIMS_PATH",
+                   tmp / "session_claims.json")
+    except ImportError:
+        pass
+
     yield tmp
     mp.undo()
 

@@ -39,6 +39,21 @@ def _real_alerts_count() -> int | None:
         conn.close()
 
 
+def test_write_barrier_blocks_real_marrow_writes():
+    """The conftest hard wall must FAIL LOUDLY on any WRITE under the real
+    ~/.config/marrow/ tree — the guard that keeps a non-isolated test from
+    polluting the live wake_signal.log / wake_audit.log (07-14 incident).
+    Reads stay allowed; only the write attempt raises."""
+    real_cortex_log = _REAL_DB.parent / "cortex" / "wake_signal.log"
+    for opener in (
+        lambda: open(real_cortex_log, "a"),
+        lambda: Path(real_cortex_log).open("w"),
+        lambda: os.open(str(real_cortex_log), os.O_CREAT | os.O_WRONLY),
+    ):
+        with pytest.raises(AssertionError, match="real ~/.config/marrow"):
+            opener()
+
+
 def test_conftest_redirects_db_path_off_production():
     """The session-scoped guard must point config.db_path() away from real db."""
     p = config.db_path()

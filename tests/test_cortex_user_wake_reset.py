@@ -254,6 +254,42 @@ def test_reset_no_refund_without_live_wait_until(cortex_env):
     assert d["wait_count"] == 1  # no live wait -> untouched
 
 
+def test_reset_stamps_last_user_msg_ts(cortex_env):
+    """FIX 3 presence gate source: a real user turn stamps last_user_msg_ts so
+    the 120k nudge can hold while the user is active. A stale prior stamp is
+    refreshed."""
+    from datetime import datetime, timezone
+    home, _ = cortex_env
+    (home / "wake_state.json").write_text(json.dumps({
+        "awake": True, "last_user_msg_ts": "2020-01-01T00:00:00+00:00",
+    }))
+    cortex_bridge._cortex_user_wake_reset({"transcript_path": "/t.jsonl",
+                                           "prompt": "hey are you there?"})
+    d = _ws(home)
+    ts = datetime.fromisoformat(d["last_user_msg_ts"])
+    assert (datetime.now(timezone.utc) - ts).total_seconds() < 60
+    # helper agrees the user is active within 15 min
+    assert cortex_bridge._user_active_within(d, 15) is True
+
+
+def test_machine_turn_does_not_refresh_user_ts(cortex_env):
+    """Trap: machine/injected turns must never count as user presence. The hook
+    gates _cortex_user_wake_reset behind is_machine_line, so a machine line never
+    reaches the writer and the stale ts is preserved (helper reports inactive)."""
+    home, _ = cortex_env
+    stale = "2020-01-01T00:00:00+00:00"
+    (home / "wake_state.json").write_text(json.dumps({
+        "awake": True, "last_user_msg_ts": stale,
+    }))
+    wrapped = ("<task-notification>\n<event>⏳ [NEW ROUND] 87 min since the "
+               "user's last message.</event>\n</task-notification>")
+    # a machine line is classified as such -> the hook skips the reset writer
+    assert cortex_bridge.is_machine_line(wrapped) is True
+    d = _ws(home)
+    assert d["last_user_msg_ts"] == stale  # never refreshed
+    assert cortex_bridge._user_active_within(d, 15) is False
+
+
 def test_reset_already_awake_preserves_awake_since(cortex_env):
     home, _ = cortex_env
     (home / "wake_state.json").write_text(json.dumps({
