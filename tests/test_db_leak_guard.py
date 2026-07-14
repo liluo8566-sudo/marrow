@@ -29,13 +29,31 @@ _REAL_DB = Path(os.path.expanduser("~/.config/marrow/marrow.db"))
 
 def _real_alerts_count() -> int | None:
     """Side-channel count of real production alerts table. Returns None if
-    the real db file does not exist (fresh machine / CI)."""
+    the real db file does not exist (fresh machine / CI).
+
+    Connects READ-ONLY (file: URI mode=ro): the conftest barrier now rejects any
+    WRITABLE sqlite3.connect under the real ~/.config/marrow/ tree, and a
+    read-only count must never migrate or create the db."""
     if not _REAL_DB.exists():
         return None
-    conn = sqlite3.connect(str(_REAL_DB))
+    conn = sqlite3.connect(f"file:{_REAL_DB}?mode=ro", uri=True)
     try:
         return conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0]
     finally:
+        conn.close()
+
+
+def test_sqlite_connect_to_real_db_raises():
+    """The barrier must reject a plain (writable) sqlite3.connect to the real
+    marrow.db — the C-extension path that bypasses the open() patches. A
+    read-only `file:...?mode=ro` connection stays allowed."""
+    with pytest.raises(AssertionError, match="real ~/.config/marrow"):
+        sqlite3.connect(str(_REAL_DB))
+    with pytest.raises(AssertionError, match="real ~/.config/marrow"):
+        sqlite3.connect(f"file:{_REAL_DB}?mode=rwc", uri=True)
+    # read-only connection is permitted (skip if the real db is absent)
+    if _REAL_DB.exists():
+        conn = sqlite3.connect(f"file:{_REAL_DB}?mode=ro", uri=True)
         conn.close()
 
 

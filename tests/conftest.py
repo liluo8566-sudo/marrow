@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import builtins
 import os
+import sqlite3
 from pathlib import Path
 
 os.environ.setdefault("WATCHDOG_USE_POLLING", "1")
@@ -47,6 +48,42 @@ def _under_real_marrow(target) -> bool:
     except (TypeError, ValueError, OSError):
         return False
     return p == _REAL_MARROW_DIR or _REAL_MARROW_DIR in p.parents
+
+
+def _sqlite_target_under_real(database, uri: bool) -> bool:
+    """Resolve the on-disk path a sqlite3.connect(database, uri=...) call targets
+    and report whether it lands under the real ~/.config/marrow/ tree.
+
+    In-memory (":memory:", empty) and unresolvable targets -> False (allowed).
+    For a `file:` URI the path is the part before any `?query`."""
+    if database is None:
+        return False
+    s = os.fspath(database) if not isinstance(database, str) else database
+    if s in ("", ":memory:") or s.startswith(":memory:"):
+        return False
+    if uri and s.startswith("file:"):
+        path_part = s[len("file:"):].split("?", 1)[0]
+        if not path_part or path_part.startswith(":memory:"):
+            return False
+        return _under_real_marrow(path_part)
+    return _under_real_marrow(s)
+
+
+def _sqlite_is_readonly(database, uri: bool) -> bool:
+    """True iff a sqlite3.connect request is read-only: a `file:` URI carrying
+    mode=ro (or immutable=1) with uri=True. Anything else (plain path, mode=rwc,
+    default) is treated as writable."""
+    if not uri:
+        return False
+    s = database if isinstance(database, str) else os.fspath(database)
+    if not s.startswith("file:") or "?" not in s:
+        return False
+    query = s.split("?", 1)[1]
+    params = query.replace(";", "&").split("&")
+    for p in params:
+        if p in ("mode=ro", "immutable=1"):
+            return True
+    return False
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -91,11 +128,28 @@ def _forbid_real_marrow_writes():
         _guard(dst)
         return _real_os_replace(src, dst, *a, **kw)
 
+    # sqlite3.connect() does its file I/O in the C extension, bypassing every
+    # open() patch above — a test connecting to the real marrow.db could still
+    # INSERT/migrate silently. Allow real-tree connections ONLY read-only
+    # (file: URI with mode=ro / immutable=1); anything writable raises.
+    _real_sqlite_connect = sqlite3.connect
+
+    def _sqlite_connect(database=":memory:", *a, **kw):
+        uri = bool(kw.get("uri", False))
+        if _sqlite_target_under_real(database, uri) and not _sqlite_is_readonly(database, uri):
+            raise AssertionError(
+                f"test attempted a WRITABLE sqlite3.connect under the real "
+                f"~/.config/marrow/ tree: {database!r} — connect read-only via "
+                f"a `file:...?mode=ro` URI (uri=True), or route to a tmp db "
+                f"(see conftest _redirect_marrow_data_dir).")
+        return _real_sqlite_connect(database, *a, **kw)
+
     mp = pytest.MonkeyPatch()
     mp.setattr(builtins, "open", _open)
     mp.setattr(Path, "open", _path_open)
     mp.setattr(os, "open", _os_open)
     mp.setattr(os, "replace", _os_replace)
+    mp.setattr(sqlite3, "connect", _sqlite_connect)
     yield
     mp.undo()
 
