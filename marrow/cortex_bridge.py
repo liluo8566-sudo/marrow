@@ -1115,6 +1115,7 @@ def _cortex_user_wake_reset(inp: dict) -> None:
     sentinel_pid = None
     flipped_awake = False
     old_gen = new_gen = None
+    awake_since = None
     with _wake_state_lock(p):
         d = _wake_state_load(p)
         _ws_ensure_epoch(d)
@@ -1122,11 +1123,14 @@ def _cortex_user_wake_reset(inp: dict) -> None:
         if not was_awake:
             from datetime import timezone as _tz
             d["awake"] = True
-            d["awake_since"] = datetime.now(_tz.utc).isoformat()
-            # Log this user-triggered wake as its own ct_wake_log row so the
-            # wakeup note's "Last wake" counts it (BUG A). Fall back to the latest
-            # open row if the insert failed, so accounting still chains.
-            d["wake_log_id"] = _log_user_wake_row() or _latest_wake_log_id()
+            awake_since = datetime.now(_tz.utc).isoformat()
+            d["awake_since"] = awake_since
+            # wake_log_id is bound AFTER this lock releases (P2 fix): the
+            # ct_wake_log INSERT (30s busy_timeout + fallback query) must never
+            # run while this flock is held, or a slow/contended db stalls the
+            # user's prompt and starves cortex's own 5s-deadline strict lock on
+            # the SAME wake_state file (fail-closed on concurrent wait/lie_down).
+            # Left unset here; the write happens below, outside the lock.
             if tpath:
                 d["transcript"] = str(tpath)
             flipped_awake = True
@@ -1168,6 +1172,20 @@ def _cortex_user_wake_reset(inp: dict) -> None:
     _clear_floor_deadline()
     _kill_pid(sentinel_pid)
     _spawn_watchdog_if_absent()
+    # BUG A wake-row log, done OUTSIDE the wake-state lock (P2 fix, see above):
+    # log this user-triggered wake as its own ct_wake_log row so the wakeup
+    # note's "Last wake" counts it. Best-effort — bind wake_log_id back only if
+    # this is still the SAME wake (awake_since unchanged); a lie_down / newer
+    # flip superseding it in the gap just means this wake's tokens go unbound,
+    # never a correctness issue, and never re-blocks a live mutation.
+    if flipped_awake:
+        wid = _log_user_wake_row() or _latest_wake_log_id()
+        if wid is not None:
+            with _wake_state_lock(p):
+                d2 = _wake_state_load(p)
+                if d2.get("awake") and d2.get("awake_since") == awake_since:
+                    d2["wake_log_id"] = wid
+                    _wake_state_save(p, d2)
 
 
 def cortex_window_closed(transcript_path: str | None) -> None:

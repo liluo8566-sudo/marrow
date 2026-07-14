@@ -10,6 +10,7 @@ these tests exercise that direct path.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 
 import pytest
@@ -207,8 +208,10 @@ def test_reset_flips_awake_and_marks_reply(cortex_env):
     assert d["awake"] is True
     assert d["user_replied_this_wake"] is True
     # No ct_wake_log table in this fixture db -> the activation-row insert falls
-    # back to None (best-effort, never blocks the wake).
-    assert d["wake_log_id"] is None
+    # back to None (best-effort, never blocks the wake). The db write now runs
+    # AFTER the wake_state lock releases (P2 fix), so a failed write leaves the
+    # key simply absent rather than explicitly None — .get() reads both the same.
+    assert d.get("wake_log_id") is None
     assert d["transcript"] == "/x/y.jsonl"
     assert "wait_count" not in d  # no wait_until -> untouched (never written)
 
@@ -235,6 +238,39 @@ def test_reset_logs_user_wake_row(cortex_env):
     assert rows[0][1] == "user"
     assert rows[0][2] is None  # force_slept NULL -> auto-rate stats unaffected
     assert _ws(home)["wake_log_id"] == rows[0][0]  # bound to the fresh row
+
+
+def test_reset_db_write_does_not_hold_wake_state_lock(cortex_env, monkeypatch):
+    """P2 fix: the ct_wake_log write (_log_user_wake_row) must run OUTSIDE the
+    wake_state flock. cortex's own strict lock on the SAME file gives up after
+    5s; a slow/contended db write held under this lock would stall the user's
+    prompt and starve a concurrent cortex-side mutation. Proven by having the
+    stubbed db-write function itself try to acquire the wake_state lock file
+    (non-blocking) — it must succeed, meaning the outer lock was already
+    released before this call runs."""
+    import fcntl
+    home, _ = cortex_env
+    lock_path = (home / "wake_state.json").with_suffix(".lock")
+    acquired = {}
+
+    def fake_log_user_wake_row():
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquired["ok"] = True
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            acquired["ok"] = False
+        finally:
+            os.close(fd)
+        return 42
+
+    monkeypatch.setattr(cortex_bridge, "_log_user_wake_row", fake_log_user_wake_row)
+    cortex_bridge._cortex_user_wake_reset({"transcript_path": "/x/y.jsonl"})
+
+    assert acquired.get("ok") is True  # the outer wake_state lock was released
+    assert _ws(home)["wake_log_id"] == 42  # patch-back still binds the id
 
 
 def test_reset_clears_silence_and_sentinel(cortex_env, monkeypatch):
@@ -396,7 +432,7 @@ def test_reset_backfill_none_on_empty_table(cortex_env):
     conn.close()
     cortex_bridge._cortex_user_wake_reset({"transcript_path": "/x.jsonl"})
     d = _ws(home)
-    assert d["wake_log_id"] is None  # empty table -> None, no raise
+    assert d.get("wake_log_id") is None  # empty table -> None, no raise
 
 
 def test_latest_wake_log_id_missing_table(cortex_env):
