@@ -504,6 +504,7 @@ def test_module_path_constants_redirected_off_real_tree():
         ("catchup._LOGS_DIR", sessionstart_catchup._LOGS_DIR),
         ("schedule._SNAPSHOT_DIR", schedule._SNAPSHOT_DIR),
         ("schedule._FAIL_LOG", schedule._FAIL_LOG),
+        ("schedule._DAILY_PATH", schedule._DAILY_PATH),
         ("cortex_bridge._DB", cortex_bridge._DB),
         ("daemon._DB", daemon._DB),
     ):

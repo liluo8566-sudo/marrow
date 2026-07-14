@@ -134,8 +134,22 @@ def _forbid_real_marrow_writes():
     # (file: URI with mode=ro / immutable=1); anything writable raises.
     _real_sqlite_connect = sqlite3.connect
 
+    # sqlite3.connect positional order after `database`:
+    #   timeout, detect_types, isolation_level, check_same_thread,
+    #   factory, cached_statements, uri
+    # -> `uri` is positional index 6 in *a (the 8th argument overall). On
+    # Python 3.12/3.13 a caller may pass it positionally
+    # (connect(db, 5.0, 0, None, True, Connection, 128, True)), which a
+    # kw-only read would miss — letting a writable real-tree connect slip past.
+    _URI_POS = 6
+
     def _sqlite_connect(database=":memory:", *a, **kw):
-        uri = bool(kw.get("uri", False))
+        if "uri" in kw:
+            uri = bool(kw["uri"])
+        elif len(a) > _URI_POS:
+            uri = bool(a[_URI_POS])
+        else:
+            uri = False
         if _sqlite_target_under_real(database, uri) and not _sqlite_is_readonly(database, uri):
             raise AssertionError(
                 f"test attempted a WRITABLE sqlite3.connect under the real "
@@ -228,6 +242,7 @@ def _redirect_marrow_data_dir(tmp_path_factory):
         from marrow import schedule as _sched_mod
         mp.setattr(_sched_mod, "_SNAPSHOT_DIR", tmp / "schedule-snapshots")
         mp.setattr(_sched_mod, "_FAIL_LOG", tmp / "logs" / "cadence_fail.log")
+        mp.setattr(_sched_mod, "_DAILY_PATH", str(tmp / "daily.md"))
     except ImportError:
         pass
     # _DB constants = config.db_path() frozen at import (real marrow.db). The

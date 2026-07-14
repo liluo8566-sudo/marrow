@@ -57,6 +57,21 @@ def test_sqlite_connect_to_real_db_raises():
         conn.close()
 
 
+def test_sqlite_connect_uri_positional_still_raises():
+    """`uri` can arrive as the 8th positional arg (Python 3.12/3.13), not just a
+    kwarg. The barrier must classify a positional-uri writable connect to the
+    real marrow.db as a violation instead of letting it slip through. Positional
+    order after database: timeout, detect_types, isolation_level,
+    check_same_thread, factory, cached_statements, uri."""
+    with pytest.raises(AssertionError, match="real ~/.config/marrow"):
+        # database, timeout, detect_types, isolation_level, check_same_thread,
+        # factory, cached_statements, uri=True — all positional.
+        sqlite3.connect(
+            f"file:{_REAL_DB}?mode=rwc", 5.0, 0, None, True,
+            sqlite3.Connection, 128, True,
+        )
+
+
 def test_write_barrier_blocks_real_marrow_writes():
     """The conftest hard wall must FAIL LOUDLY on any WRITE under the real
     ~/.config/marrow/ tree — the guard that keeps a non-isolated test from
