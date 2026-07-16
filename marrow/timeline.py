@@ -24,6 +24,7 @@ All DB timestamps are UTC; configured local timezone on render via timeutil.
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib as _hashlib
 import re as _re
 import sqlite3
 from .top_sections import _tone, _vband, _aband, _wmean
@@ -770,6 +771,11 @@ def render_timeline(conn: sqlite3.Connection,
     # carried value when the content is unchanged. Only stamped when the block
     # has rendered anchors (empty `_none_` render emits no trail at all).
     if parts:
+        # z= = fingerprint of the zone body (this text, trail-free). Lets
+        # reconcile tell render residue (z= matches recompute → DB wins
+        # silently) from a human edit (z= differs → warn) without relying on
+        # file mtime, which a volatile co-writer (Status zone) bumps.
+        parts.append("z=" + _zone_fingerprint(text))
         parts.append("t=" + _now_utc_iso())
         text += f"\n<!-- tl-rendered:{';'.join(parts)} -->"
 
@@ -782,6 +788,20 @@ def _now_utc_iso() -> str:
 
 _TL_TRAIL_LINE_RE = _re.compile(r"\n?<!--\s*tl-rendered:[^>]+-->\s*$")
 _TL_TRAIL_T_RE = _re.compile(r"t=(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)")
+_TL_TRAIL_Z_RE = _re.compile(r"z=([0-9a-f]{8})")
+
+
+def _zone_fingerprint(text: str) -> str:
+    """Deterministic 8-hex fingerprint of the timeline zone's content.
+
+    Shared by render (stamps z= into the trail) and reconcile (recomputes on
+    the current file zone). Excludes the tl-rendered trail line itself and
+    normalizes newlines + trailing whitespace so both sides are byte-identical
+    by construction, independent of the volatile t= / z= trail fields.
+    """
+    body = _TL_TRAIL_LINE_RE.sub("", text)
+    body = body.replace("\r\n", "\n").replace("\r", "\n").rstrip()
+    return _hashlib.sha1(body.encode("utf-8")).hexdigest()[:8]
 
 
 def carry_trail_t(new_block: str, old_block: str | None,

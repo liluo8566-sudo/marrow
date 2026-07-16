@@ -1474,6 +1474,7 @@ def reconcile_alerts(conn: sqlite3.Connection,
 _TIMELINE_H2 = "## Timeline"
 _TIMELINE_END_MARKER = "<!-- marrow:timeline:end -->"
 _TL_TRAIL_T_RE = re.compile(r"t=(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)")
+_TL_TRAIL_Z_RE = re.compile(r"z=([0-9a-f]{8})")
 # Matches `<!-- tl:<sid> -->` (session) and `<!-- tl:d:YYYY-MM-DD -->` (diary).
 _TL_SID_RE  = re.compile(r"<!--\s*tl:(?!d:|e:|ep:)(?P<sid>[^:\s>]+)(?::(?P<seq>\d+))?(?::(?P<ln>\d+))?\s*-->")
 _TL_DATE_RE = re.compile(r"<!--\s*tl:d:(?P<date>\d{4}-\d{2}-\d{2})\s*-->")
@@ -1499,6 +1500,17 @@ def _trail_t_iso(block: str) -> str | None:
         return None
     m_t = _TL_TRAIL_T_RE.search(m_trail.group("payload"))
     return m_t.group(1) if m_t else None
+
+
+def _trail_z(block: str) -> str | None:
+    """Zone fingerprint (z=) stored in the tl-rendered trail, or None if the
+    trail is absent or pre-migration (no z= field). None → treat as possibly
+    human-edited; one render after deploy backfills it."""
+    m_trail = _TL_TRAIL_RE.search(block)
+    if not m_trail:
+        return None
+    m_z = _TL_TRAIL_Z_RE.search(m_trail.group("payload"))
+    return m_z.group(1) if m_z else None
 _TL_EVT_RE    = re.compile(r"<!--\s*tl:e:(?P<eid>\d+)\s*-->")
 _TL_EP_RE     = re.compile(r"<!--\s*tl:ep:(?P<epid>\d+)\s*-->")
 _TL_PLUS_RE   = re.compile(
@@ -1658,6 +1670,11 @@ def reconcile_timeline(conn: sqlite3.Connection,
     # every render, so mtime alone would lose its "content last rendered" meaning.
     trail_t_iso = _trail_t_iso(block)
     md_mtime_iso = trail_t_iso or _md_mtime_iso(dashboard_path)
+    # Zone fingerprint from the trail: lets the db_win branch tell render
+    # residue (zone untouched since render) from a clobbered human edit,
+    # content-based rather than mtime-based (mtime lies on multi-zone pages
+    # like daybrief.md where a co-writer rewrites the file each render).
+    trail_z = _trail_z(block)
 
     # Parse trail marker first — tells us what was rendered last time
     trail_sid_seqs: set[tuple[str, int]] = set()
@@ -2145,19 +2162,15 @@ def reconcile_timeline(conn: sqlite3.Connection,
                 rpt.unchanged += 1
 
     if db_win_skips:
-        # Split render residue (file untouched since last render → silent self-heal)
-        # from a clobbered human edit (file changed after render → real warning).
-        # File mtime <= trail t= + slack means no human touched md since we rendered.
-        _DB_WIN_SLACK_S = 5
-        residue = False
-        try:
-            _file_mtime = dashboard_path.stat().st_mtime
-            _t_epoch = (_dt.datetime.strptime(trail_t_iso, "%Y-%m-%dT%H:%M:%SZ")
-                        .replace(tzinfo=_dt.timezone.utc).timestamp()
-                        if trail_t_iso else None)
-            residue = _t_epoch is not None and _file_mtime <= _t_epoch + _DB_WIN_SLACK_S
-        except OSError:
-            residue = False
+        # Split render residue (zone untouched since last render → silent
+        # self-heal) from a clobbered human edit (zone text changed after
+        # render → real warning). Recompute the zone fingerprint over the
+        # CURRENT file zone and compare to the trail's stored z=. Matching
+        # z= → nobody touched the timeline zone since we wrote it → residue.
+        # z= differs or absent (pre-migration trail) → possible human edit.
+        from .timeline import _zone_fingerprint
+        current_z = _zone_fingerprint(_TIMELINE_H2 + block)
+        residue = trail_z is not None and current_z == trail_z
         if residue:
             conn.execute(
                 "INSERT INTO audit_log (target_table, target_id, action, summary)"
