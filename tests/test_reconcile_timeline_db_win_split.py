@@ -120,6 +120,42 @@ def test_multizone_status_rewrite_residue_no_alert(conn, dbpath, tmp_path):
     assert len(_alert_rows(dbpath)) == 0
 
 
+def test_residue_audit_survives_uncommitted_caller(dbpath, tmp_path):
+    """daybrief.update() pattern: storage.connect() (default sqlite3 isolation)
+    -> reconcile_timeline(conn) -> conn.close() with NO external commit. The
+    residue audit_log row must not be silently rolled back on close."""
+    setup = storage.init_db(dbpath)  # creates schema, own commits
+    try:
+        t0 = _utc(-120)
+        row_ts = _utc(-60)
+        eid = _insert_self(setup, "【a】新值", created_at=t0, updated_at=row_ts)
+    finally:
+        setup.close()
+
+    zone = _timeline_zone(eid, "14:00 【a】旧值", t0)
+    path = tmp_path / "daybrief.md"
+    _daybrief_file(path, zone, status="老状态")
+    _daybrief_file(path, zone, status="新状态 - refreshed")
+
+    # Mirror daybrief.update(): a fresh connection, no commit by the caller.
+    conn = storage.connect(dbpath)
+    try:
+        rpt = reconcile_timeline(conn, path, db=dbpath)
+        assert rpt.updated == 0
+    finally:
+        conn.close()  # no commit() call here — this is the bug scenario
+
+    # Reopen from disk: the residue audit row must have survived the close.
+    verify = storage.connect(dbpath)
+    try:
+        rows = verify.execute(
+            "SELECT * FROM audit_log WHERE action='md_stale_db_win'"
+        ).fetchall()
+        assert len(rows) == 1
+    finally:
+        verify.close()
+
+
 # ── human edit + concurrent DB update → warn ─────────────────────────────────
 
 def test_human_edit_clobbered_warns(conn, dbpath, tmp_path):

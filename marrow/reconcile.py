@@ -2187,4 +2187,10 @@ def reconcile_timeline(conn: sqlite3.Connection,
                 message=(f"{len(db_win_skips)} stale md line(s) kept DB text: "
                          f"{shown}{more}"),
             )
+    # Own our writes: bare conn.execute() outside the `with conn:` blocks
+    # above (e.g. the residue audit_log INSERT) opens an implicit transaction
+    # under sqlite3's default isolation. daybrief.update() never commits its
+    # read-only conn, so those rows were silently rolled back on close().
+    # No-op when there's no open transaction (safe on every call path).
+    conn.commit()
     return rpt
