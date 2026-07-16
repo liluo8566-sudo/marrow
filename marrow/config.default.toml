@@ -415,6 +415,18 @@ machine_markers = ["[CORTEX-WAKE]", "[NEW ROUND]", "[TUCK-IN]", "[NIGHT]",
 # scheduled alarm again.
 wake_audit_log_file = "state/wake_audit.log"
 
+[outbox]
+# Cross-channel message drop (msg MCP tool → outbox table → channel adapters).
+# daily_cap_user: user-facing notes/day (targets tg/wx), all senders combined.
+# daily_cap_session: session-to-session notes/day (targets session/cli/ct).
+# Both counted since local midnight, refused at cap (warns outbox_cap).
+# user_send_channels: channels allowed to send to the user (P1: cortex only).
+# retention_days: sent/failed rows older than this aged out by the weekly job.
+daily_cap_user = 30
+daily_cap_session = 100
+user_send_channels = ["ct"]
+retention_days = 30
+
 [hooks]
 # PreToolUse backup guard — stateless, two tiers (no state, no dedup).
 # Silent: rm/mv/sed scoped to tmp/scratchpad/worktrees; a destructive command

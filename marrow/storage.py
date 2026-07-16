@@ -15,7 +15,7 @@ import sqlite_vec
 
 from . import config
 
-SCHEMA_VERSION = 39
+SCHEMA_VERSION = 40
 
 # Tables whose id must never be reused (freed-id-reuse disease family): a plain
 # INTEGER PRIMARY KEY hands a deleted id back to the next INSERT, and side-tables
@@ -249,6 +249,26 @@ CREATE TABLE IF NOT EXISTS session_watermarks (
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
   PRIMARY KEY (sid, segment_seq)
 );
+-- v40: cross-channel message drop (msg MCP tool → outbox → channel adapters).
+-- One row per note. target = tg | wx | cli | ct | session:<full-sid>. Delivery
+-- is at-most-once, claimed via a single UPDATE...WHERE status='pending'.
+CREATE TABLE IF NOT EXISTS outbox (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  from_sid TEXT,
+  from_channel TEXT,
+  target TEXT NOT NULL,
+  body TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  sent_at TEXT,
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  watch_reply INTEGER NOT NULL DEFAULT 0,
+  watch_timeout_min INTEGER,
+  watch_state TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_outbox_status_target ON outbox(status, target);
+CREATE INDEX IF NOT EXISTS idx_outbox_watch_state_sent
+  ON outbox(watch_state, sent_at);
 """
 
 # superseded_by IS NULL = the current row. Recall/backdrop read the live view.
@@ -573,6 +593,7 @@ def init_db(path: str | None = None) -> sqlite3.Connection:
         _migrate_to_v37(conn)
         _migrate_to_v38(conn)
         _migrate_to_v39(conn)
+        _migrate_to_v40(conn)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     return conn
 
@@ -1621,6 +1642,19 @@ def _migrate_to_v39(conn: sqlite3.Connection) -> None:
     if "updated_at" not in cols:
         conn.execute("ALTER TABLE events ADD COLUMN updated_at TEXT")
     conn.execute("PRAGMA user_version=39")
+
+
+def _migrate_to_v40(conn: sqlite3.Connection) -> None:
+    """v40: outbox table — cross-channel message drop (msg MCP tool).
+
+    Table + its two indexes are created via _TABLES / _FTS-style CREATE IF NOT
+    EXISTS on every connect (idempotent); this gate only bumps user_version so
+    SCHEMA_VERSION stays monotonic. Existing DBs get the table on next init_db.
+    """
+    v = conn.execute("PRAGMA user_version").fetchone()[0]
+    if v >= 40:
+        return
+    conn.execute("PRAGMA user_version=40")
 
 
 def get_latest_watermark(conn, sid):

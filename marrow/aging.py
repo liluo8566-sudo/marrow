@@ -22,6 +22,8 @@ Passes (single txn):
    pass if eviction would exceed 25% of vec rows or 10000 rows. Backup
    gate: skip if newest marrow-YYYY-MM-DD.db backup is missing or >7d old.
    vec_window_days=0 disables the pass entirely.
+6. prune_outbox — DELETE outbox rows with status sent/failed older than
+   [outbox].retention_days. Pending/claimed rows are never aged.
 """
 from __future__ import annotations
 
@@ -34,7 +36,7 @@ import os
 import sys
 from datetime import date, timedelta
 from pathlib import Path
-from . import config, repo, storage
+from . import config, outbox as _outbox, repo, storage
 
 
 def _fts_phrase(q: str) -> str:
@@ -316,6 +318,7 @@ def main(argv: list[str] | None = None) -> None:
     cfg = config.load()
     backup_dir = cfg["paths"]["backup_dir"]
     window_days = int(cfg.get("recall", {}).get("vec_window_days", 90))
+    outbox_retention = int(cfg.get("outbox", {}).get("retention_days", 30))
 
     conn = storage.init_db()
     # Alerts must land in the same DB main() operates on (init_db may be
@@ -329,6 +332,7 @@ def main(argv: list[str] | None = None) -> None:
             archived = archive_tasks(conn)
             confirmed = confirm_milestone_alerts(conn)
             tombs = prune_md_index_tombstones(conn)
+            outbox_pruned = _outbox.prune(conn, outbox_retention)
             wtshells = prune_projects_worktrees()
             vec = evict_vec_window(
                 conn,
@@ -344,7 +348,8 @@ def main(argv: list[str] | None = None) -> None:
                 "VALUES ('aging', NULL, 'weekly', ?)",
                 (f"archived={archived} "
                  f"confirmed={confirmed} "
-                 f"tombs={tombs} wtshells={wtshells} "
+                 f"tombs={tombs} outbox_pruned={outbox_pruned} "
+                 f"wtshells={wtshells} "
                  f"vec_evicted={vec['evicted']} vec_exempted={vec['exempted']} "
                  f"vec_skipped={vec['skipped']} vec_aborted={vec['aborted']}",),
             )
@@ -359,7 +364,7 @@ def main(argv: list[str] | None = None) -> None:
         sys.stderr.write(
             f"[aging] archived={archived} "
             f"confirmed={confirmed} "
-            f"tombs={tombs} wtshells={wtshells} "
+            f"tombs={tombs} outbox_pruned={outbox_pruned} wtshells={wtshells} "
             f"vec_evicted={vec['evicted']} vec_exempted={vec['exempted']} "
             f"vec_skipped={vec['skipped']} vec_aborted={vec['aborted']}"
             f"{' (dry-run)' if dry_run else ''}\n"

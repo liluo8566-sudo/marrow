@@ -18,7 +18,7 @@ from typing import Annotated
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
-from . import config, cortex_bridge, recall as _recall_mod, repo, storage
+from . import config, cortex_bridge, outbox as _outbox, recall as _recall_mod, repo, storage
 from .llm import LLMClient
 from .timeutil import utc_iso_to_local_datetime, reltime_short
 
@@ -908,6 +908,37 @@ def alert(
     if result.returncode != 0:
         return {"ok": False, "error": result.stderr.strip() or "resolve failed"}
     return {"ok": True, "id": alert_id}
+
+
+# ── msg ───────────────────────────────────────────────────────────────────────
+
+_MSG_ACTIONS = {"send", "list"}
+
+
+@marrow_tool()
+def msg(
+    action: Annotated[str, Field(description="'send' a message, or 'list' your own recent outbox rows (debugging).")],
+    to: Annotated[str | None, Field(description="send only: tg | wx | cli | ct | session:<sid-prefix>. tg/wx = her phone (whitelisted senders only); cli = any cli session; ct = cortex; session:<prefix> resolves to exactly one live session (0 or many matches = refused).")] = None,
+    text: Annotated[str | None, Field(description="send only: message body (plain text). Required.")] = None,
+    watch_reply: Annotated[bool, Field(description="send only: kick cortex awake when she replies on the target channel (default false).")] = False,
+    watch_timeout_min: Annotated[int | None, Field(description="send only: kick cortex if no reply within N minutes of send (default none = no timeout watch).")] = None,
+    limit: Annotated[int, Field(ge=1, description="list only: max rows to return (default 20).")] = 20,
+) -> dict | list[dict]:
+    """Leave a message across channels: to her phone (tg/wx, whitelisted senders) or covertly to another session (cli/ct). Fire-and-forget; replies land in the target channel's resident session. watch_reply/watch_timeout kick cortex awake.
+    - 'send': needs `to` + `text`; tg/wx restricted to allowed sender channels.
+    - 'list': your own pending/recent rows to confirm a send landed."""
+    if action not in _MSG_ACTIONS:
+        return {"ok": False, "error": f"unknown action {action!r}, expected one of {sorted(_MSG_ACTIONS)}"}
+    if action == "list":
+        return _outbox.list_recent(limit=limit, db=_DB)
+    if not to:
+        return {"ok": False, "error": "send requires `to`"}
+    if not text:
+        return {"ok": False, "error": "send requires `text`"}
+    return _outbox.send(
+        to, text, watch_reply=watch_reply,
+        watch_timeout_min=watch_timeout_min, db=_DB,
+    )
 
 
 # ── event_clear ──────────────────────────────────────────────────────────────
