@@ -184,6 +184,135 @@ def _save_ct_cursor(sid: str, last_uuid: str | None, offset: int) -> None:
         pass
 
 
+# ── cross-session replay cursor (turn_inject) ────────────────────────────────
+# One small file per sid holding the last-seen events.id, same dir/pattern as
+# recall_seen. Absent = first sight of this sid → seed to MAX(id), future-only.
+
+def _replay_cursor_path(sid: str) -> Path:
+    return config.DATA_DIR / "state" / "replay" / f"{sid}"
+
+
+def _load_replay_cursor(sid: str) -> int | None:
+    if not sid:
+        return None
+    try:
+        return int(_replay_cursor_path(sid).read_text().strip())
+    except Exception:
+        return None
+
+
+def _save_replay_cursor(sid: str, last_id: int) -> None:
+    if not sid:
+        return
+    p = _replay_cursor_path(sid)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(str(int(last_id)))
+    except Exception:
+        pass
+
+
+def _replay_local_hm(ts: str, tz) -> str:
+    try:
+        dt = datetime.fromisoformat((ts or "").replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(tz).strftime("%H:%M")
+    except Exception:
+        return "??:??"
+
+
+def _replay_truncate(text: str, limit: int) -> str:
+    text = text or ""
+    if len(text) <= limit:
+        return text
+    return text[: max(limit - 1, 0)] + "…"
+
+
+def _replay_context(sid: str, channel: str) -> str:
+    """Cross-session replay inject. Returns '' when disabled, when this session's
+    channel is an excluded target, on first sight of the sid (seed only), or when
+    no new events from OTHER sessions exist. Cursor advances after a render
+    decision (ambient — advances even when overflow turns are folded)."""
+    if not sid:
+        return ""
+    cfg = (config.load().get("replay", {}) or {})
+    if not cfg.get("enabled", True):
+        return ""
+    if channel in (cfg.get("exclude_target_channels", ["ct"]) or []):
+        return ""
+
+    max_turns = int(cfg.get("max_turns", 2))
+    per_chars = int(cfg.get("per_msg_chars", 150))
+    header = cfg.get("header", "## Recent replay from other sessions")
+
+    conn = storage.connect(config.db_path())
+    try:
+        cursor = _load_replay_cursor(sid)
+        if cursor is None:
+            row = conn.execute("SELECT MAX(id) AS m FROM events").fetchone()
+            seed = int(row["m"]) if row and row["m"] is not None else 0
+            _save_replay_cursor(sid, seed)
+            return ""  # first sight — future-only, never backfill
+
+        rows = conn.execute(
+            "SELECT id, session_id, role, content, timestamp, channel FROM events "
+            "WHERE id > ? AND session_id != ? AND role IN ('user','assistant') "
+            "AND COALESCE(channel,'') != 'ct' ORDER BY id ASC",
+            (cursor, sid),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return ""
+    finally:
+        conn.close()
+
+    if not rows:
+        return ""
+
+    max_id = rows[-1]["id"]
+    tz = config.get_tz()
+
+    # Group into turns: a user event opens a turn; consecutive user msgs stay in
+    # the same turn; the following assistant msgs close it. Next user reopens.
+    turns: list[list[dict]] = []
+    for r in rows:
+        content = transcript.strip_media_markers(r["content"])
+        if not content:
+            continue
+        item = {
+            "channel": r["channel"] or "?",
+            "sid4": (r["session_id"] or "")[:4],
+            "hm": _replay_local_hm(r["timestamp"], tz),
+            "role": "N" if r["role"] == "user" else "Y",
+            "content": _replay_truncate(content, per_chars),
+        }
+        if r["role"] == "user" and (not turns or turns[-1][-1]["role"] != "N"):
+            turns.append([item])
+        elif not turns:
+            # assistant with no opening user turn — start a bare turn
+            turns.append([item])
+        else:
+            turns[-1].append(item)
+
+    # Advance cursor on a render decision regardless of fold (ambient replay).
+    _save_replay_cursor(sid, max_id)
+
+    if not turns:
+        return ""
+
+    kept = turns[:max_turns]
+    folded = len(turns) - len(kept)
+    lines = [header]
+    for turn in kept:
+        for it in turn:
+            lines.append(
+                f"[{it['channel']}·{it['sid4']} {it['hm']}] {it['role']}: {it['content']}"
+            )
+    if folded > 0:
+        lines.append(f"+{folded} more turns")
+    return "\n".join(lines)
+
+
 def _ensure_ct_activity(conn: sqlite3.Connection) -> None:
     """Create ct_activity if absent. Cortex C1 collector reads (ts, sid, channel)."""
     conn.execute(
@@ -3450,7 +3579,9 @@ def turn_inject() -> int:
         wx_sched = _sched_fragment()
         wx_tl = _tl_fragment()
         wx_kick = f"\n\n{kickout_ctx}" if kickout_ctx else ""
-        wx_ctx = f"{wx_sched}{wx_tl}{wx_kick}".strip()
+        wx_replay = _replay_context(sid, channel)
+        wx_replay = f"\n\n{wx_replay}" if wx_replay else ""
+        wx_ctx = f"{wx_sched}{wx_tl}{wx_kick}{wx_replay}".strip()
         if wx_ctx:
             json.dump(
                 {"hookSpecificOutput": {
@@ -3505,8 +3636,10 @@ def turn_inject() -> int:
     show_full = f"\n\n{show_ctx}" if show_ctx else ""
     usage_ctx = _usage_threshold_context(sid, tpath)
     usage_full = f"\n\n{usage_ctx}" if usage_ctx else ""
+    replay_ctx = _replay_context(sid, channel)
+    replay_full = f"\n\n{replay_ctx}" if replay_ctx else ""
     ctx = (f"# Context — {now_str}{delta}{sched_ctx}{tl_ctx}{care_ctx}"
-           f"{kickout_full}{show_full}{usage_full}")
+           f"{kickout_full}{show_full}{usage_full}{replay_full}")
     json.dump(
         {"hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",

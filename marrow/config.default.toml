@@ -430,6 +430,20 @@ user_send_channels = ["ct"]
 retention_days = 30
 inject_header = "📮 Message from {channel}·{sid4} {time}"
 
+[replay]
+# Cross-session replay inject (turn_inject): each session passively hears other
+# sessions' recent user/assistant turns. Cursor per sid (state/replay/<sid>);
+# first sight seeds to current MAX(events.id) — future-only, never backfills.
+# max_turns: turn cap (one user->assistant exchange); overflow folds to +N more.
+# per_msg_chars: per-message truncation (shorter than cortex — ambient only).
+# exclude_target_channels: sessions on these channels receive NOTHING (cortex
+#   has its own diff replay). Source ct events are excluded by the query itself.
+enabled = true
+max_turns = 2
+per_msg_chars = 150
+header = "## Recent replay from other sessions"
+exclude_target_channels = ["ct"]
+
 [hooks]
 # PreToolUse backup guard — stateless, two tiers (no state, no dedup).
 # Silent: rm/mv/sed scoped to tmp/scratchpad/worktrees; a destructive command
