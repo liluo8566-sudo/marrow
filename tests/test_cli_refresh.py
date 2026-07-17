@@ -29,6 +29,7 @@ def db(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "dashboard_path", lambda: str(dash))
     monkeypatch.setattr(config, "sub_pages_path", lambda: str(sub_folder))
     monkeypatch.setattr(config, "sub_pages_state_path", lambda: str(state))
+    monkeypatch.setattr(config, "monitor_path", lambda: str(tmp_path / "monitor.md"))
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     return p, dash, sub_folder
 

@@ -506,4 +506,31 @@ def build_targets(folder: str,
             has_md_to_db=True,
         ))
 
+    # Monitor target — alerts surface (successor to the dashboard block).
+    # render_fn is monitor.update, which reconciles md hand-edits (a deleted
+    # line = resolve) BEFORE rendering, so the loop must NOT reconcile again.
+    # db_mtime_fn tracks the alerts table so a new/updated alert re-renders;
+    # md-newer fires the delete=resolve path. Missing file (fresh install) is
+    # skipped gracefully (update() mkdir-guards, _process stat-guards).
+    try:
+        monitor_path = (_config.monitor_path() or "").strip()
+    except KeyError:
+        monitor_path = ""
+    if monitor_path:
+        def _monitor_db_mtime(c: sqlite3.Connection) -> float | None:
+            return _max_any(c, [("alerts", "updated_at"),
+                                ("alerts", "created_at")])
+
+        def _monitor_render(c: sqlite3.Connection) -> None:
+            from . import monitor
+            monitor.update(c)
+
+        targets.append(SyncTarget(
+            name="monitor",
+            md_path=monitor_path,
+            db_mtime_fn=_monitor_db_mtime,
+            render_fn=_monitor_render,
+            has_md_to_db=True,
+        ))
+
     return targets

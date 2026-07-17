@@ -31,6 +31,9 @@ dashboard = ""
 # daybrief.md renders here. Empty = <DATA_DIR>/daybrief.md (back-compat).
 # e.g. "~/Documents/my-vault/db-pages/daybrief.md"
 daybrief = ""
+# monitor.md (alerts surface) renders here. Empty = <db_pages>/monitor.md.
+# e.g. "~/Documents/my-vault/db-pages/monitor.md"
+monitor = ""
 # DB-rendered pages folder (milestone.md, diary.md, ...).
 # Default is private and works without manual path setup.
 # e.g. "~/Documents/my-vault/db-pages". Name signals "rendered from DB".

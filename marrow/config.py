@@ -82,6 +82,10 @@ def load() -> dict:
     paths["daybrief"] = str(Path(daybrief).expanduser())
     paths["db_pages"] = str(Path(sub).expanduser())
     paths["db_pages_state"] = str(Path(sub_state).expanduser())
+    # monitor.md (alerts surface). Empty = <db_pages>/monitor.md so it lands
+    # beside the other DB-rendered pages without manual path setup.
+    monitor = paths.get("monitor") or str(Path(paths["db_pages"]) / "monitor.md")
+    paths["monitor"] = str(Path(monitor).expanduser())
     # Legacy keys kept synchronised so any caller still using sub_pages_path()
     # (uncommitted other-window edits in daily.py etc.) gets the same path.
     paths["sub_pages"] = paths["db_pages"]
@@ -134,6 +138,10 @@ def dashboard_path() -> str:
 
 def daybrief_path() -> str:
     return load()["paths"]["daybrief"]
+
+
+def monitor_path() -> str:
+    return load()["paths"]["monitor"]
 
 
 def db_path() -> str:

@@ -87,6 +87,7 @@ def test_dashboard_alerts_block_is_db_authoritative(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "dashboard_path", lambda: str(dash))
     monkeypatch.setattr(config, "sub_pages_path", lambda: str(tmp_path / "x"))
     monkeypatch.setattr(config, "sub_pages_state_path", lambda: str(tmp_path / "y"))
+    monkeypatch.setattr(config, "monitor_path", lambda: str(tmp_path / "monitor.md"))
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
 
     assert cli.main(["refresh", "--db", db]) == 0
@@ -126,6 +127,7 @@ def test_dashboard_alerts_recovers_from_stale_md_index_hash(tmp_path, monkeypatc
     monkeypatch.setattr(config, "dashboard_path", lambda: str(dash))
     monkeypatch.setattr(config, "sub_pages_path", lambda: str(tmp_path / "x"))
     monkeypatch.setattr(config, "sub_pages_state_path", lambda: str(tmp_path / "y"))
+    monkeypatch.setattr(config, "monitor_path", lambda: str(tmp_path / "monitor.md"))
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
 
     assert cli.main(["refresh", "--db", db]) == 0
@@ -165,6 +167,7 @@ def test_dashboard_alerts_zero_anchor_guard(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "dashboard_path", lambda: str(dash))
     monkeypatch.setattr(config, "sub_pages_path", lambda: str(tmp_path / "x"))
     monkeypatch.setattr(config, "sub_pages_state_path", lambda: str(tmp_path / "y"))
+    monkeypatch.setattr(config, "monitor_path", lambda: str(tmp_path / "monitor.md"))
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
 
     # Hand-write a legacy-style dashboard.md: alerts block without anchors.
@@ -212,6 +215,7 @@ def test_dashboard_alert_md_delete_resolves_db_row(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "dashboard_path", lambda: str(dash))
     monkeypatch.setattr(config, "sub_pages_path", lambda: str(tmp_path / "x"))
     monkeypatch.setattr(config, "sub_pages_state_path", lambda: str(tmp_path / "y"))
+    monkeypatch.setattr(config, "monitor_path", lambda: str(tmp_path / "monitor.md"))
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
 
     assert cli.main(["refresh", "--db", db]) == 0

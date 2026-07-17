@@ -546,6 +546,12 @@ def cmd_refresh(args) -> int:
             msg += " + daybrief"
         except Exception as e:
             print(f"mw: daybrief refresh failed: {e}", file=sys.stderr)
+        from . import monitor
+        try:
+            monitor.update(conn)
+            msg += " + monitor"
+        except Exception as e:
+            print(f"mw: monitor refresh failed: {e}", file=sys.stderr)
         if args.all:
             try:
                 subpages.write_all_subpages(
