@@ -313,10 +313,12 @@ def test_switch_on_cortex_session_registers_wish_and_cortex_trio(monkeypatch):
 
 def test_tool_descriptions_render_clamp_numbers_from_config(monkeypatch, tmp_path):
     """C9/C10: lie_down + wait descriptions render clamp numbers from cortex.toml
-    at register(), never hardcoded. A shared cortex.toml supplies the values."""
+    at register(), never hardcoded. A shared cortex.toml supplies the values,
+    including the nested [wake.watchdog].silent_max_min auto-timer length."""
     (tmp_path / "cortex.toml").write_text(
         "[wake]\nwait_min = 2\nwait_max = 18\nnext_wake_min = 25\n"
-        "next_wake_max = 200\n[night]\nfloor_min = 90\nfloor_max = 300\n")
+        "next_wake_max = 200\n[wake.watchdog]\nsilent_max_min = 12\n"
+        "[night]\nfloor_min = 90\nfloor_max = 300\n")
     monkeypatch.setattr(cortex_bridge.config, "db_path",
                         lambda: str(tmp_path / "marrow.db"))
     _force_enabled(monkeypatch, True)
@@ -328,12 +330,15 @@ def test_tool_descriptions_render_clamp_numbers_from_config(monkeypatch, tmp_pat
     assert "N=25-200 (Day); 90-300 (Night)" in ld
     assert "N=2-18" in wd
     assert "one wait per wake" in wd
+    assert "12-min auto timer" in wd  # rendered from [wake.watchdog].silent_max_min
+    assert "expiry brings the 3-choice menu" in wd
     # No stale hardcoded ranges leaked in.
     assert "16-55" not in wd and "90-360" not in ld
 
 
 def test_tool_descriptions_fall_back_to_defaults(monkeypatch, tmp_path):
-    """No cortex.toml -> tolerant defaults (day 21-240, wait 1-20, night 120-360)."""
+    """No cortex.toml -> tolerant defaults (day 21-240, wait 1-20, night 120-360,
+    auto timer 20)."""
     monkeypatch.setattr(cortex_bridge.config, "db_path",
                         lambda: str(tmp_path / "marrow.db"))  # no cortex.toml here
     _force_enabled(monkeypatch, True)
@@ -342,6 +347,7 @@ def test_tool_descriptions_fall_back_to_defaults(monkeypatch, tmp_path):
     cortex_bridge.register(mt)
     assert "N=21-240 (Day); 120-360 (Night)" in \
         m._tool_manager._tools["lie_down"].description
+    assert "20-min auto timer" in m._tool_manager._tools["wait"].description
     assert "N=1-20" in m._tool_manager._tools["wait"].description
 
 

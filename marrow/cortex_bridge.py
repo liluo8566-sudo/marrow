@@ -373,12 +373,15 @@ def _lie_down_doc() -> str:
 
 
 def _wait_doc() -> str:
-    """C10 (needs review): wait description with the wait clamp numbers rendered
-    from cortex config [wake].wait_min/wait_max. Never hardcoded."""
+    """C10 (user-final): wait description with the wait clamp numbers rendered
+    from cortex config [wake].wait_min/wait_max, and the chat-tier auto-timer
+    length from [wake.watchdog].silent_max_min. Never hardcoded."""
     lo = int(_cortex_toml_section("wake", "wait_min", 1))
     hi = int(_cortex_toml_section("wake", "wait_max", 20))
-    return (f"wait(N) [N={lo}-{hi}] — one wait per wake (auto or manual); "
-            f"expiry brings the 3-choice menu. A user reply resets the timer.")
+    auto = int(_cortex_toml_section("wake.watchdog", "silent_max_min", 20))
+    return (f"wait(N) [N={lo}-{hi}] — one wait per wake. Each user reply "
+            f"triggers a {auto}-min auto timer and resets all other timers. "
+            f"The auto timer also counts — expiry brings the 3-choice menu.")
 
 
 def register(marrow_tool, db: str | None = None) -> None:
@@ -1311,9 +1314,11 @@ def _cortex_toml_path() -> Path:
 
 
 def _cortex_toml_section(section: str, key: str, default):
-    """One value from cortex.toml [section]. Tolerant: missing file/key -> default.
-    marrow venv cannot import cortex, so the few numbers the tool descriptions
-    render (wait/lie_down clamps) are read straight from the shared cortex.toml."""
+    """One value from cortex.toml [section] (dotted `section` walks nested TOML
+    tables, e.g. "wake.watchdog" -> data["wake"]["watchdog"]). Tolerant: missing
+    file/key -> default. marrow venv cannot import cortex, so the few numbers the
+    tool descriptions render (wait/lie_down clamps) are read straight from the
+    shared cortex.toml."""
     import tomllib
     try:
         p = _cortex_toml_path()
@@ -1321,7 +1326,10 @@ def _cortex_toml_section(section: str, key: str, default):
             return default
         with p.open("rb") as f:
             data = tomllib.load(f)
-        v = (data.get(section, {}) or {}).get(key)
+        node = data
+        for part in section.split("."):
+            node = (node or {}).get(part, {})
+        v = (node or {}).get(key)
         return v if v is not None else default
     except (OSError, ValueError):
         return default
