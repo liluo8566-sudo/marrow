@@ -12,11 +12,11 @@ Two autouse guards:
    their own scope; this only catches the leak path.
 
 2. `_disable_hooks_popen_detach` (function-scope, autouse): hook tests
-   invoke `hooks.main(['session_*'])`, which fires `popen_detach`. The
-   child subprocess loads REAL config (monkeypatch is in-process only)
-   and would write to the real db. Neutering the hook-side reference
-   keeps tests isolated. The direct popen_detach contract test imports
-   from `marrow.popen_detach` and is unaffected.
+   invoke `hooks.main(['session_*'])`, which fires `popen_detach` (title
+   summarize). The child subprocess loads REAL config (monkeypatch is
+   in-process only) and would write to the real db. Neutering the
+   hook-side reference keeps tests isolated. The direct popen_detach
+   contract test imports from `marrow.popen_detach` and is unaffected.
 """
 from __future__ import annotations
 
@@ -282,11 +282,5 @@ def _disable_hooks_popen_detach(monkeypatch, request):
     try:
         from marrow import hooks
         monkeypatch.setattr(hooks, "popen_detach", lambda *a, **kw: None)
-        monkeypatch.setattr(hooks, "popen_detach_lazy", lambda *a, **kw: None)
-    except ImportError:
-        pass
-    try:
-        from marrow import sessionstart_catchup
-        monkeypatch.setattr(sessionstart_catchup, "popen_detach_lazy", lambda *a, **kw: None)
     except ImportError:
         pass

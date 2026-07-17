@@ -14,7 +14,6 @@ from marrow import (
     candidates,
     reconcile,
     semantic_dedup,
-    sessionend_writers,
     storage,
 )
 
@@ -66,71 +65,6 @@ def test_cosine_top_match_picks_highest(db, monkeypatch):
     idx, score = hit
     assert idx == 1  # t1 has highest dot
     assert score >= 0.85
-
-
-# ── tasks: sessionend_writers.seg_task_cand cosine layer ────────────────────
-
-_TASK_RAW = (
-    "===TASK===\n"
-    "[{{\"title\":\"{title}\",\"category\":\"Study\",\"status\":\"active\"}}]\n"
-    "===END===\n"
-)
-
-
-def test_seg_task_cand_cosine_hit_skips_insert(db, monkeypatch):
-    # Seed an existing active task.
-    db.execute(
-        "INSERT INTO tasks (category, title, status) VALUES (?, ?, 'active')",
-        ("Study", "AT3 essay"),
-    )
-    db.commit()
-    # Cosine forced to high score → new candidate must be skipped.
-    monkeypatch.setattr(
-        semantic_dedup, "cosine_max", lambda conn, q, t: 0.91,
-    )
-    n = sessionend_writers.seg_task_cand(
-        db, _TASK_RAW.format(title="AT3 论文"),
-    )
-    assert n == 0
-    cnt = db.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
-    assert cnt == 1
-
-
-def test_seg_task_cand_cosine_miss_inserts(db, monkeypatch):
-    db.execute(
-        "INSERT INTO tasks (category, title, status) VALUES (?, ?, 'active')",
-        ("Study", "AT3 essay"),
-    )
-    db.commit()
-    monkeypatch.setattr(
-        semantic_dedup, "cosine_max", lambda conn, q, t: 0.40,
-    )
-    n = sessionend_writers.seg_task_cand(
-        db, _TASK_RAW.format(title="买菜 grocery run"),
-    )
-    assert n == 1
-    cnt = db.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
-    assert cnt == 2
-
-
-def test_seg_task_cand_cosine_embedder_missing_still_inserts(db, monkeypatch):
-    db.execute(
-        "INSERT INTO tasks (category, title, status) VALUES (?, ?, 'active')",
-        ("Study", "existing one"),
-    )
-    db.commit()
-    monkeypatch.setattr(
-        semantic_dedup, "cosine_max", lambda conn, q, t: None,
-    )
-    n = sessionend_writers.seg_task_cand(
-        db, _TASK_RAW.format(title="something fresh"),
-    )
-    assert n == 1
-    # Warn alert raised once.
-    alert = db.execute(
-        "SELECT 1 FROM alerts WHERE type='tasks_dedup_no_embedder'"
-    ).fetchone()
-    assert alert is not None
 
 
 # ── milestones: write_milestone_cand cosine layer ───────────────────────────

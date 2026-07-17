@@ -581,14 +581,6 @@ def test_life_line_local_date_helper_cutoff():
     assert d_legacy == base_date
 
 
-def test_prompt_life_hhmm_rule():
-    """Prompt must instruct model to prefix LIFE lines with HH:MM timestamp."""
-    from marrow.sessionend_prompts import TASK_AFFECT_DIGEST_PROMPT
-    assert "HH:MM" in TASK_AFFECT_DIGEST_PROMPT
-    # Example in ===DIGEST=== block should show a timestamped LIFE line
-    assert "21:40" in TASK_AFFECT_DIGEST_PROMPT
-
-
 # ── catchup backfill: window keyed on session start, not digest write ────────
 
 def _event(conn, sid: str, ts: str, content: str = "msg") -> None:

@@ -315,31 +315,6 @@ def _add_milestone(conn, args) -> int:
 _ADD_TABLES = {"milestone": _add_milestone}
 
 
-def cmd_sessionend(args) -> int:
-    """mw sessionend rerun <sid> — force rerun sessionend_async, overwriting done marker."""
-    if getattr(args, "sessionend_action", None) != "rerun":
-        return _fail("usage: mw sessionend rerun <sid>")
-    target_sid = args.sid
-    if not target_sid:
-        return _fail("mw sessionend rerun requires a sid argument")
-    from .popen_detach import popen_detach
-    with _conn(args.db) as conn:
-        with conn:
-            conn.execute(
-                "INSERT INTO audit_log (target_table, target_id, action, summary)"
-                " VALUES ('events', ?, 'sessionend_extract', 'reset:mm_plus')",
-                (target_sid,),
-            )
-    log = config.DATA_DIR / "logs" / f"sessionend_async_{target_sid}.log"
-    popen_detach(
-        [sys.executable, "-m", "marrow.sessionend_async", "--sid", target_sid,
-         "--log-path", str(log)],
-        log_path=log,
-    )
-    print(f"sessionend rerun queued for sid={target_sid} (log: {log})")
-    return 0
-
-
 def cmd_export_pit(args) -> int:
     """mw export-pit [--out PATH] — write pit table rows to a markdown file.
 
@@ -948,12 +923,6 @@ def build_parser() -> argparse.ArgumentParser:
     ul = sub.add_parser("uninstall-launchd", parents=[common],
                         help="bootout and remove all 7 marrow launchd agents")
     ul.set_defaults(fn=cmd_uninstall_launchd)
-
-    se = sub.add_parser("sessionend", parents=[common])
-    se_sub = se.add_subparsers(dest="sessionend_action", required=True)
-    se_rerun = se_sub.add_parser("rerun")
-    se_rerun.add_argument("sid", help="session id to rerun")
-    se_rerun.set_defaults(fn=cmd_sessionend)
 
     ep = sub.add_parser("export-pit", parents=[common],
                         help="export pit table rows to markdown (run before dropping table)")

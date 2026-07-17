@@ -11,7 +11,6 @@ import pytest
 
 from marrow import (
     reconcile,
-    sessionend_writers as sw,
     storage,
     timeline,
     tl_nudge,
@@ -142,26 +141,6 @@ def test_self_delete(conn, tmp_path):
     assert rpt.updated == 1
     assert conn.execute("SELECT COUNT(*) c FROM events WHERE id=?",
                         (eid,)).fetchone()["c"] == 0
-
-
-# ── coexistence gate ─────────────────────────────────────────────────────────
-
-def test_seg_affect_skips_self_row_sid(conn):
-    _add(conn, sid="sess-x")
-    raw = "===AFFECT===\n- ep: 1\n  valence: 0.5\n  arousal: 0.3\n"
-    assert sw.seg_affect(conn, raw, "sess-x", "2026-07-03") == 0
-    # a different sid is not gated
-    assert sw._sid_has_self_rows(conn, "other") is False
-
-
-def test_seg_digest_suppresses_life_lines_for_self_sid(conn):
-    _add(conn, sid="sess-y")
-    raw = ("===DIGEST===\nKIND: casual\nTL: line\n"
-           "LIFE:\n- 10:00 something\n===END===")
-    sw.seg_digest(conn, raw, "sess-y", "2026-07-03")
-    row = conn.execute(
-        "SELECT life_lines FROM session_digests WHERE sid='sess-y'").fetchone()
-    assert row["life_lines"] is None
 
 
 # ── tl_update ────────────────────────────────────────────────────────────────

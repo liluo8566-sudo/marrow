@@ -52,33 +52,6 @@ def test_session_start_emits_additional_context(env, monkeypatch, capsys):
     assert out["hookSpecificOutput"]["hookEventName"] == "SessionStart"
 
 
-def test_session_end_archives_and_renders(env, monkeypatch, tmp_path):
-    """session_end archives events; dashboard is NOT written by the hook
-    (moved to sessionend_async tail)."""
-    db, dash, _ = env
-    jl = tmp_path / "s.jsonl"
-    jl.write_text("\n".join(json.dumps(o) for o in [
-        {"type": "user", "sessionId": "s1", "timestamp": "2026-05-17T01:00:00Z",
-         "message": {"role": "user", "content": "build phase 1"}},
-        {"type": "assistant", "sessionId": "s1",
-         "timestamp": "2026-05-17T01:00:09Z",
-         "message": {"role": "assistant",
-                     "content": [{"type": "text", "text": "on it"}]}},
-    ]))
-    _stdin(monkeypatch, {"session_id": "s1", "transcript_path": str(jl)})
-    rc = hooks.main(["session_end"])
-    assert rc == 0
-    conn = storage.connect(db)
-    try:
-        n = conn.execute("SELECT COUNT(*) c FROM events").fetchone()["c"]
-    finally:
-        conn.close()
-    assert n == 2
-    # Dashboard must NOT be written by session_end hook (moved to async tail).
-    from pathlib import Path
-    assert not Path(dash).exists(), "session_end must not write dashboard directly"
-
-
 def test_session_end_does_not_write_db_pages(env, monkeypatch, tmp_path):
     """SessionEnd MUST NOT touch db-pages — those are owned by daily.py.
     Re-rendering milestone.md every session was the root cause of the
@@ -101,50 +74,6 @@ def test_session_end_does_not_write_db_pages(env, monkeypatch, tmp_path):
     from pathlib import Path
     sub = Path(tmp_path / "db-pages" / "milestone.md")
     assert not sub.exists(), "session_end must not write milestone.md"
-
-
-def test_session_end_archives_events_no_dashboard(env, monkeypatch, tmp_path):
-    """session_end has no dashboard render (chain retired). Hook completes and
-    events are still archived per turn."""
-    db, dash, _ = env
-    jl = tmp_path / "s.jsonl"
-    jl.write_text("\n".join(json.dumps(o) for o in [
-        {"type": "user", "sessionId": "s1", "timestamp": "2026-05-17T01:00:00Z",
-         "message": {"role": "user", "content": "build phase 1"}},
-        {"type": "assistant", "sessionId": "s1",
-         "timestamp": "2026-05-17T01:00:09Z",
-         "message": {"role": "assistant",
-                     "content": [{"type": "text", "text": "on it"}]}},
-    ]))
-
-    _stdin(monkeypatch, {"session_id": "s1", "transcript_path": str(jl)})
-    rc = hooks.main(["session_end"])
-    assert rc == 0
-    conn = storage.connect(db)
-    try:
-        n = conn.execute("SELECT COUNT(*) c FROM events").fetchone()["c"]
-    finally:
-        conn.close()
-    assert n == 2
-
-
-def test_session_end_real_error_still_alerts(env, monkeypatch, tmp_path):
-    """session_end no longer calls dashboard — confirm hook runs cleanly
-    without any dashboard reference and archives events as expected."""
-    db, dash, _ = env
-    jl = tmp_path / "s.jsonl"
-    jl.write_text(json.dumps(
-        {"type": "user", "sessionId": "s1", "timestamp": "2026-05-17T01:00:00Z",
-         "message": {"role": "user", "content": "hi"}}))
-
-    _stdin(monkeypatch, {"session_id": "s1", "transcript_path": str(jl)})
-    assert hooks.main(["session_end"]) == 0
-    conn = storage.connect(db)
-    try:
-        n = conn.execute("SELECT COUNT(*) c FROM events").fetchone()["c"]
-    finally:
-        conn.close()
-    assert n == 1
 
 
 def test_session_end_no_transcript_is_safe(env, monkeypatch):
@@ -513,8 +442,7 @@ def test_session_end_writes_lifecycle_end_marker(env, monkeypatch, tmp_path):
         "message": {"role": "user", "content": "hello"},
     }))
     _stdin(monkeypatch, {"session_id": "lc-end-sid", "transcript_path": str(jl)})
-    with patch("marrow.hooks.popen_detach_lazy"):
-        rc = hooks.main(["session_end"])
+    rc = hooks.main(["session_end"])
     assert rc == 0
     conn = storage.connect(db)
     try:
@@ -550,11 +478,9 @@ def test_session_end_headless_writes_lifecycle_end_and_ended_at(
         "session_id": "headless-sid",
         "transcript_path": str(jl),
     })
-    with patch("marrow.hooks.popen_detach_lazy") as popen:
-        rc = hooks.main(["session_end"])
+    rc = hooks.main(["session_end"])
 
     assert rc == 0
-    assert not popen.called
     conn = storage.connect(db)
     try:
         sess = conn.execute(
@@ -596,11 +522,9 @@ def test_session_end_subagent_writes_lifecycle_end_and_ended_at(
         "session_id": "subagent-sid",
         "transcript_path": str(jl),
     })
-    with patch("marrow.hooks.popen_detach_lazy") as popen:
-        rc = hooks.main(["session_end"])
+    rc = hooks.main(["session_end"])
 
     assert rc == 0
-    assert not popen.called
     conn = storage.connect(db)
     try:
         sess = conn.execute(
@@ -648,8 +572,8 @@ def test_session_start_marrow_cortex_full_parity(env, monkeypatch, capsys):
 
 
 def test_session_end_marrow_cortex_full_parity(env, monkeypatch, tmp_path):
-    """B3m (07-08): cortex session_end writes lifecycle:end + archives events
-    like any other session (memory full parity)."""
+    """B3m (07-08): cortex session_end writes lifecycle:end like any other
+    session. Events are archived per-turn by the Stop hook, not here."""
     db, _, _ = env
     jl = tmp_path / "cortex.jsonl"
     jl.write_text(json.dumps({
@@ -660,8 +584,7 @@ def test_session_end_marrow_cortex_full_parity(env, monkeypatch, tmp_path):
     monkeypatch.setenv("MARROW_CORTEX", "1")
     monkeypatch.setenv("MARROW_CHANNEL", "ct")
     _stdin(monkeypatch, {"session_id": "cortex-sid-2", "transcript_path": str(jl)})
-    with patch("marrow.hooks.popen_detach_lazy"):
-        rc = hooks.main(["session_end"])
+    rc = hooks.main(["session_end"])
     assert rc == 0
     conn = storage.connect(db)
     try:
@@ -669,11 +592,9 @@ def test_session_end_marrow_cortex_full_parity(env, monkeypatch, tmp_path):
             "SELECT 1 FROM audit_log"
             " WHERE action='session_lifecycle:end' AND target_id='cortex-sid-2'"
         ).fetchone()
-        row = conn.execute("SELECT channel FROM events WHERE session_id='cortex-sid-2'").fetchone()
     finally:
         conn.close()
     assert lc is not None
-    assert row is not None and row["channel"] == "ct"
 
 
 def test_user_prompt_submit_marrow_cortex_full_parity(env, monkeypatch, capsys):
@@ -697,75 +618,6 @@ def test_user_prompt_submit_marrow_cortex_full_parity(env, monkeypatch, capsys):
     finally:
         conn.close()
     assert sess is not None and sess["last_active"]
-
-
-def test_session_end_skips_popen_when_already_covered(env, monkeypatch, tmp_path):
-    """session_end with ok,user_count=10 and 10 events -> popen_detach NOT called.
-
-    After archive_events runs, DB has 10 user events. ok,user_count=10 means
-    current_user (10) <= last_ok (10) -> gate fires, popen skipped.
-    """
-    db, _, _ = env
-    jl = tmp_path / "s.jsonl"
-    # Write 10 user events into transcript.
-    lines = []
-    for i in range(10):
-        lines.append(json.dumps({
-            "type": "user", "sessionId": "idem-sid",
-            "timestamp": f"2026-05-25T10:{i:02d}:00Z",
-            "message": {"role": "user", "content": f"msg {i}"},
-        }))
-    jl.write_text("\n".join(lines))
-    # Pre-seed ok,user_count=10 row only (no events — archive_events inserts them).
-    conn = storage.connect(db)
-    with conn:
-        conn.execute(
-            "INSERT INTO audit_log (target_table, target_id, action, summary)"
-            " VALUES ('events', 'idem-sid', 'sessionend_extract', 'ok,user_count=10')"
-        )
-    conn.close()
-    _stdin(monkeypatch, {"session_id": "idem-sid", "transcript_path": str(jl)})
-    popen_calls: list = []
-    with patch("marrow.hooks.popen_detach_lazy",
-               side_effect=lambda a, log_path: popen_calls.append(a)):
-        rc = hooks.main(["session_end"])
-    assert rc == 0
-    async_calls = [c for c in popen_calls if "sessionend_async" in " ".join(c)]
-    assert async_calls == [], "popen_detach must be skipped when events already covered"
-
-
-def test_session_end_fires_popen_when_events_grew(env, monkeypatch, tmp_path):
-    """session_end with ok,user_count=10 but 15 new events -> popen_detach called.
-
-    Transcript has 15 user events. After archive_events, DB has 15. ok,user_count=10
-    means current_user (15) > last_ok (10) -> gate skipped, popen fires.
-    """
-    db, _, _ = env
-    jl = tmp_path / "s.jsonl"
-    lines = []
-    for i in range(15):
-        lines.append(json.dumps({
-            "type": "user", "sessionId": "grew-sid",
-            "timestamp": f"2026-05-25T10:{i:02d}:00Z",
-            "message": {"role": "user", "content": f"msg {i}"},
-        }))
-    jl.write_text("\n".join(lines))
-    # Pre-seed ok at count=10 only (no events — archive_events inserts 15).
-    conn = storage.connect(db)
-    with conn:
-        conn.execute(
-            "INSERT INTO audit_log (target_table, target_id, action, summary)"
-            " VALUES ('events', 'grew-sid', 'sessionend_extract', 'ok,user_count=10')"
-        )
-    conn.close()
-    _stdin(monkeypatch, {"session_id": "grew-sid", "transcript_path": str(jl)})
-    popen_calls: list = []
-    with patch("marrow.hooks.popen_detach_lazy",
-               side_effect=lambda a, log_path: popen_calls.append(a)):
-        rc = hooks.main(["session_end"])
-    assert rc == 0
-    async_calls = [c for c in popen_calls if "sessionend_async" in " ".join(c)]
-    assert len(async_calls) == 1, "popen_detach must be called when events grew"
 
 
 # ── pretool_use backup guard — stateless, two tiers ──────────────────────────

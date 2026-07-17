@@ -5,17 +5,13 @@ marrow registers ALONGSIDE them, never replaces. Logic lives in the marrow
 package; this only does hook I/O (stdin JSON in, stdout JSON for
 SessionStart additionalContext, side effects for SessionEnd).
 
-  session_start      -> inject open tasks + alerts + affect backdrop; clear skip on resume
-  session_end        -> clean transcript, archive events, regen dashboard top
-  user_prompt_submit -> mm controls + recall fallback
+  session_start      -> inject alerts + timeline backdrop; drain alerts fallback
+  session_end        -> write terminal lifecycle:end marker
+  user_prompt_submit -> recall fusion injection
 
-PreToolUse is the global prompt-guard.py (scope already covers
-~/CC-Lab/marrow/), not duplicated here.
-
-mm- prefix: writes audit_log manual_skip row; sessionend_async skips LLM pipeline.
-mm+ prefix: clears manual skip and flags the sid for sessionend.
-resume detection: session_start fires on cc resume with same sid; if skip row exists,
-  write skip_cleared row so sessionend_async runs normally.
+Events are archived per-turn by the Stop hook; SessionEnd no longer cleans or
+archives the transcript. PreToolUse is the global prompt-guard.py (scope already
+covers ~/CC-Lab/marrow/), not duplicated here.
 """
 from __future__ import annotations
 
@@ -31,7 +27,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from . import config, cortex_bridge, outbox, repo, storage, transcript
-from .popen_detach import popen_detach, popen_detach_lazy
+from .popen_detach import popen_detach
 from .timeutil import (
     utc_iso_to_local_date,
     utc_iso_to_local_datetime,
@@ -384,105 +380,44 @@ def _prune_recall_logs() -> None:
         pass
 
 
-def _sweep_empty_async_logs() -> None:
-    """Drop 0-byte sessionend_async_*.log left behind when cc SIGKILLs the
-    detached child before its atexit cleanup runs. Only matches the exact
-    prefix + .log suffix so recall/ logs / unrelated files stay safe."""
-    log_dir = config.DATA_DIR / "logs"
+def _drain_fallback_sink() -> None:
+    """Replay any lines queued in alerts-fallback.jsonl into the alerts table.
+
+    Truncates the file first so a replay that itself fails re-appends via the
+    fallback sink, keeping the file bounded. Malformed lines are dropped with
+    a stderr note. Fully fail-soft — never blocks session start."""
     try:
-        for p in log_dir.glob("sessionend_async_*.log"):
+        db = config.db_path()
+        sink = config.DATA_DIR / "alerts-fallback.jsonl"
+        if not sink.exists() or sink.stat().st_size == 0:
+            return
+        try:
+            raw = sink.read_text(encoding="utf-8")
+            sink.write_text("", encoding="utf-8")  # truncate before replay
+        except OSError as e:
+            sys.stderr.write(f"[session_start] fallback drain read error: {e}\n")
+            return
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
             try:
-                if p.stat().st_size == 0:
-                    p.unlink()
-            except (FileNotFoundError, OSError):
-                pass
+                rec = json.loads(line)
+                repo.add_alert(
+                    rec["severity"], rec["type"], rec["fingerprint"],
+                    source=rec.get("source"),
+                    message=rec.get("message"),
+                    db=db,
+                )
+            except Exception as e:  # noqa: BLE001
+                sys.stderr.write(
+                    f"[session_start] fallback drain dropped malformed line: {e}\n"
+                )
     except Exception:  # noqa: BLE001 — never block session_start
         pass
 
 
-# ── manual skip helpers ───────────────────────────────────────────────────────
-
-_MANUAL_SKIP_ACTION = "manual_skip"
-_STATUS_SKIP = "skip"
-_STATUS_SKIP_CLEARED = "skip_cleared"
-_STATUS_SKIP_BRIDGE_OWNS = "bridge_owns"
-_SESSION_BLOCK_ACTION = "session_block"
-_STATUS_BLOCK_ARCHIVE = "archive"
-_STATUS_BLOCK_CLEARED = "cleared"
-_FORCE_SESSIONEND_ACTION = "force_sessionend"
-_STATUS_MM_PLUS_FLAG = "mm_plus_flag"
-_STATUS_MM_IMMEDIATE = "mm_immediate"
-_STATUS_MM_IMMEDIATE_CURRENT = "mm_immediate_current"
-
-
-def _write_manual_skip_flag(conn: sqlite3.Connection, sid: str, status: str) -> None:
-    """Write a manual_skip audit row. status = 'skip' or 'skip_cleared'."""
-    with conn:
-        conn.execute(
-            "INSERT INTO audit_log (target_table, target_id, action, summary)"
-            " VALUES ('events', ?, ?, ?)",
-            (sid, _MANUAL_SKIP_ACTION, status),
-        )
-
-
-def _write_session_block_flag(conn: sqlite3.Connection, sid: str, status: str) -> None:
-    """Write a session_block audit row. status = 'archive' -> block events insert."""
-    with conn:
-        conn.execute(
-            "INSERT INTO audit_log (target_table, target_id, action, summary)"
-            " VALUES ('events', ?, ?, ?)",
-            (sid, _SESSION_BLOCK_ACTION, status),
-        )
-
-
-def _write_force_sessionend_flag(conn: sqlite3.Connection, sid: str, status: str) -> None:
-    with conn:
-        conn.execute(
-            "INSERT INTO audit_log (target_table, target_id, action, summary)"
-            " VALUES ('events', ?, ?, ?)",
-            (sid, _FORCE_SESSIONEND_ACTION, status),
-        )
-
-
-def _has_force_sessionend(conn: sqlite3.Connection, sid: str) -> bool:
-    row = conn.execute(
-        "SELECT 1 FROM audit_log"
-        " WHERE action=? AND target_id=?"
-        " AND id > COALESCE("
-        "   (SELECT MAX(id) FROM audit_log"
-        "    WHERE action='sessionend_extract' AND target_id=?"
-        "    AND (summary='ok' OR summary LIKE 'ok,user_count=%')), 0)"
-        " LIMIT 1",
-        (_FORCE_SESSIONEND_ACTION, sid, sid),
-    ).fetchone()
-    return row is not None
-
-
-def _is_session_blocked(conn: sqlite3.Connection, sid: str) -> bool:
-    """Latest session_block row wins. archive -> True, cleared/absent -> False.
-    mm+ does not write this flag; archive blocks remain explicit."""
-    row = conn.execute(
-        "SELECT summary FROM audit_log"
-        " WHERE action=? AND target_id=?"
-        " ORDER BY id DESC LIMIT 1",
-        (_SESSION_BLOCK_ACTION, sid),
-    ).fetchone()
-    if not row:
-        return False
-    return row["summary"] == _STATUS_BLOCK_ARCHIVE
-
-
-def _is_manual_skip(conn: sqlite3.Connection, sid: str) -> bool:
-    """Latest manual_skip row wins. skip -> True, skip_cleared/absent -> False."""
-    row = conn.execute(
-        "SELECT summary FROM audit_log"
-        " WHERE action=? AND target_id=?"
-        " ORDER BY id DESC LIMIT 1",
-        (_MANUAL_SKIP_ACTION, sid),
-    ).fetchone()
-    if not row:
-        return False
-    return row["summary"] == _STATUS_SKIP
+# ── lifecycle helpers ─────────────────────────────────────────────────────────
 
 
 def _has_prior_lifecycle_start(conn: sqlite3.Connection, sid: str) -> bool:
@@ -698,23 +633,6 @@ def _started_at_for(ppid: int) -> int:
     except Exception:  # noqa: BLE001
         pass
     return int(time.time())
-
-
-def _last_ok_user_count(conn: sqlite3.Connection, sid: str) -> int | None:
-    """Return N from the most recent `ok,user_count=N` audit row, or None."""
-    row = conn.execute(
-        "SELECT summary FROM audit_log"
-        " WHERE action='sessionend_extract' AND target_id=?"
-        " AND summary LIKE 'ok,user_count=%'"
-        " ORDER BY id DESC LIMIT 1",
-        (sid,),
-    ).fetchone()
-    if not row:
-        return None
-    try:
-        return int(row["summary"].split("=", 1)[1])
-    except (ValueError, IndexError):
-        return None
 
 
 def _now_utc() -> datetime:
@@ -1101,27 +1019,13 @@ def _read_input() -> dict:
 
 
 def session_start() -> int:
-    try:
-        from datetime import date as _date
-        catchup_dir = config.DATA_DIR / "logs" / "catchup"
-        catchup_dir.mkdir(parents=True, exist_ok=True)
-        log = catchup_dir / f"catchup.{_date.today():%Y-%m-%d}.log"
-        for old in sorted(catchup_dir.glob("catchup.*.log"))[:-14]:
-            old.unlink(missing_ok=True)
-        popen_detach([sys.executable, "-m", "marrow.sessionstart_catchup"], log_path=log)
-    except Exception as e:
-        try:
-            repo.add_alert("warn", "catchup",
-                           "catchup_spawn_failed:hooks",
-                           source="hooks.py", db=config.db_path(),
-                           message=f"session_start catchup spawn failed: {e}")
-        except Exception:
-            pass
+    # Drain alerts-fallback sink: replay any alerts that were written to the
+    # jsonl fallback (add_alert path when the DB was unwritable) into the
+    # alerts table. Fail-soft — never blocks session start.
+    _drain_fallback_sink()
     # Recall housekeeping — prune day-2+ logs from recall/ dir + wipe per-session
     # dedup state so every fresh window starts with a clean recall slate.
     _prune_recall_logs()
-    # Sweep 0-byte sessionend_async_*.log residues (SIGKILL fallback).
-    _sweep_empty_async_logs()
     inp = _read_input()
     db = config.db_path()
     conn = storage.connect(db)
@@ -1141,11 +1045,9 @@ def session_start() -> int:
             _wipe_recall_seen(sid)
             _wipe_sticker_nudge(sid)
             try:
-                # Resume detection: if sid already has a lifecycle:start row, this
-                # is a cc resume. Clear any manual skip so sessionend runs normally.
+                # Resume detection: a sid with a prior lifecycle:start row is a
+                # cc resume (used below for the cortex handoff page-turn gate).
                 is_resume = _has_prior_lifecycle_start(conn, sid)
-                if is_resume and _is_manual_skip(conn, sid):
-                    _write_manual_skip_flag(conn, sid, _STATUS_SKIP_CLEARED)
                 ppid = os.getppid()
                 started_at = _started_at_for(ppid)
                 summary = f"ppid={ppid},source=cc,started_at={started_at}"
@@ -1347,156 +1249,33 @@ def session_end() -> int:
             )
 
     try:
-        # Regen/rewind suppress: bridge wrote this flag before closing cc
-        # so the intermediate SessionEnd skips archive entirely.
-        if early_sid:
-            _suppress = config.DATA_DIR / f".regen_suppress_{early_sid}"
-            if _suppress.exists():
-                try:
-                    _suppress.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                return 0
-
+        # Terminal lifecycle:end marker only. Events are archived per-turn by
+        # the Stop hook; SessionEnd no longer cleans/archives the transcript or
+        # spawns any LLM extraction. The marker is still written for every
+        # session type so timeline._query_current_sid can tell live from ended
+        # windows.
         if os.environ.get("MARROW_PIPELINE") == "1":
-            if early_sid:
-                try:
-                    _write_lifecycle_end(early_sid, "pipeline=1")
-                except Exception:  # noqa: BLE001
-                    pass
-            return 0
-
-        is_subagent = bool(tpath and "/tasks/" in tpath)
-        if is_subagent:
-            if early_sid:
-                try:
-                    _write_lifecycle_end(early_sid, "subagent=1")
-                except Exception:  # noqa: BLE001 — never block session_end
-                    pass
-            return 0
-
-        if transcript.is_headless(tpath):
-            if early_sid:
-                try:
-                    _write_lifecycle_end(early_sid, "headless=1")
-                except Exception:  # noqa: BLE001 — never block session_end
-                    pass
-            return 0
-
-        # Worktree-session gate: cc instances launched inside a NON-primary git
-        # worktree are task-isolated runs; their dialogue must not enter marrow.
-        # Skip archive_events + LLM spawn entirely. Still write lifecycle:end so
-        # catchup doesn't tag this sid as silent_death.
-        #
-        # Pin verdict on SessionStart marker first: cwd at SessionEnd time can
-        # be stale (worktree torn down, cd'd out) which would silently drop the
-        # session into the main path. Live cwd check kept as a fallback for
-        # sessions whose SessionStart hook never ran.
-        is_worktree = (
+            summary = "pipeline=1"
+        elif tpath and "/tasks/" in tpath:
+            summary = "subagent=1"
+        elif transcript.is_headless(tpath):
+            summary = "headless=1"
+        elif (
             _was_worktree_session_at_start(conn, early_sid)
             or _is_worktree_session(cwd)
-        )
-        if is_worktree:
-            if early_sid:
-                try:
-                    _write_lifecycle_end(early_sid, "worktree=1")
-                except Exception:  # noqa: BLE001 — never block session_end
-                    pass
-            return 0
+        ):
+            summary = "worktree=1"
+        else:
+            summary = ""
 
-        # mm- block gate: if the user typed mm- at any point during this session,
-        # _handle_mm_prefix wrote a session_block=archive flag. Skip the entire
-        # archive path so events table receives ZERO rows for this sid. Still
-        # write lifecycle:end so catchup doesn't flag this as silent_death.
-        if early_sid and _is_session_blocked(conn, early_sid):
+        if early_sid:
             try:
-                _write_lifecycle_end(early_sid, "mm_minus_blocked")
+                _write_lifecycle_end(early_sid, summary)
             except Exception:  # noqa: BLE001 — never block session_end
                 pass
+            # Drop per-session recall dedup state — next window starts clean.
             _wipe_recall_seen(early_sid)
             _wipe_sticker_nudge(early_sid)
-            return 0
-
-        is_bridge = os.environ.get("MARROW_BRIDGE") == "1"
-        rows = transcript.clean(tpath, skip_headless_check=is_bridge, channel=os.environ.get("MARROW_CHANNEL") or "cli")
-        if rows:
-            repo.archive_events(conn, rows)
-
-        # ── CRITICAL PATH (must complete within ms of archive) ────────────────
-        # cc reaps the whole hook process group on session close. dashboard
-        # write + embed_pending below run for seconds and routinely get
-        # killed mid-run, which used to also kill the lifecycle:end INSERT
-        # and the popen spawn -> sids stuck with no terminal marker. Keep
-        # this block tight and ahead of every slow side-effect.
-        #
-        # sid fallback: cc always sends session_id in the hook payload, but
-        # rows can be empty (transcript not yet flushed, all messages
-        # filtered out, etc). Don't rely on rows[0] — that path silently
-        # dropped lifecycle:end for thousands of sessions and bred 760
-        # silent_death alerts in one hour on 2026-06-05.
-        sid = (
-            (rows[0]["session_id"] if rows else None)
-            or early_sid
-            or None
-        )
-        if sid:
-            try:
-                _write_lifecycle_end(sid, "")
-            except Exception:  # noqa: BLE001
-                pass
-            # Drop per-session recall dedup state — next window starts clean.
-            _wipe_recall_seen(sid)
-            _wipe_sticker_nudge(sid)
-
-            # Bridge gate: when synapse-wx wraps cc, it owns sessionend timing
-            # (fires on 6h idle, not on every /model swap). Archive runs, marker
-            # written, popen suppressed. Catchup honors the bridge_owns marker
-            # until a later fail row (manual fire that failed) supersedes it.
-            # Exception: an explicit force flag requests extraction.
-            if os.environ.get("MARROW_BRIDGE") == "1":
-                if not _has_force_sessionend(conn, sid):
-                    try:
-                        _write_manual_skip_flag(
-                            conn, sid, _STATUS_SKIP_BRIDGE_OWNS,
-                        )
-                    except Exception:  # noqa: BLE001
-                        pass
-                    return 0
-
-            # Idempotent gate: skip popen if events haven't grown since last ok.
-            skip_spawn = False
-            try:
-                last_ok = _last_ok_user_count(conn, sid)
-                if last_ok is not None and not _has_force_sessionend(conn, sid):
-                    current_user = conn.execute(
-                        "SELECT COUNT(*) c FROM events"
-                        " WHERE session_id=? AND role='user'",
-                        (sid,),
-                    ).fetchone()["c"]
-                    if current_user <= last_ok:
-                        skip_spawn = True
-            except Exception:  # noqa: BLE001 — gate failure → safe to spawn
-                pass
-
-            if not skip_spawn:
-                cwd = inp.get("cwd") or ""
-                try:
-                    wm = storage.get_latest_watermark(conn, sid)
-                    after_eid = wm["last_event_id"] if wm else None
-                    _spawn_sessionend_async(
-                        sid, after_event_id=after_eid, segment_seq=0, cwd=cwd,
-                    )
-                except Exception as e:  # noqa: BLE001
-                    try:
-                        repo.add_alert(
-                            "warn", "sessionend_async",
-                            "sessionend_spawn_failed",
-                            message=f"spawn failed: {e}",
-                            source="hooks.py", db=db,
-                        )
-                    except Exception:  # noqa: BLE001
-                        pass
-
     finally:
         conn.close()
     return 0
@@ -1611,349 +1390,6 @@ def stop() -> int:
         conn.close()
     _save_ct_cursor(sid, new_last_uuid, size)
     return 0
-
-
-_SID_RE = _re.compile(
-    r"^[0-9a-f]{8}(-[0-9a-f]{4}){0,3}(-[0-9a-f]{4,12})?$",
-    _re.IGNORECASE,
-)
-
-
-def _looks_like_sid(arg: str) -> bool:
-    """Return True if arg matches a full UUID or a short hex-prefix the user might type."""
-    return bool(_SID_RE.match(arg.strip())) if arg and " " not in arg else False
-
-
-_MM_ACK = {
-    "mm-": "本窗口跳过DB",
-    "mm+": "本窗口加入DB",
-    "mm!": "补跑中",
-    "mm!!": "补跑中",
-}
-
-
-def _inject_silent_ack(prefix: str) -> None:
-    """Tell the LLM this prompt is a control signal."""
-    ack = _MM_ACK.get(prefix, prefix)
-    ctx = (
-        f"## {prefix} control signal\n"
-        f"Hook handled. Reply with exactly: {ack}"
-    )
-    json.dump(
-        {"hookSpecificOutput": {
-            "hookEventName": "UserPromptSubmit",
-            "additionalContext": ctx,
-        }},
-        sys.stdout,
-    )
-
-
-def _inject_locate_request(prefix: str, clue: str) -> None:
-    """Write a UserPromptSubmit additionalContext asking the LLM to locate the sid."""
-    action = f"{prefix} <full-sid>"
-    user_name = config.persona()["user_name"]
-    ctx = (
-        f"## {prefix} locate request\n"
-        f"{user_name} sent `{prefix} <clue>`, but the clue is not a valid sid.\n"
-        f"- clue: {clue}\n"
-        "- Search events and audit_log for matching timestamp, content, or role.\n"
-        f"- Once found, use `{action}`."
-    )
-    json.dump(
-        {"hookSpecificOutput": {
-            "hookEventName": "UserPromptSubmit",
-            "additionalContext": ctx,
-        }},
-        sys.stdout,
-    )
-
-
-def _locate_jsonl(sid: str) -> str | None:
-    """Glob ~/.claude/projects/**/<sid>.jsonl; return most-recent match or None."""
-    import pathlib
-    projects_dir = pathlib.Path.home() / ".claude" / "projects"
-    matches = list(projects_dir.glob(f"**/{sid}.jsonl"))
-    if not matches:
-        return None
-    return str(max(matches, key=lambda p: p.stat().st_mtime))
-
-
-def _pre_archive_jsonl(conn: sqlite3.Connection, tpath: str | None, channel: str = "cli") -> None:
-    """Archive events from an active-session jsonl. Fail-soft — never raises."""
-    if not tpath:
-        return
-    try:
-        if transcript.is_headless(tpath):
-            return
-        rows = transcript.clean(tpath, channel=channel)
-        if rows:
-            repo.archive_events(conn, rows)
-    except Exception:  # noqa: BLE001
-        pass
-
-
-def _spawn_sessionend_async(
-    sid: str,
-    *,
-    after_event_id: int | None = None,
-    segment_seq: int = 0,
-    cwd: str = "",
-) -> None:
-    log = config.DATA_DIR / "logs" / f"sessionend_async_{sid}.log"
-    cmd = [
-        sys.executable, "-m", "marrow.sessionend_async",
-        "--sid", sid, "--log-path", str(log),
-    ]
-    if cwd:
-        cmd.extend(["--cwd", cwd])
-    if after_event_id is not None:
-        cmd.extend(["--after-event-id", str(after_event_id)])
-    if segment_seq != 0:
-        cmd.extend(["--segment-seq", str(segment_seq)])
-    popen_detach_lazy(cmd, log_path=log)
-
-
-def _spawn_sessionend_after_watermark(
-    conn: sqlite3.Connection, sid: str, *, cwd: str = "",
-) -> None:
-    wm = storage.get_latest_watermark(conn, sid)
-    after_eid = wm["last_event_id"] if wm else None
-    _spawn_sessionend_async(sid, after_event_id=after_eid, segment_seq=0, cwd=cwd)
-
-
-def _classify_skip_reason(conn: sqlite3.Connection, sid: str) -> str:
-    """Return skip reason tag for a session without successful sessionend."""
-    has_start = conn.execute(
-        "SELECT 1 FROM audit_log"
-        " WHERE action='session_lifecycle:start' AND target_id=?"
-        " LIMIT 1",
-        (sid,),
-    ).fetchone()
-    has_end = conn.execute(
-        "SELECT 1 FROM audit_log"
-        " WHERE action='session_lifecycle:end' AND target_id=?"
-        " LIMIT 1",
-        (sid,),
-    ).fetchone()
-    if has_start and not has_end:
-        return "active"
-    block = conn.execute(
-        "SELECT summary FROM audit_log"
-        " WHERE action='session_block' AND target_id=?"
-        " ORDER BY id DESC LIMIT 1",
-        (sid,),
-    ).fetchone()
-    if block and (block["summary"] or "") == "archive":
-        return "mm-"
-    skip = conn.execute(
-        "SELECT 1 FROM audit_log"
-        " WHERE action='sessionend_extract' AND target_id=?"
-        " AND summary LIKE 'skip:short_session%'"
-        " LIMIT 1",
-        (sid,),
-    ).fetchone()
-    if skip:
-        return "short"
-    return "miss"
-
-
-def _unrun_session_rows(conn: sqlite3.Connection, limit: int = 20) -> list[dict]:
-    rows = conn.execute(
-        "WITH known AS ("
-        " SELECT sid, title, channel, cwd, last_active FROM sessions"
-        " UNION ALL"
-        " SELECT target_id AS sid, '' AS title, '' AS channel, '' AS cwd,"
-        "        MAX(occurred_at) AS last_active"
-        " FROM audit_log"
-        " WHERE action='session_lifecycle:start' AND target_id IS NOT NULL"
-        " GROUP BY target_id"
-        ")"
-        " SELECT sid, MAX(title) AS title, MAX(channel) AS channel,"
-        "        MAX(cwd) AS cwd, MAX(last_active) AS last_active"
-        " FROM known"
-        " WHERE sid IS NOT NULL AND sid != ''"
-        " AND NOT EXISTS ("
-        "   SELECT 1 FROM audit_log a"
-        "   WHERE a.action='sessionend_extract' AND a.target_id=known.sid"
-        "   AND (a.summary='ok' OR a.summary LIKE 'ok,user_count=%')"
-        " )"
-        " GROUP BY sid"
-        " ORDER BY MAX(last_active) DESC"
-        " LIMIT ?",
-        (limit,),
-    ).fetchall()
-    result = []
-    for r in rows:
-        d = dict(r)
-        d["reason"] = _classify_skip_reason(conn, d["sid"])
-        result.append(d)
-    return result
-
-
-def _inject_unrun_sessions(rows: list[dict]) -> None:
-    if rows:
-        lines = ["## mm! sessions without successful sessionend"]
-        for i, r in enumerate(rows, 1):
-            sid = r.get("sid") or ""
-            title = (r.get("title") or "").strip() or "(untitled)"
-            channel = (r.get("channel") or "-").strip() or "-"
-            reason = r.get("reason") or "miss"
-            last_active = (r.get("last_active") or "").strip()
-            tail = f" {last_active}" if last_active else ""
-            lines.append(f"{i}. [{channel}|{reason}] {title} {sid}{tail}")
-        lines.append("Reasons: miss=漏跑 mm-=主动跳过 short=三轮以下 active=进行中")
-        lines.append("Use `mm! <sid>` to run one immediately.")
-    else:
-        lines = ["## mm! sessions without successful sessionend", "No sessions found."]
-    json.dump(
-        {"hookSpecificOutput": {
-            "hookEventName": "UserPromptSubmit",
-            "additionalContext": "\n".join(lines),
-        }},
-        sys.stdout,
-    )
-
-
-def _handle_mm_prefix(inp: dict) -> bool:
-    """Handle mm control prefixes. Returns True if handled.
-
-    mm-: writes manual_skip audit row for current (or named) sid.
-    mm+: clears manual skip and flags current or named sid for sessionend.
-    mm!: lists unrun sessions or immediately spawns a named sid.
-    mm!!: pre-archives current jsonl and immediately spawns current sid.
-    mm- / mm+ / mm!: three-branch on arg after prefix:
-      - empty          → current sid (existing behaviour)
-      - UUID-like      → named sid
-      - natural-lang   → inject additionalContext to help LLM locate sid
-    Fail-soft: any error is swallowed — hook must never block the user turn.
-    """
-    prompt = (inp.get("prompt") or "").strip().replace("！", "!")
-    if not prompt.startswith(("mm-", "mm+", "mm!")):
-        return False
-
-    sid = (inp.get("session_id") or "").strip()
-    if prompt.startswith("mm!!"):
-        prefix = "mm!!"
-        rest = prompt[4:].strip()
-    else:
-        prefix = prompt[:3]
-        rest = prompt[3:].strip()
-
-    if prefix == "mm!" and not rest:
-        try:
-            conn = storage.connect(config.db_path())
-            try:
-                _inject_unrun_sessions(_unrun_session_rows(conn))
-            finally:
-                conn.close()
-        except Exception:  # noqa: BLE001
-            _inject_unrun_sessions([])
-        return True
-
-    if prefix == "mm!!":
-        if rest:
-            _inject_locate_request(prefix, rest)
-            return True
-        try:
-            if sid:
-                conn = storage.connect(config.db_path())
-                try:
-                    _write_force_sessionend_flag(conn, sid, _STATUS_MM_IMMEDIATE_CURRENT)
-                    tpath = inp.get("transcript_path") or _locate_jsonl(sid)
-                    _pre_archive_jsonl(conn, tpath, channel=os.environ.get("MARROW_CHANNEL") or "cli")
-                    row = conn.execute(
-                        "SELECT 1 FROM audit_log"
-                        " WHERE target_table='events'"
-                        " AND target_id=?"
-                        " AND action='session_lifecycle:end'"
-                        " LIMIT 1",
-                        (sid,),
-                    ).fetchone()
-                    if not row:
-                        with conn:
-                            conn.execute(
-                                "INSERT INTO audit_log"
-                                " (target_table, target_id, action, summary)"
-                                " VALUES ('events', ?, 'session_lifecycle:end', 'mm_bang')",
-                                (sid,),
-                            )
-                            conn.execute(
-                                "UPDATE sessions"
-                                " SET ended_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')"
-                                " WHERE sid = ? AND (ended_at IS NULL OR ended_at = '')",
-                                (sid,),
-                            )
-                finally:
-                    conn.close()
-                conn = storage.connect(config.db_path())
-                try:
-                    _spawn_sessionend_after_watermark(conn, sid)
-                finally:
-                    conn.close()
-        except Exception:  # noqa: BLE001
-            pass
-        _inject_silent_ack("mm!!")
-        return True
-
-    # Natural-language branch — hand off to main LLM, no DB writes, no spawn.
-    if rest and not _looks_like_sid(rest):
-        _inject_locate_request(prefix, rest)
-        return True
-
-    # Empty or UUID-like arg: empty → current sid, UUID-like → that sid.
-    target_sid = rest if rest else sid
-
-    try:
-        db = config.db_path()
-        conn = storage.connect(db)
-        try:
-            if prefix == "mm-":
-                if target_sid:
-                    _write_manual_skip_flag(conn, target_sid, _STATUS_SKIP)
-                    # Block events archive entirely for this sid — session_end
-                    # will skip transcript.clean + archive_events, leaving the
-                    # events table with zero rows for this session.
-                    _write_session_block_flag(conn, target_sid, _STATUS_BLOCK_ARCHIVE)
-            elif prefix == "mm+":
-                if target_sid:
-                    _write_manual_skip_flag(conn, target_sid, _STATUS_SKIP_CLEARED)
-                    _write_force_sessionend_flag(conn, target_sid, _STATUS_MM_PLUS_FLAG)
-            elif prefix == "mm!":
-                if target_sid:
-                    _write_force_sessionend_flag(conn, target_sid, _STATUS_MM_IMMEDIATE)
-                    row = conn.execute(
-                        "SELECT 1 FROM audit_log"
-                        " WHERE target_table='events'"
-                        " AND target_id=?"
-                        " AND action='session_lifecycle:end'"
-                        " LIMIT 1",
-                        (target_sid,),
-                    ).fetchone()
-                    if not row:
-                        with conn:
-                            conn.execute(
-                                "INSERT INTO audit_log"
-                                " (target_table, target_id, action, summary)"
-                                " VALUES ('events', ?, 'session_lifecycle:end', 'mm_bang')",
-                                (target_sid,),
-                            )
-                            conn.execute(
-                                "UPDATE sessions"
-                                " SET ended_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')"
-                                " WHERE sid = ? AND (ended_at IS NULL OR ended_at = '')",
-                                (target_sid,),
-                            )
-                    _spawn_sessionend_after_watermark(conn, target_sid)
-                    conn.close()
-                    conn = None
-        finally:
-            if conn is not None:
-                conn.close()
-    except Exception:  # noqa: BLE001 — never block prompt
-        pass
-    if prefix in {"mm-", "mm+", "mm!"}:
-        _inject_silent_ack(prefix)
-    return True
 
 
 # ── pure recall-render helpers (extracted for testability) ───────────────────
@@ -2078,10 +1514,6 @@ def user_prompt_submit() -> int:
     """
     inp = _read_input()
 
-    # mm control plane — check before recall, independent of recall config.
-    if isinstance(inp, dict) and _handle_mm_prefix(inp):
-        return 0  # no additionalContext injection for control prompts
-
     # Worktree / subagent gate: cc instances in a NON-primary git worktree
     # OR dispatched via Task tool (transcript_path under /tasks/) are
     # task-isolated runs. They take direction from the user prompt + main
@@ -2203,8 +1635,8 @@ def user_prompt_submit() -> int:
 
     # Pipeline-prompt gate: a hand-run digest/eval claude (spawned without
     # llm.py's --setting-sources isolation) still loads this hook. Its prompt
-    # opens with the transcript fence from sessionend_prompts._TRANSCRIPT_BLOCK
-    # — never inject, log, or backfill title/model for it.
+    # opens with a transcript fence — never inject, log, or backfill
+    # title/model for it.
     if prompt_text.startswith("===== BEGIN ORIGINAL TRANSCRIPT"):
         return 0
 

@@ -148,22 +148,6 @@ study   = []
 same_boost   = 0.05
 diff_penalty = 0.00
 
-[sessionend]
-# Sessions with ≤ this many user turns skip async LLM extraction (§2.7).
-# Threshold tunes after 1-week sample.
-skip_turn_threshold = 3
-# Tail embed batch size for sessionend_async. 0 = skip embed_pending.
-embed_batch = 200
-
-[sessionend_mid]
-scan_interval_min = 30
-elapsed_hours = 4
-turn_threshold_time = 10
-turn_threshold_abs = 30
-min_hours = 2
-min_turns = 4
-elapsed_hours_slow = 6
-turn_threshold_slow = 4
 
 [memes_dedup]
 # Cosine similarity threshold for the bge-m3 dedup check against existing
