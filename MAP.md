@@ -149,11 +149,11 @@ Three runtimes:
 ## 7. Scheduled jobs (launchd)
 
 - com.marrow.watcher — persistent, KeepAlive.
-- com.marrow.refresh — periodic `mw refresh --all` (daybrief + monitor + subpages).
+- com.marrow.refresh — manual trigger only (RunAtLoad false, no schedule), `mw refresh --all` (daybrief + monitor + subpages).
 - com.marrow.db-backup 03:00 daily — VACUUM INTO local + iCloud offsite, keep 14 each.
-- com.marrow.jsonl-cleanup — prune stale transcript scratch/logs.
 - com.marrow.aging Sun 12:00 weekly — cleanup passes (§10).
-- install.py `_ALL_PLISTS` provisions aging/db-backup/watcher; `_OBSOLETE_PLISTS` boots out + deletes retired dashboard-tick/daily-routine/daily-catchup on upgrade.
+- install.py `_ALL_PLISTS` sole provisioning source: aging/db-backup/refresh/watcher. `_OBSOLETE_PLISTS` boots out + deletes retired dashboard-tick/daily-routine/daily-catchup on upgrade.
+- cli.py install-launchd/uninstall-launchd path retired (was duplicate, listed dead goose-bites/jsonl-cleanup jobs).
 - MCP daemon has no plist (CC-spawned).
 
 ## 8. Alerts

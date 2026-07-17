@@ -573,99 +573,9 @@ _DEPLOY_DIR = Path(__file__).resolve().parents[1] / "deploy"
 _WATCHER_PLIST_SRC = _DEPLOY_DIR / "mw-watcher.plist"
 _LAUNCH_AGENTS = Path.home() / "Library" / "LaunchAgents"
 
-# All plist templates shipped in deploy/ with their launchd labels.
-_ALL_PLISTS: list[tuple[str, str]] = [
-    ("mw-aging.plist",         "com.marrow.aging"),
-    ("mw-db-backup.plist",     "com.marrow.db-backup"),
-    ("mw-goose-bites.plist",   "com.marrow.goose-bites"),
-    ("mw-watcher.plist",       "com.marrow.watcher"),
-]
-
 
 def _watcher_plist_target() -> Path:
     return _LAUNCH_AGENTS / "com.marrow.watcher.plist"
-
-
-def _resolve_plist(template: str) -> str:
-    """Substitute __TOKENS__ in a plist template string with live paths."""
-    project_dir = _DEPLOY_DIR.parent
-    venv_python = project_dir / ".venv" / "bin" / "python"
-    venv_bin = str(venv_python.parent)
-    log_dir = Path.home() / "Library" / "Logs"
-    data_dir = config.DATA_DIR
-    path_env = f"{Path.home() / '.local' / 'bin'}:{venv_bin}:/usr/bin:/bin"
-
-    return (
-        template
-        .replace("__VENV_PYTHON__", str(venv_python))
-        .replace("__PROJECT_DIR__", str(project_dir))
-        .replace("__LOG_DIR__", str(log_dir))
-        .replace("__DATA_DIR__", str(data_dir))
-        .replace("__PATH_ENV__", path_env)
-    )
-
-
-def cmd_install_launchd(args) -> int:
-    """Install all 7 marrow launchd agents from deploy/ templates."""
-    _LAUNCH_AGENTS.mkdir(parents=True, exist_ok=True)
-    uid = subprocess.run(["id", "-u"], capture_output=True, text=True).stdout.strip()
-    domain = f"gui/{uid}"
-
-    project_dir = _DEPLOY_DIR.parent
-    venv_python = project_dir / ".venv" / "bin" / "python"
-    log_dir = Path.home() / "Library" / "Logs"
-    data_dir = config.DATA_DIR
-
-    print(f"project dir : {project_dir}")
-    print(f"venv python : {venv_python}")
-    print(f"log dir     : {log_dir}")
-    print(f"data dir    : {data_dir}")
-    print()
-
-    errors = 0
-    for fname, label in _ALL_PLISTS:
-        src = _DEPLOY_DIR / fname
-        if not src.exists():
-            print(f"  [skip] {fname} not found in deploy/")
-            errors += 1
-            continue
-        resolved = _resolve_plist(src.read_text(encoding="utf-8"))
-        tgt = _LAUNCH_AGENTS / fname.replace("mw-", "com.marrow.").replace(".plist", "").replace(".", "-") + ".plist"
-        # Target name matches label: com.marrow.<service>.plist
-        tgt = _LAUNCH_AGENTS / f"{label}.plist"
-        tgt.write_text(resolved, encoding="utf-8")
-        # Idempotent: bootout (tolerated), then bootstrap.
-        _launchctl("bootout", domain, str(tgt))
-        rc, msg = _launchctl("bootstrap", domain, str(tgt))
-        status = "ok" if rc == 0 else f"FAILED: {msg}"
-        print(f"  {label}: {status}")
-        if rc != 0:
-            errors += 1
-
-    print()
-    print(f"installed {len(_ALL_PLISTS) - errors}/{len(_ALL_PLISTS)} agents")
-    return 0 if errors == 0 else 1
-
-
-def cmd_uninstall_launchd(args) -> int:
-    """Bootout and remove all 7 marrow launchd agents from LaunchAgents."""
-    uid = subprocess.run(["id", "-u"], capture_output=True, text=True).stdout.strip()
-    domain = f"gui/{uid}"
-
-    errors = 0
-    for _fname, label in _ALL_PLISTS:
-        tgt = _LAUNCH_AGENTS / f"{label}.plist"
-        if not tgt.exists():
-            print(f"  [skip] {tgt.name} not installed")
-            continue
-        rc, msg = _launchctl("bootout", domain, str(tgt))
-        tgt.unlink(missing_ok=True)
-        status = "removed" if rc == 0 else f"bootout failed ({msg}), file removed anyway"
-        print(f"  {label}: {status}")
-
-    print()
-    print("uninstall complete")
-    return 0
 
 
 def _launchctl(*args: str) -> tuple[int, str]:
@@ -913,14 +823,6 @@ def build_parser() -> argparse.ArgumentParser:
     wt = sub.add_parser("watcher", parents=[common])
     wt.add_argument("action", choices=["start", "stop", "status"])
     wt.set_defaults(fn=cmd_watcher)
-
-    il = sub.add_parser("install-launchd", parents=[common],
-                        help="install all 7 marrow launchd agents from deploy/ templates")
-    il.set_defaults(fn=cmd_install_launchd)
-
-    ul = sub.add_parser("uninstall-launchd", parents=[common],
-                        help="bootout and remove all 7 marrow launchd agents")
-    ul.set_defaults(fn=cmd_uninstall_launchd)
 
     ep = sub.add_parser("export-pit", parents=[common],
                         help="export pit table rows to markdown (run before dropping table)")
