@@ -33,7 +33,6 @@ _TZ = _config.get_tz()
 
 # Matches leading HH:MM in a LIFE line (e.g. "21:40 买了b5精华")
 _LIFE_TS_RE = _re.compile(r"^(\d{2}:\d{2})(?:-\d{2}:\d{2})?(?:\s+|(?=【))(.*)", _re.DOTALL)
-_CUTOFF_H = 6          # 6AM local day boundary
 _BUDGET = 4000         # soft char budget (safety net; zone caps control sizing)
 _INJECT_CAP = 20       # max film-strip lines injected into context
 
@@ -44,32 +43,8 @@ def _now_local() -> _dt.datetime:
     return _dt.datetime.now(_TZ)
 
 
-def _day_start_utc(local_date: _dt.date) -> _dt.datetime:
-    """Local date at 06:00 AM → UTC (the effective day boundary)."""
-    local_midnight = _dt.datetime(
-        local_date.year, local_date.month, local_date.day,
-        _CUTOFF_H, 0, 0, tzinfo=_TZ)
-    return local_midnight.astimezone(_dt.timezone.utc)
-
-
-def _local_date_from_utc(utc_iso: str) -> _dt.date:
-    """UTC ISO → local date (configured tz) with 6AM cutoff."""
-    s = (utc_iso or "").strip().replace("Z", "+00:00")
-    try:
-        d = _dt.datetime.fromisoformat(s)
-    except ValueError:
-        return _now_local().date()
-    if d.tzinfo is None:
-        d = d.replace(tzinfo=_dt.timezone.utc)
-    local = d.astimezone(_TZ)
-    # Before 6AM → belongs to previous diary day
-    if local.hour < _CUTOFF_H:
-        local -= _dt.timedelta(days=1)
-    return local.date()
-
-
 def _calendar_date_from_utc(utc_iso: str) -> _dt.date:
-    """UTC ISO → local calendar date (configured tz) without the 6AM cutoff."""
+    """UTC ISO → local calendar date (configured tz), natural midnight."""
     s = (utc_iso or "").strip().replace("Z", "+00:00")
     try:
         d = _dt.datetime.fromisoformat(s)
@@ -108,9 +83,8 @@ def _hhmm_local(utc_iso: str) -> str:
 
 
 def _period_of_hhmm(hhmm: str) -> str:
-    """HH:MM → AM/PM/ND period label.
-    AM 06-12, PM 12-18, ND 18-06 (next morning up to 06:00).
-    00-06 display time belongs to ND of PREVIOUS diary day.
+    """HH:MM → AM/PM/ND period label (display only, not day assignment).
+    AM 06-12, PM 12-18, ND 18-06. 00-06 keeps the ND label of its own day.
     """
     try:
         h = int(hhmm[:2])
@@ -125,7 +99,8 @@ def _period_of_hhmm(hhmm: str) -> str:
 
 def _period_diary_date(utc_iso: str) -> tuple[_dt.date, str]:
     """Return (diary_date, period) for a UTC timestamp.
-    ND 00-05 belongs to PREVIOUS diary day (the ND period of the prior night).
+    Natural midnight: diary_date = local calendar date. Period is a display
+    label (AM/PM/ND); 00-06 keeps the ND label of that same calendar day.
     """
     s = (utc_iso or "").strip().replace("Z", "+00:00")
     try:
@@ -136,14 +111,8 @@ def _period_diary_date(utc_iso: str) -> tuple[_dt.date, str]:
     if d.tzinfo is None:
         d = d.replace(tzinfo=_dt.timezone.utc)
     local = d.astimezone(_TZ)
-    h = local.hour
     period = _period_of_hhmm(local.strftime("%H:%M"))
-    # 00-05 display → ND of PREVIOUS diary day
-    if h < _CUTOFF_H:
-        diary_date = (local - _dt.timedelta(days=1)).date()
-    else:
-        diary_date = local.date()
-    return diary_date, period
+    return local.date(), period
 
 
 def _tl_anchor_sid(sid: str, segment_seq: int = 0,
@@ -181,19 +150,19 @@ def _life_line_utc_and_date(item: str, session_utc_iso: str,
     """
     m = _LIFE_TS_RE.match(item)
     if not m:
-        diary_date = _local_date_from_utc(session_utc_iso)
+        diary_date = _calendar_date_from_utc(session_utc_iso)
         return session_utc_iso, diary_date
 
     hhmm = m.group(1)
     try:
         h, mi = int(hhmm[:2]), int(hhmm[3:5])
     except ValueError:
-        diary_date = _local_date_from_utc(session_utc_iso)
+        diary_date = _calendar_date_from_utc(session_utc_iso)
         return session_utc_iso, diary_date
 
     sess_dt = _parse_utc(session_utc_iso)
     if sess_dt is None:
-        diary_date = _local_date_from_utc(session_utc_iso)
+        diary_date = _calendar_date_from_utc(session_utc_iso)
         return session_utc_iso, diary_date
     sess_local = sess_dt.astimezone(_TZ)
 
@@ -201,12 +170,7 @@ def _life_line_utc_and_date(item: str, session_utc_iso: str,
     candidate = _dt.datetime(cal_date.year, cal_date.month, cal_date.day,
                              h, mi, 0, tzinfo=_TZ)
 
-    if candidate.hour < _CUTOFF_H:
-        diary_date = (candidate - _dt.timedelta(days=1)).date()
-    else:
-        diary_date = candidate.date()
-
-    return _utc_iso(candidate), diary_date
+    return _utc_iso(candidate), candidate.date()
 
 
 def _life_line_local_date(item: str, session_date: _dt.date,
@@ -224,12 +188,10 @@ def _life_line_local_date(item: str, session_date: _dt.date,
         h, mi = int(hhmm[:2]), int(hhmm[3:5])
     except ValueError:
         return session_date
-    # Build candidate on the given calendar date; single 6AM cutoff.
+    # Build candidate on the given calendar date; natural midnight boundary.
     candidate = _dt.datetime(
         session_date.year, session_date.month, session_date.day,
         h, mi, 0, tzinfo=_TZ)
-    if candidate.hour < _CUTOFF_H:
-        return (candidate - _dt.timedelta(days=1)).date()
     return candidate.date()
 
 

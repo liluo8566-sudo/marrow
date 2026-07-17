@@ -1088,7 +1088,7 @@ def reconcile_timeline(conn: sqlite3.Connection,
             ).fetchone()
             if row is None:
                 now_melb = _dt.datetime.now(_MELB_TZ)
-                diary_cutoff = (now_melb - _dt.timedelta(hours=7)).date().isoformat()
+                diary_cutoff = now_melb.date().isoformat()
                 if date >= diary_cutoff:
                     continue
                 rpt.conflicts.append(f"tl:d:{date} not in diary")
@@ -1103,7 +1103,7 @@ def reconcile_timeline(conn: sqlite3.Connection,
             ).fetchone()
             if row is None:
                 now_melb = _dt.datetime.now(_MELB_TZ)
-                diary_cutoff = (now_melb - _dt.timedelta(hours=7)).date().isoformat()
+                diary_cutoff = now_melb.date().isoformat()
                 if date >= diary_cutoff:
                     continue
                 rpt.conflicts.append(f"tl:d:{date} not in diary")

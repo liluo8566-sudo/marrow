@@ -36,7 +36,6 @@ from .timeutil import (
 )
 
 _RECALL_TZ = config.get_tz()
-_RECALL_CUTOFF_H = 6  # 6AM local day boundary (matches digest)
 
 _SESSION_CLAIMS_PATH = Path("~/.config/marrow/session_claims.json").expanduser()
 
@@ -432,9 +431,8 @@ def _recall_log_dir() -> Path:
 
 
 def _recall_local_date(utc_now: datetime) -> str:
-    """UTC datetime → local recall-day string (YYYY-MM-DD) with 6AM cutoff."""
-    local = utc_now.astimezone(_RECALL_TZ) - timedelta(hours=_RECALL_CUTOFF_H)
-    return local.date().isoformat()
+    """UTC datetime → local recall-day string (YYYY-MM-DD), natural midnight."""
+    return utc_now.astimezone(_RECALL_TZ).date().isoformat()
 
 
 def _recall_session_log_path(sid: str, utc_now: datetime) -> Path:
@@ -447,7 +445,7 @@ def _recall_session_log_path(sid: str, utc_now: datetime) -> Path:
 def _prune_recall_logs() -> None:
     """Delete recall log files older than today-1 (keep today + yesterday).
 
-    Mirrors digest prune: 6AM cutoff for local-day boundary, mtime-based
+    Mirrors digest prune: natural midnight local-day boundary, mtime-based
     safety floor, today/yesterday whitelisted by filename."""
     try:
         now = datetime.now(timezone.utc)
