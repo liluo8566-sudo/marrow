@@ -391,11 +391,19 @@ wake_audit_log_file = "state/wake_audit.log"
 # retention_days: sent/failed rows older than this aged out by the weekly job.
 # inject_header: cli/private note header rendered above the body on delivery
 #   ({channel} sender channel, {sid4} first 4 chars of sender sid, {time} HH:MM).
+# own_note_header: header shown to a channel's resident session for notes a
+#   bridge sent on that channel (so she sees the outbound note before her reply).
+#   Per-sid cursor (state/outbound/<sid>), forward-only, consume-once.
+# wire_channels: channels whose notes go out via a bridge adapter and bypass the
+#   resident session (own_note surfacing applies to these only; cli/ct/session
+#   targets are delivered inline by outbox.deliver and never re-surfaced).
 daily_cap_user = 30
 daily_cap_session = 100
 user_send_channels = ["ct"]
 retention_days = 30
 inject_header = "📮 Message from {channel}·{sid4} {time}"
+own_note_header = "📤 Sent on this channel"
+wire_channels = ["tg", "wx"]
 
 [replay]
 # Cross-session replay inject (turn_inject): each session passively hears other
