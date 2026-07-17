@@ -123,9 +123,11 @@ def test_cap_and_fold(tmp_path, monkeypatch):
         _ev(db, SID_OTHER, "user", f"q{i}", ts=f"2026-07-17T05:0{i}:00Z")
         _ev(db, SID_OTHER, "assistant", f"a{i}", ts=f"2026-07-17T05:0{i}:30Z")
     out = hooks._replay_context(SID_SELF, "cli")
-    assert "q0" in out and "q1" in out
-    assert "q2" not in out and "q3" not in out  # folded
-    assert "+2 more turns" in out
+    # Keep the NEWEST turns; the older overflow folds (cursor advances to max_id
+    # unconditionally, so the folded turns would be silenced forever otherwise).
+    assert "q2" in out and "q3" in out          # newest kept
+    assert "q0" not in out and "q1" not in out  # oldest folded
+    assert "+2 earlier turns" in out
     # cursor advanced past ALL rows despite fold (ambient)
     conn = storage.connect(db)
     try:
