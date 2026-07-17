@@ -1,8 +1,8 @@
 # Marrow
 
-Personal AI memory system for Claude Code. SQLite + FTS5 + vector search, one markdown dashboard.
+Personal AI memory system for Claude Code. SQLite + FTS5 + vector search, markdown surfaces (daybrief, monitor, sub-pages).
 
-Captures every Claude Code session locally — extracts tasks, entities, milestones, and emotional markers at session end, then surfaces relevant memories automatically when you open a new session.
+Captures every Claude Code session locally — events archived per turn via the Stop hook — then surfaces relevant memories automatically when you open a new session.
 
 ## Quick start
 
@@ -28,7 +28,7 @@ $EDITOR ~/.config/marrow/config.toml
 - Registers 4 Claude Code hooks in `~/.claude/settings.json` (SessionStart, SessionEnd, UserPromptSubmit, PreToolUse)
 - Registers the `marrow` MCP server with Claude Code
 - Symlinks slash commands and agents into `~/.claude/`
-- Installs launchd jobs: watcher (live dashboard sync), daily routine (07:00), catchup (19:00), backup (03:00), dashboard tick (06:01), aging (weekly)
+- Installs launchd jobs: watcher (live md sync), backup (03:00), aging (weekly)
 - Downloads the bge-m3 ONNX embedding model (~600 MB); gracefully degrades to FTS5-only if absent
 
 To pre-download the model (recommended):
@@ -50,7 +50,7 @@ Key sections in `~/.config/marrow/config.toml`:
 | Section | What to set |
 |---|---|
 | `[persona]` | `user_name`, `assistant_name`, aliases, `anchor_keys` |
-| `[paths]` | `dashboard` and `db_pages` (defaults work out of the box under `~/.config/marrow/`) |
+| `[paths]` | `db_pages`, `daybrief`, `monitor` (defaults work out of the box under `~/.config/marrow/`) |
 | `[llm]` | Provider chain — `claude_cli` default |
 | `[recall]` | Fusion weights, vector window, per-rank content caps |
 
@@ -64,7 +64,7 @@ Slash commands installed into `~/.claude/`:
 |---|---|
 | `/diary` | Read diary context for a requested date |
 | `/embed` | Embed pending memory rows |
-| `/refresh` | Force-render the dashboard; add `--all` for sub-pages |
+| `/refresh` | Force-render daybrief + monitor; add `--all` for sub-pages |
 | `/switch` | Pick a recent session to resume |
 | `/sticker-entry` | Batch-fill sticker descriptions |
 
@@ -72,11 +72,11 @@ For chat-channel commands (WeChat, Telegram), see [synapse](https://github.com/J
 
 ## Architecture
 
-- **4 hooks** — inject recall context on prompt, capture session transcript on end
+- **4 hooks** — inject recall context on prompt, archive events per turn via the Stop hook
 - **MCP daemon** — serves `recall`, `sticker`, and `event_embed` tools to Claude Code
-- **SQLite** — events, tasks, milestones, entities, memes, stickers; FTS5 full-text index
+- **SQLite** — events, milestones, entities, memes, stickers; FTS5 full-text index
 - **sqlite-vec** — 1024-dim bge-m3 embeddings, 90-day rolling window
-- **Dashboard** — auto-rendered markdown pages (Obsidian / VSCode / any editor)
+- **Surfaces** — auto-rendered markdown pages: daybrief, monitor, sub-pages (Obsidian / VSCode / any editor)
 
 Internal docs: [`MAP.md`](MAP.md) (how each feature works) · [`DESIGN.md`](DESIGN.md) (goals and constraints)
 
