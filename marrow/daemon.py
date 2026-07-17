@@ -920,11 +920,11 @@ def msg(
     action: Annotated[str, Field(description="'send' a message, or 'list' your own recent outbox rows (debugging).")],
     to: Annotated[str | None, Field(description="send only: tg | wx | cli | ct | session:<sid-prefix>. tg/wx = her phone (whitelisted senders only); cli = any cli session; ct = cortex; session:<prefix> resolves to exactly one live session (0 or many matches = refused).")] = None,
     text: Annotated[str | None, Field(description="send only: message body (plain text). Required.")] = None,
-    watch_reply: Annotated[bool, Field(description="send only: kick cortex awake when she replies on the target channel (default false).")] = False,
-    watch_timeout_min: Annotated[int | None, Field(description="send only: kick cortex if no reply within N minutes of send (default none = no timeout watch).")] = None,
+    watch_reply: Annotated[bool, Field(description="send only: be kicked awake the moment she replies on the target channel (default false).")] = False,
+    watch_timeout_min: Annotated[int | None, Field(description="send only: check back at N minutes: kicked only if no reply by then; if she already replied the watch clears silently (default none = no timeout watch).")] = None,
     limit: Annotated[int, Field(ge=1, description="list only: max rows to return (default 20).")] = 20,
 ) -> dict | list[dict]:
-    """Leave a message across channels: to her phone (tg/wx, whitelisted senders) or covertly to another session (cli/ct). Fire-and-forget; replies land in the target channel's resident session. watch_reply/watch_timeout kick cortex awake.
+    """Leave a message across channels: to her phone (tg/wx, whitelisted senders) or covertly to another session (cli/ct). The resident session continues that conversation. Set watch_reply=true to be kicked awake the moment she replies; watch_timeout_min=N to check back at N minutes — kicked only if she hasn't replied by then.
     - 'send': needs `to` + `text`; tg/wx restricted to allowed sender channels.
     - 'list': your own pending/recent rows to confirm a send landed."""
     if action not in _MSG_ACTIONS:

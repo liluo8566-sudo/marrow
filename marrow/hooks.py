@@ -300,7 +300,10 @@ def _replay_context(sid: str, channel: str) -> str:
     if not turns:
         return ""
 
-    kept = turns[:max_turns]
+    # Keep the NEWEST turns: the cursor advances to max_id unconditionally, so
+    # folded turns are silenced forever — the newest are what matters for ambient
+    # awareness. The older overflow folds into a count.
+    kept = turns[-max_turns:]
     folded = len(turns) - len(kept)
     lines = [header]
     for turn in kept:
@@ -309,7 +312,7 @@ def _replay_context(sid: str, channel: str) -> str:
                 f"[{it['channel']}·{it['sid4']} {it['hm']}] {it['role']}: {it['content']}"
             )
     if folded > 0:
-        lines.append(f"+{folded} more turns")
+        lines.append(f"+{folded} earlier turns")
     return "\n".join(lines)
 
 
