@@ -183,9 +183,11 @@ def _read_gen(tmp_path):
     return d.get("gen")
 
 
-def test_tuck_in_line_does_not_double_inject_note(tmp_path, monkeypatch, capsys):
-    """A [NEW ROUND] free-round line already carries its diff-mode note inline;
-    the hook must inject NOTHING extra (no duplicate note)."""
+def test_tuck_in_line_injects_menu_not_note(tmp_path, monkeypatch, capsys):
+    """A [NEW ROUND] free-round line carries its diff-mode note inline (visible in
+    the ear Monitor event); the hook must NOT re-inject the note (no duplicate),
+    but DOES inject the C2 menu body covertly via additionalContext (never on
+    screen)."""
     monkeypatch.setenv("MARROW_CORTEX", "1")
     (tmp_path / "wakeup_note.md").write_text("FROZEN note", encoding="utf-8")
     _enable(monkeypatch, tmp_path,
@@ -193,7 +195,82 @@ def test_tuck_in_line_does_not_double_inject_note(tmp_path, monkeypatch, capsys)
     _stdin(monkeypatch, {"session_id": "s1",
                          "prompt": "📮 note inline\n\nNow: 14:00\n⏳ [NEW ROUND] 15 min"})
     assert hooks.main(["user_prompt_submit"]) == 0
-    assert _ctx(capsys) == ""  # nothing turn-injected on top of the inline note
+    ctx = _ctx(capsys)
+    assert "FROZEN note" not in ctx     # note NOT re-injected (no double note)
+    assert "3 choices" in ctx           # C2 menu injected covertly
+    assert "lie_down" in ctx
+
+
+def test_tuck_in_menu_blank_injects_nothing(tmp_path, monkeypatch, capsys):
+    """[cortex].tuck_in_menu_text = "" -> marker-only round, hook injects nothing."""
+    monkeypatch.setenv("MARROW_CORTEX", "1")
+    _enable(monkeypatch, tmp_path,
+            {"tuck_in_marker": "[NEW ROUND]", "tuck_in_menu_text": ""})
+    _stdin(monkeypatch, {"session_id": "s1",
+                         "prompt": "note\n⏳ [NEW ROUND] 15 min"})
+    assert hooks.main(["user_prompt_submit"]) == 0
+    assert _ctx(capsys) == ""
+
+
+# ── Item 4: FUSE / CTL covert body inject (marker on screen, body via hook) ────
+
+def test_fuse_marker_injects_body_covertly(tmp_path, monkeypatch, capsys):
+    """A ⚙️ [FUSE] marker turn (bare or ear-wrapped) injects the FUSE body via
+    additionalContext — the body never rode the log line."""
+    monkeypatch.setenv("MARROW_CORTEX", "1")
+    _enable(monkeypatch, tmp_path, {})
+    _stdin(monkeypatch, {"session_id": "s1",
+                         "prompt": '<event>⚙️ [FUSE]</event>'})
+    assert hooks.main(["user_prompt_submit"]) == 0
+    ctx = _ctx(capsys)
+    assert "handoff.md" in ctx and "lie_down(rotate=True)" in ctx
+
+
+def test_fuse_blank_body_injects_nothing(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("MARROW_CORTEX", "1")
+    _enable(monkeypatch, tmp_path, {"fuse_prompt_text": ""})
+    _stdin(monkeypatch, {"session_id": "s1", "prompt": "⚙️ [FUSE]"})
+    assert hooks.main(["user_prompt_submit"]) == 0
+    assert _ctx(capsys) == ""
+
+
+def test_ctl_marker_renders_body_from_args_rotate(tmp_path, monkeypatch, capsys):
+    """A ⚙️ [CTL] marker turn carrying mins/rotate args injects the sleep body
+    rendered from those args (rotate=true -> handoff prefix + rotate=true arg)."""
+    monkeypatch.setenv("MARROW_CORTEX", "1")
+    _enable(monkeypatch, tmp_path, {})
+    _stdin(monkeypatch, {"session_id": "s1",
+                         "prompt": "⚙️ [CTL] mins=30 rotate=true"})
+    assert hooks.main(["user_prompt_submit"]) == 0
+    ctx = _ctx(capsys)
+    assert "lie_down(next_wake_min=30, rotate=true)" in ctx
+    assert "write your handoff" in ctx
+
+
+def test_ctl_marker_no_rotate_omits_rotate_arg(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("MARROW_CORTEX", "1")
+    _enable(monkeypatch, tmp_path, {})
+    _stdin(monkeypatch, {"session_id": "s1",
+                         "prompt": "⚙️ [CTL] mins=15 rotate=false"})
+    assert hooks.main(["user_prompt_submit"]) == 0
+    ctx = _ctx(capsys)
+    assert "lie_down(next_wake_min=15)" in ctx
+    assert "rotate=true" not in ctx
+
+
+def test_fuse_ctl_markers_not_swallowed_mid_sentence(tmp_path, monkeypatch, capsys):
+    """A real user prompt quoting [FUSE]/[CTL] mid-sentence is NOT swallowed —
+    the covert branches are line-start shaped, so it falls through to user speech
+    (user-wake reset fires)."""
+    monkeypatch.setenv("MARROW_CORTEX", "1")
+    _enable(monkeypatch, tmp_path, {})
+    called = {"reset": False}
+    monkeypatch.setattr(cortex_bridge, "_cortex_user_wake_reset",
+                        lambda inp: called.__setitem__("reset", True))
+    _stdin(monkeypatch, {"session_id": "s1", "transcript_path": "/t/s.jsonl",
+                         "prompt": "did the [FUSE] path or [CTL] path fire?"})
+    assert hooks.main(["user_prompt_submit"]) == 0
+    assert called["reset"] is True
 
 
 def test_tuck_in_line_does_not_bump_gen(tmp_path, monkeypatch, capsys):
@@ -224,14 +301,14 @@ def test_marker_mention_mid_sentence_not_swallowed(tmp_path, monkeypatch, capsys
     assert hooks.main(["user_prompt_submit"]) == 0
     assert called["reset"] is True  # treated as a real user message
 
-    # both-direction: a genuine machine block still hits the early return (no
-    # reset), so the note is not double-injected.
+    # both-direction: a genuine machine block still hits the tuck-in branch (no
+    # user-wake reset). The note is not re-injected; only the covert C2 menu is.
     called["reset"] = False
     _stdin(monkeypatch, {"session_id": "s1", "transcript_path": "/t/s.jsonl",
                          "prompt": "note above\n⏳ [NEW ROUND] 15 min since ..."})
     assert hooks.main(["user_prompt_submit"]) == 0
     assert called["reset"] is False
-    assert _ctx(capsys) == ""  # nothing turn-injected
+    assert "note above" not in _ctx(capsys)  # note not re-injected
 
 
 def test_wakeup_note_fresh_render_wins(tmp_path, monkeypatch):

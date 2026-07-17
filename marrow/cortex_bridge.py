@@ -319,9 +319,9 @@ def _run_cortex_module(module: str, extra_args: list[str] | None = None) -> dict
 
 
 def lie_down(next_wake_min: float, rotate: bool = False) -> dict:
-    """Set the next wake before you sleep: lie_down(next_wake_min=N) [N=90-360].
-    rotate=True unlocks a short next_wake (N≥16) for a context-full quick turn.
-    NOTE: TTL=60min - be aware of cold start cost (~100k)."""
+    # Description rendered from cortex config at register() (C9); see
+    # _lie_down_doc. Kept minimal here — FastMCP reads __doc__ at registration.
+    """lie_down(next_wake_min=N)."""
     args = ["--next-wake-min", str(next_wake_min)]
     if rotate:
         args += ["--rotate"]
@@ -342,10 +342,8 @@ def lie_down(next_wake_min: float, rotate: bool = False) -> dict:
 
 
 def wait(minutes: float) -> dict:
-    """You can stay awake if you want: wait(N) [N=16-55], uncapped — renew as
-    many times as you like; a user reply resets the timer. Each expiry gives you
-    a fresh free round (play / wait / lie_down). Hint: feel free to play around
-    while waiting. Last lie_down of this session: handoff.md + rotate=True"""
+    # Description rendered from cortex config at register() (C10); see _wait_doc.
+    """wait(N)."""
     return _run_cortex_module("cortex.wait", ["--minutes", str(minutes)])
 
 
@@ -360,6 +358,30 @@ def say() -> dict:
 # DB the tools read/write. Set at register() time from the daemon's own _DB so
 # it tracks the same source the daemon resolved at import; tests patch this.
 _DB = config.db_path()
+
+
+def _lie_down_doc() -> str:
+    """C9 (user-final): lie_down description with all four clamp numbers rendered
+    from cortex config — day bounds [wake].next_wake_min/max, night bounds
+    [night].floor_min/max. Never hardcoded in the string."""
+    day_min = int(_cortex_toml_section("wake", "next_wake_min", 21))
+    day_max = int(_cortex_toml_section("wake", "next_wake_max", 240))
+    night_min = int(_cortex_toml_section("night", "floor_min", 120))
+    night_max = int(_cortex_toml_section("night", "floor_max", 360))
+    return (f"lie_down(next_wake_min=N) "
+            f"[N={day_min}-{day_max} (Day); {night_min}-{night_max} (Night)]")
+
+
+def _wait_doc() -> str:
+    """C10 (user-final): wait description with the wait clamp numbers rendered
+    from cortex config [wake].wait_min/wait_max, and the chat-tier auto-timer
+    length from [wake.watchdog].silent_max_min. Never hardcoded."""
+    lo = int(_cortex_toml_section("wake", "wait_min", 1))
+    hi = int(_cortex_toml_section("wake", "wait_max", 20))
+    auto = int(_cortex_toml_section("wake.watchdog", "silent_max_min", 20))
+    return (f"wait(N) [N={lo}-{hi}] — one wait per wake. Each user reply "
+            f"triggers a {auto}-min auto timer and resets all other timers. "
+            f"The auto timer also counts — expiry brings the 3-choice menu.")
 
 
 def register(marrow_tool, db: str | None = None) -> None:
@@ -380,6 +402,10 @@ def register(marrow_tool, db: str | None = None) -> None:
         return
     marrow_tool()(wish)
     if _CORTEX:
+        # Render the clamp numbers from cortex config into the tool descriptions
+        # at registration (C9/C10) — never hardcoded in the docstring.
+        lie_down.__doc__ = _lie_down_doc()
+        wait.__doc__ = _wait_doc()
         marrow_tool()(lie_down)
         marrow_tool()(wait)
         marrow_tool()(say)
@@ -696,6 +722,83 @@ def tuck_in_marker() -> str:
     machine line, not a real user message — excluded from the user-wake reset."""
     cx = config.load().get("cortex", {}) or {}
     return str(cx.get("tuck_in_marker") or "[NEW ROUND]").strip()
+
+
+# C2 free-round menu body (user-final, verbatim). The cortex watchdog writes ONLY
+# the [NEW ROUND] marker to wake_signal.log; that marker line renders on screen in
+# the ear Monitor event. This menu body is injected INVISIBLY via UserPromptSubmit
+# additionalContext on the marker turn, so she never SEES the menu text in the
+# cortex window. Config-first: override via marrow [cortex].tuck_in_menu_text.
+_DEFAULT_TUCK_IN_MENU = (
+    "No need to wait in silence — 3 choices: "
+    "1) talk to her in session (second person) or msg another session  "
+    "2) do your own things — see Playbook  3) lie_down..."
+)
+
+
+def tuck_in_menu_text() -> str | None:
+    """The 3-choice free-round menu (C2) injected as additionalContext when the
+    cortex ear surfaces a [NEW ROUND] marker turn — the covert half that never
+    renders on screen. None/blank -> inject nothing (marker-only round)."""
+    cx = config.load().get("cortex", {}) or {}
+    if "tuck_in_menu_text" in cx:
+        txt = str(cx.get("tuck_in_menu_text") or "").strip()
+        return txt or None
+    return _DEFAULT_TUCK_IN_MENU
+
+
+# ── Covert machine-marker bodies (FUSE / CTL). Cortex writes only the marker line
+#    to wake_signal.log; the ear Monitor surfaces just the marker, and these full
+#    instruction bodies are injected INVISIBLY via UserPromptSubmit additionalContext
+#    so she never SEES the instruction text in the cortex window. Config-first. ──
+
+_FUSE_MARKER = "[FUSE]"
+_CTL_MARKER = "[CTL]"
+
+_DEFAULT_FUSE_PROMPT = (
+    "Summarise this whole session into one section and append it to handoff.md — "
+    "follow the format and style of the preceding sections. Call "
+    "lie_down(rotate=True) when done."
+)
+
+_DEFAULT_CTL_SLEEP = (
+    "Wrap up this turn: {rotate}lie_down(next_wake_min={mins}{rotate_arg})."
+)
+
+_CTL_ARGS_RE = _re.compile(r"mins=(\d+)\s+rotate=(true|false)", _re.IGNORECASE)
+
+
+def fuse_prompt_text() -> str | None:
+    """FUSE instruction body injected as additionalContext when the cortex ear
+    surfaces a [FUSE] marker turn. Override [cortex].fuse_prompt_text; blank/None
+    -> inject nothing (marker-only)."""
+    cx = config.load().get("cortex", {}) or {}
+    if "fuse_prompt_text" in cx:
+        txt = str(cx.get("fuse_prompt_text") or "").strip()
+        return txt or None
+    return _DEFAULT_FUSE_PROMPT
+
+
+def ctl_sleep_text(marker_line: str) -> str | None:
+    """CTL sleep instruction body injected as additionalContext when the cortex
+    ear surfaces a [CTL] marker turn. The marker line carries the dynamic args
+    ('mins=N rotate=true|false'); this renders {mins}/{rotate}/{rotate_arg} from
+    them. Override [cortex].ctl_sleep_text; blank/None -> inject nothing."""
+    cx = config.load().get("cortex", {}) or {}
+    if "ctl_sleep_text" in cx:
+        tmpl = str(cx.get("ctl_sleep_text") or "").strip()
+        if not tmpl:
+            return None
+    else:
+        tmpl = _DEFAULT_CTL_SLEEP
+    m = _CTL_ARGS_RE.search(marker_line or "")
+    mins = m.group(1) if m else ""
+    rotate = bool(m and m.group(2).lower() == "true")
+    rot = "write your handoff then " if rotate else ""
+    rotate_arg = ", rotate=true" if rotate else ""
+    return (tmpl.replace("{mins}", str(mins))
+            .replace("{rotate_arg}", rotate_arg)
+            .replace("{rotate}", rot))
 
 
 _HARNESS_TAG_RE = _re.compile(r"^<[a-z][a-z0-9_-]*>")
@@ -1210,8 +1313,12 @@ def _cortex_toml_path() -> Path:
     return Path(config.db_path()).parent / "cortex.toml"
 
 
-def _cortex_night(key: str, default):
-    """One value from cortex.toml [night]. Tolerant: missing file/key -> default."""
+def _cortex_toml_section(section: str, key: str, default):
+    """One value from cortex.toml [section] (dotted `section` walks nested TOML
+    tables, e.g. "wake.watchdog" -> data["wake"]["watchdog"]). Tolerant: missing
+    file/key -> default. marrow venv cannot import cortex, so the few numbers the
+    tool descriptions render (wait/lie_down clamps) are read straight from the
+    shared cortex.toml."""
     import tomllib
     try:
         p = _cortex_toml_path()
@@ -1219,10 +1326,18 @@ def _cortex_night(key: str, default):
             return default
         with p.open("rb") as f:
             data = tomllib.load(f)
-        v = (data.get("night", {}) or {}).get(key)
+        node = data
+        for part in section.split("."):
+            node = (node or {}).get(part, {})
+        v = (node or {}).get(key)
         return v if v is not None else default
     except (OSError, ValueError):
         return default
+
+
+def _cortex_night(key: str, default):
+    """One value from cortex.toml [night]. Tolerant: missing file/key -> default."""
+    return _cortex_toml_section("night", key, default)
 
 
 def _cortex_night_mode() -> bool:

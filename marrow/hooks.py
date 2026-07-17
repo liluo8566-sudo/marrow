@@ -2112,8 +2112,38 @@ def user_prompt_submit() -> int:
         # A tuck-in is a machine line but never a wake BELL, so this guard is
         # checked before the wake-marker branch. The tuck-in falls through to
         # the is_machine_line gate below (no user-wake reset either).
+        # The C2 menu body is injected here COVERTLY (additionalContext, never
+        # rendered on screen) so she never SEES the menu text in the window —
+        # the cortex log carries only the marker + note, not the menu.
         _tuck = cortex_bridge.tuck_in_marker()
         if _tuck and cortex_bridge.line_starts_with_marker(_prompt, _tuck):
+            _menu = cortex_bridge.tuck_in_menu_text()
+            if _menu:
+                json.dump({"hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": _menu,
+                }}, sys.stdout)
+            return 0
+        # FUSE / CTL machine-marker turns arriving down the ear channel: cortex
+        # wrote ONLY the marker (+ CTL args) to wake_signal.log; the full
+        # instruction body is injected here COVERTLY so she never SEES it on
+        # screen. Line-start shape check tolerates the ear envelope wrapper; a real
+        # user prompt merely quoting the marker mid-sentence never matches.
+        if cortex_bridge.line_starts_with_marker(_prompt, cortex_bridge._FUSE_MARKER):
+            _body = cortex_bridge.fuse_prompt_text()
+            if _body:
+                json.dump({"hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": _body,
+                }}, sys.stdout)
+            return 0
+        if cortex_bridge.line_starts_with_marker(_prompt, cortex_bridge._CTL_MARKER):
+            _body = cortex_bridge.ctl_sleep_text(_prompt)
+            if _body:
+                json.dump({"hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": _body,
+                }}, sys.stdout)
             return 0
         # Wake turn → inject the full wakeup note. Marker match only; missing or
         # empty note injects nothing (never crashes). The line may carry a
