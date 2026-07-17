@@ -2124,6 +2124,27 @@ def user_prompt_submit() -> int:
                     "additionalContext": _menu,
                 }}, sys.stdout)
             return 0
+        # FUSE / CTL machine-marker turns arriving down the ear channel: cortex
+        # wrote ONLY the marker (+ CTL args) to wake_signal.log; the full
+        # instruction body is injected here COVERTLY so she never SEES it on
+        # screen. Line-start shape check tolerates the ear envelope wrapper; a real
+        # user prompt merely quoting the marker mid-sentence never matches.
+        if cortex_bridge.line_starts_with_marker(_prompt, cortex_bridge._FUSE_MARKER):
+            _body = cortex_bridge.fuse_prompt_text()
+            if _body:
+                json.dump({"hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": _body,
+                }}, sys.stdout)
+            return 0
+        if cortex_bridge.line_starts_with_marker(_prompt, cortex_bridge._CTL_MARKER):
+            _body = cortex_bridge.ctl_sleep_text(_prompt)
+            if _body:
+                json.dump({"hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": _body,
+                }}, sys.stdout)
+            return 0
         # Wake turn → inject the full wakeup note. Marker match only; missing or
         # empty note injects nothing (never crashes). The line may carry a
         # cancellation-epoch token ' {g<gen>:<sid>}': a STALE token (a newer

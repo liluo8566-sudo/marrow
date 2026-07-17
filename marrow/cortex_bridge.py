@@ -744,6 +744,60 @@ def tuck_in_menu_text() -> str | None:
     return _DEFAULT_TUCK_IN_MENU
 
 
+# ── Covert machine-marker bodies (FUSE / CTL). Cortex writes only the marker line
+#    to wake_signal.log; the ear Monitor surfaces just the marker, and these full
+#    instruction bodies are injected INVISIBLY via UserPromptSubmit additionalContext
+#    so she never SEES the instruction text in the cortex window. Config-first. ──
+
+_FUSE_MARKER = "[FUSE]"
+_CTL_MARKER = "[CTL]"
+
+_DEFAULT_FUSE_PROMPT = (
+    "Summarise this whole session into one section and append it to handoff.md — "
+    "follow the format and style of the preceding sections. Call "
+    "lie_down(rotate=True) when done."
+)
+
+_DEFAULT_CTL_SLEEP = (
+    "Wrap up this turn: {rotate}lie_down(next_wake_min={mins}{rotate_arg})."
+)
+
+_CTL_ARGS_RE = _re.compile(r"mins=(\d+)\s+rotate=(true|false)", _re.IGNORECASE)
+
+
+def fuse_prompt_text() -> str | None:
+    """FUSE instruction body injected as additionalContext when the cortex ear
+    surfaces a [FUSE] marker turn. Override [cortex].fuse_prompt_text; blank/None
+    -> inject nothing (marker-only)."""
+    cx = config.load().get("cortex", {}) or {}
+    if "fuse_prompt_text" in cx:
+        txt = str(cx.get("fuse_prompt_text") or "").strip()
+        return txt or None
+    return _DEFAULT_FUSE_PROMPT
+
+
+def ctl_sleep_text(marker_line: str) -> str | None:
+    """CTL sleep instruction body injected as additionalContext when the cortex
+    ear surfaces a [CTL] marker turn. The marker line carries the dynamic args
+    ('mins=N rotate=true|false'); this renders {mins}/{rotate}/{rotate_arg} from
+    them. Override [cortex].ctl_sleep_text; blank/None -> inject nothing."""
+    cx = config.load().get("cortex", {}) or {}
+    if "ctl_sleep_text" in cx:
+        tmpl = str(cx.get("ctl_sleep_text") or "").strip()
+        if not tmpl:
+            return None
+    else:
+        tmpl = _DEFAULT_CTL_SLEEP
+    m = _CTL_ARGS_RE.search(marker_line or "")
+    mins = m.group(1) if m else ""
+    rotate = bool(m and m.group(2).lower() == "true")
+    rot = "write your handoff then " if rotate else ""
+    rotate_arg = ", rotate=true" if rotate else ""
+    return (tmpl.replace("{mins}", str(mins))
+            .replace("{rotate_arg}", rotate_arg)
+            .replace("{rotate}", rot))
+
+
 _HARNESS_TAG_RE = _re.compile(r"^<[a-z][a-z0-9_-]*>")
 
 
