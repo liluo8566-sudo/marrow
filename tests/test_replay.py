@@ -172,10 +172,10 @@ def test_source_ct_excluded(tmp_path, monkeypatch):
 
 def test_destination_channel_excluded(tmp_path, monkeypatch):
     db = _fresh_db(tmp_path)
-    _setup(monkeypatch, tmp_path, db)
-    _ev(db, SID_OTHER, "user", "should never reach cortex")
-    # a session ON channel ct receives nothing at all — no seed, no cursor write
-    assert hooks._replay_context(SID_SELF, "ct") == ""
+    _setup(monkeypatch, tmp_path, db, {"exclude_target_channels": ["foo"]})
+    _ev(db, SID_OTHER, "user", "should never reach an excluded channel")
+    # a session ON an excluded channel receives nothing — no seed, no cursor write
+    assert hooks._replay_context(SID_SELF, "foo") == ""
     assert _cursor(SID_SELF) is None
 
 

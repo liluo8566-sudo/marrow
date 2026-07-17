@@ -225,51 +225,12 @@ def _replay_truncate(text: str, limit: int) -> str:
     return text[: max(limit - 1, 0)] + "…"
 
 
-def _replay_context(sid: str, channel: str) -> str:
-    """Cross-session replay inject. Returns '' when disabled, when this session's
-    channel is an excluded target, on first sight of the sid (seed only), or when
-    no new events from OTHER sessions exist. Cursor advances after a render
-    decision (ambient — advances even when overflow turns are folded)."""
-    if not sid:
-        return ""
-    cfg = (config.load().get("replay", {}) or {})
-    if not cfg.get("enabled", True):
-        return ""
-    if channel in (cfg.get("exclude_target_channels", ["ct"]) or []):
-        return ""
-
-    max_turns = int(cfg.get("max_turns", 2))
-    per_chars = int(cfg.get("per_msg_chars", 150))
-    header = cfg.get("header", "## Recent replay from other sessions")
-
-    conn = storage.connect(config.db_path())
-    try:
-        cursor = _load_replay_cursor(sid)
-        if cursor is None:
-            row = conn.execute("SELECT MAX(id) AS m FROM events").fetchone()
-            seed = int(row["m"]) if row and row["m"] is not None else 0
-            _save_replay_cursor(sid, seed)
-            return ""  # first sight — future-only, never backfill
-
-        rows = conn.execute(
-            "SELECT id, session_id, role, content, timestamp, channel FROM events "
-            "WHERE id > ? AND session_id != ? AND role IN ('user','assistant') "
-            "AND COALESCE(channel,'') != 'ct' ORDER BY id ASC",
-            (cursor, sid),
-        ).fetchall()
-    except sqlite3.OperationalError:
-        return ""
-    finally:
-        conn.close()
-
-    if not rows:
-        return ""
-
-    max_id = rows[-1]["id"]
+def _replay_render(rows, header: str, max_turns: int, per_chars: int) -> str:
+    """Group events into turns and render the P3 replay block, or '' when empty.
+    A user event opens a turn; consecutive user msgs stay in the same turn; the
+    following assistant msgs close it. Overflow beyond max_turns folds to a
+    count. Shared by the per-sid cursor path and the cortex last_note_ts path."""
     tz = config.get_tz()
-
-    # Group into turns: a user event opens a turn; consecutive user msgs stay in
-    # the same turn; the following assistant msgs close it. Next user reopens.
     turns: list[list[dict]] = []
     for r in rows:
         content = transcript.strip_media_markers(r["content"])
@@ -289,16 +250,8 @@ def _replay_context(sid: str, channel: str) -> str:
             turns.append([item])
         else:
             turns[-1].append(item)
-
-    # Advance cursor on a render decision regardless of fold (ambient replay).
-    _save_replay_cursor(sid, max_id)
-
     if not turns:
         return ""
-
-    # Keep the NEWEST turns: the cursor advances to max_id unconditionally, so
-    # folded turns are silenced forever — the newest are what matters for ambient
-    # awareness. The older overflow folds into a count.
     kept = turns[-max_turns:]
     folded = len(turns) - len(kept)
     lines = [header]
@@ -310,6 +263,145 @@ def _replay_context(sid: str, channel: str) -> str:
     if folded > 0:
         lines.append(f"+{folded} earlier turns")
     return "\n".join(lines)
+
+
+def _replay_cortex(header: str, max_turns: int, per_chars: int) -> str:
+    """Cortex-window replay on a normal turn, sharing note.py's last_note_ts diff
+    cursor (wake_state.json) so a turn delivered here is never re-delivered by the
+    next note, and vice versa. Reads events newer than the baseline (excludes ct
+    source, matching note.py semantics), renders P3 format, advances last_note_ts
+    to the newest rendered ts under the shared wake-state flock."""
+    p = cortex_bridge._cortex_wake_state_path()
+    conn = storage.connect(config.db_path())
+    try:
+        with cortex_bridge._wake_state_lock(p):
+            d = cortex_bridge._wake_state_load(p)
+            since_ts = d.get("last_note_ts")
+            where_since = " AND timestamp > ?" if since_ts else ""
+            params = ((since_ts,) if since_ts else ()) + (max_turns * 4,)
+            try:
+                rows = conn.execute(
+                    "SELECT id, session_id, role, content, timestamp, channel "
+                    "FROM events WHERE role IN ('user','assistant') "
+                    "AND COALESCE(channel,'') != 'ct'" + where_since
+                    + " ORDER BY id DESC LIMIT ?",
+                    params,
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return ""
+            if not rows:
+                return ""
+            rows = list(reversed(rows))  # chronological
+            cutoff = None
+            for r in rows:
+                ts = r["timestamp"]
+                if ts and (cutoff is None or ts > cutoff):
+                    cutoff = ts
+            block = _replay_render(rows, header, max_turns, per_chars)
+            if not block:
+                return ""
+            if cutoff:
+                cortex_bridge._ws_ensure_epoch(d)
+                d["last_note_ts"] = cutoff
+                cortex_bridge._wake_state_save(p, d)
+            return block
+    finally:
+        conn.close()
+
+
+def _her_last_user_age_min(conn, sid: str) -> float | None:
+    """Minutes since this sid's most recent user-role event in events, or None
+    when no prior user event exists (first turn). The current turn's message is
+    not yet archived (Stop-hook archives at turn end), so this reflects the last
+    completed turn."""
+    try:
+        row = conn.execute(
+            "SELECT MAX(timestamp) AS ts FROM events "
+            "WHERE session_id = ? AND role = 'user'",
+            (sid,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if not row or not row["ts"]:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(row["ts"]).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return (datetime.now(timezone.utc) - dt).total_seconds() / 60.0
+
+
+def _replay_context(sid: str, channel: str) -> str:
+    """Cross-session replay inject. Returns '' when disabled, when this session's
+    channel is an excluded target, on first sight of the sid (seed only), when
+    gated by idle_gate_min, or when no new events from OTHER sessions exist.
+
+    Cortex windows (MARROW_CORTEX) take the last_note_ts diff cursor shared with
+    note.py — the exclude_target_channels gate and the per-sid cursor never apply
+    there. Every cortex turn is eligible (no idle gate)."""
+    if not sid:
+        return ""
+    cfg = (config.load().get("replay", {}) or {})
+    if not cfg.get("enabled", True):
+        return ""
+
+    max_turns = int(cfg.get("max_turns", 2))
+    per_chars = int(cfg.get("per_msg_chars", 150))
+    header = cfg.get("header", "## Recent replay from other sessions")
+
+    if cortex_bridge.is_cortex_session():
+        try:
+            return _replay_cortex(header, max_turns, per_chars)
+        except Exception:
+            return ""
+
+    if channel in (cfg.get("exclude_target_channels", []) or []):
+        return ""
+
+    idle_gate_min = float(cfg.get("idle_gate_min", 20))
+
+    conn = storage.connect(config.db_path())
+    try:
+        cursor = _load_replay_cursor(sid)
+        if cursor is None:
+            row = conn.execute("SELECT MAX(id) AS m FROM events").fetchone()
+            seed = int(row["m"]) if row and row["m"] is not None else 0
+            _save_replay_cursor(sid, seed)
+            return ""  # first sight — future-only, never backfill
+
+        # Idle gate: inject only when her last completed turn in THIS sid is
+        # >= idle_gate_min old (or no prior user event = first turn). While
+        # gated, hold the cursor — nothing lost; the fold caps the burst on
+        # release. idle_gate_min = 0 disables the gate (every turn).
+        if idle_gate_min > 0:
+            age = _her_last_user_age_min(conn, sid)
+            if age is not None and age < idle_gate_min:
+                return ""
+
+        rows = conn.execute(
+            "SELECT id, session_id, role, content, timestamp, channel FROM events "
+            "WHERE id > ? AND session_id != ? AND role IN ('user','assistant') "
+            "AND COALESCE(channel,'') != 'ct' ORDER BY id ASC",
+            (cursor, sid),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return ""
+    finally:
+        conn.close()
+
+    if not rows:
+        return ""
+
+    max_id = rows[-1]["id"]
+
+    block = _replay_render(rows, header, max_turns, per_chars)
+
+    # Advance cursor on a render decision regardless of fold (ambient replay).
+    _save_replay_cursor(sid, max_id)
+
+    return block
 
 
 def _ensure_ct_activity(conn: sqlite3.Connection) -> None:
