@@ -721,6 +721,29 @@ def tuck_in_marker() -> str:
     return str(cx.get("tuck_in_marker") or "[NEW ROUND]").strip()
 
 
+# C2 free-round menu body (user-final, verbatim). The cortex watchdog writes ONLY
+# the [NEW ROUND] marker to wake_signal.log; that marker line renders on screen in
+# the ear Monitor event. This menu body is injected INVISIBLY via UserPromptSubmit
+# additionalContext on the marker turn, so she never SEES the menu text in the
+# cortex window. Config-first: override via marrow [cortex].tuck_in_menu_text.
+_DEFAULT_TUCK_IN_MENU = (
+    "No need to wait in silence — 3 choices: "
+    "1) talk to her in session (second person) or msg another session  "
+    "2) do your own things — see Playbook  3) lie_down..."
+)
+
+
+def tuck_in_menu_text() -> str | None:
+    """The 3-choice free-round menu (C2) injected as additionalContext when the
+    cortex ear surfaces a [NEW ROUND] marker turn — the covert half that never
+    renders on screen. None/blank -> inject nothing (marker-only round)."""
+    cx = config.load().get("cortex", {}) or {}
+    if "tuck_in_menu_text" in cx:
+        txt = str(cx.get("tuck_in_menu_text") or "").strip()
+        return txt or None
+    return _DEFAULT_TUCK_IN_MENU
+
+
 _HARNESS_TAG_RE = _re.compile(r"^<[a-z][a-z0-9_-]*>")
 
 
