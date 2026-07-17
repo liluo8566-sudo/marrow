@@ -222,3 +222,37 @@ def test_cli_session_note_injected_on_normal_turn(tmp_path, monkeypatch, capsys)
     ctx = _ctx(capsys)
     assert "note for A" in ctx
     assert _status(db, 1)["status"] == "sent"
+
+
+def test_ct_note_injected_on_normal_cortex_turn(tmp_path, monkeypatch, capsys):
+    """P12 fix: a ct-targeted note is delivered on a NORMAL cortex turn (no wake
+    marker), not only on the wake turn — the normal path now passes
+    is_cortex=is_cortex_session()."""
+    monkeypatch.setenv("MARROW_CORTEX", "1")
+    monkeypatch.setenv("MARROW_CHANNEL", "ct")
+    db = _fresh_db(tmp_path)
+    _enable_cortex(monkeypatch, tmp_path, db)
+    _mk(db, "ct", "covert note on a normal turn", from_channel="tg")
+    _stdin(monkeypatch, {"session_id": "ctsid9", "cwd": str(tmp_path),
+                         "prompt": "an ordinary cortex reply, not a wake bell"})
+    assert hooks.main(["user_prompt_submit"]) == 0
+    assert "covert note on a normal turn" in _ctx(capsys)
+    assert _status(db, 1)["status"] == "sent"
+
+
+def test_ct_note_normal_turn_consume_once(tmp_path, monkeypatch, capsys):
+    """A ct note claimed on one normal turn is not re-delivered on the next."""
+    monkeypatch.setenv("MARROW_CORTEX", "1")
+    monkeypatch.setenv("MARROW_CHANNEL", "ct")
+    db = _fresh_db(tmp_path)
+    _enable_cortex(monkeypatch, tmp_path, db)
+    _mk(db, "ct", "once only")
+    _stdin(monkeypatch, {"session_id": "ctsidA", "cwd": str(tmp_path),
+                         "prompt": "turn one"})
+    assert hooks.main(["user_prompt_submit"]) == 0
+    assert "once only" in _ctx(capsys)
+    _stdin(monkeypatch, {"session_id": "ctsidA", "cwd": str(tmp_path),
+                         "prompt": "turn two"})
+    assert hooks.main(["user_prompt_submit"]) == 0
+    assert "once only" not in _ctx(capsys)
+    assert _status(db, 1)["status"] == "sent"

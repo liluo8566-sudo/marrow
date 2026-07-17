@@ -15,7 +15,7 @@ import sqlite_vec
 
 from . import config
 
-SCHEMA_VERSION = 40
+SCHEMA_VERSION = 41
 
 # Tables whose id must never be reused (freed-id-reuse disease family): a plain
 # INTEGER PRIMARY KEY hands a deleted id back to the next INSERT, and side-tables
@@ -264,7 +264,11 @@ CREATE TABLE IF NOT EXISTS outbox (
   retry_count INTEGER NOT NULL DEFAULT 0,
   watch_reply INTEGER NOT NULL DEFAULT 0,
   watch_timeout_min INTEGER,
-  watch_state TEXT
+  watch_state TEXT,
+  -- v41: reply receipt — bridge stamps her reply on every sent tg/wx note.
+  replied_at TEXT,
+  reply_text TEXT,
+  receipt_seen INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_outbox_status_target ON outbox(status, target);
 CREATE INDEX IF NOT EXISTS idx_outbox_watch_state_sent
@@ -546,6 +550,9 @@ def init_db(path: str | None = None) -> sqlite3.Connection:
             ("milestones", "updated_at", "TEXT"),
             ("sessions", "cwd", "TEXT"),
             ("events", "updated_at", "TEXT"),
+            ("outbox", "replied_at", "TEXT"),
+            ("outbox", "reply_text", "TEXT"),
+            ("outbox", "receipt_seen", "INTEGER NOT NULL DEFAULT 0"),
         ):
             try:
                 conn.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {decl}")
@@ -594,6 +601,7 @@ def init_db(path: str | None = None) -> sqlite3.Connection:
         _migrate_to_v38(conn)
         _migrate_to_v39(conn)
         _migrate_to_v40(conn)
+        _migrate_to_v41(conn)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     return conn
 
@@ -1655,6 +1663,19 @@ def _migrate_to_v40(conn: sqlite3.Connection) -> None:
     if v >= 40:
         return
     conn.execute("PRAGMA user_version=40")
+
+
+def _migrate_to_v41(conn: sqlite3.Connection) -> None:
+    """v41: outbox reply receipt — replied_at / reply_text / receipt_seen.
+
+    The three columns are added by the schema-evolution backfill loop above
+    (idempotent ALTER, non-constant default handled there); this gate only
+    bumps user_version so SCHEMA_VERSION stays monotonic.
+    """
+    v = conn.execute("PRAGMA user_version").fetchone()[0]
+    if v >= 41:
+        return
+    conn.execute("PRAGMA user_version=41")
 
 
 def get_latest_watermark(conn, sid):

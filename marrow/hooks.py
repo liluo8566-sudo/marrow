@@ -2218,14 +2218,18 @@ def user_prompt_submit() -> int:
         except Exception:
             pass
 
-    # Outbox delivery (cli/session notes): claim + render notes targeting this
-    # session (exact sid, or 'cli' broadcast for cli sessions), consume-once.
-    # ct-targeted notes are handled in the wake branch above. Seeds _nudge_line
-    # so it lands on every emit path (renders above recall / other nudges).
+    # Outbox delivery (cli/session/ct notes): claim + render notes targeting this
+    # session (exact sid, 'cli' broadcast for cli sessions, 'ct' for the cortex
+    # session), consume-once. The wake branch above delivers ct notes on a wake
+    # turn (and returns before here); a normal cortex turn never hits that branch,
+    # so ct notes must be claimed here too — same atomic claim resolves the race
+    # so a row taken by either path is never re-delivered. Seeds _nudge_line so it
+    # lands on every emit path (renders above recall / other nudges).
     _nudge_line: str | None = None
     try:
         _msg_note = outbox.deliver(
             sid, os.environ.get("MARROW_CHANNEL") or "cli",
+            is_cortex=cortex_bridge.is_cortex_session(),
             db=config.db_path())
         if _msg_note:
             _nudge_line = _msg_note

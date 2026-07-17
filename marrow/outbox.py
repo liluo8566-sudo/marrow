@@ -246,14 +246,16 @@ def list_recent(limit: int = 20, db: str | None = None) -> list[dict]:
         if from_sid:
             rows = conn.execute(
                 "SELECT id, created_at, target, status, body, watch_reply,"
-                " watch_state, sent_at FROM outbox WHERE from_sid = ?"
+                " watch_state, sent_at, replied_at, reply_text, receipt_seen"
+                " FROM outbox WHERE from_sid = ?"
                 " ORDER BY id DESC LIMIT ?",
                 (from_sid, limit),
             ).fetchall()
         else:
             rows = conn.execute(
                 "SELECT id, created_at, target, status, body, watch_reply,"
-                " watch_state, sent_at FROM outbox"
+                " watch_state, sent_at, replied_at, reply_text, receipt_seen"
+                " FROM outbox"
                 " ORDER BY id DESC LIMIT ?",
                 (limit,),
             ).fetchall()

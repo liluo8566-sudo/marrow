@@ -38,11 +38,12 @@ def _rows(p):
 def test_migration_creates_outbox_and_indexes(tmp_path):
     conn = storage.init_db(str(tmp_path / "m.db"))
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 40
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 41
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(outbox)")}
         assert {"id", "created_at", "from_sid", "from_channel", "target",
                 "body", "status", "sent_at", "retry_count", "watch_reply",
-                "watch_timeout_min", "watch_state"} <= cols
+                "watch_timeout_min", "watch_state",
+                "replied_at", "reply_text", "receipt_seen"} <= cols
         idx = {r["name"] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='index'"
             " AND tbl_name='outbox'")}
@@ -59,9 +60,13 @@ def test_migration_idempotent(tmp_path):
     # second init_db (re-run every migration) must not raise
     conn = storage.init_db(p)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 40
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 41
         storage._migrate_to_v40(conn)  # direct re-entry
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 40
+        storage._migrate_to_v41(conn)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 41
+        # receipt columns present + idempotent (re-init must not raise)
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(outbox)")}
+        assert {"replied_at", "reply_text", "receipt_seen"} <= cols
     finally:
         conn.close()
 
