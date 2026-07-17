@@ -540,10 +540,8 @@ def _run_extraction(conn, sid: str, date: str,
                     cwd: str = "", segment_seq: int = 0,
                     after_event_id: int | None = None) -> int:
     """Single sonnet call: TASK_AFFECT_DIGEST_PROMPT emits all segments.
-    dashboard + embed_pending run at tail (fail-soft).
+    embed_pending runs at tail (fail-soft).
     """
-    from . import dashboard as _dash_mod
-
     client = LLMClient(cfg=cfg)
     active_tasks = _load_active_tasks_for_sonnet(conn)
     since_ts = int(_dt.datetime.now(_dt.timezone.utc).timestamp()) - 24 * 3600
@@ -622,19 +620,6 @@ def _run_extraction(conn, sid: str, date: str,
 
     # ── tail: slow side-effects (fail-soft; cc can't kill us here) ───────────
     db = config.db_path()
-    try:
-        state_dir = str(config.DATA_DIR / "state")
-        _dash_mod.write_dashboard(
-            config.dashboard_path(), conn, state_dir=state_dir, db=db)
-    except Exception as e:  # noqa: BLE001
-        try:
-            repo.add_alert("warn", "dashboard",
-                           "sessionend_async_dashboard_failed",
-                           source="sessionend_async.py", db=db,
-                           message=f"sessionend_async dashboard write failed: {e}")
-        except Exception:  # noqa: BLE001
-            pass
-
     embed_batch = cfg.get("sessionend", {}).get("embed_batch", 200)
     if embed_batch:
         try:

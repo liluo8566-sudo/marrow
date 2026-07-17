@@ -129,35 +129,3 @@ def test_add_alert_without_db_arg_does_not_touch_real_db():
     )
 
 
-def test_reconcile_tasks_dup_path_does_not_leak(tmp_path):
-    """Exercise the historical dup-title reconcile path; assert real db
-    unchanged. The current code dedups silently, but if a future revert
-    re-adds the alert without db=, the conftest guard still catches it."""
-    before = _real_alerts_count()
-
-    db = str(tmp_path / "t.db")
-    conn = storage.init_db(db)
-    try:
-        conn.execute(
-            "INSERT INTO tasks (category, title, status, updated_at)"
-            " VALUES ('Study', 'dup title matches active id=1', 'active',"
-            "         strftime('%Y-%m-%dT%H:%M:%SZ','now'))"
-        )
-        conn.commit()
-        dash = tmp_path / "dashboard.md"
-        dash.write_text(
-            "## Tasks\n"
-            "- [ ] [Study] dup title matches active id=1\n"
-            "<!-- cand:task:ids=[] -->\n",
-            encoding="utf-8",
-        )
-        reconcile.reconcile_tasks(conn, dash)
-    finally:
-        conn.close()
-
-    after = _real_alerts_count()
-    if before is None and after is None:
-        pytest.skip("real db absent — nothing to regress against")
-    assert after == before, (
-        f"reconcile_tasks dup path leaked into real db ({before} -> {after})"
-    )

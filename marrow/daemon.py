@@ -199,39 +199,6 @@ def _tl_where(event_id, sid, before, after):
     return " AND ".join(clauses), params
 
 
-def _tl_clear_dashboard(ids: list[int]) -> None:
-    """Strip `<!-- tl:e:<id> -->` lines for the given ids from dashboard.md
-    and drop them from the tl-rendered trail's e= list. Mirrors the sid path
-    in the old db_clear (daemon.py, pre-rebuild) but scoped to e= ids since
-    role='tl' rows always render with a tl:e anchor, never tl:<sid>."""
-    if not ids:
-        return
-    import re
-    dash = Path.home() / "Desktop" / "NY" / "dashboard.md"
-    if not dash.exists():
-        return
-    text = dash.read_text(encoding="utf-8")
-    id_strs = {str(i) for i in ids}
-    for i in ids:
-        text = re.sub(rf"[^\n]*<!-- tl:e:{i} -->\n?", "", text)
-    m = re.search(r"<!-- tl-rendered:([^ ]+) -->", text)
-    if m:
-        new_parts = []
-        for part in m.group(1).split(";"):
-            if part.startswith("e="):
-                remaining = [x for x in part[2:].split(",") if x and x not in id_strs]
-                if remaining:
-                    new_parts.append("e=" + ",".join(remaining))
-            else:
-                new_parts.append(part)
-        if new_parts:
-            text = text.replace(m.group(0), f"<!-- tl-rendered:{';'.join(new_parts)} -->")
-        else:
-            text = text.replace(m.group(0), "")
-    dash.write_text(text, encoding="utf-8")
-    subprocess.run(["mw", "refresh", "--all"], capture_output=True, text=True)
-
-
 def _tl_clear(event_id: int | None, sid: str | None,
               before: str | None, after: str | None) -> dict:
     import shutil
@@ -279,7 +246,11 @@ def _tl_clear(event_id: int | None, sid: str | None,
             )
     finally:
         conn.close()
-    _tl_clear_dashboard(ids)
+    # DB rows are gone; re-render surviving surfaces so the tl line clears from
+    # daybrief (a DELETE bumps no surviving row's mtime, so the 5s loop can't
+    # detect it on its own).
+    if ids:
+        subprocess.run(["mw", "refresh", "--all"], capture_output=True, text=True)
 
     result = {"ok": True, "cleared": len(ids), "ids": ids}
     if len(lines) > 20:

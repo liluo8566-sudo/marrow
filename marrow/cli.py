@@ -18,7 +18,7 @@ import sys
 from contextlib import contextmanager
 from pathlib import Path
 
-from . import config, dashboard, repo, storage, subpages
+from . import config, repo, storage, subpages
 
 
 PROTECTED = {"id", "created_at", "updated_at", "source_hash", "occurred_at"}
@@ -282,13 +282,6 @@ def cmd_tl_silence(args) -> int:
     return 0
 
 
-def cmd_done(args) -> int:
-    return _shortcut(
-        args, "tasks",
-        "UPDATE tasks SET status='done' WHERE id=?", "status=done",
-    )
-
-
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
@@ -515,17 +508,14 @@ def _refresh_scan(conn, *, include_subpages: bool) -> None:
     Observe-only: brand-new block_ids get a first-sight baseline so the
     inserter knows they exist; existing block_ids whose body changed
     leave their content_hash baseline UNTOUCHED — that is the signal the
-    dashboard inserter uses to recognise a user edit and preserve it.
+    subpage inserter uses to recognise a user edit and preserve it.
 
-    Always: dashboard.md. With include_subpages: db-pages.
+    daybrief/monitor reconcile inside their own update(); with
+    include_subpages: observe db-pages before subpage render.
     """
     from .md_index import MdIndex
     idx = MdIndex(conn)
-    file_roots = [config.dashboard_path()]
     dir_roots = [config.sub_pages_path()] if include_subpages else []
-    for f in file_roots:
-        if Path(f).exists():
-            idx.sync_file_observe(f)
     if dir_roots:
         idx.full_scan(dir_roots, observe=True)
 
@@ -535,15 +525,11 @@ def cmd_refresh(args) -> int:
     conn = storage.init_db(db)
     try:
         _refresh_scan(conn, include_subpages=args.all)
-        dashboard.write_dashboard(
-            config.dashboard_path(), conn,
-            state_dir=str(config.DATA_DIR / "state"), db=db,
-        )
-        msg = "dashboard refreshed"
+        msg = "refreshed"
         from . import daybrief
         try:
             daybrief.update(conn)
-            msg += " + daybrief"
+            msg += " daybrief"
         except Exception as e:
             print(f"mw: daybrief refresh failed: {e}", file=sys.stderr)
         from . import monitor
@@ -617,7 +603,6 @@ _ALL_PLISTS: list[tuple[str, str]] = [
     ("mw-aging.plist",         "com.marrow.aging"),
     ("mw-daily-catchup.plist", "com.marrow.daily-catchup"),
     ("mw-daily-routine.plist", "com.marrow.daily-routine"),
-    ("mw-dashboard-tick.plist","com.marrow.dashboard-tick"),
     ("mw-db-backup.plist",     "com.marrow.db-backup"),
     ("mw-goose-bites.plist",   "com.marrow.goose-bites"),
     ("mw-watcher.plist",       "com.marrow.watcher"),
@@ -914,10 +899,6 @@ def build_parser() -> argparse.ArgumentParser:
     tls.add_argument("--sid", default=None,
                      help="override session id (default: current)")
     tls.set_defaults(fn=cmd_tl_silence)
-
-    dn = sub.add_parser("done", parents=[common])
-    dn.add_argument("id")
-    dn.set_defaults(fn=cmd_done)
 
     pn = sub.add_parser("pin", parents=[common],
                         help="set pinned=1 on a memes/milestones row")

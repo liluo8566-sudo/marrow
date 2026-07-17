@@ -146,7 +146,6 @@ FACTS:
 ===END==="""
 
     with patch("marrow.sessionend_async.LLMClient") as mock_client, \
-            patch("marrow.dashboard.write_dashboard"), \
             patch("marrow.recall.embed_pending"):
         mock_client.return_value.call.return_value = raw
         rc = sessionend_async.main(
@@ -198,7 +197,6 @@ FACTS:
 ===END==="""
 
     with patch("marrow.sessionend_async.LLMClient") as mock_client, \
-            patch("marrow.dashboard.write_dashboard"), \
             patch("marrow.recall.embed_pending"), \
             patch("marrow.sessionend_async.seg_affect", side_effect=RuntimeError("affect boom")):
         mock_client.return_value.call.return_value = raw

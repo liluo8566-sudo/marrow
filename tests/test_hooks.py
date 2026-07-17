@@ -103,10 +103,9 @@ def test_session_end_does_not_write_db_pages(env, monkeypatch, tmp_path):
     assert not sub.exists(), "session_end must not write milestone.md"
 
 
-def test_session_end_dashboard_eperm_alerts_warn(env, monkeypatch, tmp_path):
-    """session_end no longer calls dashboard.write_dashboard — the call moved
-    to sessionend_async tail. Hook must complete without calling dashboard and
-    events must still be archived."""
+def test_session_end_archives_events_no_dashboard(env, monkeypatch, tmp_path):
+    """session_end has no dashboard render (chain retired). Hook completes and
+    events are still archived per turn."""
     db, dash, _ = env
     jl = tmp_path / "s.jsonl"
     jl.write_text("\n".join(json.dumps(o) for o in [
@@ -118,14 +117,8 @@ def test_session_end_dashboard_eperm_alerts_warn(env, monkeypatch, tmp_path):
                      "content": [{"type": "text", "text": "on it"}]}},
     ]))
 
-    dash_calls: list = []
-
-    def track(*a, **k):
-        dash_calls.append(1)
-
-    with patch("marrow.dashboard.write_dashboard", side_effect=track):
-        _stdin(monkeypatch, {"session_id": "s1", "transcript_path": str(jl)})
-        rc = hooks.main(["session_end"])
+    _stdin(monkeypatch, {"session_id": "s1", "transcript_path": str(jl)})
+    rc = hooks.main(["session_end"])
     assert rc == 0
     conn = storage.connect(db)
     try:
@@ -133,7 +126,6 @@ def test_session_end_dashboard_eperm_alerts_warn(env, monkeypatch, tmp_path):
     finally:
         conn.close()
     assert n == 2
-    assert dash_calls == [], "session_end must not call write_dashboard directly"
 
 
 def test_session_end_real_error_still_alerts(env, monkeypatch, tmp_path):

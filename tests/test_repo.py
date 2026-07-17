@@ -60,25 +60,6 @@ def test_recall_budget_chars_truncates(db):
     assert total <= 4000
 
 
-# ── open_tasks ────────────────────────────────────────────────────────────────
-
-def test_open_tasks_active_only(db):
-    db.execute("INSERT INTO tasks(category,title,status) VALUES('work','A','active')")
-    db.execute("INSERT INTO tasks(category,title,status) VALUES('work','B','closed')")
-    db.commit()
-    titles = [t["title"] for t in repo.open_tasks(db)]
-    assert "A" in titles
-    assert "B" not in titles
-
-
-def test_open_tasks_due_before_null(db):
-    db.execute("INSERT INTO tasks(category,title,status,due) VALUES('work','NullDue','active',NULL)")
-    db.execute("INSERT INTO tasks(category,title,status,due) VALUES('work','HasDue','active','2026-06-01')")
-    db.commit()
-    titles = [t["title"] for t in repo.open_tasks(db)]
-    assert titles.index("HasDue") < titles.index("NullDue")
-
-
 # ── open_alerts ───────────────────────────────────────────────────────────────
 
 def test_open_alerts_unresolved_only(db):
@@ -414,61 +395,6 @@ def test_archive_events_case_insensitive_match(db):
     }]
     repo.archive_events(db, rows)
     assert _mc(db, eid) == 1
-
-
-# ── archived_today ────────────────────────────────────────────────────────────
-
-def test_archived_today_returns_done_today(tmp_path, monkeypatch):
-    """2 tasks done today + 1 done yesterday: only 2 returned."""
-    from datetime import datetime, timedelta, timezone
-    from marrow import top_sections
-    p = str(tmp_path / "a.db")
-    conn = storage.init_db(p)
-
-    cutoff = top_sections._day_cutoff_utc()
-    # Today = 1h after cutoff
-    today_ts = (cutoff + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    # Also today = 2h after cutoff
-    today_ts2 = (cutoff + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    # Yesterday = 1h before cutoff
-    yesterday_ts = (cutoff - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    conn.execute(
-        "INSERT INTO tasks(category,title,status,updated_at) VALUES('Project','Done-A','done',?)",
-        (today_ts,),
-    )
-    conn.execute(
-        "INSERT INTO tasks(category,title,status,updated_at) VALUES('Study','Done-B','done',?)",
-        (today_ts2,),
-    )
-    conn.execute(
-        "INSERT INTO tasks(category,title,status,updated_at) VALUES('Daily','Done-Yesterday','done',?)",
-        (yesterday_ts,),
-    )
-    conn.execute(
-        "INSERT INTO tasks(category,title,status) VALUES('Project','Active-Now','active')",
-    )
-    conn.commit()
-
-    results = repo.archived_today(conn)
-    conn.close()
-
-    titles = [r["title"] for r in results]
-    assert "Done-A" in titles
-    assert "Done-B" in titles
-    assert "Done-Yesterday" not in titles
-    assert "Active-Now" not in titles
-    assert len(results) == 2
-    # Sorted by updated_at ASC
-    assert titles.index("Done-A") < titles.index("Done-B")
-
-
-def test_archived_today_empty_when_none(tmp_path):
-    p = str(tmp_path / "b.db")
-    conn = storage.init_db(p)
-    results = repo.archived_today(conn)
-    conn.close()
-    assert results == []
 
 
 # ── sessions ─────────────────────────────────────────────────────────────────

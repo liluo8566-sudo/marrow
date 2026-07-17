@@ -20,7 +20,6 @@ from marrow.sync_loop import (
     SyncTarget,
     USER_ACTIVE_WINDOW_S,
     _MTIME_EPSILON_S,
-    last_db_mtime_dashboard,
     last_db_mtime_daybrief,
     last_db_mtime_subpage,
 )
@@ -97,36 +96,6 @@ def test_last_db_mtime_subpage_with_data(tmp_path):
     c.close()
 
 
-# ---------------------------------------------------------------------------
-# last_db_mtime_dashboard
-# ---------------------------------------------------------------------------
-
-def test_last_db_mtime_dashboard_no_tables():
-    c = _conn()
-    assert last_db_mtime_dashboard(c) is None
-
-
-def test_last_db_mtime_dashboard_aggregates_across_tables(tmp_path):
-    """db_mtime = max across affect/tasks/milestones/alerts."""
-    from marrow import storage
-    db = str(tmp_path / "t.db")
-    c = storage.init_db(db)
-    # Insert into affect (created_at) and tasks (updated_at) with different times
-    c.execute(
-        "INSERT INTO affect (date,ep,valence,arousal,importance,created_at)"
-        " VALUES ('2026-05-27',1,0.7,0.5,3,'2026-05-27T09:00:00Z')"
-    )
-    c.execute(
-        "INSERT INTO tasks (category,title,updated_at)"
-        " VALUES ('project','t1','2026-05-27T12:00:00Z')"
-    )
-    c.commit()
-    ts = last_db_mtime_dashboard(c)
-    assert ts is not None
-    # Should pick max: tasks updated_at 12:00 > affect created_at 09:00
-    from datetime import datetime, timezone
-    expected = datetime(2026, 5, 27, 12, 0, 0, tzinfo=timezone.utc).timestamp()
-    assert abs(ts - expected) < 1.0
     c.close()
 
 

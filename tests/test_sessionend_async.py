@@ -1054,47 +1054,15 @@ def test_write_final_audit_records_user_count(db_env):
     assert re.match(r"ok,user_count=\d+", final), f"unexpected final summary: {final!r}"
 
 
-# ── Tail: dashboard + embed_pending in sessionend_async ──────────────────────
+# ── Tail: embed_pending in sessionend_async ──────────────────────────────────
 
-def test_sessionend_async_writes_dashboard_at_tail(db_env, tmp_path,
-                                                    monkeypatch):
-    """main() calls dashboard.write_dashboard once after both LLM calls."""
+def test_sessionend_async_embeds_at_tail(db_env, tmp_path, monkeypatch):
+    """main() completes cleanly (no dashboard tail) and writes an ok final audit."""
     db, _ = db_env
-    sid = "dash-tail-sid"
+    sid = "embed-tail-sid"
     _insert_events(db, sid, count=10, role="user")
-    monkeypatch.setattr(config, "dashboard_path",
-                        lambda: str(tmp_path / "dashboard.md"))
 
-    calls: list = []
-
-    def fake_write_dashboard(path, conn, state_dir, db):  # noqa: ARG001
-        calls.append((path, db))
-
-    with patch("marrow.sessionend_async.LLMClient") as MockClient, \
-         patch("marrow.dashboard.write_dashboard",
-               side_effect=fake_write_dashboard):
-        MockClient.return_value.call.return_value = "echo done"
-        from marrow import sessionend_async
-        rc = sessionend_async.main(["--sid", sid])
-
-    assert rc == 0
-    assert len(calls) == 1, f"expected 1 write_dashboard call, got {len(calls)}"
-    assert calls[0][1] == db
-
-
-def test_sessionend_async_continues_when_dashboard_fails(db_env, tmp_path,
-                                                          monkeypatch):
-    """write_dashboard raises -> _write_final_audit still writes ok row and
-    an alert row exists in alerts."""
-    db, _ = db_env
-    sid = "dash-fail-sid"
-    _insert_events(db, sid, count=10, role="user")
-    monkeypatch.setattr(config, "dashboard_path",
-                        lambda: str(tmp_path / "dashboard.md"))
-
-    with patch("marrow.sessionend_async.LLMClient") as MockClient, \
-         patch("marrow.dashboard.write_dashboard",
-               side_effect=RuntimeError("dashboard exploded")):
+    with patch("marrow.sessionend_async.LLMClient") as MockClient:
         MockClient.return_value.call.return_value = "echo done"
         from marrow import sessionend_async
         rc = sessionend_async.main(["--sid", sid])
@@ -1103,58 +1071,6 @@ def test_sessionend_async_continues_when_dashboard_fails(db_env, tmp_path,
     rows = _audit_rows(db, sid)
     assert rows[-1]["summary"].startswith("ok,user_count="), (
         f"final audit should be ok, got: {rows[-1]['summary']!r}")
-
-    conn = storage.connect(db)
-    try:
-        alert_row = conn.execute(
-            "SELECT * FROM alerts WHERE type='dashboard' LIMIT 1"
-        ).fetchone()
-    finally:
-        conn.close()
-    assert alert_row is not None, "expected an alert row for dashboard failure"
-
-
-def test_session_end_hook_no_longer_calls_dashboard(db_env, monkeypatch,
-                                                     tmp_path):
-    """session_end hook must NOT call dashboard.write_dashboard directly.
-    Dashboard write moved to sessionend_async tail."""
-    import io
-    import json
-
-    db, _ = db_env
-    jl = tmp_path / "s.jsonl"
-    jl.write_text(json.dumps({
-        "type": "user", "sessionId": "sid-nodash",
-        "timestamp": "2026-05-23T10:00:00Z",
-        "message": {"role": "user", "content": "hook no-dash test"},
-    }))
-
-    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(
-        {"session_id": "sid-nodash", "transcript_path": str(jl)})))
-    monkeypatch.setattr(config, "dashboard_path",
-                        lambda: str(tmp_path / "dashboard.md"))
-    monkeypatch.setattr(config, "db_pages_path",
-                        lambda: str(tmp_path / "db-pages"))
-    monkeypatch.setattr(config, "db_pages_state_path",
-                        lambda: str(tmp_path / "db_state"))
-    monkeypatch.setattr(config, "sub_pages_path",
-                        lambda: str(tmp_path / "db-pages"))
-    monkeypatch.setattr(config, "sub_pages_state_path",
-                        lambda: str(tmp_path / "db_state"))
-
-    dash_calls: list = []
-
-    def track_dash(*a, **kw):
-        dash_calls.append(1)
-
-    with patch("marrow.hooks.popen_detach_lazy", return_value=None), \
-         patch("marrow.dashboard.write_dashboard", side_effect=track_dash):
-        from marrow import hooks
-        rc = hooks.session_end()
-
-    assert rc == 0
-    assert dash_calls == [], (
-        f"session_end hook must not call write_dashboard; got {len(dash_calls)} call(s)")
 
 
 def test_session_end_hook_no_longer_calls_embed_pending(db_env, monkeypatch,

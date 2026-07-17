@@ -133,42 +133,6 @@ def test_seg_task_cand_cosine_embedder_missing_still_inserts(db, monkeypatch):
     assert alert is not None
 
 
-# ── tasks: reconcile._insert_unanchored_tasks cosine layer ──────────────────
-
-def test_reconcile_unanchored_cosine_hit_skips(db, monkeypatch):
-    db.execute(
-        "INSERT INTO tasks (category, title, status) VALUES (?, ?, 'active')",
-        ("Study", "AT3 essay"),
-    )
-    db.commit()
-    monkeypatch.setattr(
-        semantic_dedup, "cosine_max", lambda conn, q, t: 0.92,
-    )
-    rpt = reconcile.ReconcileReport()
-    reconcile._insert_unanchored_tasks(
-        db, [(" ", "Study | AT3 论文")], rpt,
-    )
-    assert rpt.inserted == 0
-    cnt = db.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
-    assert cnt == 1
-
-
-def test_reconcile_unanchored_cosine_miss_inserts(db, monkeypatch):
-    db.execute(
-        "INSERT INTO tasks (category, title, status) VALUES (?, ?, 'active')",
-        ("Study", "AT3 essay"),
-    )
-    db.commit()
-    monkeypatch.setattr(
-        semantic_dedup, "cosine_max", lambda conn, q, t: 0.30,
-    )
-    rpt = reconcile.ReconcileReport()
-    reconcile._insert_unanchored_tasks(
-        db, [(" ", "Projects | brand new thing")], rpt,
-    )
-    assert rpt.inserted == 1
-
-
 # ── milestones: write_milestone_cand cosine layer ───────────────────────────
 
 _MS_RAW = (

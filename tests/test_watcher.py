@@ -124,20 +124,18 @@ def test_watcher_boot_reconcile_syncs(tmp_path, monkeypatch):
     db_pages = tmp_path / "db-pages"
     db_pages.mkdir()
     (db_pages / "x.md").write_text("- a <!-- id:1 -->\n")
-    dashboard = tmp_path / "dashboard.md"
-    dashboard.write_text("- d <!-- id:9 -->\n")
     def fake_load():
-        return {"paths": {"db": str(db), "dashboard": str(dashboard),
+        return {"paths": {"db": str(db),
                           "db_pages": str(db_pages)},
                 "embedding": {"dim": 1024}, "backup": {"keep": 14}}
 
     monkeypatch.setattr(config, "load", fake_load)
     w = Watcher()
     w._reconcile_boot()
-    # 2 blocks inserted across 2 paths (dashboard + db-pages).
+    # Only db-pages is watched now (dashboard retired).
     rows = w.conn.execute("SELECT path, block_id FROM md_index").fetchall()
     bids = sorted(r[1] for r in rows)
-    assert bids == ["1", "9"]
+    assert bids == ["1"]
     w.conn.close()
 
 

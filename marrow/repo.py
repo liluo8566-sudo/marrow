@@ -15,7 +15,6 @@ from pathlib import Path
 from . import config
 from . import storage
 from . import recall as _recall_mod
-from . import top_sections as _top_sections
 from . import entity_recall as _entity_recall
 from . import candidates as _candidates
 
@@ -69,15 +68,6 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 10,
     )
 
 
-def open_tasks(conn: sqlite3.Connection) -> list[dict]:
-    rows = conn.execute(
-        "SELECT id, category, title, due, next_step, last_session_summary "
-        "FROM tasks WHERE status = 'active' "
-        "ORDER BY (due IS NULL), due, created_at"
-    ).fetchall()
-    return [dict(r) for r in rows]
-
-
 def open_alerts(conn: sqlite3.Connection) -> list[dict]:
     rows = conn.execute(
         "SELECT id, severity, type, message, source "
@@ -86,20 +76,6 @@ def open_alerts(conn: sqlite3.Connection) -> list[dict]:
         "ELSE 2 END, created_at ASC"
     ).fetchall()
     return [dict(r) for r in rows]
-
-
-def archived_today(conn: sqlite3.Connection) -> list[dict]:
-    """Tasks done since today's 6AM cutoff, sorted by updated_at ASC."""
-    cutoff = _top_sections._day_cutoff_utc()
-    cutoff_iso = cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
-    rows = conn.execute(
-        "SELECT id, category, title, updated_at FROM tasks "
-        "WHERE status = 'done' AND updated_at >= ? "
-        "ORDER BY updated_at ASC",
-        (cutoff_iso,),
-    ).fetchall()
-    return [dict(r) for r in rows]
-
 
 
 def upsert_session(sid: str, model: str | None, channel: str | None,

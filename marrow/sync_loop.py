@@ -1,7 +1,7 @@
-"""Sync loop — periodic md↔db reconcile/render for subpages + dashboard.
+"""Sync loop — periodic md↔db reconcile/render for subpages + daybrief + monitor.
 
-5s tick: for each target (subpage + dashboard.md), compare md mtime vs
-db mtime. md newer → reconcile; db newer → render. Race防御: re-check md
+5s tick: for each target (subpage + daybrief.md + monitor.md), compare md mtime
+vs db mtime. md newer → reconcile; db newer → render. Race防御: re-check md
 mtime after reconcile; if it advanced, skip render this tick.
 
 Runs in its own thread (SQLite WAL handles concurrent reads). Boot tick
@@ -31,7 +31,7 @@ log = logging.getLogger("marrow.watcher")
 
 
 # ---------------------------------------------------------------------------
-# db_mtime helpers — one per subpage key + dashboard
+# db_mtime helpers — one per subpage key + daybrief + monitor
 # ---------------------------------------------------------------------------
 
 def _max_updated(conn: sqlite3.Connection, table: str,
@@ -115,17 +115,6 @@ _SUBPAGE_DB_SOURCES: dict[str, list[tuple[str, str]]] = {
 # S2b sync_loop integration wires this after merge; scaffold lives here.
 _ATLAS_SWEEP_TICK_S = float(os.environ.get("MARROW_ATLAS_SWEEP_TICK_S", "60.0"))
 
-# Tables that feed dashboard.md. No separate milestone_candidate or monitor
-# table exists in current schema; milestones covers candidates.
-_DASHBOARD_DB_SOURCES: list[tuple[str, str]] = [
-    ("affect",          "created_at"),
-    ("tasks",           "updated_at"),
-    ("milestones",      "updated_at"),
-    ("alerts",          "created_at"),
-    ("session_digests", "ts"),
-    ("diary",           "updated_at"),
-]
-
 # Timeline-only subset feeding daybrief.md. Restricted to the rows
 # render_timeline actually renders, via (table, expr, where) triples so raw
 # conversation churn cannot fire the loop:
@@ -157,11 +146,6 @@ def last_db_mtime_subpage(conn: sqlite3.Connection, key: str) -> float | None:
     return _max_any(conn, sources)
 
 
-def last_db_mtime_dashboard(conn: sqlite3.Connection) -> float | None:
-    """Return max db timestamp across all dashboard-feeding tables."""
-    return _max_any(conn, _DASHBOARD_DB_SOURCES)
-
-
 def last_db_mtime_daybrief(conn: sqlite3.Connection) -> float | None:
     """Return max db timestamp across the timeline-only daybrief sources.
 
@@ -177,7 +161,7 @@ def last_db_mtime_daybrief(conn: sqlite3.Connection) -> float | None:
 # ---------------------------------------------------------------------------
 
 class SyncTarget:
-    """One sync target: a subpage or dashboard.md."""
+    """One sync target: a subpage or daybrief.md / monitor.md."""
 
     def __init__(
         self,
@@ -418,16 +402,14 @@ class UsageSnapshotLoop:
 
 
 # ---------------------------------------------------------------------------
-# Factory: build targets from _REGISTRY + dashboard
+# Factory: build targets from _REGISTRY + daybrief + monitor
 # ---------------------------------------------------------------------------
 
 def build_targets(folder: str,
-                  state_dir: str,
-                  dashboard_path: str) -> list[SyncTarget]:
-    """Build SyncTarget list from subpages._REGISTRY + dashboard."""
+                  state_dir: str) -> list[SyncTarget]:
+    """Build SyncTarget list from subpages._REGISTRY + daybrief + monitor."""
     from . import config as _config
     from . import storage, subpages
-    from .dashboard import write_dashboard
 
     targets: list[SyncTarget] = []
 
@@ -464,23 +446,6 @@ def build_targets(folder: str,
             has_md_to_db=cfg.reconcile is not None,
         ))
 
-    # Dashboard target
-    _sd = state_dir
-
-    def _dash_db_mtime(c: sqlite3.Connection) -> float | None:
-        return last_db_mtime_dashboard(c)
-
-    def _dash_render(c: sqlite3.Connection) -> None:
-        write_dashboard(dashboard_path, c, state_dir=_sd)
-
-    targets.append(SyncTarget(
-        name="dashboard",
-        md_path=dashboard_path,
-        db_mtime_fn=_dash_db_mtime,
-        render_fn=_dash_render,
-        has_md_to_db=True,
-    ))
-
     # Daybrief target — timeline zone is bidirectional. render_fn is
     # daybrief.update, which reconciles md hand-edits BEFORE rendering (P2),
     # so the loop must NOT reconcile again. db_mtime_fn is the timeline-only
@@ -506,7 +471,7 @@ def build_targets(folder: str,
             has_md_to_db=True,
         ))
 
-    # Monitor target — alerts surface (successor to the dashboard block).
+    # Monitor target — alerts surface.
     # render_fn is monitor.update, which reconciles md hand-edits (a deleted
     # line = resolve) BEFORE rendering, so the loop must NOT reconcile again.
     # db_mtime_fn tracks the alerts table so a new/updated alert re-renders;

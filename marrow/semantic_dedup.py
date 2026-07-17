@@ -1,7 +1,7 @@
 """Shared semantic-dedup primitives (bge-m3 cosine).
 
 Callers: candidates.write_entity_cand / write_milestone_cand, memes_dedup,
-sessionend_writers.seg_task_cand, reconcile._insert_unanchored_tasks.
+sessionend_writers.seg_task_cand.
 
 Embeds are L2-normalized → cosine = dot product. Embedder absent → returns
 None; callers raise a one-shot warn alert and skip the cosine layer (string

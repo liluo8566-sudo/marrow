@@ -18,7 +18,7 @@ Format (FINAL spec, plan 4A-3):
   Trim order: day lines → period lines (farthest day first) → 24h farthest.
   Budget ~4000 chars (safety net).
 
-Tone labels reuse top_sections._tone / _vband / _aband (no duplication).
+Tone labels: 9-tone (V-band, A-band) table + importance-weighted means.
 All DB timestamps are UTC; configured local timezone on render via timeutil.
 """
 from __future__ import annotations
@@ -27,10 +27,35 @@ import datetime as _dt
 import hashlib as _hashlib
 import re as _re
 import sqlite3
-from .top_sections import _tone, _vband, _aband, _wmean
 from . import config as _config
 
 _TZ = _config.get_tz()
+
+# ── 9-tone table: (V-band, A-band) → main tone ───────────────────────────────
+# V band: <0.4 Low, 0.4–0.6 Neu, ≥0.6 High
+# A band: <0.4 Calm, 0.4–0.6 Active, ≥0.6 Intense
+_TONE = {
+    ("Low",  "Calm"): "低落", ("Low",  "Active"): "烦躁", ("Low",  "Intense"): "痛苦",
+    ("Neu",  "Calm"): "平淡", ("Neu",  "Active"): "专注", ("Neu",  "Intense"): "紧张",
+    ("High", "Calm"): "温暖", ("High", "Active"): "愉悦", ("High", "Intense"): "兴奋",
+}
+
+
+def _vband(v: float) -> str:
+    return "Low" if v < 0.4 else ("Neu" if v < 0.6 else "High")
+
+
+def _aband(a: float) -> str:
+    return "Calm" if a < 0.4 else ("Active" if a < 0.6 else "Intense")
+
+
+def _tone(v: float, a: float) -> str:
+    return _TONE[(_vband(v), _aband(a))]
+
+
+def _wmean(rows: list[dict], key: str) -> float:
+    ws = sum(r["importance"] for r in rows)
+    return sum(r[key] * r["importance"] for r in rows) / ws if ws else 0.5
 # Matches leading HH:MM in a LIFE line (e.g. "21:40 买了b5精华")
 _LIFE_TS_RE = _re.compile(r"^(\d{2}:\d{2})(?:-\d{2}:\d{2})?(?:\s+|(?=【))(.*)", _re.DOTALL)
 _CUTOFF_H = 6          # 6AM local day boundary

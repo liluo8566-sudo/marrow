@@ -644,43 +644,6 @@ def test_reconcile_memes_missing_file_noop(tmp_path):
     conn.close()
 
 
-# ── Task 1: tag parsing — no-space CJK ────────────────────────────────────────
-
-def test_parse_unanchored_task_body_cjk_no_space():
-    """[appointment]看牙医 → category Appointment, clean title, no prefix."""
-    result = reconcile._parse_unanchored_task_body("[appointment]看牙医")
-    assert result is not None
-    assert result["category"] == "Appointment"
-    assert result["title"] == "看牙医"
-    assert result["due"] is None
-
-
-def test_parse_unanchored_task_body_cjk_with_due():
-    """[appointment]看牙医 [06-20] → Appointment + title + due peeled."""
-    result = reconcile._parse_unanchored_task_body("[appointment]看牙医 [06-20]")
-    assert result is not None
-    assert result["category"] == "Appointment"
-    assert result["title"] == "看牙医"
-    assert result["due"] == "06-20"
-
-
-def test_parse_unanchored_task_body_spaced_unchanged():
-    """[Study] existing spaced form still works after the \\s* fix."""
-    result = reconcile._parse_unanchored_task_body("[Study] review notes")
-    assert result is not None
-    assert result["category"] == "Study"
-    assert result["title"] == "review notes"
-
-
-def test_parse_task_row_body_cjk_no_space():
-    """_parse_task_row_body strips [appointment] prefix with no space before CJK."""
-    result = reconcile._parse_task_row_body("[appointment]看牙医", None, None)
-    assert result is not None
-    title, ns = result
-    assert title == "看牙医"
-    assert ns is None
-
-
 # ── Task 2a: bare-text insert in ## Us / ## Me ────────────────────────────────
 
 _MELB_DATE = reconcile._today_melb()

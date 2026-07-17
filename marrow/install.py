@@ -55,7 +55,6 @@ _ALL_PLISTS: list[tuple[str, str]] = [
     ("mw-aging.plist",          "com.marrow.aging"),
     ("mw-daily-catchup.plist",  "com.marrow.daily-catchup"),
     ("mw-daily-routine.plist",  "com.marrow.daily-routine"),
-    ("mw-dashboard-tick.plist", "com.marrow.dashboard-tick"),
     ("mw-db-backup.plist",      "com.marrow.db-backup"),
     ("mw-watcher.plist",        "com.marrow.watcher"),
 ]
@@ -157,7 +156,6 @@ def setup_config() -> bool:
         paths_cfg.write_text(
             'marrow_db = "~/.config/marrow/marrow.db"\n'
             'ny_root = "~/.config/marrow"\n'
-            'dashboard_md = "~/.config/marrow/dashboard.md"\n'
             'drift_pending_dir = "~/.config/marrow/drift_pending"\n'
             'drift_backup_dir = "~/.config/marrow/drift_backup"\n'
             'dir_tree_md = "~/.config/marrow/dir_tree.md"\n'
@@ -171,11 +169,6 @@ def setup_config() -> bool:
         src = _REPO_ROOT / "marrow" / "config.default.toml"
         shutil.copy(src, cfg)
         cfg_text = cfg.read_text(encoding="utf-8")
-        cfg_text = cfg_text.replace(
-            'dashboard = ""',
-            f'dashboard = "{(_CONFIG_DIR / "dashboard.md").as_posix()}"',
-            1,
-        )
         cfg_text = cfg_text.replace(
             'db_pages = "~/.config/marrow/db-pages"',
             f'db_pages = "{(_CONFIG_DIR / "db-pages").as_posix()}"',

@@ -30,7 +30,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from . import config, cortex_bridge, outbox, repo, storage, top_sections, transcript
+from . import config, cortex_bridge, outbox, repo, storage, transcript
 from .popen_detach import popen_detach, popen_detach_lazy
 from .timeutil import (
     utc_iso_to_local_date,
