@@ -318,13 +318,18 @@ def _run_cortex_module(module: str, extra_args: list[str] | None = None) -> dict
     return {"ok": True, "stdout": (p.stdout or "").strip()}
 
 
-def lie_down(next_wake_min: float, rotate: bool = False) -> dict:
+def lie_down(next_wake_min: float, rotate: bool = False,
+             mode: str | None = None) -> dict:
     # Description rendered from cortex config at register() (C9); see
     # _lie_down_doc. Kept minimal here — FastMCP reads __doc__ at registration.
+    # mode='night' = the night package (forces rotate, clamps N to the night
+    # band, sets the persistent night flag). Cleared by the morning kick.
     """lie_down(next_wake_min=N)."""
     args = ["--next-wake-min", str(next_wake_min)]
     if rotate:
         args += ["--rotate"]
+    if mode:
+        args += ["--mode", str(mode)]
     out = _run_cortex_module("cortex.lie_down", args)
     # Surface the chosen wake time (cortex.lie_down prints JSON with a
     # "next_wake":"HH:MM" field). Old cortex builds omit it — tolerate silently.
