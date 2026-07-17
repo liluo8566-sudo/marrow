@@ -103,7 +103,12 @@ def send(
             }
         since, until = _today_utc_range()
         cap = cap_user if is_user else cap_session
-        watch_state = "armed" if watch_reply else None
+        # Arm on EITHER watch flag — a timeout-only note (watch_reply=False,
+        # watch_timeout_min set) must still reach 'armed' or claim_timeouts
+        # (synapse cortex_kick.py) can never find it (its WHERE requires
+        # watch_state='armed'). claim_reply separately requires watch_reply=1,
+        # so a timeout-only row stays correctly excluded from the reply claim.
+        watch_state = "armed" if (watch_reply or watch_timeout_min) else None
         # Count-today + insert in ONE BEGIN IMMEDIATE txn — per-session daemons
         # race the cap otherwise.
         conn.isolation_level = None

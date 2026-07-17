@@ -204,22 +204,56 @@ def _run_hook(monkeypatch, event, payload):
     return rc, buf.getvalue()
 
 
-def test_session_start_seeds_and_first_turn_shows_new_activity(tmp_path, monkeypatch):
-    # F11: SessionStart seeds the replay cursor early via _replay_context (the
-    # same function turn_inject calls each turn), so genuinely new activity
-    # between SessionStart and her first message surfaces on turn 1 instead of
-    # being swallowed by the first-sight seed-only call.
+def test_session_start_shows_last_turns_regardless_of_cursor(tmp_path, monkeypatch):
+    # F11: SessionStart renders the last [replay].max_turns turns of other-
+    # session activity even on first sight (fresh sid, no cursor yet) —
+    # opening context is never empty just because the cursor never moved.
     db = _fresh_db(tmp_path)
     _setup(monkeypatch, tmp_path, db)
-    # Fresh sid, never seen before -> SessionStart seeds the cursor (empty inject,
-    # matches the always-empty first-sight rule).
+    aid = _ev(db, SID_OTHER, "user", "earlier chatter", ts="2026-07-17T04:00:00Z")
+    _ev(db, SID_OTHER, "assistant", "earlier reply", ts="2026-07-17T04:00:30Z")
+
     rc, out = _run_hook(monkeypatch, "session_start", {"session_id": SID_SELF})
     assert rc == 0
     ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
-    assert "## Recent replay from other sessions" not in ctx
-    assert _cursor(SID_SELF) is not None
+    assert "## Recent replay from other sessions" in ctx
+    assert "earlier chatter" in ctx and "earlier reply" in ctx
+    # Cursor advanced forward to the seed's rendered cutoff (not left at None).
+    assert _cursor(SID_SELF) == aid + 1
 
-    # Activity from another session lands AFTER the seed, BEFORE her first msg.
+
+def test_session_start_seed_cursor_forward_only_no_repeat_on_turn1(tmp_path, monkeypatch):
+    # The seed's cursor advance is forward-only to the rendered cutoff, so a
+    # normal turn_inject call right after never re-shows the same lines.
+    db = _fresh_db(tmp_path)
+    _setup(monkeypatch, tmp_path, db)
+    _ev(db, SID_OTHER, "user", "seeded content", ts="2026-07-17T04:00:00Z")
+    _ev(db, SID_OTHER, "assistant", "seeded reply", ts="2026-07-17T04:00:30Z")
+
+    rc, out = _run_hook(monkeypatch, "session_start", {"session_id": SID_SELF})
+    assert rc == 0
+    ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+    assert "seeded content" in ctx
+
+    rc, out = _run_hook(
+        monkeypatch, "turn_inject",
+        {"session_id": SID_SELF, "prompt": "hi", "cwd": str(tmp_path)})
+    assert rc == 0
+    ctx2 = json.loads(out)["hookSpecificOutput"]["additionalContext"] if out else ""
+    assert "seeded content" not in ctx2
+
+
+def test_session_start_seed_then_new_activity_shows_on_turn1(tmp_path, monkeypatch):
+    # Genuinely new activity landing AFTER the seed's cutoff, before her first
+    # message, still surfaces on turn 1 as before.
+    db = _fresh_db(tmp_path)
+    _setup(monkeypatch, tmp_path, db)
+    _ev(db, SID_OTHER, "user", "seeded content", ts="2026-07-17T04:00:00Z")
+    _ev(db, SID_OTHER, "assistant", "seeded reply", ts="2026-07-17T04:00:30Z")
+
+    rc, out = _run_hook(monkeypatch, "session_start", {"session_id": SID_SELF})
+    assert rc == 0
+
     _ev(db, SID_OTHER, "user", "activity before her first message",
         ts="2026-07-17T04:10:00Z")
     _ev(db, SID_OTHER, "assistant", "reply before her first message",
@@ -231,11 +265,16 @@ def test_session_start_seeds_and_first_turn_shows_new_activity(tmp_path, monkeyp
     assert rc == 0
     ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
     assert "activity before her first message" in ctx
+    assert "seeded content" not in ctx  # already rendered by the seed
 
-    # Turn 1 consumed the cursor — a second turn with no new events repeats nothing.
-    rc, out = _run_hook(
-        monkeypatch, "turn_inject",
-        {"session_id": SID_SELF, "prompt": "again", "cwd": str(tmp_path)})
+
+def test_session_start_seed_empty_db_seeds_zero(tmp_path, monkeypatch):
+    # No other-session activity exists yet -> seed falls back to the old
+    # empty-inject, cursor-at-zero behaviour (nothing to render).
+    db = _fresh_db(tmp_path)
+    _setup(monkeypatch, tmp_path, db)
+    rc, out = _run_hook(monkeypatch, "session_start", {"session_id": SID_SELF})
     assert rc == 0
-    ctx2 = json.loads(out)["hookSpecificOutput"]["additionalContext"] if out else ""
-    assert "activity before her first message" not in ctx2
+    ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+    assert "## Recent replay from other sessions" not in ctx
+    assert _cursor(SID_SELF) == 0

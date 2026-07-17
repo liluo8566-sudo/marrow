@@ -126,6 +126,36 @@ def test_send_watch_flags_stored(db):
     assert row["watch_timeout_min"] == 15
 
 
+def test_send_timeout_only_arms(db):
+    # FIX 3: watch_reply=False + watch_timeout_min set must still arm, or
+    # claim_timeouts (synapse cortex_kick.py, WHERE watch_state='armed') can
+    # never find the row.
+    r = outbox.send("tg", "ping", watch_timeout_min=10, db=db)
+    assert r["ok"]
+    row = _rows(db)[0]
+    assert row["watch_reply"] == 0
+    assert row["watch_state"] == "armed"
+    assert row["watch_timeout_min"] == 10
+
+
+def test_send_reply_only_arms(db):
+    r = outbox.send("tg", "ping", watch_reply=True, db=db)
+    assert r["ok"]
+    row = _rows(db)[0]
+    assert row["watch_reply"] == 1
+    assert row["watch_state"] == "armed"
+    assert row["watch_timeout_min"] is None
+
+
+def test_send_no_watch_stays_unarmed(db):
+    r = outbox.send("tg", "ping", db=db)
+    assert r["ok"]
+    row = _rows(db)[0]
+    assert row["watch_reply"] == 0
+    assert row["watch_state"] is None
+    assert row["watch_timeout_min"] is None
+
+
 # ── permission ───────────────────────────────────────────────────────────────
 
 def test_user_target_refused_for_non_whitelisted_channel(db, monkeypatch):

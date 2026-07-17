@@ -375,10 +375,42 @@ def _her_last_user_age_min(conn, sid: str) -> float | None:
     return (datetime.now(timezone.utc) - dt).total_seconds() / 60.0
 
 
-def _replay_context(sid: str, channel: str) -> str:
+def _replay_seed(conn, sid: str, header: str, max_turns: int, per_chars: int) -> str:
+    """F11: SessionStart-only first-sight render for the per-sid replay cursor.
+    Renders the last max_turns turns of other-session activity regardless of
+    cursor position (there is none yet), then advances the cursor forward to
+    the rendered cutoff (not the DB tip) so turn 1's normal diff-mode call
+    never re-shows the same lines. Empty result still seeds the cursor to the
+    current tip (future-only from here), matching the no-seed_ok behaviour."""
+    rows = conn.execute(
+        "SELECT id, session_id, role, content, timestamp, channel FROM events "
+        "WHERE session_id != ? AND role IN ('user','assistant') "
+        "AND COALESCE(channel,'') != 'ct' ORDER BY id DESC LIMIT ?",
+        (sid, max_turns * 4),
+    ).fetchall()
+    if not rows:
+        row = conn.execute("SELECT MAX(id) AS m FROM events").fetchone()
+        seed = int(row["m"]) if row and row["m"] is not None else 0
+        _save_replay_cursor(sid, seed)
+        return ""
+    rows = list(reversed(rows))  # chronological
+    block, _ = _replay_render(rows, header, max_turns, per_chars)
+    max_id = rows[-1]["id"]
+    _save_replay_cursor(sid, max_id)
+    return block
+
+
+def _replay_context(sid: str, channel: str, *, seed_ok: bool = False) -> str:
     """Cross-session replay inject. Returns '' when disabled, when this session's
-    channel is an excluded target, on first sight of the sid (seed only), when
-    gated by idle_gate_min, or when no new events from OTHER sessions exist.
+    channel is an excluded target, on first sight of the sid (seed only, unless
+    seed_ok), when gated by idle_gate_min, or when no new events from OTHER
+    sessions exist.
+
+    seed_ok (F11, SessionStart only): on first sight of the sid, render the
+    last max_turns turns of other-session activity instead of seeding silently
+    — opening context should not be empty just because the cursor has never
+    moved. The cursor still only advances forward (to the rendered cutoff), so
+    turn 1 never re-shows a line this seed already rendered.
 
     Cortex windows (MARROW_CORTEX) take the last_note_ts diff cursor shared with
     note.py — the exclude_target_channels gate and the per-sid cursor never apply
@@ -408,6 +440,8 @@ def _replay_context(sid: str, channel: str) -> str:
     try:
         cursor = _load_replay_cursor(sid)
         if cursor is None:
+            if seed_ok:
+                return _replay_seed(conn, sid, header, max_turns, per_chars)
             row = conn.execute("SELECT MAX(id) AS m FROM events").fetchone()
             seed = int(row["m"]) if row and row["m"] is not None else 0
             _save_replay_cursor(sid, seed)
@@ -1288,7 +1322,8 @@ def session_start() -> int:
             # call on turn 1. Outbound-notes (F6) excluded — its own cursor
             # would otherwise be consumed here too, silencing turn 1's inject.
             if sid:
-                replay_seed = _replay_context(sid, os.environ.get("MARROW_CHANNEL") or "cli")
+                replay_seed = _replay_context(
+                    sid, os.environ.get("MARROW_CHANNEL") or "cli", seed_ok=True)
                 if replay_seed:
                     parts.append(replay_seed)
 
