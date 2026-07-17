@@ -11,16 +11,21 @@
 ## 1. System map
 
 ```
- CC session ── transcript.jsonl ──SessionEnd──▶ events ──popen──▶ sessionend_async
-     ▲                                            │                (TASK_AFFECT + DIGEST)
+ CC session ── transcript.jsonl ──Stop (per turn)──▶ events (archive_events)
+     ▲                                            │
      │ injected context                           ▼
- hooks (auto) / daemon (MCP) ◀────────── DB (SQLite) ◀── daily.py 07:00 (candidates+diary)
+ hooks (auto) / daemon (MCP) ◀────────── DB (SQLite)
                                           │  events·tasks·affect·entities·milestones·memes
                                           │  diary·digests·alerts·audit_log·atlas·md_index…
                                           │  bge-m3 · 6 vec lanes · recall fusion
                                           ▼▲ watcher + sync_loop (5s) / user md edits
-                                Surface: dashboard.md + db-pages/ (11 subpages)
+                                Surface: db-pages/ (daybrief·monitor·subpages)
 ```
+
+The Stop hook per-turn archive (`hooks:stop` → `repo:archive_events`) is THE
+event write path. SessionEnd runs only the cortex-window-closing branch (§6).
+tasks/affect/diary/session_digests tables are retained as read/legacy surfaces;
+nothing writes them now (tasks via cadence rem/cal; timeline via tl MCP).
 
 Three runtimes:
 - **hooks** — one-shot per CC lifecycle event, exit after injecting/spawning.
@@ -29,9 +34,9 @@ Three runtimes:
 
 ### 1.2 Hooks registry (all in marrow/hooks.py)
 
-- SessionStart `hooks:session_start` — injects affect heartbeat (events-but-no-affect gap day in last 7d) + `timeline:render_timeline` (06/11; see §3) + static hint line (dims via mcp `dim`, goals via `goal`, 07-06). Hardcap 6000 chars. Does NOT inject tasks/alerts. Spawns sessionstart_catchup detached. Writes lifecycle:start marker (ppid+started_at).
-- SessionEnd `hooks:session_end` — transcript.clean → repo:archive_events (idempotent by source_hash) → lifecycle:end commits BEFORE popen → idempotent spawn gate (skip popen when user_count ≤ last ok,user_count=N) → popen_detach_lazy sessionend_async. MARROW_BRIDGE=1 suppresses popen (bridge owns timing).
-- UserPromptSubmit `hooks:user_prompt_submit` — mm-/mm+ control prefixes + recall fusion injection (params §3). Per-session recall_seen dedup state under DATA_DIR/state/recall_seen/<sid>.json (wiped at start+end). Second registered hook same event: `hooks:turn_inject` — time+delta-since-last-reply stamp (skipped when MARROW_CHANNEL=wx, bridge injects its own), schedule.check_and_inject, and the config-first per-turn care directive (`[turn_inject].care_text`, absorbed from the old global turn-inject.sh 07-03 eve).
+- SessionStart `hooks:session_start` — injects `timeline:render_timeline` (see §3) + static hint line (dims via mcp `dim`, goals via `goal`). Hardcap 6000 chars. Does NOT inject tasks/alerts. Drains alerts-fallback.jsonl into the alerts table (truncate-then-replay, `_drain_fallback_sink`, D8). Writes lifecycle:start marker (ppid+started_at); resume detection reads it.
+- SessionEnd `hooks:session_end` — cortex-window-closing branch only (§6.3 page-turn). No archive/popen/spawn (events land per-turn via Stop hook).
+- UserPromptSubmit `hooks:user_prompt_submit` — recall fusion injection (params §3). Per-session recall_seen dedup state under DATA_DIR/state/recall_seen/<sid>.json (wiped at start+end). Second registered hook same event: `hooks:turn_inject` — time+delta-since-last-reply stamp (skipped when MARROW_CHANNEL=wx, bridge injects its own), schedule.check_and_inject, and the config-first per-turn care directive (`[turn_inject].care_text`).
 - PreToolUse `hooks:pretool_use` — Write/Bash placement ops get atlas ancestor-chain guidance (desc + naming_hint); others get a literal path reminder. Matcher=Agent → `hooks:agent_guard` — denies any Agent dispatch whose subagent_type is in `[agent_guard].deny` (default `["general-purpose"]`, burst-recursion protection); exit 2 + stderr reason, fail-soft (any error → exit 0). Backup guard, stateless two-tier, fail-open (07-07 v3): silent (tmp/scratchpad/worktree rm/mv/sed, any command chaining a backup action cp/rsync/tar/git commit/git stash push/.backup, all git ops) · reminder additionalContext EVERY matching call (no dedup/state): non-recursive rm on non-whitelisted path, bulk mv/sed -i wildcard→non-whitelisted dest, unwhered DELETE FROM not on a .db, destructive MCP actions (event_clear/db_clear/sticker delete/mcp__marrow__ clear|delete) · deny `permissionDecision:"deny"` (recursive rm on non-whitelisted path, rm of a *.db outside whitelist, sqlite3 *.db DROP TABLE/TRUNCATE/unwhered DELETE) unless the SAME command carries a backup action; `backup_guard_intercept=false` downgrades deny→reminder. Write/Edit no longer guarded (write needs a prior read → recoverable). Git force-push guard (`hooks:_git_force_push_guard`, config `[hooks].git_force_push_guard`) — hard `deny`, tokenized per shell segment (git push --force/-f/--force-with-lease), no escape hatch, no worktree exemption, runs FIRST. Git revert-type guard (`hooks:_git_revert_guard`, config `[hooks].git_revert_*`) — PreToolUse `permissionDecision:"ask"` held for authorship verify (reset --hard/checkout -- path/restore[non --staged]/clean -f/branch -D/stash drop|clear/revert --no-edit/switch --discard-changes/worktree remove), message 🤡; exempts worktree/agent cleanup (silent). Pretool order: rm→trash rewrite → force-push deny → git ask → backup deny → reminder. rm→trash auto-rewrite (`hooks:_rm_to_trash_rewrite`, config `[hooks].rm_to_trash`/`trash_paths`, default on): a Bash `rm` segment whose positional paths ALL resolve under a `trash_paths` prefix (~ expanded, relative joined onto cwd) is rewritten to `/usr/bin/trash <shlex-quoted paths>` (rm flags dropped) BEFORE all guards, via `hookSpecificOutput.updatedInput.command` + an `additionalContext` line; mixed/zero-positional/wildcard/out-of-zone segments untouched and reclassified normally; separators preserved byte-identical; fail-open.
 - MARROW_CORTEX (cortex session, §6) gets full memory parity: lifecycle rows, sessions row, recall/timeline injection, per-turn archive same as any session. Env var = identity marker only (e.g. B8 immunity); channel = `MARROW_CHANNEL=ct` (set alongside it, `llm.py:_run_claude_cortex`).
 - `[kickout]` (B8, `hooks:turn_inject`) — config-first nudge: cli 21:30-22:00 wind-down + 22:00-06:00 leave-desk (channel=cli), wx/tg 23:00-06:00 quiet. Skipped when MARROW_CORTEX=1.
@@ -41,42 +46,19 @@ Three runtimes:
 
 ## 2. Write path
 
-### 2.1 session capture
-- `transcript:clean` code-only strip: tool calls, thinking, sidechains; headless spawns dropped via `transcript:is_headless` (worker_models prefix match + 12 known prompt heads). `repo:archive_events` also bumps entity mention_count + memes use_count in the same txn.
+### 2.1 session capture (Stop hook, THE write path)
+- `hooks:stop` per turn → `transcript:clean` → `repo:archive_events`. Clean = code-only strip: tool calls, thinking, sidechains; headless spawns dropped via `transcript:is_headless` (worker_models prefix match + surviving prompt heads: transcript wrapper, handover, markdown-compressor). `repo:archive_events` idempotent by source_hash, bumps entity mention_count + memes use_count in the same txn.
 
-### 2.2 sessionend extraction (sessionend_async.py)
-- Skip rule: ≤3 user turns (`[sessionend].skip_turn_threshold`) → terminal `skip:short_session,user_count=N`. Stale-skip recovery `sessionend_async:_drop_stale_skip`: skip row dropped + reprocessed if count later grew past threshold.
-- ONE merged sonnet call (replaced sonnet+haiku pair): TASK_AFFECT_DIGEST_PROMPT emits ===TASK===/===AFFECT===/===DIGEST=== fenced blocks → writers seg_task_cand + seg_affect + seg_digest. Per-writer audit rows; digest 0 rows → `fail:zero_rows` (rides the retry chain — immediate digest_zero_write alert deleted 06/11); final row rebuilt from THIS run's segment rows only (`_collect_run_failures`, after latest 'start' stamp): ok,user_count=N / partial:<writers> / fail:*. Transcript lines carry `[HH:MM] [name]` prefixes (Melbourne) — LIFE lines copy these timestamps.
-- DIGEST segment is structured lines (KIND casual|task · LIFE per-line `HH:MM【tone】detail` casual-only · FACTS one-line `HH:MM【tone】summary` task-only · VOICE verbatim casual-only). Both LIFE and FACTS extracted to life_lines column (mutually exclusive). Parser fullwidth-colon tolerant; parse fail → kind/life_lines NULL + alert, body kept raw. AFFECT episodes carry `open` flag (unresolved emotion). TL field removed (06/24).
-- seg_affect: event_hint resolved FTS→LIKE within same-session events; reconcile_prev resolves most-recent unresolved affect row scoped to same date (AND date=?); cross-day skip logged to audit_log action=reconcile_skip.
-- seg_task_cand: cosine dedup 0.85 vs active + 24h-done tasks; tick-by-id from sonnet `{"id":N,"status":"done"}`.
-- Digest raw log → ~/.config/marrow/logs/digest/digest-YYYY-MM-DD.log (6AM cutoff, pruned >2.5d).
-- Tail (fail-soft, alerted): `dashboard:write_dashboard` + `recall:embed_pending(batch=200)`.
-
-### 2.5 tl_add/tl_update self-authored timeline (tl_writer.py, A2r)
-- One MCP call → one `events` row, `role='tl'`, `channel`=platform (MARROW_CHANNEL env, default cli). No affect-table write: affect phrase lives verbatim in content, importance in `events.imp`.
+### 2.2 tl_add/tl_update self-authored timeline (tl_writer.py)
+- One MCP call → one `events` row, `role='tl'`, `channel`=platform (MARROW_CHANNEL env, default cli). Affect phrase lives verbatim in content, importance in `events.imp`.
 - Format: `HH:mm[-HH:mm] 【user_word·i | assistant_word·i】body` — user_word/assistant_word ≤8 chars each, body ≤50 chars (config: `tl.body_max`), i = per-side intensity 1-5 (`n_intensity`/`y_intensity`), `importance` param = row-level composite (default max of the two sides). At least one of user_word/assistant_word required.
-- `tl_add`/`tl_update` allowed under `MARROW_CORTEX=1` (B3m 07-08) — cortex writes timeline like any channel, `channel=ct`.
-- `tl_update` only accepts `role='tl'` event ids; only passed fields change (label/body/timerange/imp independently updatable).
-- Retire chain: v29 migration (`storage:_migrate_to_v29`) backfilled every prior `channel='self'` row to `role='tl'`, folded its affect-table label into content as `【label】body`, dropped the `channel='self'` marker entirely (channel now always a real platform value).
-
-### 2.3 mid_scan (mid_scan.py, bridge-called per active session)
-- Pre-archives transcript into events, then watermark-based trigger check (elapsed hours / turn thresholds) → spawns sessionend_async extraction; audit_log action=mid_scan_trigger per fire, segment_seq increments for multi-segment sessions.
-- flock serialised (lock-dir fallback /tmp, 4b0e013); pre-archive failure → audit `mid_scan_pre_archive_fail` (ce53a32).
-- Verified healthy 07-02: 11 triggers over 06-26→07-01 across tg+wx, zero pre_archive_fail post-fix.
-
-### 2.4 daily candidates (daily.py 07:00, for yesterday)
-- One sonnet call → 3 fenced blocks (entity/milestone/memes), block-isolated parse; second sonnet call → diary prose (DIARY_PROMPT in daily_prompts.py). Diary output: prose + TONE (2-char CN) + OVERVIEW (100-150 chars day summary) → diary.tone/overview columns. _read_digests includes life_lines in material. Idempotent per date unless --force; serialised by `daily_catchup:app_lock` (fcntl).
-- Ingestion gates (`candidates.py`):
-  - entities: conf ≥0.8; cosine 0.85 same-kind hit → merge aliases into matched row (never blocks).
-  - milestones: conf ≥0.85; cosine 0.85 blocks; tombstone anti-revive via audit_log sha256(scope|date|title); affect importance=5 force-emits a candidate.
-  - memes: ALL six types gated by `candidates:_events_semantic_count_14d` — max(LIKE, vec KNN cosine>=0.65) on >=3 distinct calendar days in last 14d; cosine 0.85 vs memes+milestones+entities blocks; paw/fact auto-pinned.
-- Shared dedup config `[*_dedup]`: cosine_threshold 0.85 · fast_skip_count 3 (persistent rejects short-circuit via memes_reject_log).
-- Empty day (no digests, no affect) writes stub diary row '—'; pending_days excludes stubs (content='—'/'-') so daily re-runs when digests appear.
+- `tl_add`/`tl_update` allowed under `MARROW_CORTEX=1` — cortex writes timeline like any channel, `channel=ct`.
+- `tl_update` only accepts `role='tl'` event ids; only passed fields change (label/body/timerange/imp independently updatable). No dashboard-line sync (dashboard retired); daybrief/monitor re-render picks up the DB change.
+- v29 migration (`storage:_migrate_to_v29`) backfilled prior `channel='self'` rows to `role='tl'`, folding affect-table label into content as `【label】body`; channel is now always a real platform value.
 
 ## 3. Read path (what gets injected)
 
-- SessionStart: affect heartbeat warning (§1.2) + `## Timeline` 2-zone view (`timeline:render_timeline`, cap 20 lines, ~2400-2900ch measured 07-05): unresolved-episodes (未解, 7d expiry) → Zone A: yesterday-00:00-to-now HH:MM film-strip, unified life_lines read (casual LIFE + task FACTS), `**MM-DD Day**` date headers, cap 20. Old sessions w/o life_lines fallback to tl_line via `_tl_or_fallback`. → Zone B: 3 diary days before zone A start, `**MM-DD Day 【tone】**` + overview from diary.tone/overview; NULL overview days skipped; `**The Week 【trend ↗/↘/→】**` footer from affect delta. Manual notes: `+ [HH:MM] text` → events channel='manual'; line+anchor delete → tl_hidden=1 or manual-event hard-DELETE + vec cleanup, via `<!-- tl-rendered:s=..;d=..;e=..;ep=.. -->` trail diff (post budget-trim). Unresolved episodes `<!-- tl:ep:N -->` anchor; user-delete → reconcile auto-resolves. Reconcile no longer writes tl_line back (06/24); present anchors count as unchanged, hidden sweep preserved.
+- SessionStart: `## Timeline` 2-zone view (`timeline:render_timeline`, cap 20 lines, natural-midnight day boundary): Zone A = last-24h-from-midnight HH:MM film-strip, life_lines read, `--- MM-DD ---` day dividers, cap 20. Zone B = 3 diary days before zone A start, `**MM-DD Day 【tone】**` + overview from diary.tone/overview; NULL overview days skipped. No affect-episode zone, no Week-trend footer. Manual notes: `+ [HH:MM] text` → events channel='manual'; line+anchor delete → tl_hidden=1 or manual-event hard-DELETE + vec cleanup, via `<!-- tl-rendered:s=..;d=..;e=..;ep=.. -->` trail diff (post budget-trim). Reconcile does not write tl_line back; present anchors count as unchanged, hidden sweep preserved.
 - UserPromptSubmit: recall fusion hits as passive context. Render shaping in `hooks:user_prompt_submit`: budget 800 chars · rank_caps [300,120,120,40,40] · rel_cutoff 0.6×top1 · only rank-1 event hit gets ±1 context turns (`recall:fetch_event_context`) · per-kind head via `hooks:_recall_head` (event `[chan reltime] ev#id` using `timeutil:reltime_short`; memes `[MM-DD|YYYY] me#id`; milestone `[date] ms#id` T00:00-stripped; entity `en#id` no time; diary/task `d#/t#` keep `format_recall_ts`) — same head reused by the recall log (`hooks:_append_recall_log`) · recall_seen dedup per session · post-injection `recall:bump_recall_counts` (best-effort).
 - Time-lane (passive): `timecue:parse_time_cue` on prompt (昨天/前天/上周X/N天前/X月X号/EN equivalents → Melbourne natural-day → UTC window; future cues → None). Cue + substantive stripped text → windowed fusion takes TOP slots (budget min([recall].timelane_budget 400, budget/2)); stripped trivial → `recall:fetch_window_digests` lines `[MM-DD Day · digest]`, seen-key ("digest", sid). Semantic pool fills remainder, deduped vs windowed; rel_cutoff per-pool only.
 - MCP `daemon:recall` — same fusion, exclude_kinds=() (hook excludes diary+task), optional context=bool for ±1 turns, `when` relative-time field. since/until params (Melbourne YYYY-MM-DD, converted via `timecue:melb_day_range`); empty query + window → window digests instead of fusion.
@@ -104,9 +86,9 @@ Three runtimes:
 
 ## 5. Surface (DB ↔ md)
 
-### 5.1 dashboard (`dashboard:write_dashboard`)
-- Flow: 4 reconcile passes (tasks, affect, alerts, timeline — each fail-soft + warn alert) → `top_sections:iter_top_blocks` render (Alerts→Tasks→Timeline→Content→Affect) → `dashboard:_resolve_blocks` per-block: RECONCILED_BLOCK_IDS (alerts, tasks, affect, timeline) always overwrite (reconcile absorbed edits) · pure-display blocks hash-skip if user-edited · tombstoned omit → atomic write → md_index hashes recorded after write. milestone-cand block retired 06/11 (render fn kept, not wired into iter_top_blocks).
-- Tasks bucketing: today / next7 / later / no_date, 6AM Melbourne boundary. Affect: last batch + 24h + 7d windows, V/A split-tone label when std_v>0.3.
+### 5.1 daybrief + monitor (the DB→md surfaces)
+- `daybrief:update` — single owner of `daybrief.md`. Reconciles md hand-edits BEFORE render (reconcile_timeline), then composes the same render fns the SessionStart hook injects (usage.sessionstart_lines, schedule.render_daily, timeline.render_timeline) into bounded zones; atomic write. Timeline zone carries the `<!-- id:... -->` block anchor for md_index tracking.
+- `monitor:render` — `monitor.md` alert surface (§8). reconcile_alerts (md-delete=resolve) runs BEFORE render; one-way DB→md, no ping-pong. Path from `[paths].monitor` (empty = `<db_pages>/monitor.md`).
 
 ### 5.2 subpage catalog (registry `subpages:_REGISTRY`, specs `subpage_specs.py`)
 - All inserter-backed unless noted; `<!-- id:N -->` anchors; DB→md unless noted.
@@ -115,18 +97,18 @@ Three runtimes:
 
 ### 5.3 sync machinery
 - `md_index` — SHA-256 per (path, block_id); baseline = last auto-write; observe mode freezes baseline on user edit. Missing file in observe mode bulk-tombstones its blocks (debounced 200ms). Tombstone aging 30d.
-- `watcher` — watchdog on dashboard/handover/db-pages + ~/Desktop/NY/stickers/ (non-recursive, `_StickerHandler`: 1.5s debounce, size-stability check, auto-ingest new images via `sticker_ops:ingest_sticker`, skips stk_NNN/dotfiles/_thumb); 200ms debounce for md; boot full_scan(observe=True) covers crash gap; never renders. Boot: sweep_orphans (prune rows w/ missing files + md lines) → sweep_file_orphans (re-register untracked stk_NNN, exact-phash dedup deletes file). _standardize_image: format-convert only (JPG→PNG), no resize; thumbnails 240px in _thumb/ for wx send.
-- `sync_loop` — 5s tick: md newer (mtime epsilon 1s) → write_dashboard (reconcile+render); DB newer (max updated_at per source table) → write_dashboard. Dashboard sources: affect, tasks, milestones, alerts, session_digests(ts), diary(updated_at). USER_ACTIVE_WINDOW 3s skips render under cursor. 3-consecutive tick failure per target → warn sync_loop_tick_failed:{target} alert, counter resets after alert.
-- `reconcile.py` — dashboard routes: milestones (bidirectional + id-anchor splice-back; bare-text line or unanchored single-bracket Me row → insert w/ date=today Melb + canonical line write-back) · milestone_candidates (✅pin/❌tombstone/✏️edit + trail diff; render fn kept but not called from write_dashboard) · tasks (trail marker, tick/untick/archive/insert, cosine dedup; [tag] needs no trailing space — CJK-friendly; mtime gate on retitle/next_step + archive-by-absence) · affect (aff:id segments + pending id:affect.N; delete window mtime-7d; aff-rendered id-set diff → removed id marks row superseded; COALESCE(updated_at, created_at) gate) · alerts (md delete = resolve; zero-anchor block no-op guard; mtime gate) · timeline (life_lines per-line anchor + write-back with mtime gate; diary.overview + diary.tone write-back; `+ ` manual add; trail-diff delete with per-row mtime gate on all 4 paths — sid/date/evt/ep, §3). reconcile_memes/profile/diary/etc live in reconcile_inserter.py (reconcile.py shims are back-compat only) — UPDATE/DELETE + unanchored-INSERT pass (memes Personal/Public section→type, profile section→kind, diary new `#### date` block; anchor write-back, natural-key dedup). UPDATE pass bidirectional: if table has updated_at and row.updated_at > md_mtime → DB-wins (patch md line via spec.render_row + atomic_write, skip DB revert); else → md-wins (existing). Atlas: mtime gate on UPDATE/DELETE in reconcile_atlas. Conflicts → `reconcile:emit_conflict_alerts` at dashboard + subpage call sites — add_alert(warn, reconcile_conflict), fingerprint=conflict text.
+- `watcher` — watchdog on handover/db-pages + ~/Desktop/NY/stickers/ (non-recursive, `_StickerHandler`: 1.5s debounce, size-stability check, auto-ingest new images via `sticker_ops:ingest_sticker`, skips stk_NNN/dotfiles/_thumb); 200ms debounce for md; boot full_scan(observe=True) covers crash gap; never renders. Boot: sweep_orphans (prune rows w/ missing files + md lines) → sweep_file_orphans (re-register untracked stk_NNN, exact-phash dedup deletes file). _standardize_image: format-convert only (JPG→PNG), no resize; thumbnails 240px in _thumb/ for wx send.
+- `sync_loop` — 5s tick, one SyncTarget per subpage + daybrief.md + monitor.md: md newer (mtime epsilon 1s) → reconcile; DB newer (max db timestamp per target's sources) → render. daybrief db_mtime = timeline-only sources; render calls daybrief.update (which reconciles internally, so the loop skips its own reconcile). monitor db_mtime = alerts max(updated_at). Re-check md mtime after reconcile; if advanced, skip render this tick. USER_ACTIVE_WINDOW 3s skips render under cursor. 3-consecutive tick failure per target → warn sync_loop_tick_failed:{target} alert, counter resets after alert.
+- `reconcile.py` — surviving routes: reconcile_timeline (daybrief.md — life_lines per-line anchor + write-back with mtime gate; diary.overview + diary.tone write-back; `+ ` manual add; trail-diff delete with per-row mtime gate on 4 anchor paths sid/date/evt/ep, §3) · reconcile_alerts (monitor.md — md delete = resolve; zero-anchor block no-op guard; mtime gate) · reconcile_milestones (milestone subpage — bidirectional + id-anchor splice-back; bare-text/unanchored single-bracket Me row → insert w/ date=today Melb + canonical line write-back). reconcile_memes/profile/diary/etc live in reconcile_inserter.py (reconcile.py shims are back-compat only) — UPDATE/DELETE + unanchored-INSERT pass (memes Personal/Public section→type, profile section→kind, diary new `#### date` block; anchor write-back, natural-key dedup). UPDATE pass bidirectional: table has updated_at and row.updated_at > md_mtime → DB-wins (patch md line via spec.render_row + atomic_write); else md-wins. Atlas: mtime gate on UPDATE/DELETE in reconcile_atlas. Conflicts → `reconcile:emit_conflict_alerts` (add_alert warn reconcile_conflict, fingerprint=conflict text).
 - `drift_sweep` — Trigger A same-root move (immediate) · B cross-root delete+create matched by basename+size within 30s batch window, pending TTL 1800s · dangling delete warn. Refs via rg (timeout 30s, 10MB cap, Python fallback); safe exts auto-apply with info alert; unsafe → pending JSON + `mw drift apply <pid>`. AUTHORIZED_ROOTS ×5 = atlas seed roots.
 - `atlas` — seed (INSERT OR IGNORE per root) → `atlas:atlas_sweep_fs` depth-walk stubs/deletes → `atlas:reconcile_atlas` md headings back to DB; retract logic drops stub-only rows outside seed coverage; out-of-root purge guard. Canonical render ~/Desktop/NY/db-pages/atlas.md only.
 
 ### 5.4 mw CLI + MCP tools (`cli.py` entry `~/.local/bin/mw`, `daemon.py` MCP)
-- CLI: mutation (set/rm/done/pin/add-alert/alerts-clear/tl-silence, no refresh) · `resolve <id>` (only mutation w/ auto-refresh) · session mgmt · display (show/ls/atlas/doctor) · system (refresh/sessionend-rerun/drift/watcher/install). Command hints for AI live in MCP tool descriptions (`daemon.py`).
+- CLI: mutation (set/rm/pin/add-alert/alerts-clear/tl-silence, no refresh) · `resolve <id>` (only mutation w/ auto-refresh) · session mgmt · display (show/ls/atlas/doctor) · system (refresh/drift/watcher/install). `mw refresh` = daybrief + monitor + subpages. Command hints for AI live in MCP tool descriptions (`daemon.py`).
 - MCP tools (`daemon.py`), 12 total, action-dispatch (one tool + `action` param, replaces old per-verb tool naming, 07-05/06): recall · atlas_lookup · event_embed (fn `embed_pending`) · tl (add/update/clear) · sticker (search/pick) · sticker_admin (ingest/update/delete/pending) · goal (set/list/delete) · wish (append-only, `text`+optional `section`/`due` params, no action) · first (tick/untick/list, status=done|tried) · dim (upsert/query/delete; kind=person/pref/place/meme/milestone) · alert (list/resolve) · event_clear (was db_clear — events/FTS/vectors only). tl/goal/wish/first tools detailed in §6.
 
 ### 5.5 write arbitration
-- Dashboard writers: watcher (observe-only) · sync_loop (timed) · sessionend-tail (one-shot). Both renderers run reconcile first; a race = two atomic writes, second wins, nothing lost. sync_loop guards USER_ACTIVE_WINDOW; sessionend-tail doesn't (session over). flock on every md write.
+- Surface writers: watcher (observe-only) · sync_loop (timed) · `mw refresh` (manual). Renderers run reconcile first; a race = two atomic writes, second wins, nothing lost. sync_loop guards USER_ACTIVE_WINDOW. flock on every md write.
 
 ## 6. Cortex bridge (C3)
 
@@ -164,29 +146,26 @@ Three runtimes:
 - `deploy/commands/ct-clear.md` — slash command wrapping `lie_down(rotate=True)`: summarise the session into handoff.md, then rotate.
 - agent_guard (§1.2) lives in the main hooks pipeline rather than a cortex-side hook because hooks only execute in the main session's settings.json, and cortex's resumed session shares the same global settings.
 
-## 7. Scheduled jobs (launchd, 7 plists)
+## 7. Scheduled jobs (launchd)
 
 - com.marrow.watcher — persistent, KeepAlive.
-- com.marrow.dashboard-tick 06:01 daily — force dashboard render.
-- com.marrow.daily-routine 07:00 daily — candidates + diary for yesterday.
-- com.marrow.daily-catchup 19:00 daily — backfill ≤3 missing diary days in 7d window.
+- com.marrow.refresh — periodic `mw refresh --all` (daybrief + monitor + subpages).
 - com.marrow.db-backup 03:00 daily — VACUUM INTO local + iCloud offsite, keep 14 each.
-- com.marrow.aging Sun 12:00 weekly — 7 cleanup passes (§10).
+- com.marrow.jsonl-cleanup — prune stale transcript scratch/logs.
+- com.marrow.aging Sun 12:00 weekly — cleanup passes (§10).
+- install.py `_ALL_PLISTS` provisions aging/db-backup/watcher; `_OBSOLETE_PLISTS` boots out + deletes retired dashboard-tick/daily-routine/daily-catchup on upgrade.
 - MCP daemon has no plist (CC-spawned).
 
 ## 8. Alerts
 
-- `repo:add_alert(severity, type, fingerprint, message=, db=)` — dedup key (type, fingerprint, resolved=0); repeats bump hit_count/updated_at/message. Never raises: any DB failure appends the record to DATA_DIR/alerts-fallback.jsonl + stderr note, returns -1; drained at catchup boot (truncate-then-replay). resolve = acknowledge: recurrence re-inserts (anti-mute, by design). Surface: dashboard ## Alerts (`top_sections:render_alerts`, resolved=0) ; resolve via md-delete (reconcile_alerts) or `mw resolve <id>`; aging auto-resolves milestone_added >7d only.
+- `repo:add_alert(severity, type, fingerprint, message=, db=)` — dedup key (type, fingerprint, resolved=0); repeats bump hit_count/updated_at/message. Never raises: any DB failure appends the record to DATA_DIR/alerts-fallback.jsonl + stderr note, returns -1; drained by the session_start hook (truncate-then-replay, §9). resolve = acknowledge: recurrence re-inserts (anti-mute, by design). Surface: monitor.md ## Alerts (`monitor:render_alerts`, resolved=0); resolve via md-delete (reconcile_alerts) or `mw resolve <id>`; aging auto-resolves milestone_added >7d only.
 - `schedule:_log_fail` — cadence subprocess fails append to DATA_DIR/logs/cadence_fail.log; streak of 3 → one warn alert, message triaged by `schedule:_alert_message` (auth → restart-watcher-first checklist; TCC grants = per-process snapshot at start · timeout → not-auth · other → first err line). Streak resets on success.
 - Current contract + full call-site/falsing audit + fixes: see alert redesign archive. Batch A landed 06/11 (P5 unpark, digest-zero retry chain, fallback sink, aging finally-flush). Batch B/C landed 06/15 (stable fingerprints · reconcile_ref date-scoped · sync_loop 3-consecutive alert · watcher thread-start critical · stub diary unblock · overflow auto-resolve · offsite 30s retry · dangling path-absent gate). Remaining: wx death escalation + wx media failure alerts (synapse-wx side).
 
 ## 9. Catchup & self-heal
 
-- `sessionstart_catchup:_classify` per sid (24h window, union audit_log lifecycle + events): preconditions P1 bridge_owns (TTL 12h, superseded by newer extract row) · P2 session_block=archive · P3 manual_skip · P4 end summary worktree=1/mm_minus_blocked · P5 in-flight iff start row newer than end AND no terminal row (ok/skip/fail/partial) after that start AND start age <15min (`_INFLIGHT_GRACE_SECONDS`) — terminal or stale start falls through, so fail/partial/died sids respawn (fixed 06/11, was park-forever P0-1). States: 1 ppid live→skip · 2 ok,user_count=N & grew→spawn · 3 covered→skip (skip:short_session counts as terminal ok here) · 4 end <5min→skip · 5 end ≥5min no ok→spawn · 6 start+ppid dead→spawn · 7 events only→spawn. MAX_FIRE 2/run. Alerts only on spawn failure (no predicate-based death alerts, by design).
-- ppid liveness `sessionstart_catchup:_live_cc_ppids`: os.kill(pid,0) primary; ps lstart (LC_ALL=C) soft confirm.
-- catchup `main` boot: `_drain_fallback_sink` replays alerts-fallback.jsonl into alerts table before classification (malformed lines dropped with stderr note).
-- daily_catchup 19:00 — diary backfill cap 3/run, 7d window, 6AM cutoff.
-- affect heartbeat (SessionStart) · dormant revive (§4.3) · diary vec orphan sweep (§4.2) · mm+ `hooks:_handle_mm_prefix` reset:mm_plus forces re-extraction (pre-archives live jsonl).
+- alerts-fallback drain: the SessionStart hook runs `_drain_fallback_sink` every session start — replays DATA_DIR/alerts-fallback.jsonl into the alerts table (truncate-then-replay; malformed lines dropped with stderr note), so an alert that failed to write during a DB outage lands on the next session.
+- dormant revive (§4.3) · diary vec orphan sweep (§4.2).
 
 ## 10. Aging (weekly, one txn, alerts flushed in finally)
 

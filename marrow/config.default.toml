@@ -25,9 +25,6 @@ backup_dir = ""
 # iCloud offsite copy of the daily DB snapshot. Empty = disabled.
 # e.g. "~/Library/Mobile Documents/com~apple~CloudDocs/Backup/marrow"
 offsite_backup_dir = ""
-# Dashboard renders here. Empty lets the installer fill a private default.
-# e.g. "~/Documents/my-vault/dashboard.md"
-dashboard = ""
 # daybrief.md renders here. Empty = <DATA_DIR>/daybrief.md (back-compat).
 # e.g. "~/Documents/my-vault/db-pages/daybrief.md"
 daybrief = ""
@@ -35,10 +32,10 @@ daybrief = ""
 # e.g. "~/Documents/my-vault/db-pages/monitor.md"
 monitor = ""
 # DB-rendered pages folder (milestone.md, diary.md, ...).
-# Default is private and works without manual path setup.
+# Empty = <ny_root>/db-pages, else <DATA_DIR>/db-pages (config.py fallback).
 # e.g. "~/Documents/my-vault/db-pages". Name signals "rendered from DB".
 # Legacy key: `sub_pages`.
-db_pages = "~/.config/marrow/db-pages"
+db_pages = ""
 # State dir for db-page hashes. Empty = <DATA_DIR>/state.
 db_pages_state = ""
 
@@ -196,8 +193,8 @@ meme_exclude_terms = []
 # Sub-page render order + visibility (DESIGN L43-65). Known keys:
 #   profile · milestone · diary · memes · stickers · wallet
 #   study · projects · cheatsheet
-# `top` = content (numbered on dashboard). `bottom` = utility (unnumbered).
-# `hidden` = built but not listed in dashboard `## Content`.
+# `top` = content (numbered in the `## Content` list). `bottom` = utility
+# (unnumbered). `hidden` = built but not listed in `## Content`.
 top = ["profile", "milestone", "diary", "memes", "stickers", "wallet"]
 bottom = ["study", "projects", "cheatsheet"]
 hidden = []

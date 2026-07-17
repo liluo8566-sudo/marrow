@@ -164,41 +164,6 @@ def test_tl_update_body_only_keeps_label(conn):
     assert ev["content"] == "【N愉悦♡Y委屈】just body [3]"
 
 
-def test_tl_update_rewrites_rendered_dashboard_line(conn, monkeypatch, tmp_path):
-    """A rendered row's md line must be rewritten to match the DB update, or
-    the resident reconcile sees a stale diff and reverts it (silent data loss
-    bug — see tl_update)."""
-    r = _add(conn, body="orig")
-    eid = r["event_id"]
-    md = timeline.render_timeline(conn)
-    dash = tmp_path / "dashboard.md"
-    dash.write_text(md, encoding="utf-8")
-    monkeypatch.setattr(tl_writer, "_dashboard_path", lambda: dash)
-
-    tl_writer.tl_update(conn, eid, body="updated", user_word="温柔", assistant_word="委屈")
-
-    new_md = dash.read_text(encoding="utf-8")
-    assert f"【N温柔♡Y委屈】updated [3] <!-- tl:e:{eid} -->" in new_md
-    assert "orig" not in new_md
-    # reconcile must now see no diff -> no self-edit revert
-    rpt = reconcile.reconcile_timeline(conn, dash)
-    assert rpt.updated == 0
-    assert conn.execute("SELECT content FROM events WHERE id=?",
-                        (eid,)).fetchone()["content"] == "【N温柔♡Y委屈】updated [3]"
-
-
-def test_tl_update_unrendered_row_leaves_dashboard_untouched(conn, monkeypatch, tmp_path):
-    r = _add(conn, body="orig")
-    eid = r["event_id"]
-    dash = tmp_path / "dashboard.md"
-    dash.write_text("## Timeline\n_none_\n", encoding="utf-8")
-    monkeypatch.setattr(tl_writer, "_dashboard_path", lambda: dash)
-
-    tl_writer.tl_update(conn, eid, body="updated")
-
-    assert dash.read_text(encoding="utf-8") == "## Timeline\n_none_\n"
-
-
 def test_tl_update_rejects_non_tl(conn):
     conn.execute("INSERT INTO events (session_id, timestamp, role, content,"
                  " channel) VALUES ('m', '2026-07-03T00:00:00Z', 'user', 'x',"

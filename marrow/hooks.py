@@ -709,7 +709,7 @@ def _started_at_for(ppid: int) -> int:
 
     LC_ALL=C forces POSIX time format so the strptime mask works under any
     user locale (en_AU prints day-before-month by default, breaking parsing
-    and silently rotting catchup's ppid liveness check)."""
+    of the started_at stamp on the lifecycle:start marker)."""
     try:
         env = os.environ.copy()
         env["LC_ALL"] = "C"
@@ -1082,7 +1082,7 @@ def session_start() -> int:
     db = config.db_path()
     conn = storage.connect(db)
     try:
-        # Write lifecycle:start marker so catchup can detect live vs dead sessions.
+        # Write lifecycle:start marker (resume detection + latest-session query).
         sid = inp.get("session_id") if isinstance(inp, dict) else None
         cwd = inp.get("cwd") if isinstance(inp, dict) else None
         tpath = inp.get("transcript_path") if isinstance(inp, dict) else None

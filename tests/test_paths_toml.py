@@ -15,9 +15,9 @@ def test_load_default(tmp_path):
     assert p.marrow_db == Path(_DEFAULTS["marrow_db"]).expanduser()
     assert p.logs_dir == Path(_DEFAULTS["logs_dir"]).expanduser()
     assert p.state_dir == Path(_DEFAULTS["state_dir"]).expanduser()
-    # ny_root and dashboard_md default to empty (user must configure)
+    # ny_root and daybrief_md default to empty (user must configure)
     assert p.ny_root == Path("")
-    assert p.dashboard_md == Path("")
+    assert p.daybrief_md == Path("")
     # Non-optional paths must be absolute (expanduser applied)
     assert p.marrow_db.is_absolute()
 
@@ -29,14 +29,14 @@ def test_load_custom(tmp_path, monkeypatch):
     custom_toml.write_text(
         f'marrow_db = "{custom_db}"\n'
         f'ny_root = "{tmp_path}"\n'
-        f'dashboard_md = "{tmp_path / "dash.md"}"\n',
+        f'daybrief_md = "{tmp_path / "db.md"}"\n',
         encoding="utf-8",
     )
     monkeypatch.setenv("MARROW_PATHS_FILE", str(custom_toml))
     p = load_paths()  # picks up env var
     assert p.marrow_db == custom_db
     assert p.ny_root == tmp_path
-    assert p.dashboard_md == tmp_path / "dash.md"
+    assert p.daybrief_md == tmp_path / "db.md"
     # Keys not in the custom toml fall back to defaults
     assert p.logs_dir == Path(_DEFAULTS["logs_dir"]).expanduser()
 
@@ -60,14 +60,14 @@ def test_no_regression_paths_import(tmp_path, monkeypatch):
     # Module-level singleton exists
     assert hasattr(mp, "paths")
     assert hasattr(mp.paths, "marrow_db")
-    assert hasattr(mp.paths, "dashboard_md")
+    assert hasattr(mp.paths, "daybrief_md")
     assert hasattr(mp.paths, "logs_dir")
     assert hasattr(mp.paths, "state_dir")
     assert hasattr(mp.paths, "ny_root")
 
 
 def test_no_regression_config_load(tmp_path, monkeypatch):
-    """config.load() works with paths-sourced defaults — no crash, dashboard/db paths sane."""
+    """config.load() works with paths-sourced defaults — no crash, daybrief/db paths sane."""
     import marrow.config as cfg
     monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
     monkeypatch.setattr(cfg, "CONFIG_PATH", tmp_path / "config.toml")
@@ -76,8 +76,8 @@ def test_no_regression_config_load(tmp_path, monkeypatch):
     assert "paths" in result
     # db should be an absolute path string
     assert Path(result["paths"]["db"]).is_absolute()
-    # dashboard should be an absolute path string
-    assert Path(result["paths"]["dashboard"]).is_absolute()
+    # daybrief should be an absolute path string
+    assert Path(result["paths"]["daybrief"]).is_absolute()
 
 
 def test_no_regression_hooks_import(monkeypatch):

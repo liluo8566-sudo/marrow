@@ -22,7 +22,6 @@ def env(tmp_path, monkeypatch):
     sub = tmp_path / "db-pages"
     dash = tmp_path / "dashboard.md"
     state = tmp_path / "state"
-    monkeypatch.setattr(config, "dashboard_path", lambda: str(dash))
     monkeypatch.setattr(config, "sub_pages_path", lambda: str(sub))
     monkeypatch.setattr(config, "sub_pages_state_path", lambda: str(state))
     monkeypatch.setattr(config, "monitor_path", lambda: str(tmp_path / "monitor.md"))

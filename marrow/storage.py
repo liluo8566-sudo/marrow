@@ -639,7 +639,8 @@ def _migrate_to_v2(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE affect ADD COLUMN {col} {decl}")
         except sqlite3.OperationalError:
             pass
-    # session_digests: one row per sessionend_async DIGEST result.
+    # session_digests: per-session digest rows. Writes retired; table kept as a
+    # read surface for the timeline life-line zone.
     conn.execute(
         "CREATE TABLE IF NOT EXISTS session_digests ("
         "  sid TEXT PRIMARY KEY,"

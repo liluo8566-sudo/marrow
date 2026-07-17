@@ -36,8 +36,6 @@ def env(tmp_path, monkeypatch):
     conn.close()
     monkeypatch.setattr(config, "db_path", lambda: db)
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(config, "dashboard_path",
-                        lambda: str(tmp_path / "dashboard.md"))
     monkeypatch.setattr(config, "sub_pages_path",
                         lambda: str(tmp_path / "db-pages"))
     monkeypatch.setattr(config, "sub_pages_state_path",

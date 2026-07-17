@@ -89,8 +89,7 @@ def render_milestone(conn: sqlite3.Connection) -> str:
       the inline `<!-- id:N -->` anchor and pulls date from DB.
 
     `title` column = subject. `theme` kept nullable but unused.
-    Confirmed rows (pinned=1) are clean — no `Nh ago`, no `✅❌✏️`
-    buttons (those decorate candidate rows in top_sections only).
+    Confirmed rows (pinned=1) are clean — no `Nh ago`, no `✅❌✏️` buttons.
     """
     key = "milestone"
     rows = conn.execute(

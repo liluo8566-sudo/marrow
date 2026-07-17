@@ -146,12 +146,9 @@ def test_watcher_live_modify_triggers_sync(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "db_path", lambda: str(db))
     db_pages = tmp_path / "db-pages"
     db_pages.mkdir()
-    dashboard = tmp_path / "dashboard.md"
-    dashboard.write_text("")
 
     def fake_load():
-        return {"paths": {"db": str(db), "dashboard": str(dashboard),
-                          "db_pages": str(db_pages)},
+        return {"paths": {"db": str(db), "db_pages": str(db_pages)},
                 "embedding": {"dim": 1024}, "backup": {"keep": 14}}
 
     monkeypatch.setattr(config, "load", fake_load)
@@ -237,12 +234,9 @@ def test_watchdog_roundtrip_delete_restore_add(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "db_path", lambda: str(db))
     db_pages = tmp_path / "db-pages"
     db_pages.mkdir()
-    dashboard = tmp_path / "dashboard.md"
-    dashboard.write_text("")
 
     def fake_load():
-        return {"paths": {"db": str(db), "dashboard": str(dashboard),
-                          "db_pages": str(db_pages)},
+        return {"paths": {"db": str(db), "db_pages": str(db_pages)},
                 "embedding": {"dim": 1024}, "backup": {"keep": 14}}
 
     monkeypatch.setattr(config, "load", fake_load)

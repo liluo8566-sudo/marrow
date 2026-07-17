@@ -16,18 +16,10 @@ logger = logging.getLogger(__name__)
 # no model signal. Its first user / queue-operation content head matches a
 # Marrow-pipeline or prompt-lint spawn prompt; a real interrupted session
 # carries a human prompt instead. Heads kept in sync with the surviving
-# summariser/handover prompts and ~/.claude/hooks/prompt-lint.py. Retired
-# daily/sessionend heads are inert now (those spawns no longer fire).
+# handover + markdown-compressor prompts (~/.claude/hooks/prompt-lint.py).
 _SPAWN_HEADS = (
     "===== BEGIN ORIGINAL TRANSCRIPT",
-    "You compress ONE long session of dialogue",
-    "Extract per-episode affect from the session",
-    "Extract candidate entities mentioned in the session",
-    "Extract task-like items from the session",
-    "Extract candidate life-shaping milestones from the session",
-    "Extract candidate memes from the session",
     "Write the handover narrative",
-    "格式（单一/混合）：散文段落",
     "You are a ruthless markdown compressor",
     "You compress a markdown edit",
     "Compress this file per the rules",

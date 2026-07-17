@@ -1,13 +1,10 @@
-"""monitor.md renderer — the alert surface, successor to the dashboard block.
+"""monitor.md renderer — the alert surface.
 
-Renders unresolved alerts (resolved=0) into db-pages/monitor.md with the same
-ordering, format and per-line `<!-- id:alert.N -->` anchors reconcile_alerts
-expects. One-way DB→md render plus md-delete=resolve absorb: a line the user
-deletes resolves the alert instead of being re-rendered back, so reconcile
-runs BEFORE render (mirrors daybrief.update).
-
-render_alerts is lifted verbatim from the retiring top_sections so this module
-never imports the dying one. Path comes from config ([paths].monitor).
+Renders unresolved alerts (resolved=0) into db-pages/monitor.md with per-line
+`<!-- id:alert.N -->` anchors reconcile_alerts expects. One-way DB→md render
+plus md-delete=resolve absorb: a line the user deletes resolves the alert
+instead of being re-rendered back, so reconcile runs BEFORE render (mirrors
+daybrief.update). Path comes from config ([paths].monitor).
 """
 from __future__ import annotations
 
@@ -20,7 +17,7 @@ from .md_index import MdIndex, _hash
 from .reconcile import reconcile_alerts
 
 # md_index block id for the alerts block — same `<!-- id:... -->` convention
-# the dashboard/daybrief use so the watcher/md_index can track it.
+# daybrief uses so the watcher/md_index can track it.
 _ALERTS_BLOCK_ID = "monitor.alerts"
 
 _H1 = "# Monitor"
@@ -29,9 +26,8 @@ _H1 = "# Monitor"
 def render_alerts(conn: sqlite3.Connection) -> str:
     """Alerts block: `## Alerts` H2 + anchored bullets, resolved=0 only.
 
-    Verbatim ordering/format lifted from top_sections.render_alerts — the
-    `<!-- alert-block-anchored -->` sentinel and `<!-- id:alert.N -->` anchors
-    are exactly what reconcile_alerts locates."""
+    The `<!-- alert-block-anchored -->` sentinel and `<!-- id:alert.N -->`
+    anchors are exactly what reconcile_alerts locates."""
     rows = conn.execute(
         "SELECT id, severity, message FROM alerts WHERE resolved = 0 "
         "ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'warn' THEN 1 "

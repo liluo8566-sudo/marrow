@@ -51,10 +51,6 @@ def load() -> dict:
         Path.home() / "Library" / "Mobile Documents"
         / "com~apple~CloudDocs" / "Backup" / "marrow"
     )
-    dash = paths.get("dashboard") or (
-        str(_mpaths.dashboard_md) if _mpaths.dashboard_md != Path("") else
-        str(DATA_DIR / "dashboard.md")
-    )
     daybrief = paths.get("daybrief") or (
         str(_mpaths.daybrief_md) if _mpaths.daybrief_md != Path("") else
         str(DATA_DIR / "daybrief.md")
@@ -78,7 +74,6 @@ def load() -> dict:
     paths["db"] = db
     paths["backup_dir"] = backup
     paths["offsite_backup_dir"] = offsite
-    paths["dashboard"] = str(Path(dash).expanduser()) if dash else dash
     paths["daybrief"] = str(Path(daybrief).expanduser())
     paths["db_pages"] = str(Path(sub).expanduser())
     paths["db_pages_state"] = str(Path(sub_state).expanduser())
@@ -130,10 +125,6 @@ def all_assistant_terms() -> list[str]:
 
 def anchor_keys_set() -> frozenset[str]:
     return frozenset(persona()["anchor_keys"])
-
-
-def dashboard_path() -> str:
-    return load()["paths"]["dashboard"]
 
 
 def daybrief_path() -> str:

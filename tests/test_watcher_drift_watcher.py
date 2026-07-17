@@ -79,7 +79,6 @@ def test_watcher_has_drift_watcher_attribute(tmp_path, monkeypatch):
          patch("marrow.watcher.config.DATA_DIR", str(tmp_path)), \
          patch("marrow.watcher.config.load", return_value={
              "paths": {
-                 "dashboard": str(tmp_path / "dashboard.md"),
                  "db_pages": str(tmp_path / "db-pages"),
              }
          }), \
@@ -209,7 +208,6 @@ def test_drift_handler_scheduled_for_each_root(tmp_path, monkeypatch):
          patch("marrow.watcher.config.DATA_DIR", str(tmp_path)), \
          patch("marrow.watcher.config.load", return_value={
              "paths": {
-                 "dashboard": str(tmp_path / "dashboard.md"),
                  "db_pages": str(tmp_path / "db-pages"),
              }
          }), \

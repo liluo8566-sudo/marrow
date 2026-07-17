@@ -17,7 +17,6 @@ from __future__ import annotations
 import datetime as _dt
 import os
 import re
-from pathlib import Path
 
 from . import config as _config
 
@@ -282,10 +281,6 @@ def tl_update(conn, event_id: int, timerange: str | None = None,
             " VALUES ('events', ?, 'tl_update', ?)",
             (ev["session_id"], f"event_id={event_id}"),
         )
-    from .timeline import _hhmm_local
-    hhmm_start = _hhmm_local(ts_start)
-    hhmm_end = _hhmm_local(ts_end) if ts_end else None
-    _sync_dashboard_line(event_id, hhmm_start, hhmm_end, new_content)
     return {"ok": True, "event_id": event_id}
 
 
@@ -294,72 +289,3 @@ def tl_update(conn, event_id: int, timerange: str | None = None,
 def render_line(hhmm_start: str, hhmm_end: str | None, content: str) -> str:
     rng = f"{hhmm_start}-{hhmm_end}" if hhmm_end else hhmm_start
     return f"{rng} {content}"
-
-
-# ── dashboard sync (md must mirror DB or reconcile reverts the edit) ─────────
-
-def _dashboard_path() -> Path:
-    return Path.home() / "Desktop" / "NY" / "dashboard.md"
-
-
-def _sync_dashboard_line(event_id: int, hhmm_start: str, hhmm_end: str | None,
-                          content: str) -> bool:
-    """Rewrite the dashboard.md line anchored `<!-- tl:e:<event_id> -->` so it
-    matches the just-written DB content. Without this, the resident md->DB
-    reconcile (_reconcile_self_edit) treats the stale md line as a user edit
-    and reverts the update within seconds. No-op if the row isn't rendered
-    yet (anchor absent) — the next render will pick up the DB content."""
-    dash = _dashboard_path()
-    if not dash.exists():
-        return False
-    anchor = f"<!-- tl:e:{event_id} -->"
-    new_line = f"{render_line(hhmm_start, hhmm_end, content)} {anchor}"
-    lines = dash.read_text(encoding="utf-8").splitlines(keepends=True)
-    for i, line in enumerate(lines):
-        if line.rstrip("\n").endswith(anchor):
-            eol = "\n" if line.endswith("\n") else ""
-            lines[i] = new_line + eol
-            text = "".join(lines)
-            # Advance the tl-rendered trail t= AND z= together with this
-            # out-of-band write. reconcile trusts t= as "md current as of" and
-            # z= as the zone fingerprint; a stale t= makes the freshness gate
-            # misread this DB write as the md being outdated, and a stale z=
-            # makes reconcile misclassify the now-synced line as a human edit.
-            text = _refresh_trail(text)
-            dash.write_text(text, encoding="utf-8")
-            return True
-    return False
-
-
-# Trail comment on the dashboard timeline block: `<!-- tl-rendered:...t=..;z=.. -->`.
-_TRAIL_LINE_RE = re.compile(r"<!--\s*tl-rendered:[^>]*-->")
-_TIMELINE_H2 = "## Timeline"
-_TIMELINE_END_MARKER = "<!-- marrow:timeline:end -->"
-
-
-def _refresh_trail(text: str) -> str:
-    """Rewrite the tl-rendered trail's t= (now) and z= (recomputed zone
-    fingerprint) after an out-of-band line edit. Targets the actual trail
-    comment, not any stray t=/z= elsewhere in the file."""
-    from .timeline import (
-        _TL_TRAIL_T_RE, _TL_TRAIL_Z_RE, _now_utc_iso, _zone_fingerprint,
-    )
-    m = _TRAIL_LINE_RE.search(text)
-    if not m:
-        return text
-    # Fingerprint the same zone reconcile sees: `## Timeline` .. next H2 / end.
-    start = text.find(_TIMELINE_H2)
-    if start == -1:
-        return text
-    after = text[start + len(_TIMELINE_H2):]
-    n_h2 = re.search(r"\n##\s", after)
-    n_end = after.find(_TIMELINE_END_MARKER)
-    ends = [e.start() if hasattr(e, "start") else e
-            for e in (n_h2, n_end) if e is not None and e != -1]
-    block = after[: min(ends)] if ends else after
-    z = _zone_fingerprint(_TIMELINE_H2 + block)
-    trail = m.group(0)
-    trail = _TL_TRAIL_T_RE.sub(f"t={_now_utc_iso()}", trail, count=1)
-    if _TL_TRAIL_Z_RE.search(trail):
-        trail = _TL_TRAIL_Z_RE.sub(f"z={z}", trail, count=1)
-    return text[:m.start()] + trail + text[m.end():]

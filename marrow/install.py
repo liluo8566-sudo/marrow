@@ -217,13 +217,13 @@ def migrate_db() -> bool:
 
 
 def render_initial_surface() -> bool:
-    _act("rendering dashboard + sub-pages")
+    _act("rendering daybrief + monitor + sub-pages")
     r = subprocess.run([str(_VENV_PYTHON), "-m", "marrow.cli", "refresh", "--all"],
                        capture_output=True, text=True, cwd=str(_REPO_ROOT))
     if r.returncode != 0:
         _fail(f"initial render failed: {(r.stderr or r.stdout).strip()[-500:]}")
         return False
-    _ok((r.stdout.strip() or "dashboard rendered").splitlines()[-1])
+    _ok((r.stdout.strip() or "surface rendered").splitlines()[-1])
     return True
 
 

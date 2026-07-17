@@ -1,25 +1,18 @@
-"""Timeline block renderer — merged affect + session view.
+"""Timeline block renderer — life-line session view.
 
-Two outlets:
-  render_timeline(conn) -> str   # SessionStart injection / dashboard block
-  Both use the same render fn; caller decides where to put the output.
+  render_timeline(conn) -> str   # SessionStart injection / daybrief block
 
-Format (FINAL spec, plan 4A-3):
-  未解: <desc> [label] <!-- tl:ep:<id> -->  — open affect episodes, 7d expiry, top of block
-  Last 24h: flat HH:MM film-strip newest→oldest, cap 20
-    - LIFE lines (casual sessions only; task sessions omitted)
-    - day crossings: --- MM-DD --- divider
-  Today-1 overflow + today-2: per-day **MM-DD Day 【tone】** + AM/PM/ND periods
-    - ND 00-06 belongs to PREVIOUS day
-    - all sessions' LIFE lines in period joined time-order; empty hidden
-    - 24h sessions exceeding cap spill here as day summaries
-  Day 3-6: Week 【tone ↗/↘/→】 trend + one line per day 【tone】 diary.tone/overview
+Format:
+  Zone A (last 24h from natural midnight): flat HH:MM film-strip newest→oldest,
+    cap 20 · LIFE lines (life_lines column) · day crossings `--- MM-DD ---`.
+  Zone B (3 diary days before zone A start): per-day `**MM-DD Day 【tone】**` +
+    overview from diary.tone/overview; NULL overview days skipped.
   No in-progress session line.
-  Trim order: day lines → period lines (farthest day first) → 24h farthest.
-  Budget ~4000 chars (safety net).
+  Trim order: zone-B day lines (farthest first) → zone-A farthest. Budget
+  ~4000 chars (safety net).
 
-Tone labels: 9-tone (V-band, A-band) table + importance-weighted means.
-All DB timestamps are UTC; configured local timezone on render via timeutil.
+Day boundary: natural midnight (configured tz). All DB timestamps are UTC;
+local timezone applied on render via timeutil.
 """
 from __future__ import annotations
 
@@ -228,20 +221,6 @@ def _query_session_event_span(conn: sqlite3.Connection,
     return row["t_start"], row["t_end"]
 
 
-def _query_session_max_event_ts(conn: sqlite3.Connection,
-                                sids: list[str]) -> dict[str, str]:
-    if not sids:
-        return {}
-    placeholders = ",".join("?" for _ in sids)
-    rows = conn.execute(
-        "SELECT session_id, MAX(timestamp) AS t_end"
-        f" FROM events WHERE session_id IN ({placeholders})"
-        " GROUP BY session_id",
-        sids,
-    ).fetchall()
-    return {r["session_id"]: r["t_end"] for r in rows if r["t_end"]}
-
-
 def _query_diary_zone_b(conn: sqlite3.Connection,
                         dates: list[_dt.date]) -> dict[str, dict]:
     """diary.tone + diary.overview keyed by date string, for zone B."""
@@ -435,7 +414,6 @@ def _render_24h(digests: list[dict],
             continue
         ts = sd.get("ts") or ""
         sess_hhmm = _hhmm_local(ts)
-        kind = (sd.get("kind") or "casual").lower()
         life_raw = sd.get("life_lines") or ""
         life_items = [x.strip() for x in life_raw.splitlines() if x.strip()]
 

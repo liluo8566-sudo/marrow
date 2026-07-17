@@ -237,32 +237,3 @@ def test_roundtrip_real_render_fingerprint(conn, tmp_path):
     assert recomputed == stored_z
 
 
-# ── tool sync: _sync_dashboard_line refreshes z= → later reconcile silent ────
-
-def test_tool_sync_updates_z_not_human_edited(tmp_path, monkeypatch):
-    """After _sync_dashboard_line rewrites a line, the trail z= matches a fresh
-    recompute over the post-edit zone → a subsequent reconcile does not flag it
-    as human-edited."""
-    from marrow import tl_writer, timeline
-
-    eid = 42
-    t0 = _utc(-120)
-    zone = _timeline_zone(eid, "14:00 老内容", t0)
-    dash = tmp_path / "dashboard.md"
-    dash.write_text("## Timeline\n" + zone.split("## Timeline\n", 1)[1])
-
-    monkeypatch.setattr(tl_writer, "_dashboard_path", lambda: dash)
-
-    ok = tl_writer._sync_dashboard_line(eid, "14:00", None, "新内容")
-    assert ok
-
-    text = dash.read_text(encoding="utf-8")
-    import re
-    stored_z = re.search(r"z=([0-9a-f]{8})", text).group(1)
-
-    start = text.find("## Timeline")
-    after = text[start + len("## Timeline"):]
-    n_end = after.find("<!-- marrow:timeline:end -->")
-    block = after[:n_end] if n_end != -1 else after
-    recomputed = timeline._zone_fingerprint("## Timeline" + block)
-    assert recomputed == stored_z

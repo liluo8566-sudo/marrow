@@ -76,7 +76,7 @@ def _remcal_body(existing: str | None) -> str:
 
 def _stamp_block_id(body: str) -> str:
     """Prepend the id marker on its own line above the `## Timeline` heading so
-    md_index/watcher track the block; idempotent. Mirrors top_sections."""
+    md_index/watcher track the block; idempotent."""
     marker = f"<!-- id:{_TIMELINE_BLOCK_ID} -->"
     if marker in body:
         return body

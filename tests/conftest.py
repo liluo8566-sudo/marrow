@@ -176,7 +176,7 @@ def _redirect_marrow_data_dir(tmp_path_factory):
     config.db_path()` returns the test path. Survives reimports because
     the attribute lives on the module singleton.
 
-    Also redirects dashboard_path / db_pages_path / sub_pages_path —
+    Also redirects db_pages_path / sub_pages_path —
     these fall back to `~/Desktop/NY/...` (NOT DATA_DIR), so a test that
     forgets to patch them would write into the real Obsidian vault. This
     autouse guard makes that leak impossible.
@@ -192,8 +192,6 @@ def _redirect_marrow_data_dir(tmp_path_factory):
     mp = pytest.MonkeyPatch()
     mp.setattr(config, "DATA_DIR", tmp)
     mp.setattr(config, "CONFIG_PATH", tmp / "config.toml")
-    mp.setattr(config, "dashboard_path",
-               lambda: str(vault / "dashboard.md"))
     mp.setattr(config, "db_pages_path",
                lambda: str(vault / "db-pages"))
     mp.setattr(config, "sub_pages_path",
@@ -217,7 +215,7 @@ def _redirect_marrow_data_dir(tmp_path_factory):
     mp.setattr(config, "load", _load_isolated)
 
     # marrow.paths singleton + hooks session-claim file also hardcode the real
-    # tree; redirect them so migrate/sessionstart_catchup/drift never leak.
+    # tree; redirect them so migrate/drift never leak.
     from marrow import paths as _paths_mod
     for _f in ("marrow_db", "drift_pending_dir", "drift_backup_dir",
                "dir_tree_md", "logs_dir", "state_dir"):
@@ -231,14 +229,8 @@ def _redirect_marrow_data_dir(tmp_path_factory):
 
     # Module-level path/db constants captured at IMPORT time (before this
     # fixture ran) still point at the real tree — patching config.DATA_DIR /
-    # the paths singleton comes too late for them. A catchup spawn hands its
-    # child the real log path (out of reach of in-process guards), and a
-    # schedule snapshot mkdir()s a real dir. Repoint each one at tmp.
-    try:
-        from marrow import sessionstart_catchup as _sc_mod
-        mp.setattr(_sc_mod, "_LOGS_DIR", tmp / "logs")
-    except ImportError:
-        pass
+    # the paths singleton comes too late for them. A schedule snapshot
+    # mkdir()s a real dir. Repoint each one at tmp.
     try:
         from marrow import schedule as _sched_mod
         mp.setattr(_sched_mod, "_SNAPSHOT_DIR", tmp / "schedule-snapshots")

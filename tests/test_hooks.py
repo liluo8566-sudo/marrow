@@ -1,6 +1,6 @@
 """Integration tests for marrow/hooks.py — thin CC hook entrypoints.
 
-Hooks read paths from config; tests point config at a tmp db/dashboard via
+Hooks read paths from config; tests point config at a tmp db via
 monkeypatch and drive main() with stdin JSON like CC does.
 """
 from __future__ import annotations
@@ -26,7 +26,6 @@ def env(tmp_path, monkeypatch):
     conn.commit()
     conn.close()
     monkeypatch.setattr(config, "db_path", lambda: db)
-    monkeypatch.setattr(config, "dashboard_path", lambda: dash)
     monkeypatch.setattr(config, "db_pages_path", lambda: sub_folder)
     monkeypatch.setattr(config, "db_pages_state_path", lambda: sub_state)
     # Legacy aliases kept synced so any caller still hitting the old name

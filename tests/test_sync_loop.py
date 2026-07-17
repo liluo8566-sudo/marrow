@@ -8,18 +8,14 @@ from __future__ import annotations
 
 import os
 import sqlite3
-import threading
 import time
 from pathlib import Path
 from typing import Callable
-
-import pytest
 
 from marrow.sync_loop import (
     SyncLoop,
     SyncTarget,
     USER_ACTIVE_WINDOW_S,
-    _MTIME_EPSILON_S,
     last_db_mtime_daybrief,
     last_db_mtime_subpage,
 )

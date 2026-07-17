@@ -235,18 +235,11 @@ def test_empty_model_set_spawn_prompt_head_is_headless(tmp_path):
     # spawn exited before any assistant flush; first user is a spawn prompt
     jl = _w(tmp_path / "e.jsonl", [
         {"type": "queue-operation", "content":
-            "You compress ONE long session of dialogue into a digest"},
-        _user("You compress ONE long session of dialogue into a digest"),
+            "Compress this file per the rules. Output ONLY"},
+        _user("Compress this file per the rules. Output ONLY"),
     ])
     assert transcript.is_headless(jl) is True
     assert transcript.clean(jl) == []
-
-
-def test_empty_model_set_stitch_prompt_head_is_headless(tmp_path):
-    jl = _w(tmp_path / "st.jsonl", [
-        _user("Extract per-episode affect from the session below."),
-    ])
-    assert transcript.is_headless(jl) is True
 
 
 def test_empty_model_set_human_first_message_is_not_headless(tmp_path):

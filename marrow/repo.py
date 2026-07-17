@@ -248,7 +248,7 @@ def add_alert(severity: str, atype: str, fingerprint: str,
     # human detail.
     #
     # Never raises: on any DB exception the record is appended to
-    # alerts-fallback.jsonl (drained by sessionstart_catchup on next boot).
+    # alerts-fallback.jsonl (drained by the session_start hook next boot).
     try:
         detail = message if message is not None else fingerprint
         conn = storage.connect(db)
