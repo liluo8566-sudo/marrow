@@ -1201,6 +1201,99 @@ def _cortex_user_wake_reset(inp: dict) -> None:
                     _wake_state_save(p, d2)
 
 
+# ── external wake (cortex.kick) — cli morning flag-pull (P6) ──────────────────
+
+def _cortex_toml_path() -> Path:
+    """cortex.toml lives beside marrow's config (shared config dir). Read
+    directly (marrow venv cannot import cortex) for the few kick knobs the cli
+    morning path needs."""
+    return Path(config.db_path()).parent / "cortex.toml"
+
+
+def _cortex_night(key: str, default):
+    """One value from cortex.toml [night]. Tolerant: missing file/key -> default."""
+    import tomllib
+    try:
+        p = _cortex_toml_path()
+        if not p.exists():
+            return default
+        with p.open("rb") as f:
+            data = tomllib.load(f)
+        v = (data.get("night", {}) or {}).get(key)
+        return v if v is not None else default
+    except (OSError, ValueError):
+        return default
+
+
+def _cortex_night_mode() -> bool:
+    """True when cortex wake_state carries the night flag (mode == 'night').
+    Absent / unreadable file -> False (day = no morning kick). The flag lifecycle
+    itself is P8; this only reads it."""
+    try:
+        d = _wake_state_load(_cortex_wake_state_path())
+        return str(d.get("mode") or "") == "night"
+    except Exception:
+        return False
+
+
+def _past_morning_start() -> bool:
+    """True when local time is at/after night.morning_start (default 06:00)."""
+    from zoneinfo import ZoneInfo
+    raw = str(_cortex_night("morning_start", "06:00") or "06:00")
+    try:
+        hh, mm = (int(x) for x in raw.split(":"))
+    except (ValueError, TypeError):
+        hh, mm = 6, 0
+    tz = str(config.load().get("core", {}).get("timezone")
+             or config.load().get("timezone") or "Australia/Melbourne")
+    try:
+        now = datetime.now(ZoneInfo(tz))
+    except Exception:
+        now = datetime.now()
+    return (now.hour, now.minute) >= (hh, mm)
+
+
+def kick_cortex(kind: str, note_id=None, minutes=None) -> None:
+    """Fire cortex.kick as a detached, fire-and-forget subprocess in the cortex
+    venv (marrow venv cannot import cortex). Never blocks the caller; any launch
+    failure is swallowed. `kind` in {reply, timeout, morning}."""
+    py, root = _cortex_paths()
+    if not py or not root:
+        return
+    py = str(Path(py).expanduser())
+    root = str(Path(root).expanduser())
+    argv = [py, "-m", "cortex.kick", "--kind", str(kind)]
+    if note_id is not None:
+        argv += ["--note-id", str(note_id)]
+    if minutes is not None:
+        argv += ["--minutes", str(minutes)]
+    try:
+        log = _cortex_path("wake_audit_log_file", "state/wake_audit.log").with_suffix(".kick.log")
+        log.parent.mkdir(parents=True, exist_ok=True)
+        f = open(log, "a")
+        subprocess.Popen(
+            argv, cwd=root, stdout=f, stderr=f, stdin=subprocess.DEVNULL,
+            start_new_session=True, env={**os.environ},
+        )
+    except OSError:
+        pass
+
+
+def maybe_morning_kick_cli() -> None:
+    """cli morning flag-pull: a real user turn in a NON-cortex cli session, with
+    the cortex night flag set and local time past morning_start, pokes cortex to
+    clear the flag and return to day cadence. The caller has already excluded
+    machine/subagent turns and confirmed this is NOT the cortex session.
+    No-op unless enabled + configured + night + past morning_start."""
+    if not enabled():
+        return
+    if os.environ.get("MARROW_CORTEX"):
+        return  # cortex session takes its own reset path, not this
+    if not (_cortex_night_mode() and _past_morning_start()):
+        return
+    kick_cortex("morning")
+
+
 def cortex_window_closed(transcript_path: str | None) -> None:
     """Cortex window really ending (session_end, non-'clear' reason): if the
     wake_state is awake AND (no transcript recorded yet OR it matches this

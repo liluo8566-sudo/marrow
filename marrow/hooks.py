@@ -2175,6 +2175,16 @@ def user_prompt_submit() -> int:
     if prompt_text.startswith("===== BEGIN ORIGINAL TRANSCRIPT"):
         return 0
 
+    # Morning flag-pull (cli path, P6): a real user turn in a non-cortex session,
+    # while the cortex night flag is set and local time is past morning_start,
+    # pokes cortex to clear the flag + return to day cadence. Subagent/worktree
+    # turns already returned above; self-guards MARROW_CORTEX. Best-effort.
+    if prompt_text:
+        try:
+            cortex_bridge.maybe_morning_kick_cli()
+        except Exception:
+            pass
+
     # Outbox delivery (cli/session notes): claim + render notes targeting this
     # session (exact sid, or 'cli' broadcast for cli sessions), consume-once.
     # ct-targeted notes are handled in the wake branch above. Seeds _nudge_line
