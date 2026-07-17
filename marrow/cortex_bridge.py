@@ -319,9 +319,9 @@ def _run_cortex_module(module: str, extra_args: list[str] | None = None) -> dict
 
 
 def lie_down(next_wake_min: float, rotate: bool = False) -> dict:
-    """Set the next wake before you sleep: lie_down(next_wake_min=N) [N=90-360].
-    rotate=True unlocks a short next_wake (N≥16) for a context-full quick turn.
-    NOTE: TTL=60min - be aware of cold start cost (~100k)."""
+    # Description rendered from cortex config at register() (C9); see
+    # _lie_down_doc. Kept minimal here — FastMCP reads __doc__ at registration.
+    """lie_down(next_wake_min=N)."""
     args = ["--next-wake-min", str(next_wake_min)]
     if rotate:
         args += ["--rotate"]
@@ -342,10 +342,8 @@ def lie_down(next_wake_min: float, rotate: bool = False) -> dict:
 
 
 def wait(minutes: float) -> dict:
-    """You can stay awake if you want: wait(N) [N=16-55], uncapped — renew as
-    many times as you like; a user reply resets the timer. Each expiry gives you
-    a fresh free round (play / wait / lie_down). Hint: feel free to play around
-    while waiting. Last lie_down of this session: handoff.md + rotate=True"""
+    # Description rendered from cortex config at register() (C10); see _wait_doc.
+    """wait(N)."""
     return _run_cortex_module("cortex.wait", ["--minutes", str(minutes)])
 
 
@@ -360,6 +358,27 @@ def say() -> dict:
 # DB the tools read/write. Set at register() time from the daemon's own _DB so
 # it tracks the same source the daemon resolved at import; tests patch this.
 _DB = config.db_path()
+
+
+def _lie_down_doc() -> str:
+    """C9 (user-final): lie_down description with all four clamp numbers rendered
+    from cortex config — day bounds [wake].next_wake_min/max, night bounds
+    [night].floor_min/max. Never hardcoded in the string."""
+    day_min = int(_cortex_toml_section("wake", "next_wake_min", 21))
+    day_max = int(_cortex_toml_section("wake", "next_wake_max", 240))
+    night_min = int(_cortex_toml_section("night", "floor_min", 120))
+    night_max = int(_cortex_toml_section("night", "floor_max", 360))
+    return (f"lie_down(next_wake_min=N) "
+            f"[N={day_min}-{day_max} (Day); {night_min}-{night_max} (Night)]")
+
+
+def _wait_doc() -> str:
+    """C10 (needs review): wait description with the wait clamp numbers rendered
+    from cortex config [wake].wait_min/wait_max. Never hardcoded."""
+    lo = int(_cortex_toml_section("wake", "wait_min", 1))
+    hi = int(_cortex_toml_section("wake", "wait_max", 20))
+    return (f"wait(N) [N={lo}-{hi}] — one wait per wake (auto or manual); "
+            f"expiry brings the 3-choice menu. A user reply resets the timer.")
 
 
 def register(marrow_tool, db: str | None = None) -> None:
@@ -380,6 +399,10 @@ def register(marrow_tool, db: str | None = None) -> None:
         return
     marrow_tool()(wish)
     if _CORTEX:
+        # Render the clamp numbers from cortex config into the tool descriptions
+        # at registration (C9/C10) — never hardcoded in the docstring.
+        lie_down.__doc__ = _lie_down_doc()
+        wait.__doc__ = _wait_doc()
         marrow_tool()(lie_down)
         marrow_tool()(wait)
         marrow_tool()(say)
@@ -1210,8 +1233,10 @@ def _cortex_toml_path() -> Path:
     return Path(config.db_path()).parent / "cortex.toml"
 
 
-def _cortex_night(key: str, default):
-    """One value from cortex.toml [night]. Tolerant: missing file/key -> default."""
+def _cortex_toml_section(section: str, key: str, default):
+    """One value from cortex.toml [section]. Tolerant: missing file/key -> default.
+    marrow venv cannot import cortex, so the few numbers the tool descriptions
+    render (wait/lie_down clamps) are read straight from the shared cortex.toml."""
     import tomllib
     try:
         p = _cortex_toml_path()
@@ -1219,10 +1244,15 @@ def _cortex_night(key: str, default):
             return default
         with p.open("rb") as f:
             data = tomllib.load(f)
-        v = (data.get("night", {}) or {}).get(key)
+        v = (data.get(section, {}) or {}).get(key)
         return v if v is not None else default
     except (OSError, ValueError):
         return default
+
+
+def _cortex_night(key: str, default):
+    """One value from cortex.toml [night]. Tolerant: missing file/key -> default."""
+    return _cortex_toml_section("night", key, default)
 
 
 def _cortex_night_mode() -> bool:
