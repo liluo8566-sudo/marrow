@@ -513,6 +513,12 @@ def cmd_refresh(args) -> int:
             msg += " + monitor"
         except Exception as e:
             print(f"mw: monitor refresh failed: {e}", file=sys.stderr)
+        from . import timeline_page
+        try:
+            timeline_page.update(conn)
+            msg += " + timeline"
+        except Exception as e:
+            print(f"mw: timeline page refresh failed: {e}", file=sys.stderr)
         if args.all:
             try:
                 subpages.write_all_subpages(
