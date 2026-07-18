@@ -912,6 +912,132 @@ def msg(
     )
 
 
+# ── qidu shared-reading bridge ───────────────────────────────────────────────
+
+import json as _json
+import urllib.request as _urlreq
+
+
+def _qidu_cfg() -> tuple[str, str] | None:
+    """Return (api_base, token) from [qidu] config, or None if unconfigured."""
+    qidu = config.load().get("qidu", {})
+    api_base = (qidu.get("api_base") or "").rstrip("/")
+    token = qidu.get("token") or ""
+    if not api_base or not token:
+        return None
+    return api_base, token
+
+
+_QIDU_ERROR = "qidu not configured — set [qidu] api_base/token in marrow config.toml"
+
+
+def _book_get(path: str):
+    cfg = _qidu_cfg()
+    if cfg is None:
+        return {"error": _QIDU_ERROR}
+    api_base, token = cfg
+    req = _urlreq.Request(
+        f"{api_base}{path}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    try:
+        resp = _urlreq.urlopen(req, timeout=5)
+        return _json.loads(resp.read())
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _book_post(path: str, body: dict):
+    cfg = _qidu_cfg()
+    if cfg is None:
+        return {"error": _QIDU_ERROR}
+    api_base, token = cfg
+    data = _json.dumps(body).encode()
+    req = _urlreq.Request(
+        f"{api_base}{path}",
+        data=data,
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        resp = _urlreq.urlopen(req, timeout=5)
+        return _json.loads(resp.read())
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@marrow_tool()
+def book_list() -> list[dict]:
+    """List all books on the shared-reading shelf with progress."""
+    return _book_get("/books")
+
+
+@marrow_tool()
+def book_chapters(book_id: str) -> list[dict]:
+    """List all chapters of a book with paragraph ranges."""
+    return _book_get(f"/books/{book_id}/chapters")
+
+
+@marrow_tool()
+def book_page(book_id: str, chapter_id: str, offset: int = 0, limit: int = 30) -> dict:
+    """Read a slice of paragraphs from one chapter. A chapter can hold hundreds
+    of paragraphs, so this fetches the full chapter and slices client-side —
+    returns {total, offset, paragraphs} to show how much is left unread."""
+    paragraphs = _book_get(f"/books/{book_id}/chapters/{chapter_id}/paragraphs")
+    if isinstance(paragraphs, dict) and "error" in paragraphs:
+        return paragraphs
+    if not isinstance(paragraphs, list):
+        return {"error": "unexpected response from book server"}
+    total = len(paragraphs)
+    return {"total": total, "offset": offset, "paragraphs": paragraphs[offset:offset + limit]}
+
+
+@marrow_tool()
+def book_progress(book_id: str) -> dict:
+    """Get current reading progress for a book."""
+    return _book_get(f"/books/{book_id}/progress")
+
+
+@marrow_tool()
+def book_annotations(book_id: str, chapter_id: str = "") -> list[dict]:
+    """Read annotations (both frost and leith) for a book, optionally filtered by chapter."""
+    q = f"?chapter_id={chapter_id}" if chapter_id else ""
+    return _book_get(f"/books/{book_id}/annotations{q}")
+
+
+@marrow_tool()
+def book_annotate(book_id: str, highlight_id: int, text: str, parent_id: int | None = None) -> str:
+    """Write an annotation (as Leith) to a highlight in the shared-reading book server.
+    parent_id replies inside an existing thread; omit for a top-level annotation."""
+    body: dict = {"highlight_id": highlight_id, "text": text}
+    if parent_id is not None:
+        body["parent_id"] = parent_id
+    result = _book_post(f"/books/{book_id}/annotations/ai", body)
+    if isinstance(result, dict) and "error" in result:
+        return f"Failed to write annotation: {result['error']}"
+    return f"Annotation written: {result.get('annotation_id', 'ok')}"
+
+
+@marrow_tool()
+def book_message(text: str, message_type: str = "encourage", book_id: str = "") -> str:
+    """Push an encourage/health companion message to the shared-reading reader
+    frontend. book_id is copied from the signal text."""
+    result = _book_post("/push/message", {"text": text, "message_type": message_type, "book_id": book_id})
+    if isinstance(result, dict) and "error" in result:
+        return f"Failed to push message: {result['error']}"
+    return "Message pushed to reader frontend."
+
+
+@marrow_tool()
+def book_retention(text: str, book_id: str = "", session_id: int = 0) -> str:
+    """Push retention text to the shared-reading reader frontend (exit ceremony).
+    book_id/session_id are copied from the signal text."""
+    result = _book_post("/push/retention", {"text": text, "book_id": book_id, "session_id": session_id})
+    if isinstance(result, dict) and "error" in result:
+        return f"Failed to push retention: {result['error']}"
+    return "Retention message pushed to reader frontend."
+
+
 # ── event_clear ──────────────────────────────────────────────────────────────
 
 def _time_where(col, before, after):
