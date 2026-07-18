@@ -914,8 +914,8 @@ def msg(
 
 # ── qidu shared-reading bridge ───────────────────────────────────────────────
 
-import json as _json
-import urllib.request as _urlreq
+import json
+import urllib.request
 
 
 def _qidu_cfg() -> tuple[str, str] | None:
@@ -936,13 +936,13 @@ def _book_get(path: str):
     if cfg is None:
         return {"error": _QIDU_ERROR}
     api_base, token = cfg
-    req = _urlreq.Request(
+    req = urllib.request.Request(
         f"{api_base}{path}",
         headers={"Authorization": f"Bearer {token}"},
     )
     try:
-        resp = _urlreq.urlopen(req, timeout=5)
-        return _json.loads(resp.read())
+        resp = urllib.request.urlopen(req, timeout=5)
+        return json.loads(resp.read())
     except Exception as e:
         return {"error": str(e)}
 
@@ -952,16 +952,16 @@ def _book_post(path: str, body: dict):
     if cfg is None:
         return {"error": _QIDU_ERROR}
     api_base, token = cfg
-    data = _json.dumps(body).encode()
-    req = _urlreq.Request(
+    data = json.dumps(body).encode()
+    req = urllib.request.Request(
         f"{api_base}{path}",
         data=data,
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         method="POST",
     )
     try:
-        resp = _urlreq.urlopen(req, timeout=5)
-        return _json.loads(resp.read())
+        resp = urllib.request.urlopen(req, timeout=5)
+        return json.loads(resp.read())
     except Exception as e:
         return {"error": str(e)}
 

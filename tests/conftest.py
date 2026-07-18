@@ -27,6 +27,18 @@ from pathlib import Path
 
 os.environ.setdefault("WATCHDOG_USE_POLLING", "1")
 
+# ── pin the test timezone BEFORE any marrow module import ──────────────────────
+# Tests assert Melbourne wall-clock times (AEST/AEDT), but several modules
+# cache the zone at import time (timecue._MELB, hooks._RECALL_TZ) — before the
+# session fixtures below redirect CONFIG_PATH — so a user config with any
+# other [core].timezone breaks the suite. conftest imports first, so patching
+# get_tz here guarantees every cache and runtime call sees Melbourne.
+from zoneinfo import ZoneInfo
+
+import marrow.config as _marrow_config
+
+_marrow_config.get_tz = lambda: ZoneInfo("Australia/Melbourne")
+
 import pytest
 
 
