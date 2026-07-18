@@ -17,7 +17,7 @@ _DEFAULT_TOML = _DATA_DIR / "paths.toml"
 _DEFAULTS = {
     "marrow_db": "~/.config/marrow/marrow.db",
     "ny_root": "",
-    "dashboard_md": "",
+    "daybrief_md": "",
     "drift_pending_dir": "~/.config/marrow/drift_pending",
     "drift_backup_dir": "~/.config/marrow/drift_backup",
     "dir_tree_md": "~/.config/marrow/dir_tree.md",
@@ -30,7 +30,7 @@ _DEFAULTS = {
 class Paths:
     marrow_db: Path
     ny_root: Path
-    dashboard_md: Path
+    daybrief_md: Path
     drift_pending_dir: Path
     drift_backup_dir: Path
     dir_tree_md: Path
@@ -61,7 +61,7 @@ def load_paths(toml_path: str | Path | None = None) -> Paths:
     return Paths(
         marrow_db=_p("marrow_db"),
         ny_root=_p("ny_root"),
-        dashboard_md=_p("dashboard_md"),
+        daybrief_md=_p("daybrief_md"),
         drift_pending_dir=_p("drift_pending_dir"),
         drift_backup_dir=_p("drift_backup_dir"),
         dir_tree_md=_p("dir_tree_md"),

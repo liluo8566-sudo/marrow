@@ -15,7 +15,7 @@ import sqlite_vec
 
 from . import config
 
-SCHEMA_VERSION = 38
+SCHEMA_VERSION = 42
 
 # Tables whose id must never be reused (freed-id-reuse disease family): a plain
 # INTEGER PRIMARY KEY hands a deleted id back to the next INSERT, and side-tables
@@ -38,7 +38,8 @@ CREATE TABLE IF NOT EXISTS events (
   source_hash TEXT,
   ts_start TEXT,
   ts_end TEXT,
-  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  updated_at TEXT
 );
 -- Deleted events: source_hash of rows the user purged. archive_events skips any
 -- hash listed here so a SessionEnd/catchup re-archive can't resurrect them.
@@ -248,6 +249,35 @@ CREATE TABLE IF NOT EXISTS session_watermarks (
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
   PRIMARY KEY (sid, segment_seq)
 );
+-- v40: cross-channel message drop (msg MCP tool → outbox → channel adapters).
+-- One row per note. target = tg | wx | cli | ct | session:<full-sid>. Delivery
+-- is at-most-once, claimed via a single UPDATE...WHERE status='pending'.
+CREATE TABLE IF NOT EXISTS outbox (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  from_sid TEXT,
+  from_channel TEXT,
+  target TEXT NOT NULL,
+  body TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  sent_at TEXT,
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  watch_reply INTEGER NOT NULL DEFAULT 0,
+  watch_timeout_min INTEGER,
+  watch_state TEXT,
+  -- v41: reply receipt — bridge stamps her reply on every sent tg/wx note.
+  replied_at TEXT,
+  reply_text TEXT,
+  receipt_seen INTEGER NOT NULL DEFAULT 0,
+  -- v42: claim-source audit — every claim path stamps who/when it consumed a
+  -- row (e.g. 'marrow.deliver' / 'cortex.note' / 'cortex.free_round'), so one
+  -- query answers "who consumed note N and when".
+  claimed_by TEXT,
+  claimed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_outbox_status_target ON outbox(status, target);
+CREATE INDEX IF NOT EXISTS idx_outbox_watch_state_sent
+  ON outbox(watch_state, sent_at);
 """
 
 # superseded_by IS NULL = the current row. Recall/backdrop read the live view.
@@ -524,6 +554,12 @@ def init_db(path: str | None = None) -> sqlite3.Connection:
         for tbl, col, decl in (
             ("milestones", "updated_at", "TEXT"),
             ("sessions", "cwd", "TEXT"),
+            ("events", "updated_at", "TEXT"),
+            ("outbox", "replied_at", "TEXT"),
+            ("outbox", "reply_text", "TEXT"),
+            ("outbox", "receipt_seen", "INTEGER NOT NULL DEFAULT 0"),
+            ("outbox", "claimed_by", "TEXT"),
+            ("outbox", "claimed_at", "TEXT"),
         ):
             try:
                 conn.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {decl}")
@@ -570,6 +606,10 @@ def init_db(path: str | None = None) -> sqlite3.Connection:
         _migrate_to_v36(conn)
         _migrate_to_v37(conn)
         _migrate_to_v38(conn)
+        _migrate_to_v39(conn)
+        _migrate_to_v40(conn)
+        _migrate_to_v41(conn)
+        _migrate_to_v42(conn)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     return conn
 
@@ -607,7 +647,8 @@ def _migrate_to_v2(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE affect ADD COLUMN {col} {decl}")
         except sqlite3.OperationalError:
             pass
-    # session_digests: one row per sessionend_async DIGEST result.
+    # session_digests: per-session digest rows. Writes retired; table kept as a
+    # read surface for the timeline life-line zone.
     conn.execute(
         "CREATE TABLE IF NOT EXISTS session_digests ("
         "  sid TEXT PRIMARY KEY,"
@@ -1600,6 +1641,63 @@ def _migrate_to_v38(conn: sqlite3.Connection) -> None:
                 (md_max, table),
             )
     conn.execute("PRAGMA user_version=38")
+
+
+def _migrate_to_v39(conn: sqlite3.Connection) -> None:
+    """v39: events.updated_at — freshness arbitration for timeline reconcile.
+
+    The ALTER runs in the schema-evolution backfill loop above (idempotent);
+    this gate only bumps user_version. Existing rows stay NULL on purpose:
+    the reconcile gate reads COALESCE(updated_at, created_at), so NULL means
+    "never content-edited, base = created_at". Only a content-write path
+    (tl_writer.tl_update / reconcile self+manual edit) stamps updated_at.
+    """
+    v = conn.execute("PRAGMA user_version").fetchone()[0]
+    if v >= 39:
+        return
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(events)")}
+    if "updated_at" not in cols:
+        conn.execute("ALTER TABLE events ADD COLUMN updated_at TEXT")
+    conn.execute("PRAGMA user_version=39")
+
+
+def _migrate_to_v40(conn: sqlite3.Connection) -> None:
+    """v40: outbox table — cross-channel message drop (msg MCP tool).
+
+    Table + its two indexes are created via _TABLES / _FTS-style CREATE IF NOT
+    EXISTS on every connect (idempotent); this gate only bumps user_version so
+    SCHEMA_VERSION stays monotonic. Existing DBs get the table on next init_db.
+    """
+    v = conn.execute("PRAGMA user_version").fetchone()[0]
+    if v >= 40:
+        return
+    conn.execute("PRAGMA user_version=40")
+
+
+def _migrate_to_v41(conn: sqlite3.Connection) -> None:
+    """v41: outbox reply receipt — replied_at / reply_text / receipt_seen.
+
+    The three columns are added by the schema-evolution backfill loop above
+    (idempotent ALTER, non-constant default handled there); this gate only
+    bumps user_version so SCHEMA_VERSION stays monotonic.
+    """
+    v = conn.execute("PRAGMA user_version").fetchone()[0]
+    if v >= 41:
+        return
+    conn.execute("PRAGMA user_version=41")
+
+
+def _migrate_to_v42(conn: sqlite3.Connection) -> None:
+    """v42: outbox claim-source audit — claimed_by / claimed_at.
+
+    The two columns are added by the schema-evolution backfill loop above
+    (idempotent ALTER); this gate only bumps user_version so SCHEMA_VERSION
+    stays monotonic.
+    """
+    v = conn.execute("PRAGMA user_version").fetchone()[0]
+    if v >= 42:
+        return
+    conn.execute("PRAGMA user_version=42")
 
 
 def get_latest_watermark(conn, sid):

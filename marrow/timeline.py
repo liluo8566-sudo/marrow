@@ -1,41 +1,33 @@
-"""Timeline block renderer — merged affect + session view.
+"""Timeline block renderer — life-line session view.
 
-Two outlets:
-  render_timeline(conn) -> str   # SessionStart injection / dashboard block
-  Both use the same render fn; caller decides where to put the output.
+  render_timeline(conn) -> str   # SessionStart injection / daybrief block
 
-Format (FINAL spec, plan 4A-3):
-  未解: <desc> [label] <!-- tl:ep:<id> -->  — open affect episodes, 7d expiry, top of block
-  Last 24h: flat HH:MM film-strip newest→oldest, cap 20
-    - LIFE lines (casual sessions only; task sessions omitted)
-    - day crossings: --- MM-DD --- divider
-  Today-1 overflow + today-2: per-day **MM-DD Day 【tone】** + AM/PM/ND periods
-    - ND 00-06 belongs to PREVIOUS day
-    - all sessions' LIFE lines in period joined time-order; empty hidden
-    - 24h sessions exceeding cap spill here as day summaries
-  Day 3-6: Week 【tone ↗/↘/→】 trend + one line per day 【tone】 diary.tone/overview
+Format:
+  Zone A (last 24h from natural midnight): flat HH:MM film-strip newest→oldest,
+    cap 20 · LIFE lines (life_lines column) · day crossings `--- MM-DD ---`.
+  Zone B (3 diary days before zone A start): per-day `**MM-DD Day 【tone】**` +
+    overview from diary.tone/overview; NULL overview days skipped.
   No in-progress session line.
-  Trim order: day lines → period lines (farthest day first) → 24h farthest.
-  Budget ~4000 chars (safety net).
+  Trim order: zone-B day lines (farthest first) → zone-A farthest. Budget
+  ~4000 chars (safety net).
 
-Tone labels reuse top_sections._tone / _vband / _aband (no duplication).
-All DB timestamps are UTC; configured local timezone on render via timeutil.
+Day boundary: natural midnight (configured tz). All DB timestamps are UTC;
+local timezone applied on render via timeutil.
 """
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib as _hashlib
 import re as _re
 import sqlite3
-from .top_sections import _tone, _vband, _aband, _wmean
 from . import config as _config
 
 _TZ = _config.get_tz()
+
 # Matches leading HH:MM in a LIFE line (e.g. "21:40 买了b5精华")
 _LIFE_TS_RE = _re.compile(r"^(\d{2}:\d{2})(?:-\d{2}:\d{2})?(?:\s+|(?=【))(.*)", _re.DOTALL)
-_CUTOFF_H = 6          # 6AM local day boundary
 _BUDGET = 4000         # soft char budget (safety net; zone caps control sizing)
 _INJECT_CAP = 20       # max film-strip lines injected into context
-_OPEN_EXPIRY_DAYS = 7  # open episodes older than this are hidden
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
@@ -44,32 +36,8 @@ def _now_local() -> _dt.datetime:
     return _dt.datetime.now(_TZ)
 
 
-def _day_start_utc(local_date: _dt.date) -> _dt.datetime:
-    """Local date at 06:00 AM → UTC (the effective day boundary)."""
-    local_midnight = _dt.datetime(
-        local_date.year, local_date.month, local_date.day,
-        _CUTOFF_H, 0, 0, tzinfo=_TZ)
-    return local_midnight.astimezone(_dt.timezone.utc)
-
-
-def _local_date_from_utc(utc_iso: str) -> _dt.date:
-    """UTC ISO → local date (configured tz) with 6AM cutoff."""
-    s = (utc_iso or "").strip().replace("Z", "+00:00")
-    try:
-        d = _dt.datetime.fromisoformat(s)
-    except ValueError:
-        return _now_local().date()
-    if d.tzinfo is None:
-        d = d.replace(tzinfo=_dt.timezone.utc)
-    local = d.astimezone(_TZ)
-    # Before 6AM → belongs to previous diary day
-    if local.hour < _CUTOFF_H:
-        local -= _dt.timedelta(days=1)
-    return local.date()
-
-
 def _calendar_date_from_utc(utc_iso: str) -> _dt.date:
-    """UTC ISO → local calendar date (configured tz) without the 6AM cutoff."""
+    """UTC ISO → local calendar date (configured tz), natural midnight."""
     s = (utc_iso or "").strip().replace("Z", "+00:00")
     try:
         d = _dt.datetime.fromisoformat(s)
@@ -108,9 +76,8 @@ def _hhmm_local(utc_iso: str) -> str:
 
 
 def _period_of_hhmm(hhmm: str) -> str:
-    """HH:MM → AM/PM/ND period label.
-    AM 06-12, PM 12-18, ND 18-06 (next morning up to 06:00).
-    00-06 display time belongs to ND of PREVIOUS diary day.
+    """HH:MM → AM/PM/ND period label (display only, not day assignment).
+    AM 06-12, PM 12-18, ND 18-06. 00-06 keeps the ND label of its own day.
     """
     try:
         h = int(hhmm[:2])
@@ -125,7 +92,8 @@ def _period_of_hhmm(hhmm: str) -> str:
 
 def _period_diary_date(utc_iso: str) -> tuple[_dt.date, str]:
     """Return (diary_date, period) for a UTC timestamp.
-    ND 00-05 belongs to PREVIOUS diary day (the ND period of the prior night).
+    Natural midnight: diary_date = local calendar date. Period is a display
+    label (AM/PM/ND); 00-06 keeps the ND label of that same calendar day.
     """
     s = (utc_iso or "").strip().replace("Z", "+00:00")
     try:
@@ -136,44 +104,8 @@ def _period_diary_date(utc_iso: str) -> tuple[_dt.date, str]:
     if d.tzinfo is None:
         d = d.replace(tzinfo=_dt.timezone.utc)
     local = d.astimezone(_TZ)
-    h = local.hour
     period = _period_of_hhmm(local.strftime("%H:%M"))
-    # 00-05 display → ND of PREVIOUS diary day
-    if h < _CUTOFF_H:
-        diary_date = (local - _dt.timedelta(days=1)).date()
-    else:
-        diary_date = local.date()
-    return diary_date, period
-
-
-def _tone_from_rows(rows: list[dict]) -> str:
-    if not rows:
-        return "平淡"
-    v = _wmean(rows, "valence")
-    a = _wmean(rows, "arousal")
-    return _tone(v, a)
-
-
-def _week_trend(this_week: list[dict], last_week: list[dict]) -> str:
-    """↗/↘/→ based on V/A mean delta between this week and last week."""
-    if not this_week:
-        return "平淡"
-    tw_v = _wmean(this_week, "valence")
-    tw_a = _wmean(this_week, "arousal")
-    tone_label = _tone(tw_v, tw_a)
-    if not last_week:
-        return tone_label
-    lw_v = _wmean(last_week, "valence")
-    delta_v = tw_v - lw_v
-    if delta_v > 0.05:
-        arrow = "↗"
-    elif delta_v < -0.05:
-        arrow = "↘"
-    else:
-        arrow = "→"
-    return f"{tone_label} {arrow}"
-
-
+    return local.date(), period
 
 
 def _tl_anchor_sid(sid: str, segment_seq: int = 0,
@@ -211,19 +143,19 @@ def _life_line_utc_and_date(item: str, session_utc_iso: str,
     """
     m = _LIFE_TS_RE.match(item)
     if not m:
-        diary_date = _local_date_from_utc(session_utc_iso)
+        diary_date = _calendar_date_from_utc(session_utc_iso)
         return session_utc_iso, diary_date
 
     hhmm = m.group(1)
     try:
         h, mi = int(hhmm[:2]), int(hhmm[3:5])
     except ValueError:
-        diary_date = _local_date_from_utc(session_utc_iso)
+        diary_date = _calendar_date_from_utc(session_utc_iso)
         return session_utc_iso, diary_date
 
     sess_dt = _parse_utc(session_utc_iso)
     if sess_dt is None:
-        diary_date = _local_date_from_utc(session_utc_iso)
+        diary_date = _calendar_date_from_utc(session_utc_iso)
         return session_utc_iso, diary_date
     sess_local = sess_dt.astimezone(_TZ)
 
@@ -231,12 +163,7 @@ def _life_line_utc_and_date(item: str, session_utc_iso: str,
     candidate = _dt.datetime(cal_date.year, cal_date.month, cal_date.day,
                              h, mi, 0, tzinfo=_TZ)
 
-    if candidate.hour < _CUTOFF_H:
-        diary_date = (candidate - _dt.timedelta(days=1)).date()
-    else:
-        diary_date = candidate.date()
-
-    return _utc_iso(candidate), diary_date
+    return _utc_iso(candidate), candidate.date()
 
 
 def _life_line_local_date(item: str, session_date: _dt.date,
@@ -254,32 +181,14 @@ def _life_line_local_date(item: str, session_date: _dt.date,
         h, mi = int(hhmm[:2]), int(hhmm[3:5])
     except ValueError:
         return session_date
-    # Build candidate on the given calendar date; single 6AM cutoff.
+    # Build candidate on the given calendar date; natural midnight boundary.
     candidate = _dt.datetime(
         session_date.year, session_date.month, session_date.day,
         h, mi, 0, tzinfo=_TZ)
-    if candidate.hour < _CUTOFF_H:
-        return (candidate - _dt.timedelta(days=1)).date()
     return candidate.date()
 
 
 # ── DB queries ───────────────────────────────────────────────────────────────
-
-def _query_open_episodes(conn: sqlite3.Connection,
-                         cutoff_utc: str) -> list[dict]:
-    """Unresolved affect episodes from last 7d, not superseded."""
-    rows = conn.execute(
-        "SELECT id, description, label, created_at"
-        " FROM affect"
-        " WHERE superseded_by IS NULL"
-        " AND unresolved = 1"
-        " AND resolved_at IS NULL"
-        " AND created_at >= ?"
-        " ORDER BY created_at ASC",
-        (cutoff_utc,),
-    ).fetchall()
-    return [dict(r) for r in rows]
-
 
 def _query_digests_range(conn: sqlite3.Connection,
                          from_utc: str, to_utc: str) -> list[dict]:
@@ -310,75 +219,6 @@ def _query_session_event_span(conn: sqlite3.Connection,
     if row is None:
         return None, None
     return row["t_start"], row["t_end"]
-
-
-def _query_session_max_event_ts(conn: sqlite3.Connection,
-                                sids: list[str]) -> dict[str, str]:
-    if not sids:
-        return {}
-    placeholders = ",".join("?" for _ in sids)
-    rows = conn.execute(
-        "SELECT session_id, MAX(timestamp) AS t_end"
-        f" FROM events WHERE session_id IN ({placeholders})"
-        " GROUP BY session_id",
-        sids,
-    ).fetchall()
-    return {r["session_id"]: r["t_end"] for r in rows if r["t_end"]}
-
-
-def _query_affect_range(conn: sqlite3.Connection,
-                        from_utc: str, to_utc: str) -> list[dict]:
-    """Affect rows in UTC range for tone computation."""
-    rows = conn.execute(
-        "SELECT valence, arousal, importance, created_at"
-        " FROM affect"
-        " WHERE superseded_by IS NULL"
-        " AND created_at >= ? AND created_at < ?",
-        (from_utc, to_utc),
-    ).fetchall()
-    return [dict(r) for r in rows]
-
-
-def _query_affect_by_session(conn: sqlite3.Connection,
-                              from_utc: str, to_utc: str) -> dict[str, list[dict]]:
-    """Affect rows grouped by session_id for 24h tone tags (Bug 3).
-
-    Affect rows don't carry a session_id column, so we match by time span:
-    rows whose created_at falls within [session_start, session_end) where
-    session_end = next session's start (or to_utc).  We approximate this by
-    joining on events: affect.created_at between first and last event of
-    the session.  For sessions with no events we use the digest ts window.
-    Returns {sid: [affect_row, ...]}
-    """
-    # Fetch affect rows in range with their timestamps
-    rows = conn.execute(
-        "SELECT valence, arousal, importance, created_at"
-        " FROM affect"
-        " WHERE superseded_by IS NULL"
-        " AND created_at >= ? AND created_at < ?",
-        (from_utc, to_utc),
-    ).fetchall()
-    affect_rows = [dict(r) for r in rows]
-
-    # Fetch session time spans (first_event_ts, last_event_ts) from events
-    spans = conn.execute(
-        "SELECT session_id, MIN(timestamp) AS t_start, MAX(timestamp) AS t_end"
-        " FROM events"
-        " WHERE timestamp >= ? AND timestamp < ?"
-        " GROUP BY session_id",
-        (from_utc, to_utc),
-    ).fetchall()
-
-    by_sid: dict[str, list[dict]] = {}
-    for span in spans:
-        sid = span["session_id"]
-        t_start = span["t_start"]
-        t_end = span["t_end"]
-        by_sid[sid] = [
-            ar for ar in affect_rows
-            if t_start <= ar["created_at"] <= t_end
-        ]
-    return by_sid
 
 
 def _query_diary_zone_b(conn: sqlite3.Connection,
@@ -433,14 +273,13 @@ def _query_self_rows_24h(conn: sqlite3.Connection,
         " ORDER BY e.timestamp ASC",
         (from_utc, to_utc),
     ).fetchall()
-    from . import tl_writer as _tl_writer
     out: list[dict] = []
     for r in rows:
         ts_start = r["ts_start"] or r["ts"]
         hhmm = _hhmm_local(ts_start)
         end = r["ts_end"]
         rng = f"{hhmm}-{_hhmm_local(end)}" if end else hhmm
-        body = _tl_writer.canonicalize_label_letters((r["body"] or "").strip())
+        body = (r["body"] or "").strip()
         out.append({
             "id": r["id"],
             "ts": ts_start,
@@ -472,17 +311,6 @@ def _query_current_sid(conn: sqlite3.Connection) -> str | None:
 
 # ── zone renderers ───────────────────────────────────────────────────────────
 
-def _render_open_episodes(episodes: list[dict]) -> list[str]:
-    lines: list[str] = []
-    for ep in episodes:
-        desc = ep.get("description") or ep.get("label") or "(ep)"
-        label = ep.get("label") or ""
-        tag = f" [{label}]" if label and label != desc else ""
-        ep_id = ep.get("id", 0)
-        lines.append(f"未解: {desc}{tag} <!-- tl:ep:{ep_id} -->")
-    return lines
-
-
 def _render_24h(digests: list[dict],
                 current_sid: str | None,
                 manual_events: list[dict] | None = None,
@@ -495,8 +323,8 @@ def _render_24h(digests: list[dict],
     """Flat 24h film-strip, newest first, filtered per rendered line.
 
     self_rows (role='tl', tl_add) render PRIMARY with a tl:e anchor and
-    the 【N word♡Y word】body [i] format (letters configurable via
-    tl.user_letter / tl.assistant_letter); life_lines are the history fallback.
+    the 【<u> word♡<a> word】body [i] format (markers from persona config);
+    life_lines are the history fallback.
     """
     if event_spans is None:
         event_spans = {}
@@ -586,7 +414,6 @@ def _render_24h(digests: list[dict],
             continue
         ts = sd.get("ts") or ""
         sess_hhmm = _hhmm_local(ts)
-        kind = (sd.get("kind") or "casual").lower()
         life_raw = sd.get("life_lines") or ""
         life_items = [x.strip() for x in life_raw.splitlines() if x.strip()]
 
@@ -662,10 +489,8 @@ def _render_24h(digests: list[dict],
 
 
 def _render_zone_b(diary_data: dict[str, dict],
-                   dates: list[_dt.date],
-                   this_week_affect: list[dict],
-                   last_week_affect: list[dict]) -> list[str]:
-    """Zone B: per-day diary overview + week trend footer.
+                   dates: list[_dt.date]) -> list[str]:
+    """Zone B: per-day diary overview.
     Returns [] if there is no diary data (no days rendered).
     """
     day_lines: list[str] = []
@@ -679,12 +504,7 @@ def _render_zone_b(diary_data: dict[str, dict],
         day_lines.append(f"**{date.strftime('%m-%d')} {date.strftime('%a')} 【{tone}】** {anchor}")
         day_lines.append(overview)
 
-    if not day_lines:
-        return []
-
-    # Week trend footer
-    trend = _week_trend(this_week_affect, last_week_affect)
-    return day_lines + ["", f"**The Week 【{trend}】**"]
+    return day_lines
 
 
 # ── main render ──────────────────────────────────────────────────────────────
@@ -707,16 +527,7 @@ def render_timeline(conn: sqlite3.Connection,
     ).astimezone(_dt.timezone.utc)
     yesterday_start_utc_iso = _utc_iso(yesterday_start_utc)
 
-    # Time boundaries (UTC ISO strings)
-    t_24h = (now_utc - _dt.timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    t_7d  = (now_utc - _dt.timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    t_14d = (now_utc - _dt.timedelta(days=14)).strftime("%Y-%m-%dT%H:%M:%SZ")
-
     current_sid = _query_current_sid(conn)
-
-    # ── open episodes ────────────────────────────────────────────────────────
-    open_eps = _query_open_episodes(conn, t_7d)
-    open_lines = _render_open_episodes(open_eps)
 
     # ── last 24h ─────────────────────────────────────────────────────────────
     digests_24h = _query_digests_range(conn, yesterday_start_utc_iso, now_utc_iso)
@@ -740,20 +551,15 @@ def render_timeline(conn: sqlite3.Connection,
     zone_b_dates = [zone_a_start_date - _dt.timedelta(days=d) for d in range(1, 4)]
     diary_data = _query_diary_zone_b(conn, zone_b_dates)
 
-    # Affect for week trend
-    zone_b_from_utc = _day_start_utc(zone_b_dates[-1]).strftime("%Y-%m-%dT%H:%M:%SZ")
-    this_week_affect = _query_affect_range(conn, zone_b_from_utc, now_utc_iso)
-    last_week_affect = _query_affect_range(conn, t_14d, t_7d)
-
-    lines_zone_b = _render_zone_b(diary_data, zone_b_dates, this_week_affect, last_week_affect)
+    lines_zone_b = _render_zone_b(diary_data, zone_b_dates)
 
     # ── assemble + trim to budget ────────────────────────────────────────────
-    all_sections = _assemble(open_lines, lines_24h, lines_zone_b)
+    all_sections = _assemble(lines_24h, lines_zone_b)
     text = "## Timeline\n" + "\n".join(all_sections) if all_sections else "## Timeline\n_none_"
 
     # Trim if over budget (visible text only — edit anchors don't count)
     if _visible_len(text) > _BUDGET:
-        text = _trim_to_budget(text, open_lines, lines_24h, lines_zone_b)
+        text = _trim_to_budget(text, lines_24h, lines_zone_b)
 
     # Append tl-rendered trail marker so reconcile knows which anchors were rendered
     trail_sids  = sorted(set(_TL_TRAIL_SID_RE.findall(text)))
@@ -766,17 +572,78 @@ def render_timeline(conn: sqlite3.Connection,
     if trail_dates: parts.append("d=" + ",".join(trail_dates))
     if trail_evts:  parts.append("e=" + ",".join(trail_evts))
     if trail_eps:   parts.append("ep=" + ",".join(trail_eps))
+    # t= = moment timeline block content last changed; render_timeline stays
+    # pure and stamps now — carry_trail_t (writer-side) rewrites it to the
+    # carried value when the content is unchanged. Only stamped when the block
+    # has rendered anchors (empty `_none_` render emits no trail at all).
     if parts:
+        # z= = fingerprint of the zone body (this text, trail-free). Lets
+        # reconcile tell render residue (z= matches recompute → DB wins
+        # silently) from a human edit (z= differs → warn) without relying on
+        # file mtime, which a volatile co-writer (Status zone) bumps.
+        parts.append("z=" + _zone_fingerprint(text))
+        parts.append("t=" + _now_utc_iso())
         text += f"\n<!-- tl-rendered:{';'.join(parts)} -->"
 
     return text
 
 
-def _assemble(open_lines: list[str],
-              lines_24h: list[str],
+def _now_utc_iso() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+_TL_TRAIL_LINE_RE = _re.compile(r"\n?<!--\s*tl-rendered:[^>]+-->\s*$")
+_TL_TRAIL_T_RE = _re.compile(r"t=(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)")
+_TL_TRAIL_Z_RE = _re.compile(r"z=([0-9a-f]{8})")
+
+
+def _zone_fingerprint(text: str) -> str:
+    """Deterministic 8-hex fingerprint of the timeline zone's content.
+
+    Shared by render (stamps z= into the trail) and reconcile (recomputes on
+    the current file zone). Excludes the tl-rendered trail line itself and
+    normalizes newlines + trailing whitespace so both sides are byte-identical
+    by construction, independent of the volatile t= / z= trail fields.
+    """
+    body = _TL_TRAIL_LINE_RE.sub("", text)
+    body = body.replace("\r\n", "\n").replace("\r", "\n").rstrip()
+    return _hashlib.sha1(body.encode("utf-8")).hexdigest()[:8]
+
+
+def carry_trail_t(new_block: str, old_block: str | None,
+                  absorbed: bool = False) -> str:
+    """Writer-side trail-t reconciliation.
+
+    Compare new vs old timeline block with the trail line stripped. Identical
+    content → rewrite the new trail carrying the old t= (content unchanged).
+    Different content, or no old t= → keep the fresh t=now already stamped by
+    render_timeline. Returns the (possibly rewritten) new block.
+
+    absorbed=True means the reconcile pass just wrote at least one edit into
+    the DB, so the DB rows now carry a fresh mts (> the old t=). Keeping the
+    old t= would deadlock the per-row db-win gate (row_ts > t= forever → every
+    later edit of that row rejected). So on absorb, keep the fresh t=now even
+    when the rendered content equals the old file content (the reconcile made
+    the file match the DB, but the DB moved).
+    """
+    if old_block is None:
+        return new_block
+    if absorbed:
+        return new_block
+    old_t = _TL_TRAIL_T_RE.search(_TL_TRAIL_LINE_RE.search(old_block).group(0)) \
+        if _TL_TRAIL_LINE_RE.search(old_block) else None
+    if old_t is None:
+        return new_block
+    new_body = _TL_TRAIL_LINE_RE.sub("", new_block)
+    old_body = _TL_TRAIL_LINE_RE.sub("", old_block)
+    if new_body != old_body:
+        return new_block
+    return _TL_TRAIL_T_RE.sub(f"t={old_t.group(1)}", new_block, count=1)
+
+
+def _assemble(lines_24h: list[str],
               lines_zone_b: list[str]) -> list[str]:
     parts: list[str] = []
-    parts.extend(open_lines)
     parts.extend(lines_24h)
     if lines_zone_b:
         if parts:
@@ -802,22 +669,21 @@ visible_len = _visible_len
 
 
 def _trim_to_budget(text: str,
-                    open_lines: list[str],
                     lines_24h: list[str],
                     lines_zone_b: list[str]) -> str:
     lzb = list(lines_zone_b)
     l24h = list(lines_24h)
 
     def _rebuild() -> str:
-        parts = _assemble(open_lines, l24h, lzb)
+        parts = _assemble(l24h, lzb)
         body = "\n".join(parts) if parts else "_none_"
         return "## Timeline\n" + body
 
-    # Trim zone B lines (farthest day first = near end, skip week footer)
-    while len(lzb) > 2 and _visible_len(_rebuild()) > _BUDGET:
+    # Trim zone B lines (farthest day first = near end)
+    while len(lzb) >= 2 and _visible_len(_rebuild()) > _BUDGET:
         # Remove last day entry (2 lines: header + overview)
-        lzb.pop(-3)  # overview before the footer gap
-        lzb.pop(-3)  # header before the footer gap
+        lzb.pop()  # overview
+        lzb.pop()  # header
 
     # Remove all zone B if still over
     if lzb and _visible_len(_rebuild()) > _BUDGET:

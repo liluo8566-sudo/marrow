@@ -254,3 +254,32 @@ def test_disabled_returns_none(monkeypatch, tmp_path):
     monkeypatch.setattr(schedule, "_SNAPSHOT_DIR", tmp_path / "snap")
     monkeypatch.setattr(schedule, "is_enabled", lambda: False)
     assert schedule.check_and_inject("any") is None
+
+
+# --- cadence-failure alert message classification --------------------------
+
+def test_alert_message_authorization_denied():
+    msg = schedule._alert_message("rem", "cadence: authorization denied")
+    assert "authorization" in msg.lower()
+    assert "Fix order:" in msg
+    assert "kickstart" in msg
+
+
+def test_alert_message_reminders_store():
+    msg = schedule._alert_message("rem", "could not locate the Reminders store")
+    assert "Fix order:" in msg
+    assert "Full Disk Access" in msg
+
+
+def test_alert_message_timeout():
+    msg = schedule._alert_message("timeout", "")
+    assert "timing out" in msg.lower()
+    assert "NOT an authorization" in msg
+    assert "Fix order:" not in msg
+
+
+def test_alert_message_other():
+    msg = schedule._alert_message("rem", "cadence: unexpected exit code 2\ntrace")
+    assert "Fix order:" not in msg
+    assert "cadence: unexpected exit code 2" in msg
+    assert "\n" not in msg

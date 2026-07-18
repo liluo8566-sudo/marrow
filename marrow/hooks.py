@@ -5,17 +5,13 @@ marrow registers ALONGSIDE them, never replaces. Logic lives in the marrow
 package; this only does hook I/O (stdin JSON in, stdout JSON for
 SessionStart additionalContext, side effects for SessionEnd).
 
-  session_start      -> inject open tasks + alerts + affect backdrop; clear skip on resume
-  session_end        -> clean transcript, archive events, regen dashboard top
-  user_prompt_submit -> mm controls + recall fallback
+  session_start      -> inject alerts + timeline backdrop; drain alerts fallback
+  session_end        -> write terminal lifecycle:end marker
+  user_prompt_submit -> recall fusion injection
 
-PreToolUse is the global prompt-guard.py (scope already covers
-~/CC-Lab/marrow/), not duplicated here.
-
-mm- prefix: writes audit_log manual_skip row; sessionend_async skips LLM pipeline.
-mm+ prefix: clears manual skip and flags the sid for sessionend.
-resume detection: session_start fires on cc resume with same sid; if skip row exists,
-  write skip_cleared row so sessionend_async runs normally.
+Events are archived per-turn by the Stop hook; SessionEnd no longer cleans or
+archives the transcript. PreToolUse is the global prompt-guard.py (scope already
+covers ~/CC-Lab/marrow/), not duplicated here.
 """
 from __future__ import annotations
 
@@ -30,8 +26,8 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from . import config, cortex_bridge, repo, storage, top_sections, transcript
-from .popen_detach import popen_detach, popen_detach_lazy
+from . import config, cortex_bridge, outbox, repo, storage, transcript
+from .popen_detach import popen_detach
 from .timeutil import (
     utc_iso_to_local_date,
     utc_iso_to_local_datetime,
@@ -40,7 +36,6 @@ from .timeutil import (
 )
 
 _RECALL_TZ = config.get_tz()
-_RECALL_CUTOFF_H = 6  # 6AM local day boundary (matches digest)
 
 _SESSION_CLAIMS_PATH = Path("~/.config/marrow/session_claims.json").expanduser()
 
@@ -184,6 +179,379 @@ def _save_ct_cursor(sid: str, last_uuid: str | None, offset: int) -> None:
         pass
 
 
+# ── cross-session replay cursor (turn_inject) ────────────────────────────────
+# One small file per sid holding the last-seen events.id, same dir/pattern as
+# recall_seen. Absent = first sight of this sid → seed to MAX(id), future-only.
+
+def _replay_cursor_path(sid: str) -> Path:
+    return config.DATA_DIR / "state" / "replay" / f"{sid}"
+
+
+def _load_replay_cursor(sid: str) -> int | None:
+    if not sid:
+        return None
+    try:
+        return int(_replay_cursor_path(sid).read_text().strip())
+    except Exception:
+        return None
+
+
+def _save_replay_cursor(sid: str, last_id: int) -> None:
+    if not sid:
+        return
+    p = _replay_cursor_path(sid)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(str(int(last_id)))
+    except Exception:
+        pass
+
+
+# ── own-channel outbound-note cursor (turn_inject, F6) ───────────────────────
+# One file per sid holding the last-rendered outbox.sent_at, same dir pattern as
+# replay. Absent = first sight → seed to MAX(sent_at), future-only. Advance is
+# monotonic forward-only (cutoff = max sent_at of the rendered subset), so a
+# note surfaced once is never re-injected.
+
+def _outbound_cursor_path(sid: str) -> Path:
+    return config.DATA_DIR / "state" / "outbound" / f"{sid}"
+
+
+def _load_outbound_cursor(sid: str) -> str | None:
+    """Cursor value, or None only when never seeded (file absent). A seeded but
+    empty baseline (first sight with no notes yet) returns "" — distinct from
+    None so it is not re-seeded and past notes surface once."""
+    if not sid:
+        return None
+    try:
+        return _outbound_cursor_path(sid).read_text().strip()
+    except Exception:
+        return None
+
+
+def _save_outbound_cursor(sid: str, sent_at: str) -> None:
+    """Persist the cursor. An empty string is a valid seed (file present but no
+    baseline yet) — write it so the sid counts as seeded."""
+    if not sid:
+        return
+    p = _outbound_cursor_path(sid)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(str(sent_at or ""))
+    except Exception:
+        pass
+
+
+def _replay_local_hm(ts: str, tz) -> str:
+    try:
+        dt = datetime.fromisoformat((ts or "").replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(tz).strftime("%H:%M")
+    except Exception:
+        return "??:??"
+
+
+def _replay_truncate(text: str, limit: int) -> str:
+    text = text or ""
+    if len(text) <= limit:
+        return text
+    return text[: max(limit - 1, 0)] + "…"
+
+
+def _replay_render(rows, header: str, max_turns: int, per_chars: int, max_lines: int = 0):
+    """Group events into turns and render the P3 replay block. Returns
+    (block, rendered_cutoff): block is '' when empty; rendered_cutoff is the max
+    timestamp of the rows that carried non-empty content (mirrors note.py's
+    _replay cutoff — the diff baseline advances on exactly what was rendered,
+    fold included). A user event opens a turn; consecutive user msgs stay in the
+    same turn; the following assistant msgs close it. Overflow beyond max_turns
+    folds to a count. `max_lines` (0 = no cap) further caps the rendered message
+    lines to the newest N after turn-capping — an outer bound below max_turns
+    for turns that carry many per-turn messages. Shared by the per-sid cursor
+    path and the cortex last_note_ts path."""
+    tz = config.get_tz()
+    turns: list[list[dict]] = []
+    cutoff = None
+    for r in rows:
+        content = transcript.strip_media_markers(r["content"])
+        if not content:
+            continue
+        ts = r["timestamp"]
+        if ts and (cutoff is None or ts > cutoff):
+            cutoff = ts
+        item = {
+            "channel": r["channel"] or "?",
+            "sid4": (r["session_id"] or "")[:4],
+            "hm": _replay_local_hm(r["timestamp"], tz),
+            "role": "N" if r["role"] == "user" else "Y",
+            "content": _replay_truncate(content, per_chars),
+        }
+        if r["role"] == "user" and (not turns or turns[-1][-1]["role"] != "N"):
+            turns.append([item])
+        elif not turns:
+            # assistant with no opening user turn — start a bare turn
+            turns.append([item])
+        else:
+            turns[-1].append(item)
+    if not turns:
+        return "", None
+    kept = turns[-max_turns:]
+    folded = len(turns) - len(kept)
+    msg_lines = [
+        f"[{it['channel']}·{it['sid4']} {it['hm']}] {it['role']}: {it['content']}"
+        for turn in kept for it in turn
+    ]
+    if max_lines and len(msg_lines) > max_lines:
+        msg_lines = msg_lines[-max_lines:]  # newest lines win
+    lines = [header, *msg_lines]
+    if folded > 0:
+        lines.append(f"+{folded} earlier turns")
+    return "\n".join(lines), cutoff
+
+
+def _replay_cortex(header: str, max_turns: int, per_chars: int, max_lines: int = 0) -> str:
+    """Cortex-window replay on a normal turn, sharing note.py's last_note_ts diff
+    cursor (wake_state.json) so a turn delivered here is never re-delivered by the
+    next note, and vice versa. Reads events newer than the baseline (excludes ct
+    source, matching note.py semantics), renders P3 format, advances last_note_ts
+    to the newest RENDERED ts (same cutoff note.py uses) under the shared
+    wake-state flock. Advance is monotonic — never rewinds a baseline that
+    note.py (or a concurrent turn) already pushed forward."""
+    p = cortex_bridge._cortex_wake_state_path()
+    conn = storage.connect(config.db_path())
+    try:
+        with cortex_bridge._wake_state_lock(p):
+            d = cortex_bridge._wake_state_load(p)
+            since_ts = d.get("last_note_ts")
+            where_since = " AND timestamp > ?" if since_ts else ""
+            params = ((since_ts,) if since_ts else ()) + (max_turns * 4,)
+            try:
+                rows = conn.execute(
+                    "SELECT id, session_id, role, content, timestamp, channel "
+                    "FROM events WHERE role IN ('user','assistant') "
+                    "AND COALESCE(channel,'') != 'ct'" + where_since
+                    + " ORDER BY id DESC LIMIT ?",
+                    params,
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return ""
+            if not rows:
+                return ""
+            rows = list(reversed(rows))  # chronological
+            block, cutoff = _replay_render(rows, header, max_turns, per_chars, max_lines)
+            if not block:
+                return ""
+            # Monotonic advance to the rendered cutoff: only move forward, so a
+            # baseline note.py or a concurrent cortex turn already pushed past
+            # this point is never rewound (the double-deliver / 18:38-rewind bug).
+            if cutoff and (not since_ts or str(cutoff) > str(since_ts)):
+                cortex_bridge._ws_ensure_epoch(d)
+                d["last_note_ts"] = cutoff
+                cortex_bridge._wake_state_save(p, d)
+            return block
+    finally:
+        conn.close()
+
+
+def _her_last_user_age_min(conn, sid: str) -> float | None:
+    """Minutes since this sid's most recent user-role event in events, or None
+    when no prior user event exists (first turn). The current turn's message is
+    not yet archived (Stop-hook archives at turn end), so this reflects the last
+    completed turn."""
+    try:
+        row = conn.execute(
+            "SELECT MAX(timestamp) AS ts FROM events "
+            "WHERE session_id = ? AND role = 'user'",
+            (sid,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if not row or not row["ts"]:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(row["ts"]).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return (datetime.now(timezone.utc) - dt).total_seconds() / 60.0
+
+
+def _replay_seed(conn, sid: str, header: str, max_turns: int, per_chars: int,
+                  max_lines: int = 0) -> str:
+    """F11: SessionStart-only first-sight render for the per-sid replay cursor.
+    Renders the last max_turns turns of other-session activity regardless of
+    cursor position (there is none yet), then advances the cursor forward to
+    the rendered cutoff (not the DB tip) so turn 1's normal diff-mode call
+    never re-shows the same lines. Empty result still seeds the cursor to the
+    current tip (future-only from here), matching the no-seed_ok behaviour."""
+    rows = conn.execute(
+        "SELECT id, session_id, role, content, timestamp, channel FROM events "
+        "WHERE session_id != ? AND role IN ('user','assistant') "
+        "AND COALESCE(channel,'') != 'ct' ORDER BY id DESC LIMIT ?",
+        (sid, max_turns * 4),
+    ).fetchall()
+    if not rows:
+        row = conn.execute("SELECT MAX(id) AS m FROM events").fetchone()
+        seed = int(row["m"]) if row and row["m"] is not None else 0
+        _save_replay_cursor(sid, seed)
+        return ""
+    rows = list(reversed(rows))  # chronological
+    block, _ = _replay_render(rows, header, max_turns, per_chars, max_lines)
+    max_id = rows[-1]["id"]
+    _save_replay_cursor(sid, max_id)
+    return block
+
+
+def _replay_context(sid: str, channel: str, *, seed_ok: bool = False) -> str:
+    """Cross-session replay inject. Returns '' when disabled, when this session's
+    channel is an excluded target, on first sight of the sid (seed only, unless
+    seed_ok), when gated by idle_gate_min, or when no new events from OTHER
+    sessions exist.
+
+    seed_ok (F11, SessionStart only): on first sight of the sid, render the
+    last max_turns turns of other-session activity instead of seeding silently
+    — opening context should not be empty just because the cursor has never
+    moved. The cursor still only advances forward (to the rendered cutoff), so
+    turn 1 never re-shows a line this seed already rendered.
+
+    Cortex windows (MARROW_CORTEX) take the last_note_ts diff cursor shared with
+    note.py — the exclude_target_channels gate and the per-sid cursor never apply
+    there. Every cortex turn is eligible (no idle gate)."""
+    if not sid:
+        return ""
+    cfg = (config.load().get("replay", {}) or {})
+    if not cfg.get("enabled", True):
+        return ""
+
+    max_turns = int(cfg.get("max_turns", 2))
+    per_chars = int(cfg.get("per_msg_chars", 250))
+    max_lines = int(cfg.get("max_lines", 4))
+    header = cfg.get("header", "## Recent replay from other sessions")
+
+    if cortex_bridge.is_cortex_session():
+        try:
+            return _replay_cortex(header, max_turns, per_chars, max_lines)
+        except Exception:
+            return ""
+
+    if channel in (cfg.get("exclude_target_channels", []) or []):
+        return ""
+
+    idle_gate_min = float(cfg.get("idle_gate_min", 20))
+
+    conn = storage.connect(config.db_path())
+    try:
+        cursor = _load_replay_cursor(sid)
+        if cursor is None:
+            if seed_ok:
+                return _replay_seed(conn, sid, header, max_turns, per_chars, max_lines)
+            row = conn.execute("SELECT MAX(id) AS m FROM events").fetchone()
+            seed = int(row["m"]) if row and row["m"] is not None else 0
+            _save_replay_cursor(sid, seed)
+            return ""  # first sight — future-only, never backfill
+
+        # Idle gate: inject only when her last completed turn in THIS sid is
+        # >= idle_gate_min old (or no prior user event = first turn). While
+        # gated, hold the cursor — nothing lost; the fold caps the burst on
+        # release. idle_gate_min = 0 disables the gate (every turn).
+        if idle_gate_min > 0:
+            age = _her_last_user_age_min(conn, sid)
+            if age is not None and age < idle_gate_min:
+                return ""
+
+        rows = conn.execute(
+            "SELECT id, session_id, role, content, timestamp, channel FROM events "
+            "WHERE id > ? AND session_id != ? AND role IN ('user','assistant') "
+            "AND COALESCE(channel,'') != 'ct' ORDER BY id ASC",
+            (cursor, sid),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return ""
+    finally:
+        conn.close()
+
+    if not rows:
+        return ""
+
+    max_id = rows[-1]["id"]
+
+    block, _ = _replay_render(rows, header, max_turns, per_chars, max_lines)
+
+    # Advance cursor on a render decision regardless of fold (ambient replay).
+    _save_replay_cursor(sid, max_id)
+
+    return block
+
+
+def _outbound_notes(sid: str, channel: str) -> str:
+    """F6 own-channel note visibility. A bridge sends an outbound note on a
+    channel (e.g. cortex→tg) straight to the wire, bypassing that channel's
+    resident session — so she later replies to a note it never saw. This surfaces
+    the notes bridge-delivered on THIS channel since the per-sid cursor, so the
+    resident session sees them before her reply.
+
+    Reads outbox rows with target=channel, status='sent', sent_at past the cursor
+    (already-delivered outbound notes only — never her replies). First sight seeds
+    the cursor to MAX(sent_at) (future-only, no backfill). Advance is monotonic
+    forward-only to the max rendered sent_at, so a note is surfaced exactly once.
+    Data already in outbox — no writes to the DB, no transcript writes."""
+    if not sid or not channel:
+        return ""
+    cfg = (config.load().get("outbox", {}) or {})
+    if channel not in (cfg.get("wire_channels", ["tg", "wx"]) or []):
+        return ""  # cli/ct/session are delivered inline by outbox.deliver
+    header = cfg.get("own_note_header", "📤 Sent on this channel")
+    per_chars = int(
+        (config.load().get("replay", {}) or {}).get("per_msg_chars", 150)
+    )
+    conn = storage.connect(config.db_path())
+    try:
+        since = _load_outbound_cursor(sid)
+        if since is None:
+            row = conn.execute(
+                "SELECT MAX(sent_at) AS m FROM outbox"
+                " WHERE target = ? AND status = 'sent'",
+                (channel,),
+            ).fetchone()
+            seed = (row["m"] if row else None) or ""
+            _save_outbound_cursor(sid, seed or "")
+            return ""  # first sight — future-only, never backfill
+        where_since = " AND sent_at > ?" if since else ""
+        params = (channel,) + ((since,) if since else ())
+        rows = conn.execute(
+            "SELECT id, body, sent_at FROM outbox"
+            " WHERE target = ? AND status = 'sent' AND sent_at IS NOT NULL"
+            + where_since + " ORDER BY sent_at ASC, id ASC",
+            params,
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return ""
+    finally:
+        conn.close()
+
+    if not rows:
+        return ""
+
+    tz = config.get_tz()
+    lines = [header]
+    cutoff = since
+    for r in rows:
+        sent_at = r["sent_at"]
+        if sent_at and (not cutoff or str(sent_at) > str(cutoff)):
+            cutoff = sent_at
+        hm = _replay_local_hm(sent_at, tz)
+        body = _replay_truncate(transcript.strip_media_markers(r["body"]) or "", per_chars)
+        lines.append(f"[{hm}] {body}")
+
+    # Monotonic forward-only advance to the max rendered sent_at (F8 semantics).
+    if cutoff and (not since or str(cutoff) > str(since)):
+        _save_outbound_cursor(sid, str(cutoff))
+
+    return "\n".join(lines)
+
+
 def _ensure_ct_activity(conn: sqlite3.Connection) -> None:
     """Create ct_activity if absent. Cortex C1 collector reads (ts, sid, channel)."""
     conn.execute(
@@ -212,9 +580,8 @@ def _recall_log_dir() -> Path:
 
 
 def _recall_local_date(utc_now: datetime) -> str:
-    """UTC datetime → local recall-day string (YYYY-MM-DD) with 6AM cutoff."""
-    local = utc_now.astimezone(_RECALL_TZ) - timedelta(hours=_RECALL_CUTOFF_H)
-    return local.date().isoformat()
+    """UTC datetime → local recall-day string (YYYY-MM-DD), natural midnight."""
+    return utc_now.astimezone(_RECALL_TZ).date().isoformat()
 
 
 def _recall_session_log_path(sid: str, utc_now: datetime) -> Path:
@@ -227,7 +594,7 @@ def _recall_session_log_path(sid: str, utc_now: datetime) -> Path:
 def _prune_recall_logs() -> None:
     """Delete recall log files older than today-1 (keep today + yesterday).
 
-    Mirrors digest prune: 6AM cutoff for local-day boundary, mtime-based
+    Mirrors digest prune: natural midnight local-day boundary, mtime-based
     safety floor, today/yesterday whitelisted by filename."""
     try:
         now = datetime.now(timezone.utc)
@@ -252,105 +619,44 @@ def _prune_recall_logs() -> None:
         pass
 
 
-def _sweep_empty_async_logs() -> None:
-    """Drop 0-byte sessionend_async_*.log left behind when cc SIGKILLs the
-    detached child before its atexit cleanup runs. Only matches the exact
-    prefix + .log suffix so recall/ logs / unrelated files stay safe."""
-    log_dir = config.DATA_DIR / "logs"
+def _drain_fallback_sink() -> None:
+    """Replay any lines queued in alerts-fallback.jsonl into the alerts table.
+
+    Truncates the file first so a replay that itself fails re-appends via the
+    fallback sink, keeping the file bounded. Malformed lines are dropped with
+    a stderr note. Fully fail-soft — never blocks session start."""
     try:
-        for p in log_dir.glob("sessionend_async_*.log"):
+        db = config.db_path()
+        sink = config.DATA_DIR / "alerts-fallback.jsonl"
+        if not sink.exists() or sink.stat().st_size == 0:
+            return
+        try:
+            raw = sink.read_text(encoding="utf-8")
+            sink.write_text("", encoding="utf-8")  # truncate before replay
+        except OSError as e:
+            sys.stderr.write(f"[session_start] fallback drain read error: {e}\n")
+            return
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
             try:
-                if p.stat().st_size == 0:
-                    p.unlink()
-            except (FileNotFoundError, OSError):
-                pass
+                rec = json.loads(line)
+                repo.add_alert(
+                    rec["severity"], rec["type"], rec["fingerprint"],
+                    source=rec.get("source"),
+                    message=rec.get("message"),
+                    db=db,
+                )
+            except Exception as e:  # noqa: BLE001
+                sys.stderr.write(
+                    f"[session_start] fallback drain dropped malformed line: {e}\n"
+                )
     except Exception:  # noqa: BLE001 — never block session_start
         pass
 
 
-# ── manual skip helpers ───────────────────────────────────────────────────────
-
-_MANUAL_SKIP_ACTION = "manual_skip"
-_STATUS_SKIP = "skip"
-_STATUS_SKIP_CLEARED = "skip_cleared"
-_STATUS_SKIP_BRIDGE_OWNS = "bridge_owns"
-_SESSION_BLOCK_ACTION = "session_block"
-_STATUS_BLOCK_ARCHIVE = "archive"
-_STATUS_BLOCK_CLEARED = "cleared"
-_FORCE_SESSIONEND_ACTION = "force_sessionend"
-_STATUS_MM_PLUS_FLAG = "mm_plus_flag"
-_STATUS_MM_IMMEDIATE = "mm_immediate"
-_STATUS_MM_IMMEDIATE_CURRENT = "mm_immediate_current"
-
-
-def _write_manual_skip_flag(conn: sqlite3.Connection, sid: str, status: str) -> None:
-    """Write a manual_skip audit row. status = 'skip' or 'skip_cleared'."""
-    with conn:
-        conn.execute(
-            "INSERT INTO audit_log (target_table, target_id, action, summary)"
-            " VALUES ('events', ?, ?, ?)",
-            (sid, _MANUAL_SKIP_ACTION, status),
-        )
-
-
-def _write_session_block_flag(conn: sqlite3.Connection, sid: str, status: str) -> None:
-    """Write a session_block audit row. status = 'archive' -> block events insert."""
-    with conn:
-        conn.execute(
-            "INSERT INTO audit_log (target_table, target_id, action, summary)"
-            " VALUES ('events', ?, ?, ?)",
-            (sid, _SESSION_BLOCK_ACTION, status),
-        )
-
-
-def _write_force_sessionend_flag(conn: sqlite3.Connection, sid: str, status: str) -> None:
-    with conn:
-        conn.execute(
-            "INSERT INTO audit_log (target_table, target_id, action, summary)"
-            " VALUES ('events', ?, ?, ?)",
-            (sid, _FORCE_SESSIONEND_ACTION, status),
-        )
-
-
-def _has_force_sessionend(conn: sqlite3.Connection, sid: str) -> bool:
-    row = conn.execute(
-        "SELECT 1 FROM audit_log"
-        " WHERE action=? AND target_id=?"
-        " AND id > COALESCE("
-        "   (SELECT MAX(id) FROM audit_log"
-        "    WHERE action='sessionend_extract' AND target_id=?"
-        "    AND (summary='ok' OR summary LIKE 'ok,user_count=%')), 0)"
-        " LIMIT 1",
-        (_FORCE_SESSIONEND_ACTION, sid, sid),
-    ).fetchone()
-    return row is not None
-
-
-def _is_session_blocked(conn: sqlite3.Connection, sid: str) -> bool:
-    """Latest session_block row wins. archive -> True, cleared/absent -> False.
-    mm+ does not write this flag; archive blocks remain explicit."""
-    row = conn.execute(
-        "SELECT summary FROM audit_log"
-        " WHERE action=? AND target_id=?"
-        " ORDER BY id DESC LIMIT 1",
-        (_SESSION_BLOCK_ACTION, sid),
-    ).fetchone()
-    if not row:
-        return False
-    return row["summary"] == _STATUS_BLOCK_ARCHIVE
-
-
-def _is_manual_skip(conn: sqlite3.Connection, sid: str) -> bool:
-    """Latest manual_skip row wins. skip -> True, skip_cleared/absent -> False."""
-    row = conn.execute(
-        "SELECT summary FROM audit_log"
-        " WHERE action=? AND target_id=?"
-        " ORDER BY id DESC LIMIT 1",
-        (_MANUAL_SKIP_ACTION, sid),
-    ).fetchone()
-    if not row:
-        return False
-    return row["summary"] == _STATUS_SKIP
+# ── lifecycle helpers ─────────────────────────────────────────────────────────
 
 
 def _has_prior_lifecycle_start(conn: sqlite3.Connection, sid: str) -> bool:
@@ -552,7 +858,7 @@ def _started_at_for(ppid: int) -> int:
 
     LC_ALL=C forces POSIX time format so the strptime mask works under any
     user locale (en_AU prints day-before-month by default, breaking parsing
-    and silently rotting catchup's ppid liveness check)."""
+    of the started_at stamp on the lifecycle:start marker)."""
     try:
         env = os.environ.copy()
         env["LC_ALL"] = "C"
@@ -566,23 +872,6 @@ def _started_at_for(ppid: int) -> int:
     except Exception:  # noqa: BLE001
         pass
     return int(time.time())
-
-
-def _last_ok_user_count(conn: sqlite3.Connection, sid: str) -> int | None:
-    """Return N from the most recent `ok,user_count=N` audit row, or None."""
-    row = conn.execute(
-        "SELECT summary FROM audit_log"
-        " WHERE action='sessionend_extract' AND target_id=?"
-        " AND summary LIKE 'ok,user_count=%'"
-        " ORDER BY id DESC LIMIT 1",
-        (sid,),
-    ).fetchone()
-    if not row:
-        return None
-    try:
-        return int(row["summary"].split("=", 1)[1])
-    except (ValueError, IndexError):
-        return None
 
 
 def _now_utc() -> datetime:
@@ -915,44 +1204,6 @@ def _claude_json_snapshot_block() -> str | None:
         return None
 
 
-# ── affect heartbeat ─────────────────────────────────────────────────────────
-
-def _affect_heartbeat(conn: sqlite3.Connection) -> str | None:
-    """Return block line if a day in last 7d had events but no affect, else None.
-
-    DECISIONS line 37: fires ONLY on a day that HAD events but NO affect.
-    Checks the past 7 calendar days (UTC date boundary), but ignores days
-    earlier than the affect pipeline's first-seen date — historical events
-    before AFFECT extraction shipped never had a chance to produce rows.
-    """
-    pipeline_start_row = conn.execute(
-        "SELECT MIN(date) FROM affect_live"
-    ).fetchone()
-    pipeline_start = pipeline_start_row[0] if pipeline_start_row else None
-    if not pipeline_start:
-        return None  # pipeline never produced anything → warning is noise
-    today = _now_utc().date()
-    gap_day: str | None = None
-    for delta in range(1, 8):
-        d = (today - timedelta(days=delta)).isoformat()
-        if d < pipeline_start:
-            continue
-        has_events = conn.execute(
-            "SELECT 1 FROM events WHERE date(timestamp) = ? LIMIT 1", (d,)
-        ).fetchone()
-        if not has_events:
-            continue
-        has_affect = conn.execute(
-            "SELECT 1 FROM affect_live WHERE date = ? LIMIT 1", (d,)
-        ).fetchone()
-        if not has_affect:
-            gap_day = d
-            break  # report the most recent gap only
-    if gap_day:
-        return f"[⚠ (情感记录可能中断): {gap_day}]"
-    return None
-
-
 # ── session-start payload ────────────────────────────────────────────────────
 
 def _read_input() -> dict:
@@ -969,32 +1220,18 @@ def _read_input() -> dict:
 
 
 def session_start() -> int:
-    try:
-        from datetime import date as _date
-        catchup_dir = config.DATA_DIR / "logs" / "catchup"
-        catchup_dir.mkdir(parents=True, exist_ok=True)
-        log = catchup_dir / f"catchup.{_date.today():%Y-%m-%d}.log"
-        for old in sorted(catchup_dir.glob("catchup.*.log"))[:-14]:
-            old.unlink(missing_ok=True)
-        popen_detach([sys.executable, "-m", "marrow.sessionstart_catchup"], log_path=log)
-    except Exception as e:
-        try:
-            repo.add_alert("warn", "catchup",
-                           "catchup_spawn_failed:hooks",
-                           source="hooks.py", db=config.db_path(),
-                           message=f"session_start catchup spawn failed: {e}")
-        except Exception:
-            pass
+    # Drain alerts-fallback sink: replay any alerts that were written to the
+    # jsonl fallback (add_alert path when the DB was unwritable) into the
+    # alerts table. Fail-soft — never blocks session start.
+    _drain_fallback_sink()
     # Recall housekeeping — prune day-2+ logs from recall/ dir + wipe per-session
     # dedup state so every fresh window starts with a clean recall slate.
     _prune_recall_logs()
-    # Sweep 0-byte sessionend_async_*.log residues (SIGKILL fallback).
-    _sweep_empty_async_logs()
     inp = _read_input()
     db = config.db_path()
     conn = storage.connect(db)
     try:
-        # Write lifecycle:start marker so catchup can detect live vs dead sessions.
+        # Write lifecycle:start marker (resume detection + latest-session query).
         sid = inp.get("session_id") if isinstance(inp, dict) else None
         cwd = inp.get("cwd") if isinstance(inp, dict) else None
         tpath = inp.get("transcript_path") if isinstance(inp, dict) else None
@@ -1009,11 +1246,9 @@ def session_start() -> int:
             _wipe_recall_seen(sid)
             _wipe_sticker_nudge(sid)
             try:
-                # Resume detection: if sid already has a lifecycle:start row, this
-                # is a cc resume. Clear any manual skip so sessionend runs normally.
+                # Resume detection: a sid with a prior lifecycle:start row is a
+                # cc resume (used below for the cortex handoff page-turn gate).
                 is_resume = _has_prior_lifecycle_start(conn, sid)
-                if is_resume and _is_manual_skip(conn, sid):
-                    _write_manual_skip_flag(conn, sid, _STATUS_SKIP_CLEARED)
                 ppid = os.getppid()
                 started_at = _started_at_for(ppid)
                 summary = f"ppid={ppid},source=cc,started_at={started_at}"
@@ -1061,11 +1296,6 @@ def session_start() -> int:
             if cj_snap:
                 parts.append(cj_snap)
 
-            # Heartbeat block goes first so it is never buried.
-            heartbeat = _affect_heartbeat(conn)
-            if heartbeat:
-                parts.append(heartbeat)
-
             alert_rows = conn.execute(
                 "SELECT id, severity, type, message FROM alerts WHERE resolved = 0 ORDER BY id"
             ).fetchall()
@@ -1091,6 +1321,17 @@ def session_start() -> int:
             if backdrop:
                 parts.append(backdrop)
 
+            # F11: seed cross-session replay here (same cursor/render path as
+            # turn_inject) so opening context carries other-session activity
+            # before her first message, instead of wasting the first-sight seed
+            # call on turn 1. Outbound-notes (F6) excluded — its own cursor
+            # would otherwise be consumed here too, silencing turn 1's inject.
+            if sid:
+                replay_seed = _replay_context(
+                    sid, os.environ.get("MARROW_CHANNEL") or "cli", seed_ok=True)
+                if replay_seed:
+                    parts.append(replay_seed)
+
             # Usage block (all sessions self-aware) — off the collector kv.
             try:
                 from . import usage as _usage
@@ -1104,13 +1345,40 @@ def session_start() -> int:
             # a resume skips). Content is no longer injected here — the user's
             # cortex CLAUDE.md `@handoff.md` imports it directly. Page-turn
             # (stale-date archive + fresh template) still runs as a side effect.
-            if cortex_bridge.enabled() and os.environ.get("MARROW_CORTEX") and not is_resume:
-                cortex_bridge._cortex_handoff_page_turn_if_stale()
-                # Arm the ear on a fresh cortex window: one-shot reminder to start
-                # the signal-log tail. Blank config text = no injection.
-                _arm = cortex_bridge.arm_ear_text()
-                if _arm:
-                    parts.append(_arm)
+            if cortex_bridge.enabled() and os.environ.get("MARROW_CORTEX"):
+                if not is_resume:
+                    cortex_bridge._cortex_handoff_page_turn_if_stale()
+                    # Arm the ear on a fresh cortex window: one-shot reminder to
+                    # start the signal-log tail. Blank config text = no injection.
+                    _arm = cortex_bridge.arm_ear_text()
+                    if _arm:
+                        parts.append(_arm)
+                else:
+                    # Resumed cortex window. Decide in code (not model judgement)
+                    # whether it is still the active resident: compare the
+                    # resumed transcript against wake_state.json's `transcript`
+                    # pointer.
+                    if cortex_bridge.is_resident_session(tpath):
+                        # Resident resume: the prior process died with its ear
+                        # tail; the harness will surface stale pre-resume task
+                        # notifications. Kill orphan tails (none of ours armed
+                        # yet — safe only here) and inject re-arm guidance so the
+                        # model does not treat leftovers as a wake/rotate.
+                        try:
+                            cortex_bridge.kill_orphan_ear_tails()
+                        except Exception:
+                            pass
+                        _resume = cortex_bridge.resume_ear_text()
+                        if _resume:
+                            parts.append(_resume)
+                    else:
+                        # Retired window: a newer cortex took over (or this was
+                        # rotated out and reopened to read history). Arm nothing,
+                        # touch no wake_state, never kill the live resident's
+                        # tail — inject read-only/archive guidance instead.
+                        _retired = cortex_bridge.retired_ear_text()
+                        if _retired:
+                            parts.append(_retired)
 
             try:
                 from . import schedule as _sched
@@ -1129,7 +1397,7 @@ def session_start() -> int:
                     (
                         "sessions",
                         "session_start:zones",
-                        f"git={len(git_hk or '')} hb={len(heartbeat or '')} alerts={len(alert_block)}"
+                        f"git={len(git_hk or '')} alerts={len(alert_block)}"
                         f" tl={len(backdrop or '')} total={len(ctx)}",
                     ),
                 )
@@ -1188,156 +1456,33 @@ def session_end() -> int:
             )
 
     try:
-        # Regen/rewind suppress: bridge wrote this flag before closing cc
-        # so the intermediate SessionEnd skips archive entirely.
-        if early_sid:
-            _suppress = config.DATA_DIR / f".regen_suppress_{early_sid}"
-            if _suppress.exists():
-                try:
-                    _suppress.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                return 0
-
+        # Terminal lifecycle:end marker only. Events are archived per-turn by
+        # the Stop hook; SessionEnd no longer cleans/archives the transcript or
+        # spawns any LLM extraction. The marker is still written for every
+        # session type so timeline._query_current_sid can tell live from ended
+        # windows.
         if os.environ.get("MARROW_PIPELINE") == "1":
-            if early_sid:
-                try:
-                    _write_lifecycle_end(early_sid, "pipeline=1")
-                except Exception:  # noqa: BLE001
-                    pass
-            return 0
-
-        is_subagent = bool(tpath and "/tasks/" in tpath)
-        if is_subagent:
-            if early_sid:
-                try:
-                    _write_lifecycle_end(early_sid, "subagent=1")
-                except Exception:  # noqa: BLE001 — never block session_end
-                    pass
-            return 0
-
-        if transcript.is_headless(tpath):
-            if early_sid:
-                try:
-                    _write_lifecycle_end(early_sid, "headless=1")
-                except Exception:  # noqa: BLE001 — never block session_end
-                    pass
-            return 0
-
-        # Worktree-session gate: cc instances launched inside a NON-primary git
-        # worktree are task-isolated runs; their dialogue must not enter marrow.
-        # Skip archive_events + LLM spawn entirely. Still write lifecycle:end so
-        # catchup doesn't tag this sid as silent_death.
-        #
-        # Pin verdict on SessionStart marker first: cwd at SessionEnd time can
-        # be stale (worktree torn down, cd'd out) which would silently drop the
-        # session into the main path. Live cwd check kept as a fallback for
-        # sessions whose SessionStart hook never ran.
-        is_worktree = (
+            summary = "pipeline=1"
+        elif tpath and "/tasks/" in tpath:
+            summary = "subagent=1"
+        elif transcript.is_headless(tpath):
+            summary = "headless=1"
+        elif (
             _was_worktree_session_at_start(conn, early_sid)
             or _is_worktree_session(cwd)
-        )
-        if is_worktree:
-            if early_sid:
-                try:
-                    _write_lifecycle_end(early_sid, "worktree=1")
-                except Exception:  # noqa: BLE001 — never block session_end
-                    pass
-            return 0
+        ):
+            summary = "worktree=1"
+        else:
+            summary = ""
 
-        # mm- block gate: if the user typed mm- at any point during this session,
-        # _handle_mm_prefix wrote a session_block=archive flag. Skip the entire
-        # archive path so events table receives ZERO rows for this sid. Still
-        # write lifecycle:end so catchup doesn't flag this as silent_death.
-        if early_sid and _is_session_blocked(conn, early_sid):
+        if early_sid:
             try:
-                _write_lifecycle_end(early_sid, "mm_minus_blocked")
+                _write_lifecycle_end(early_sid, summary)
             except Exception:  # noqa: BLE001 — never block session_end
                 pass
+            # Drop per-session recall dedup state — next window starts clean.
             _wipe_recall_seen(early_sid)
             _wipe_sticker_nudge(early_sid)
-            return 0
-
-        is_bridge = os.environ.get("MARROW_BRIDGE") == "1"
-        rows = transcript.clean(tpath, skip_headless_check=is_bridge, channel=os.environ.get("MARROW_CHANNEL") or "cli")
-        if rows:
-            repo.archive_events(conn, rows)
-
-        # ── CRITICAL PATH (must complete within ms of archive) ────────────────
-        # cc reaps the whole hook process group on session close. dashboard
-        # write + embed_pending below run for seconds and routinely get
-        # killed mid-run, which used to also kill the lifecycle:end INSERT
-        # and the popen spawn -> sids stuck with no terminal marker. Keep
-        # this block tight and ahead of every slow side-effect.
-        #
-        # sid fallback: cc always sends session_id in the hook payload, but
-        # rows can be empty (transcript not yet flushed, all messages
-        # filtered out, etc). Don't rely on rows[0] — that path silently
-        # dropped lifecycle:end for thousands of sessions and bred 760
-        # silent_death alerts in one hour on 2026-06-05.
-        sid = (
-            (rows[0]["session_id"] if rows else None)
-            or early_sid
-            or None
-        )
-        if sid:
-            try:
-                _write_lifecycle_end(sid, "")
-            except Exception:  # noqa: BLE001
-                pass
-            # Drop per-session recall dedup state — next window starts clean.
-            _wipe_recall_seen(sid)
-            _wipe_sticker_nudge(sid)
-
-            # Bridge gate: when synapse-wx wraps cc, it owns sessionend timing
-            # (fires on 6h idle, not on every /model swap). Archive runs, marker
-            # written, popen suppressed. Catchup honors the bridge_owns marker
-            # until a later fail row (manual fire that failed) supersedes it.
-            # Exception: an explicit force flag requests extraction.
-            if os.environ.get("MARROW_BRIDGE") == "1":
-                if not _has_force_sessionend(conn, sid):
-                    try:
-                        _write_manual_skip_flag(
-                            conn, sid, _STATUS_SKIP_BRIDGE_OWNS,
-                        )
-                    except Exception:  # noqa: BLE001
-                        pass
-                    return 0
-
-            # Idempotent gate: skip popen if events haven't grown since last ok.
-            skip_spawn = False
-            try:
-                last_ok = _last_ok_user_count(conn, sid)
-                if last_ok is not None and not _has_force_sessionend(conn, sid):
-                    current_user = conn.execute(
-                        "SELECT COUNT(*) c FROM events"
-                        " WHERE session_id=? AND role='user'",
-                        (sid,),
-                    ).fetchone()["c"]
-                    if current_user <= last_ok:
-                        skip_spawn = True
-            except Exception:  # noqa: BLE001 — gate failure → safe to spawn
-                pass
-
-            if not skip_spawn:
-                cwd = inp.get("cwd") or ""
-                try:
-                    wm = storage.get_latest_watermark(conn, sid)
-                    after_eid = wm["last_event_id"] if wm else None
-                    _spawn_sessionend_async(
-                        sid, after_event_id=after_eid, segment_seq=0, cwd=cwd,
-                    )
-                except Exception as e:  # noqa: BLE001
-                    try:
-                        repo.add_alert(
-                            "warn", "sessionend_async",
-                            "sessionend_spawn_failed",
-                            message=f"spawn failed: {e}",
-                            source="hooks.py", db=db,
-                        )
-                    except Exception:  # noqa: BLE001
-                        pass
-
     finally:
         conn.close()
     return 0
@@ -1452,349 +1597,6 @@ def stop() -> int:
         conn.close()
     _save_ct_cursor(sid, new_last_uuid, size)
     return 0
-
-
-_SID_RE = _re.compile(
-    r"^[0-9a-f]{8}(-[0-9a-f]{4}){0,3}(-[0-9a-f]{4,12})?$",
-    _re.IGNORECASE,
-)
-
-
-def _looks_like_sid(arg: str) -> bool:
-    """Return True if arg matches a full UUID or a short hex-prefix the user might type."""
-    return bool(_SID_RE.match(arg.strip())) if arg and " " not in arg else False
-
-
-_MM_ACK = {
-    "mm-": "本窗口跳过DB",
-    "mm+": "本窗口加入DB",
-    "mm!": "补跑中",
-    "mm!!": "补跑中",
-}
-
-
-def _inject_silent_ack(prefix: str) -> None:
-    """Tell the LLM this prompt is a control signal."""
-    ack = _MM_ACK.get(prefix, prefix)
-    ctx = (
-        f"## {prefix} control signal\n"
-        f"Hook handled. Reply with exactly: {ack}"
-    )
-    json.dump(
-        {"hookSpecificOutput": {
-            "hookEventName": "UserPromptSubmit",
-            "additionalContext": ctx,
-        }},
-        sys.stdout,
-    )
-
-
-def _inject_locate_request(prefix: str, clue: str) -> None:
-    """Write a UserPromptSubmit additionalContext asking the LLM to locate the sid."""
-    action = f"{prefix} <full-sid>"
-    user_name = config.persona()["user_name"]
-    ctx = (
-        f"## {prefix} locate request\n"
-        f"{user_name} sent `{prefix} <clue>`, but the clue is not a valid sid.\n"
-        f"- clue: {clue}\n"
-        "- Search events and audit_log for matching timestamp, content, or role.\n"
-        f"- Once found, use `{action}`."
-    )
-    json.dump(
-        {"hookSpecificOutput": {
-            "hookEventName": "UserPromptSubmit",
-            "additionalContext": ctx,
-        }},
-        sys.stdout,
-    )
-
-
-def _locate_jsonl(sid: str) -> str | None:
-    """Glob ~/.claude/projects/**/<sid>.jsonl; return most-recent match or None."""
-    import pathlib
-    projects_dir = pathlib.Path.home() / ".claude" / "projects"
-    matches = list(projects_dir.glob(f"**/{sid}.jsonl"))
-    if not matches:
-        return None
-    return str(max(matches, key=lambda p: p.stat().st_mtime))
-
-
-def _pre_archive_jsonl(conn: sqlite3.Connection, tpath: str | None, channel: str = "cli") -> None:
-    """Archive events from an active-session jsonl. Fail-soft — never raises."""
-    if not tpath:
-        return
-    try:
-        if transcript.is_headless(tpath):
-            return
-        rows = transcript.clean(tpath, channel=channel)
-        if rows:
-            repo.archive_events(conn, rows)
-    except Exception:  # noqa: BLE001
-        pass
-
-
-def _spawn_sessionend_async(
-    sid: str,
-    *,
-    after_event_id: int | None = None,
-    segment_seq: int = 0,
-    cwd: str = "",
-) -> None:
-    log = config.DATA_DIR / "logs" / f"sessionend_async_{sid}.log"
-    cmd = [
-        sys.executable, "-m", "marrow.sessionend_async",
-        "--sid", sid, "--log-path", str(log),
-    ]
-    if cwd:
-        cmd.extend(["--cwd", cwd])
-    if after_event_id is not None:
-        cmd.extend(["--after-event-id", str(after_event_id)])
-    if segment_seq != 0:
-        cmd.extend(["--segment-seq", str(segment_seq)])
-    popen_detach_lazy(cmd, log_path=log)
-
-
-def _spawn_sessionend_after_watermark(
-    conn: sqlite3.Connection, sid: str, *, cwd: str = "",
-) -> None:
-    wm = storage.get_latest_watermark(conn, sid)
-    after_eid = wm["last_event_id"] if wm else None
-    _spawn_sessionend_async(sid, after_event_id=after_eid, segment_seq=0, cwd=cwd)
-
-
-def _classify_skip_reason(conn: sqlite3.Connection, sid: str) -> str:
-    """Return skip reason tag for a session without successful sessionend."""
-    has_start = conn.execute(
-        "SELECT 1 FROM audit_log"
-        " WHERE action='session_lifecycle:start' AND target_id=?"
-        " LIMIT 1",
-        (sid,),
-    ).fetchone()
-    has_end = conn.execute(
-        "SELECT 1 FROM audit_log"
-        " WHERE action='session_lifecycle:end' AND target_id=?"
-        " LIMIT 1",
-        (sid,),
-    ).fetchone()
-    if has_start and not has_end:
-        return "active"
-    block = conn.execute(
-        "SELECT summary FROM audit_log"
-        " WHERE action='session_block' AND target_id=?"
-        " ORDER BY id DESC LIMIT 1",
-        (sid,),
-    ).fetchone()
-    if block and (block["summary"] or "") == "archive":
-        return "mm-"
-    skip = conn.execute(
-        "SELECT 1 FROM audit_log"
-        " WHERE action='sessionend_extract' AND target_id=?"
-        " AND summary LIKE 'skip:short_session%'"
-        " LIMIT 1",
-        (sid,),
-    ).fetchone()
-    if skip:
-        return "short"
-    return "miss"
-
-
-def _unrun_session_rows(conn: sqlite3.Connection, limit: int = 20) -> list[dict]:
-    rows = conn.execute(
-        "WITH known AS ("
-        " SELECT sid, title, channel, cwd, last_active FROM sessions"
-        " UNION ALL"
-        " SELECT target_id AS sid, '' AS title, '' AS channel, '' AS cwd,"
-        "        MAX(occurred_at) AS last_active"
-        " FROM audit_log"
-        " WHERE action='session_lifecycle:start' AND target_id IS NOT NULL"
-        " GROUP BY target_id"
-        ")"
-        " SELECT sid, MAX(title) AS title, MAX(channel) AS channel,"
-        "        MAX(cwd) AS cwd, MAX(last_active) AS last_active"
-        " FROM known"
-        " WHERE sid IS NOT NULL AND sid != ''"
-        " AND NOT EXISTS ("
-        "   SELECT 1 FROM audit_log a"
-        "   WHERE a.action='sessionend_extract' AND a.target_id=known.sid"
-        "   AND (a.summary='ok' OR a.summary LIKE 'ok,user_count=%')"
-        " )"
-        " GROUP BY sid"
-        " ORDER BY MAX(last_active) DESC"
-        " LIMIT ?",
-        (limit,),
-    ).fetchall()
-    result = []
-    for r in rows:
-        d = dict(r)
-        d["reason"] = _classify_skip_reason(conn, d["sid"])
-        result.append(d)
-    return result
-
-
-def _inject_unrun_sessions(rows: list[dict]) -> None:
-    if rows:
-        lines = ["## mm! sessions without successful sessionend"]
-        for i, r in enumerate(rows, 1):
-            sid = r.get("sid") or ""
-            title = (r.get("title") or "").strip() or "(untitled)"
-            channel = (r.get("channel") or "-").strip() or "-"
-            reason = r.get("reason") or "miss"
-            last_active = (r.get("last_active") or "").strip()
-            tail = f" {last_active}" if last_active else ""
-            lines.append(f"{i}. [{channel}|{reason}] {title} {sid}{tail}")
-        lines.append("Reasons: miss=漏跑 mm-=主动跳过 short=三轮以下 active=进行中")
-        lines.append("Use `mm! <sid>` to run one immediately.")
-    else:
-        lines = ["## mm! sessions without successful sessionend", "No sessions found."]
-    json.dump(
-        {"hookSpecificOutput": {
-            "hookEventName": "UserPromptSubmit",
-            "additionalContext": "\n".join(lines),
-        }},
-        sys.stdout,
-    )
-
-
-def _handle_mm_prefix(inp: dict) -> bool:
-    """Handle mm control prefixes. Returns True if handled.
-
-    mm-: writes manual_skip audit row for current (or named) sid.
-    mm+: clears manual skip and flags current or named sid for sessionend.
-    mm!: lists unrun sessions or immediately spawns a named sid.
-    mm!!: pre-archives current jsonl and immediately spawns current sid.
-    mm- / mm+ / mm!: three-branch on arg after prefix:
-      - empty          → current sid (existing behaviour)
-      - UUID-like      → named sid
-      - natural-lang   → inject additionalContext to help LLM locate sid
-    Fail-soft: any error is swallowed — hook must never block the user turn.
-    """
-    prompt = (inp.get("prompt") or "").strip().replace("！", "!")
-    if not prompt.startswith(("mm-", "mm+", "mm!")):
-        return False
-
-    sid = (inp.get("session_id") or "").strip()
-    if prompt.startswith("mm!!"):
-        prefix = "mm!!"
-        rest = prompt[4:].strip()
-    else:
-        prefix = prompt[:3]
-        rest = prompt[3:].strip()
-
-    if prefix == "mm!" and not rest:
-        try:
-            conn = storage.connect(config.db_path())
-            try:
-                _inject_unrun_sessions(_unrun_session_rows(conn))
-            finally:
-                conn.close()
-        except Exception:  # noqa: BLE001
-            _inject_unrun_sessions([])
-        return True
-
-    if prefix == "mm!!":
-        if rest:
-            _inject_locate_request(prefix, rest)
-            return True
-        try:
-            if sid:
-                conn = storage.connect(config.db_path())
-                try:
-                    _write_force_sessionend_flag(conn, sid, _STATUS_MM_IMMEDIATE_CURRENT)
-                    tpath = inp.get("transcript_path") or _locate_jsonl(sid)
-                    _pre_archive_jsonl(conn, tpath, channel=os.environ.get("MARROW_CHANNEL") or "cli")
-                    row = conn.execute(
-                        "SELECT 1 FROM audit_log"
-                        " WHERE target_table='events'"
-                        " AND target_id=?"
-                        " AND action='session_lifecycle:end'"
-                        " LIMIT 1",
-                        (sid,),
-                    ).fetchone()
-                    if not row:
-                        with conn:
-                            conn.execute(
-                                "INSERT INTO audit_log"
-                                " (target_table, target_id, action, summary)"
-                                " VALUES ('events', ?, 'session_lifecycle:end', 'mm_bang')",
-                                (sid,),
-                            )
-                            conn.execute(
-                                "UPDATE sessions"
-                                " SET ended_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')"
-                                " WHERE sid = ? AND (ended_at IS NULL OR ended_at = '')",
-                                (sid,),
-                            )
-                finally:
-                    conn.close()
-                conn = storage.connect(config.db_path())
-                try:
-                    _spawn_sessionend_after_watermark(conn, sid)
-                finally:
-                    conn.close()
-        except Exception:  # noqa: BLE001
-            pass
-        _inject_silent_ack("mm!!")
-        return True
-
-    # Natural-language branch — hand off to main LLM, no DB writes, no spawn.
-    if rest and not _looks_like_sid(rest):
-        _inject_locate_request(prefix, rest)
-        return True
-
-    # Empty or UUID-like arg: empty → current sid, UUID-like → that sid.
-    target_sid = rest if rest else sid
-
-    try:
-        db = config.db_path()
-        conn = storage.connect(db)
-        try:
-            if prefix == "mm-":
-                if target_sid:
-                    _write_manual_skip_flag(conn, target_sid, _STATUS_SKIP)
-                    # Block events archive entirely for this sid — session_end
-                    # will skip transcript.clean + archive_events, leaving the
-                    # events table with zero rows for this session.
-                    _write_session_block_flag(conn, target_sid, _STATUS_BLOCK_ARCHIVE)
-            elif prefix == "mm+":
-                if target_sid:
-                    _write_manual_skip_flag(conn, target_sid, _STATUS_SKIP_CLEARED)
-                    _write_force_sessionend_flag(conn, target_sid, _STATUS_MM_PLUS_FLAG)
-            elif prefix == "mm!":
-                if target_sid:
-                    _write_force_sessionend_flag(conn, target_sid, _STATUS_MM_IMMEDIATE)
-                    row = conn.execute(
-                        "SELECT 1 FROM audit_log"
-                        " WHERE target_table='events'"
-                        " AND target_id=?"
-                        " AND action='session_lifecycle:end'"
-                        " LIMIT 1",
-                        (target_sid,),
-                    ).fetchone()
-                    if not row:
-                        with conn:
-                            conn.execute(
-                                "INSERT INTO audit_log"
-                                " (target_table, target_id, action, summary)"
-                                " VALUES ('events', ?, 'session_lifecycle:end', 'mm_bang')",
-                                (target_sid,),
-                            )
-                            conn.execute(
-                                "UPDATE sessions"
-                                " SET ended_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')"
-                                " WHERE sid = ? AND (ended_at IS NULL OR ended_at = '')",
-                                (target_sid,),
-                            )
-                    _spawn_sessionend_after_watermark(conn, target_sid)
-                    conn.close()
-                    conn = None
-        finally:
-            if conn is not None:
-                conn.close()
-    except Exception:  # noqa: BLE001 — never block prompt
-        pass
-    if prefix in {"mm-", "mm+", "mm!"}:
-        _inject_silent_ack(prefix)
-    return True
 
 
 # ── pure recall-render helpers (extracted for testability) ───────────────────
@@ -1919,10 +1721,6 @@ def user_prompt_submit() -> int:
     """
     inp = _read_input()
 
-    # mm control plane — check before recall, independent of recall config.
-    if isinstance(inp, dict) and _handle_mm_prefix(inp):
-        return 0  # no additionalContext injection for control prompts
-
     # Worktree / subagent gate: cc instances in a NON-primary git worktree
     # OR dispatched via Task tool (transcript_path under /tasks/) are
     # task-isolated runs. They take direction from the user prompt + main
@@ -1950,15 +1748,79 @@ def user_prompt_submit() -> int:
                     "additionalContext": _re_txt,
                 }}, sys.stdout)
             return 0
-        # Wake turn → inject the full wakeup note. Marker match only; missing or
-        # empty note injects nothing (never crashes).
-        _marker = cortex_bridge.wake_marker()
-        if _marker and _marker in _prompt:
-            _note = cortex_bridge.wakeup_note_text()
-            if _note:
+        # Free-round tuck-in ([NEW ROUND]) already carries its diff-mode note
+        # INLINE (cortex watchdog D6) — the hook must NOT also turn-inject the
+        # full note, or the round lands with a duplicate note (07-14 incident).
+        # A tuck-in is a machine line but never a wake BELL, so this guard is
+        # checked before the wake-marker branch. The tuck-in falls through to
+        # the is_machine_line gate below (no user-wake reset either).
+        # The C2 menu body is injected here COVERTLY (additionalContext, never
+        # rendered on screen) so she never SEES the menu text in the window —
+        # the cortex log carries only the marker + note, not the menu.
+        _tuck = cortex_bridge.tuck_in_marker()
+        if _tuck and cortex_bridge.line_starts_with_marker(_prompt, _tuck):
+            _menu = cortex_bridge.tuck_in_menu_text()
+            if _menu:
                 json.dump({"hookSpecificOutput": {
                     "hookEventName": "UserPromptSubmit",
-                    "additionalContext": _note,
+                    "additionalContext": _menu,
+                }}, sys.stdout)
+            return 0
+        # FUSE / CTL machine-marker turns arriving down the ear channel: cortex
+        # wrote ONLY the marker (+ CTL args) to wake_signal.log; the full
+        # instruction body is injected here COVERTLY so she never SEES it on
+        # screen. Line-start shape check tolerates the ear envelope wrapper; a real
+        # user prompt merely quoting the marker mid-sentence never matches.
+        if cortex_bridge.line_starts_with_marker(_prompt, cortex_bridge._FUSE_MARKER):
+            _body = cortex_bridge.fuse_prompt_text()
+            if _body:
+                json.dump({"hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": _body,
+                }}, sys.stdout)
+            return 0
+        if cortex_bridge.line_starts_with_marker(_prompt, cortex_bridge._CTL_MARKER):
+            _body = cortex_bridge.ctl_sleep_text(_prompt)
+            if _body:
+                json.dump({"hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": _body,
+                }}, sys.stdout)
+            return 0
+        # Wake turn → inject the full wakeup note. Marker match only; missing or
+        # empty note injects nothing (never crashes). The line may carry a
+        # cancellation-epoch token ' {g<gen>:<sid>}': a STALE token (a newer
+        # epoch — e.g. a user message — already superseded this alarm) suppresses
+        # the wake-note injection (log only, do NOT process as a wake). A
+        # token-less line is legacy and processed as before.
+        # Line-start shape check (NOT substring): a real user prompt merely
+        # quoting the marker mid-sentence ("grep for [CORTEX-WAKE]") must fall
+        # through to the user-wake reset + recall, not be swallowed here. The
+        # real wake bell always line-starts the marker; the epoch token
+        # ' {g<gen>:<sid>}' is a suffix, so the startswith check tolerates it.
+        _marker = cortex_bridge.wake_marker()
+        if _marker and cortex_bridge.line_starts_with_marker(_prompt, _marker):
+            _tok = cortex_bridge.parse_gen_token(_prompt)
+            if _tok is not None and not cortex_bridge.wake_token_current(_tok):
+                cortex_bridge._wake_audit(
+                    "wake_line_stale", f"gen={_tok[0]}",
+                    "suppressed (superseded epoch)")
+                return 0
+            _note = cortex_bridge.wakeup_note_text(tpath)
+            # Merge any ct-targeted outbox notes into the wake payload — the
+            # normal delivery path below never runs on a wake turn, so ct notes
+            # must be consumed here (same atomic claim/consume ordering).
+            try:
+                _ob = outbox.deliver(
+                    inp.get("session_id") if isinstance(inp, dict) else None,
+                    "ct", is_cortex=True, db=config.db_path())
+            except Exception:
+                _ob = None
+            _payload = "\n\n".join(p for p in (_note, _ob) if p)
+            if _payload:
+                json.dump({"hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": _payload,
                 }}, sys.stdout)
             return 0
         # Real user message (NOT a machine line down the ear channel) → user-wake
@@ -1980,20 +1842,48 @@ def user_prompt_submit() -> int:
 
     # Pipeline-prompt gate: a hand-run digest/eval claude (spawned without
     # llm.py's --setting-sources isolation) still loads this hook. Its prompt
-    # opens with the transcript fence from sessionend_prompts._TRANSCRIPT_BLOCK
-    # — never inject, log, or backfill title/model for it.
+    # opens with a transcript fence — never inject, log, or backfill
+    # title/model for it.
     if prompt_text.startswith("===== BEGIN ORIGINAL TRANSCRIPT"):
         return 0
 
-    # Sticker nudge: increment turn counter; flag nudge if 10 turns since last sticker.
+    # Morning flag-pull (cli path, P6): a real user turn in a non-cortex session,
+    # while the cortex night flag is set and local time is past morning_start,
+    # pokes cortex to clear the flag + return to day cadence. Subagent/worktree
+    # turns already returned above; self-guards MARROW_CORTEX. Best-effort.
+    if prompt_text:
+        try:
+            cortex_bridge.maybe_morning_kick_cli()
+        except Exception:
+            pass
+
+    # Outbox delivery (cli/session/ct notes): claim + render notes targeting this
+    # session (exact sid, 'cli' broadcast for cli sessions, 'ct' for the cortex
+    # session), consume-once. The wake branch above delivers ct notes on a wake
+    # turn (and returns before here); a normal cortex turn never hits that branch,
+    # so ct notes must be claimed here too — same atomic claim resolves the race
+    # so a row taken by either path is never re-delivered. Seeds _nudge_line so it
+    # lands on every emit path (renders above recall / other nudges).
     _nudge_line: str | None = None
+    try:
+        _msg_note = outbox.deliver(
+            sid, os.environ.get("MARROW_CHANNEL") or "cli",
+            is_cortex=cortex_bridge.is_cortex_session(),
+            db=config.db_path())
+        if _msg_note:
+            _nudge_line = _msg_note
+    except Exception:
+        pass
+
+    # Sticker nudge: increment turn counter; flag nudge if 10 turns since last sticker.
     if sid and os.environ.get("MARROW_BRIDGE") == "1":
         try:
             _sn = _load_sticker_nudge(sid)
             _sn["turn_count"] = _sn.get("turn_count", 0) + 1
             if _sn["turn_count"] - _sn.get("last_sticker_turn", 0) >= 10:
                 user_name = config.persona()["user_name"]
-                _nudge_line = f"你怎么还不发表情包，{user_name}都等急了——翻翻 sticker(action=search) 找个应景的发一下。"
+                _sticker_line = f"你怎么还不发表情包，{user_name}都等急了——翻翻 sticker(action=search) 找个应景的发一下。"
+                _nudge_line = f"{_nudge_line}\n{_sticker_line}" if _nudge_line else _sticker_line
                 _sn["last_sticker_turn"] = _sn["turn_count"]
             _save_sticker_nudge(sid, _sn)
         except Exception:
@@ -2992,6 +2882,15 @@ def pretool_use() -> int:
             })
             return 0
 
+        # Cortex F5 activity feed — any cortex tool call other than wait()
+        # restores the round's wait quota (no consecutive empty waits). Never
+        # blocks; runs before the lie_down gate below.
+        try:
+            if cortex_bridge.enabled():
+                cortex_bridge._cortex_round_activity(inp)
+        except Exception:  # noqa: BLE001 — fail-open, never blocks the hook
+            pass
+
         # Cortex lie_down handoff gate — deny a rotate/full-window lie_down until
         # the handoff is written this window. Plain lie_down passes.
         lie_down_deny: str | None = None
@@ -3375,7 +3274,11 @@ def turn_inject() -> int:
         wx_sched = _sched_fragment()
         wx_tl = _tl_fragment()
         wx_kick = f"\n\n{kickout_ctx}" if kickout_ctx else ""
-        wx_ctx = f"{wx_sched}{wx_tl}{wx_kick}".strip()
+        wx_replay = _replay_context(sid, channel)
+        wx_replay = f"\n\n{wx_replay}" if wx_replay else ""
+        wx_own = _outbound_notes(sid, channel)
+        wx_own = f"\n\n{wx_own}" if wx_own else ""
+        wx_ctx = f"{wx_sched}{wx_tl}{wx_kick}{wx_replay}{wx_own}".strip()
         if wx_ctx:
             json.dump(
                 {"hookSpecificOutput": {
@@ -3430,8 +3333,12 @@ def turn_inject() -> int:
     show_full = f"\n\n{show_ctx}" if show_ctx else ""
     usage_ctx = _usage_threshold_context(sid, tpath)
     usage_full = f"\n\n{usage_ctx}" if usage_ctx else ""
+    replay_ctx = _replay_context(sid, channel)
+    replay_full = f"\n\n{replay_ctx}" if replay_ctx else ""
+    own_ctx = _outbound_notes(sid, channel)
+    own_full = f"\n\n{own_ctx}" if own_ctx else ""
     ctx = (f"# Context — {now_str}{delta}{sched_ctx}{tl_ctx}{care_ctx}"
-           f"{kickout_full}{show_full}{usage_full}")
+           f"{kickout_full}{show_full}{usage_full}{replay_full}{own_full}")
     json.dump(
         {"hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",

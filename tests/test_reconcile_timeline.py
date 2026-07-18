@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from marrow import dashboard, storage
+from marrow import storage
 import marrow.reconcile as reconcile_mod
 from marrow.reconcile import reconcile_timeline, ReconcileReport
 
@@ -288,68 +288,6 @@ def test_reconcile_tl_no_file(conn, dash_path):
     """Missing md file → no-op."""
     rpt = reconcile_timeline(conn, dash_path)
     assert rpt.updated == 0
-
-
-# ── aff pending-row deletion (existing behaviour, regression) ────────────────
-
-def test_aff_pending_deletion_marks_resolved(conn, tmp_path):
-    """Deleting a Pending row from ## Affect block marks it resolved=0→
-    unresolved=0 (existing behaviour, should not regress)."""
-    state = tmp_path / "s"
-    dash = tmp_path / "dashboard.md"
-    ts = _now_utc()
-    conn.execute(
-        "INSERT INTO affect (date, ep, valence, arousal, importance, label,"
-        " description, source, unresolved, created_at)"
-        " VALUES (?, 1, 0.2, 0.7, 3, '委屈', '等回复', 'test', 1, ?)",
-        (ts[:10], ts),
-    )
-    conn.commit()
-
-    dashboard.write_dashboard(str(dash), conn, state_dir=str(state))
-    content = dash.read_text()
-    assert "等回复" in content
-
-    # Delete the Pending bullet
-    lines = [ln for ln in content.splitlines() if "等回复" not in ln]
-    dash.write_text("\n".join(lines))
-
-    dashboard.write_dashboard(str(dash), conn, state_dir=str(state))
-    row = conn.execute(
-        "SELECT unresolved FROM affect WHERE description='等回复'"
-    ).fetchone()
-    assert row["unresolved"] == 0
-
-
-# ── episode text edit (existing behaviour, regression) ───────────────────────
-
-def test_aff_episode_text_edit_survives(conn, tmp_path):
-    """Editing an ep description in ## Affect block writes back to DB
-    and survives subsequent renders (regression guard)."""
-    state = tmp_path / "s"
-    dash = tmp_path / "dashboard.md"
-    ts = _now_utc()
-    conn.execute(
-        "INSERT INTO affect (date, ep, valence, arousal, importance, label,"
-        " description, source, created_at)"
-        " VALUES (?, 1, 0.7, 0.5, 3, '开心', '项目过审', 'test', ?)",
-        (ts[:10], ts),
-    )
-    conn.commit()
-
-    dashboard.write_dashboard(str(dash), conn, state_dir=str(state))
-    content = dash.read_text()
-    assert "项目过审" in content
-
-    # Edit the description in md
-    edited = content.replace("项目过审", "大项目过审了")
-    dash.write_text(edited)
-
-    dashboard.write_dashboard(str(dash), conn, state_dir=str(state))
-    row = conn.execute(
-        "SELECT description FROM affect WHERE label='开心'"
-    ).fetchone()
-    assert row["description"] == "大项目过审了"
 
 
 # ── tl_hidden migration idempotent ───────────────────────────────────────────

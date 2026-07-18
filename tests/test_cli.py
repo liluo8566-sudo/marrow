@@ -101,12 +101,6 @@ def test_resolve_marks_alert(db):
     assert row["resolved_at"] is not None
 
 
-def test_done_marks_task(db):
-    rc = cli.main(["done", "1", "--db", db])
-    assert rc == 0
-    assert _rows(db, "SELECT status FROM tasks WHERE id=1")[0]["status"] == "done"
-
-
 # ── pin / unpin shortcuts ──────────────────────────────────────────────────────
 
 def _insert_meme(p, mtype: str, pinned: int) -> None:

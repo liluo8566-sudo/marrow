@@ -198,7 +198,7 @@ _LANES: dict[str, dict[str, str]] = {
     # Diary table is keyed by `date TEXT PRIMARY KEY`, not INTEGER. vec0 rowid
     # must be INTEGER, so we ride SQLite's implicit `rowid` column (auto-assigned
     # to every table without an explicit INTEGER PRIMARY KEY). Stable across
-    # re-opens; reassigned on DELETE+INSERT (daily.py rewrites by date). Orphan
+    # re-opens; reassigned on DELETE+INSERT (any diary rewrite by date). Orphan
     # rows in diary_vec_meta whose rowid no longer exists in diary are swept by
     # _embed_pending_lane before the per-lane backfill query runs.
     "diary": {
@@ -369,9 +369,9 @@ def embed_task(
 
 def _sweep_diary_orphans(conn: sqlite3.Connection) -> None:
     """Drop diary_vec / diary_vec_meta rows whose rowid no longer maps to a
-    diary row. daily.run_day rewrites diary by DELETE+INSERT, which reassigns
-    rowid and orphans the previous vec embedding. Cheap full-scan join — diary
-    is small (≤ ~365 rows/yr).
+    diary row. A diary rewrite by DELETE+INSERT reassigns rowid and orphans the
+    previous vec embedding. Cheap full-scan join — diary is small (≤ ~365
+    rows/yr).
     """
     try:
         stale = [r[0] for r in conn.execute(

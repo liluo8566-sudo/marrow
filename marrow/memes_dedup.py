@@ -1,7 +1,7 @@
 """Memes dedup gate: protects the memes table from concept-overlap with
 milestones / entities / other memes.
 
-Order of checks (called from candidates.write_memes_cand before INSERT):
+Order of checks (called from daemon dim(action=upsert) before INSERT):
   1. fast_skip_already_rejected — (key, type) accumulated ≥ N persistent
      rejects → return 'fast_skip' so caller drops silently, no work.
   2. string_dup_against_milestone_entity — exact case-insensitive match on

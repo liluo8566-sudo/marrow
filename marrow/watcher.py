@@ -1,4 +1,4 @@
-"""marrow watcher — keep md_index in sync with dashboard.md, db-pages/.
+"""marrow watcher — keep md_index in sync with db-pages/ (daybrief, monitor, subpages).
 
 Boot: full_scan reconcile (covers crash gap) -> persistent watchdog.Observer
 on three roots. Edits are debounced 200ms per (path, key) to dedup OS event
@@ -62,11 +62,25 @@ def _setup_logger() -> logging.Logger:
 
 
 def _resolve_roots() -> tuple[list[str], list[str]]:
-    """Returns (file_roots, dir_roots) — both as absolute strings."""
+    """Returns (file_roots, dir_roots) — both as absolute strings.
+
+    daybrief lives at config.daybrief_path(); the db_pages recursive dir root
+    already covers it once the file sits inside db_pages (NY migration). When
+    daybrief_path points elsewhere (DATA_DIR default / pre-migration), add it
+    as an explicit file root so its hand-edits still reach sync_file_observe.
+    """
     cfg = config.load()
-    dash = str(Path(cfg["paths"]["dashboard"]).resolve())
     db_pages = str(Path(cfg["paths"]["db_pages"]).resolve())
-    return [dash], [db_pages]
+    file_roots: list[str] = []
+    try:
+        daybrief_raw = (config.daybrief_path() or "").strip()
+    except KeyError:
+        daybrief_raw = ""
+    if daybrief_raw:
+        daybrief = str(Path(daybrief_raw).resolve())
+        if daybrief != db_pages and not daybrief.startswith(db_pages + os.sep):
+            file_roots.append(daybrief)
+    return file_roots, [db_pages]
 
 
 class _Debouncer:
@@ -129,13 +143,12 @@ class _MdHandler(FileSystemEventHandler):
     _DETAIL_INDEX_NAMES = (
         "study.md",
         "projects.md",
-        "dashboard.md",
     )
 
     def _is_detail_page(self, path: str) -> bool:
         """True for db-pages/{study,projects}/*.md detail pages; index pages stay watched."""
         # study/<unit>.md and projects/<name>.md (incl. pit.md) flow through
-        # inserter or user edits, not md_index. study.md/projects.md/dashboard.md
+        # inserter or user edits, not md_index. study.md/projects.md
         # remain candidates.
         basename = os.path.basename(path)
         if basename in self._DETAIL_INDEX_NAMES:
@@ -388,9 +401,9 @@ def _warmup_imports() -> None:
     import sqlite3  # noqa: F401
 
     from . import (  # noqa: F401
-        atlas, candidates, config, dashboard, drift_sweep, entity_recall,
+        atlas, candidates, config, drift_sweep, entity_recall,
         inserter, md_index, recall, reconcile, repo, storage, subpage_specs,
-        subpages, subpages_render, top_sections,
+        subpages, subpages_render,
     )
 
 
@@ -429,10 +442,10 @@ class Watcher:
         self.drift_watcher = DriftWatcher(roots=list(AUTHORIZED_ROOTS))
 
     def _fire_sync(self, path: str) -> None:
-        # observe-only — keep auto-write baseline frozen so the dashboard
+        # observe-only — keep auto-write baseline frozen so the subpage/daybrief
         # inserter can detect user edits on the next render. Hand-edit
         # debounce fires → block_id stays in md_index but content_hash
-        # baseline is NOT updated → dashboard._resolve_blocks sees stored
+        # baseline is NOT updated → the inserter sees stored
         # != cur_hash → preserves user body.
         # Each debouncer worker thread opens its own conn to avoid sharing
         # SQLite connection state across threads.
@@ -528,8 +541,7 @@ class Watcher:
             cfg = config.load()
             folder = cfg["paths"]["db_pages"]
             state_dir = cfg["paths"]["db_pages_state"]
-            dash = cfg["paths"]["dashboard"]
-            targets = build_targets(folder, state_dir, dash)
+            targets = build_targets(folder, state_dir)
             self._sync_loop = SyncLoop(storage.connect, targets)
             try:
                 self._sync_loop.start()

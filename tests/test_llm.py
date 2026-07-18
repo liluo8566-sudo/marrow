@@ -190,7 +190,7 @@ def _new_sink():
 def test_stream_subprocess_dedupes_repeated_requestid_lines(tmp_path):
     """Regression (07-04 live incident): one API turn streams as multiple
     assistant lines (thinking/tool_use/text) each repeating identical usage
-    under the same requestId. Corrected true numbers for the two live turns:
+    under the same request_id. Corrected true numbers for the two live turns:
     turn1 in=3 cache_creation=24159 out=290 (x2 duplicate lines); turn2 in=3
     cache_read=24159 cache_creation=1572 out=417 (x3 duplicate lines). True
     cumulative: in=6 out=707 cache_read=24159 cache_write=25731; final
@@ -200,8 +200,8 @@ def test_stream_subprocess_dedupes_repeated_requestid_lines(tmp_path):
     turn2_usage = {"input_tokens": 3, "output_tokens": 417,
                    "cache_read_input_tokens": 24159, "cache_creation_input_tokens": 1572}
     events = (
-        [{"type": "assistant", "requestId": "req-1", "message": {"usage": turn1_usage}}] * 2
-        + [{"type": "assistant", "requestId": "req-2", "message": {"usage": turn2_usage}}] * 3
+        [{"type": "assistant", "request_id": "req-1", "message": {"usage": turn1_usage}}] * 2
+        + [{"type": "assistant", "request_id": "req-2", "message": {"usage": turn2_usage}}] * 3
     )
     bin_ = _fake_claude_usage_stream(tmp_path, events)
     sink = _new_sink()
@@ -362,7 +362,7 @@ def test_run_claude_cortex_snapshots_window_tokens(monkeypatch, tmp_path):
 
     turn_usage = {"input_tokens": 100, "output_tokens": 20,
                   "cache_read_input_tokens": 5000, "cache_creation_input_tokens": 0}
-    events = [{"type": "assistant", "requestId": "r1",
+    events = [{"type": "assistant", "request_id": "r1",
                "message": {"usage": turn_usage}}]
     bin_ = _fake_claude_usage_stream(tmp_path, events, result="hi")
     monkeypatch.setattr("marrow.llm._claude_bin", lambda: bin_)
@@ -708,7 +708,7 @@ def test_log_usage_db_failure_does_not_raise(monkeypatch):
 def _assistant(request_id="req-1", **usage):
     ev = {"type": "assistant", "message": {"usage": usage}}
     if request_id is not None:
-        ev["requestId"] = request_id
+        ev["request_id"] = request_id
     return ev
 
 
@@ -736,7 +736,7 @@ def test_add_event_usage_ignores_non_assistant_no_double_count():
 def test_add_event_usage_dedupes_repeated_requestid():
     """A single API turn streams as several assistant lines (thinking/
     tool_use/text) all repeating the identical usage under the same
-    requestId — the accumulator must count it once, not N times."""
+    request_id — the accumulator must count it once, not N times."""
     sink = _new_sink()
     usage = dict(input_tokens=100, output_tokens=50,
                  cache_read_input_tokens=10, cache_creation_input_tokens=5)

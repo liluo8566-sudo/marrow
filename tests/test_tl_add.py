@@ -11,7 +11,6 @@ import pytest
 
 from marrow import (
     reconcile,
-    sessionend_writers as sw,
     storage,
     timeline,
     tl_nudge,
@@ -35,7 +34,7 @@ def _hhmm(hours_ago: float) -> str:
 def _add(conn, sid="sess-1", body="body orig", **kw):
     return tl_writer.tl_add(
         conn, f"{_hhmm(2)}-{_hhmm(1.9)}", body,
-        n_word="愉悦", y_word="委屈",
+        user_word="愉悦", assistant_word="委屈",
         sid=sid, **kw,
     )
 
@@ -76,17 +75,17 @@ def test_explicit_importance_sets_events_imp(conn):
 
 def test_validation_word_and_body_limits(conn):
     # word cap is 8 chars now; 7-char word is valid
-    tl_writer.tl_add(conn, _hhmm(1), "b", n_word="1234567", sid="s")
+    tl_writer.tl_add(conn, _hhmm(1), "b", user_word="1234567", sid="s")
     with pytest.raises(tl_writer.TlError):
-        tl_writer.tl_add(conn, _hhmm(1), "b", n_word="123456789", sid="s")
+        tl_writer.tl_add(conn, _hhmm(1), "b", user_word="123456789", sid="s")
     with pytest.raises(tl_writer.TlError):
-        tl_writer.tl_add(conn, _hhmm(1), "x" * 51, n_word="愉悦", sid="s")
+        tl_writer.tl_add(conn, _hhmm(1), "x" * 51, user_word="愉悦", sid="s")
     with pytest.raises(tl_writer.TlError):
         tl_writer.tl_add(conn, _hhmm(1), "b", sid="s")  # no word
 
 
 def test_single_moment_no_end(conn):
-    r = tl_writer.tl_add(conn, _hhmm(1), "moment", n_word="愉悦", sid="s")
+    r = tl_writer.tl_add(conn, _hhmm(1), "moment", user_word="愉悦", sid="s")
     ev = conn.execute("SELECT ts_end FROM events WHERE id=?",
                       (r["event_id"],)).fetchone()
     assert ev["ts_end"] is None
@@ -160,32 +159,12 @@ def test_self_delete(conn, tmp_path):
                         (eid,)).fetchone()["c"] == 0
 
 
-# ── coexistence gate ─────────────────────────────────────────────────────────
-
-def test_seg_affect_skips_self_row_sid(conn):
-    _add(conn, sid="sess-x")
-    raw = "===AFFECT===\n- ep: 1\n  valence: 0.5\n  arousal: 0.3\n"
-    assert sw.seg_affect(conn, raw, "sess-x", "2026-07-03") == 0
-    # a different sid is not gated
-    assert sw._sid_has_self_rows(conn, "other") is False
-
-
-def test_seg_digest_suppresses_life_lines_for_self_sid(conn):
-    _add(conn, sid="sess-y")
-    raw = ("===DIGEST===\nKIND: casual\nTL: line\n"
-           "LIFE:\n- 10:00 something\n===END===")
-    sw.seg_digest(conn, raw, "sess-y", "2026-07-03")
-    row = conn.execute(
-        "SELECT life_lines FROM session_digests WHERE sid='sess-y'").fetchone()
-    assert row["life_lines"] is None
-
-
 # ── tl_update ────────────────────────────────────────────────────────────────
 
 def test_tl_update_changes_body_and_label(conn):
     r = _add(conn, body="orig")
     tl_writer.tl_update(conn, r["event_id"], body="updated",
-                        n_word="温柔", y_word="委屈",
+                        user_word="温柔", assistant_word="委屈",
                         importance=4)
     ev = conn.execute("SELECT content, imp FROM events WHERE id=?",
                       (r["event_id"],)).fetchone()
@@ -199,41 +178,6 @@ def test_tl_update_body_only_keeps_label(conn):
     ev = conn.execute("SELECT content FROM events WHERE id=?",
                       (r["event_id"],)).fetchone()
     assert ev["content"] == "【N愉悦♡Y委屈】just body [3]"
-
-
-def test_tl_update_rewrites_rendered_dashboard_line(conn, monkeypatch, tmp_path):
-    """A rendered row's md line must be rewritten to match the DB update, or
-    the resident reconcile sees a stale diff and reverts it (silent data loss
-    bug — see tl_update)."""
-    r = _add(conn, body="orig")
-    eid = r["event_id"]
-    md = timeline.render_timeline(conn)
-    dash = tmp_path / "dashboard.md"
-    dash.write_text(md, encoding="utf-8")
-    monkeypatch.setattr(tl_writer, "_dashboard_path", lambda: dash)
-
-    tl_writer.tl_update(conn, eid, body="updated", n_word="温柔", y_word="委屈")
-
-    new_md = dash.read_text(encoding="utf-8")
-    assert f"【N温柔♡Y委屈】updated [3] <!-- tl:e:{eid} -->" in new_md
-    assert "orig" not in new_md
-    # reconcile must now see no diff -> no self-edit revert
-    rpt = reconcile.reconcile_timeline(conn, dash)
-    assert rpt.updated == 0
-    assert conn.execute("SELECT content FROM events WHERE id=?",
-                        (eid,)).fetchone()["content"] == "【N温柔♡Y委屈】updated [3]"
-
-
-def test_tl_update_unrendered_row_leaves_dashboard_untouched(conn, monkeypatch, tmp_path):
-    r = _add(conn, body="orig")
-    eid = r["event_id"]
-    dash = tmp_path / "dashboard.md"
-    dash.write_text("## Timeline\n_none_\n", encoding="utf-8")
-    monkeypatch.setattr(tl_writer, "_dashboard_path", lambda: dash)
-
-    tl_writer.tl_update(conn, eid, body="updated")
-
-    assert dash.read_text(encoding="utf-8") == "## Timeline\n_none_\n"
 
 
 def test_tl_update_rejects_non_tl(conn):
@@ -310,3 +254,38 @@ def test_nudge_disabled_never_fires(conn, monkeypatch):
     monkeypatch.setattr(tl_nudge, "enabled", lambda: False)
     for _ in range(20):
         assert tl_nudge.maybe_nudge(conn, "off") is None
+
+
+# ── body plain-text guard ────────────────────────────────────────────────────
+
+def test_tl_add_accepts_plain_body(conn):
+    r = _add(conn, body="翻CC日志找骂人梗")
+    assert r["ok"] is True
+
+
+def test_tl_add_rejects_affect_block_in_body(conn):
+    with pytest.raises(tl_writer.TlError, match="plain text"):
+        _add(conn, body="【愉悦】翻日志")
+
+
+def test_tl_add_rejects_trailing_imp_in_body(conn):
+    with pytest.raises(tl_writer.TlError, match="plain text"):
+        _add(conn, body="翻日志 [3]")
+
+
+def test_tl_update_accepts_plain_body(conn):
+    ev = _add(conn)["event_id"]
+    r = tl_writer.tl_update(conn, ev, body="换个新body")
+    assert r["ok"] is True
+
+
+def test_tl_update_rejects_affect_block_in_body(conn):
+    ev = _add(conn)["event_id"]
+    with pytest.raises(tl_writer.TlError, match="plain text"):
+        tl_writer.tl_update(conn, ev, body="body 【委屈】")
+
+
+def test_tl_update_rejects_trailing_imp_in_body(conn):
+    ev = _add(conn)["event_id"]
+    with pytest.raises(tl_writer.TlError, match="plain text"):
+        tl_writer.tl_update(conn, ev, body="body [4]")

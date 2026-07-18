@@ -25,14 +25,17 @@ backup_dir = ""
 # iCloud offsite copy of the daily DB snapshot. Empty = disabled.
 # e.g. "~/Library/Mobile Documents/com~apple~CloudDocs/Backup/marrow"
 offsite_backup_dir = ""
-# Dashboard renders here. Empty lets the installer fill a private default.
-# e.g. "~/Documents/my-vault/dashboard.md"
-dashboard = ""
+# daybrief.md renders here. Empty = <DATA_DIR>/daybrief.md (back-compat).
+# e.g. "~/Documents/my-vault/db-pages/daybrief.md"
+daybrief = ""
+# monitor.md (alerts surface) renders here. Empty = <db_pages>/monitor.md.
+# e.g. "~/Documents/my-vault/db-pages/monitor.md"
+monitor = ""
 # DB-rendered pages folder (milestone.md, diary.md, ...).
-# Default is private and works without manual path setup.
+# Empty = <ny_root>/db-pages, else <DATA_DIR>/db-pages (config.py fallback).
 # e.g. "~/Documents/my-vault/db-pages". Name signals "rendered from DB".
 # Legacy key: `sub_pages`.
-db_pages = "~/.config/marrow/db-pages"
+db_pages = ""
 # State dir for db-page hashes. Empty = <DATA_DIR>/state.
 db_pages_state = ""
 
@@ -142,22 +145,6 @@ study   = []
 same_boost   = 0.05
 diff_penalty = 0.00
 
-[sessionend]
-# Sessions with ≤ this many user turns skip async LLM extraction (§2.7).
-# Threshold tunes after 1-week sample.
-skip_turn_threshold = 3
-# Tail embed batch size for sessionend_async. 0 = skip embed_pending.
-embed_batch = 200
-
-[sessionend_mid]
-scan_interval_min = 30
-elapsed_hours = 4
-turn_threshold_time = 10
-turn_threshold_abs = 30
-min_hours = 2
-min_turns = 4
-elapsed_hours_slow = 6
-turn_threshold_slow = 4
 
 [memes_dedup]
 # Cosine similarity threshold for the bge-m3 dedup check against existing
@@ -172,12 +159,6 @@ cosine_threshold = 0.85
 # repeat candidates.
 fast_skip_count = 3
 
-[tasks_dedup]
-# Cosine vs active tasks + 24h-window done tasks. Archived intentionally
-# excluded — old archived tasks may legitimately resurface under new
-# wording. Cross-category in both insert paths.
-cosine_threshold = 0.85
-
 [milestones_dedup]
 # Cosine vs all milestones.title (table stays small, <1 row/month).
 cosine_threshold = 0.85
@@ -191,6 +172,10 @@ cosine_threshold = 0.85
 # Fork users: fill these in your ~/.config/marrow/config.toml.
 user_name = "User"
 assistant_name = "Assistant"
+# Single-char initials prefixed to affect words in timeline labels
+# (【<user_marker>affect♡<assistant_marker>affect】). Keep short.
+user_marker = "U"
+assistant_marker = "A"
 user_aliases = []
 assistant_aliases = []
 # User's birth year, used by migrate.py to convert `[Age N]` milestone
@@ -208,8 +193,8 @@ meme_exclude_terms = []
 # Sub-page render order + visibility (DESIGN L43-65). Known keys:
 #   profile · milestone · diary · memes · stickers · wallet
 #   study · projects · cheatsheet
-# `top` = content (numbered on dashboard). `bottom` = utility (unnumbered).
-# `hidden` = built but not listed in dashboard `## Content`.
+# `top` = content (numbered in the `## Content` list). `bottom` = utility
+# (unnumbered). `hidden` = built but not listed in `## Content`.
 top = ["profile", "milestone", "diary", "memes", "stickers", "wallet"]
 bottom = ["study", "projects", "cheatsheet"]
 hidden = []
@@ -247,7 +232,12 @@ im_quiet_text = ""
 # nudge to wrap up, write the handoff, and lie_down(rotate=True). Normal
 # sessions never see this. Empty text = inert.
 show_tokens = 120000
-show_text = "Context ≥120k - If not actively chatting with user, handoff within 3 turns and lie_down(rotate=True) to clear.  If mid-conversation: carry on, the 150k fuse is the backstop."
+show_text = "Context ≥120k - If not actively chatting with user, handoff within 3 turns and lie_down(rotate=True) to clear (rotate unlocks a short next_wake, ≥16min). If mid-conversation: carry on, the 150k fuse is the backstop."
+# Behavioural presence gate (mirrors cortex silent_max_min = 15): hold the nudge
+# while the user's last real message is younger than this many minutes (mid-chat
+# — the fuse is the backstop), inject once they have been silent this long. 0 =
+# no gate (fire on the boolean user_replied_this_wake only).
+show_silent_min = 15
 
 [cortex_usage]
 # Net-token visibility (all sessions self-aware). Rendered by usage.py off the
@@ -292,21 +282,10 @@ text_file = ""
 # false = no cross-window tl injection.
 enabled = true
 
-[day_para]
-# Day-paragraph writer (marrow.day_para): one 100-150 char overview per day,
-# composed from that day's self-timeline (role='tl') rows + calendar. Fills the
-# diary.overview column without touching diary.content. Prompt text lives in
-# marrow/data/prompt_day_para.txt (or point prompt_file at your own).
-prompt_file = ""
-chars_min = 100
-chars_max = 150
-# Pull the day's calendar (cadence cal read) into the prompt. false = tl only.
-include_calendar = true
-
 [diary]
-# Diary free-write prompt loader (marrow.day_para.load_diary_prompt). Text in
-# marrow/data/prompt_diary.txt (or point prompt_file at your own). enabled is a
-# groundwork flag for the cortex free-write slot — no writer wired yet.
+# Diary free-write groundwork for the cortex free-write slot — no writer wired
+# yet. Prompt text in marrow/data/prompt_diary.txt (or point prompt_file at your
+# own). enabled is a groundwork flag.
 enabled = false
 prompt_file = ""
 length_range = "300-800"
@@ -332,6 +311,10 @@ wishlist_path = ""
 # = tools return a "not configured" error.
 venv_python = ""
 repo_root = ""
+# Fresh wakeup-note render at inject time (`python -m <module> --transcript ...`,
+# read-only) instead of the frozen file; reflects current time + caller SID even
+# after a window rotation. Empty = disabled, static file only.
+render_module = ""
 # When the cortex window is closed while a wake is open, session_end runs a
 # proxy lie_down(--force-slept auto) with this next-wake (minutes, clamped
 # 1..240 by cortex) so the wake ends at once instead of waiting for the
@@ -356,7 +339,7 @@ handoff_deny_text = "Write your handoff note first — call lie_down again after
 # for the note and signal log default to <home>/<file> (override with an
 # absolute path).
 wakeup_note_file = "wakeup_note.md"
-wake_signal_log_file = "wake_signal.log"
+wake_signal_log_file = "state/wake_signal.log"
 # Marker prefixing a wake signal line. A UserPromptSubmit carrying it inside a
 # cortex window is a wake turn: the hook injects the full wakeup-note text.
 wake_marker = "[CORTEX-WAKE]"
@@ -366,10 +349,88 @@ arm_ear_text = "Important: Set a persistent monitor first: Monitor(command: \"ta
 # Rearm line injected when the ear Monitor dies mid-window (the harness surfaces
 # a "Monitor stopped" task-notification). {signal_log} substituted. Blank = off.
 rearm_text = "Monitor is off — rearm now: Monitor(command: \"tail -n 0 -f {signal_log}\", description: \"cortex wake signal\", persistent: true); then investigate why it died."
-# Marker in the chat-tier TUCK-IN line the cortex watchdog appends to
-# wake_signal.log (arrives down the ear channel). A cortex-window prompt
-# carrying it is a machine line, excluded from the user-wake reset.
-tuck_in_marker = "[TUCK-IN]"
+# SessionStart line injected on a RESUMED cortex window (fresh windows get
+# arm_ear_text instead). The prior process died with its ear Monitor; the
+# resumed window has no live tail and the harness surfaces stale task
+# notifications. This line tells the model to drop the leftovers and re-arm.
+# {signal_log} substituted with the resolved absolute path. Blank = off.
+resume_ear_text = "⏯️ The session has been resumed - re-arm a fresh monitor (Monitor(command: \"tail -n 0 -f {signal_log}\", description: \"cortex wake signal\", persistent: true)). Continue the conversation as normal."
+# SessionStart line for a RESUMED cortex window that is NO LONGER the resident
+# (wake_state.json points at a different transcript — a newer cortex took over,
+# or this window was rotated out and is reopened only to read history). This
+# window must stay read-only: arm no ear, touch no wake_state, never rotate.
+# {signal_log} substituted with the resolved absolute path. Blank = off.
+retired_ear_text = "⏯️ This is an archived session - ignore all task/monitor. Do not call any tool."
+# Marker in the free-round line the cortex watchdog appends to wake_signal.log
+# (arrives down the ear channel). A cortex-window prompt carrying it is a machine
+# line, excluded from the user-wake reset — must match cortex tuck_in_text.
+tuck_in_marker = "[NEW ROUND]"
+# Markers that identify an auto-compact continuation injection. Claude Code
+# replays the archived transcript as a user-role turn; without this it is
+# misread as a real user message and silently kills the pending wake alarm.
+# Any listed marker appearing near the start (within compact_marker_head_chars)
+# of a cortex-window prompt classifies it as a machine line. Narrow strings —
+# ordinary chat never contains them.
+compact_markers = ["===== BEGIN ORIGINAL TRANSCRIPT", "===== END ORIGINAL TRANSCRIPT"]
+compact_marker_head_chars = 200
+# Line-start machine markers. Any transcript turn whose first non-space chars
+# begin with one of these is a cortex-injected machine line (wake bell, free
+# round, night close, fuse, ctl, slash-command body), NOT user/assistant speech,
+# so ingestion drops it from events/recall/tl. Exact line-start match only —
+# a real message merely quoting a marker keeps flowing. Emoji prefix (⚙️/⏳/☀️)
+# is tolerated automatically.
+machine_markers = ["[CORTEX-WAKE]", "[NEW ROUND]", "[TUCK-IN]", "[NIGHT]",
+                   "[FUSE]", "[CTL]", "[CMD"]
+# Audit log for destructive wake-state actions (sentinel kill / floor clear /
+# awake flip). Bare name resolves under cortex home. Never silently destroy a
+# scheduled alarm again.
+wake_audit_log_file = "state/wake_audit.log"
+
+[outbox]
+# Cross-channel message drop (msg MCP tool → outbox table → channel adapters).
+# daily_cap_user: user-facing notes/day (targets tg/wx), all senders combined.
+# daily_cap_session: session-to-session notes/day (targets session/cli/ct).
+# Both counted since local midnight, refused at cap (warns outbox_cap).
+# user_send_channels: channels allowed to send to the user (P1: cortex only).
+# retention_days: sent/failed rows older than this aged out by the weekly job.
+# inject_header: cli/private note header rendered above the body on delivery
+#   ({channel} sender channel, {sid4} first 4 chars of sender sid, {time} HH:MM).
+# own_note_header: header shown to a channel's resident session for notes a
+#   bridge sent on that channel (so she sees the outbound note before her reply).
+#   Per-sid cursor (state/outbound/<sid>), forward-only, consume-once.
+# wire_channels: channels whose notes go out via a bridge adapter and bypass the
+#   resident session (own_note surfacing applies to these only; cli/ct/session
+#   targets are delivered inline by outbox.deliver and never re-surfaced).
+daily_cap_user = 30
+daily_cap_session = 100
+user_send_channels = ["ct"]
+retention_days = 30
+inject_header = "📮 Message from {channel}·{sid4} {time}"
+own_note_header = "📤 Sent on this channel"
+wire_channels = ["tg", "wx"]
+
+[replay]
+# Cross-session replay inject (turn_inject): each session passively hears other
+# sessions' recent user/assistant turns. Cursor per sid (state/replay/<sid>);
+# first sight seeds to current MAX(events.id) — future-only, never backfills.
+# max_turns: turn cap (one user->assistant exchange); overflow folds to +N more.
+# max_lines: outer cap on rendered message lines, below max_turns — a turn with
+#   many per-turn messages can still overflow the turn cap; newest lines win.
+# per_msg_chars: per-message truncation (shorter than cortex — ambient only).
+# idle_gate_min: non-cortex sessions inject replay only when her last completed
+#   turn in that session is >= this many minutes old (catch-up on return, quiet
+#   during focused work). First turn = injects. 0 = every turn. Cortex is exempt
+#   (every turn, via the last_note_ts cursor shared with note.py).
+# exclude_target_channels: non-cortex sessions on these channels receive NOTHING.
+#   ct is NOT listed — the cortex window takes the note-aligned cursor path.
+#   Source ct events are excluded by the query itself.
+enabled = true
+max_turns = 2
+max_lines = 4
+per_msg_chars = 250
+idle_gate_min = 20
+header = "## Recent replay from other sessions"
+exclude_target_channels = []
 
 [qidu]
 # Qidu book-server — powers the book_* MCP tools (Phase 3 划线/批注系统).
@@ -446,5 +507,5 @@ housekeep_protected_files = [
 ]
 
 # ~/.claude.json mcpServers snapshot: rolling backups kept in
-# ~/.config/marrow/backups/claude-json/, newest N retained.
+# ~/.config/marrow/backup/claude-json/, newest N retained.
 claude_json_snapshot_keep = 10

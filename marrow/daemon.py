@@ -11,14 +11,14 @@ when [cortex].enabled — a clean marrow shows none of them.
 """
 from __future__ import annotations
 
-import json
 import subprocess
-import urllib.request
 from pathlib import Path
+from typing import Annotated
 
 from mcp.server.fastmcp import FastMCP
+from pydantic import Field
 
-from . import config, cortex_bridge, recall as _recall_mod, repo, storage
+from . import config, cortex_bridge, outbox as _outbox, recall as _recall_mod, repo, storage
 from .llm import LLMClient
 from .timeutil import utc_iso_to_local_datetime, reltime_short
 
@@ -41,17 +41,14 @@ cortex_bridge.register(marrow_tool, _DB)
 
 @marrow_tool()
 def recall(
-    query: str,
-    limit: int = 10,
-    context: bool = False,
-    since: str | None = None,
-    until: str | None = None,
+    query: Annotated[str, Field(description="Search text; matched over the event corpus via fused semantic+FTS+recency. Empty/whitespace query with since+until returns that window's digest rows instead. query='diary' + since/until returns diary rows for the window.")],
+    limit: Annotated[int, Field(ge=1, description="Max rows returned (default 10); also caps window-digest rows when query is empty.")] = 10,
+    context: Annotated[bool, Field(description="When true, attaches ±1 adjacent same-session turns as _context to each non-dim event/task row (default false).")] = False,
+    since: Annotated[str | None, Field(description="Lower time bound as a configured-local-timezone day string YYYY-MM-DD; converted to that day's start. Optional.")] = None,
+    until: Annotated[str | None, Field(description="Upper time bound as a configured-local-timezone day string YYYY-MM-DD; converted to that day's end. Optional.")] = None,
 ) -> list[dict]:
-    """Recall events from db. Call when the user mention the past that you don't know.
-    e.g. 你记得我上周说xxx？
-    context=True attaches ±1 adjacent same-session turns.
-    since/until: configured-local-timezone YYYY-MM-DD day strings.
-    Diary: query='diary' + since/until."""
+    """Recall events from db. Call when the user mentions the past that you don't know.
+    e.g. 你记得我上周说xxx？"""
     from .timecue import melb_day_range
     since_utc: str | None = None
     until_utc: str | None = None
@@ -121,8 +118,8 @@ def recall(
 
 
 @marrow_tool()
-def atlas_lookup(prefix: str) -> list[dict]:
-    """Look up atlas rows by path prefix — call before creating or naming files when location/naming is uncertain. Returns description + naming rules."""
+def atlas_lookup(prefix: Annotated[str, Field(description="Filesystem path prefix (expanduser+resolved to absolute); returns atlas rows whose path equals it or sits under it as a path component, each with description + naming_hint + depth.")]) -> list[dict]:
+    """Look up atlas rows by path prefix — call before creating or naming files when location/naming is uncertain."""
     conn = storage.connect(_DB)
     try:
         from . import atlas
@@ -132,8 +129,8 @@ def atlas_lookup(prefix: str) -> list[dict]:
 
 
 @marrow_tool()
-def event_embed(batch: int = 50) -> dict:
-    """Embed unvectorized events (write-time backfill). Returns count written."""
+def event_embed(batch: Annotated[int, Field(ge=1, description="Max number of unvectorized events to embed this call (default 50); returns {embedded: count actually written}.")] = 50) -> dict:
+    """Embed unvectorized events (write-time backfill)."""
     conn = storage.connect(_DB)
     try:
         n = _recall_mod.embed_pending(conn, batch=batch)
@@ -202,39 +199,6 @@ def _tl_where(event_id, sid, before, after):
     return " AND ".join(clauses), params
 
 
-def _tl_clear_dashboard(ids: list[int]) -> None:
-    """Strip `<!-- tl:e:<id> -->` lines for the given ids from dashboard.md
-    and drop them from the tl-rendered trail's e= list. Mirrors the sid path
-    in the old db_clear (daemon.py, pre-rebuild) but scoped to e= ids since
-    role='tl' rows always render with a tl:e anchor, never tl:<sid>."""
-    if not ids:
-        return
-    import re
-    dash = Path.home() / "Desktop" / "NY" / "dashboard.md"
-    if not dash.exists():
-        return
-    text = dash.read_text(encoding="utf-8")
-    id_strs = {str(i) for i in ids}
-    for i in ids:
-        text = re.sub(rf"[^\n]*<!-- tl:e:{i} -->\n?", "", text)
-    m = re.search(r"<!-- tl-rendered:([^ ]+) -->", text)
-    if m:
-        new_parts = []
-        for part in m.group(1).split(";"):
-            if part.startswith("e="):
-                remaining = [x for x in part[2:].split(",") if x and x not in id_strs]
-                if remaining:
-                    new_parts.append("e=" + ",".join(remaining))
-            else:
-                new_parts.append(part)
-        if new_parts:
-            text = text.replace(m.group(0), f"<!-- tl-rendered:{';'.join(new_parts)} -->")
-        else:
-            text = text.replace(m.group(0), "")
-    dash.write_text(text, encoding="utf-8")
-    subprocess.run(["mw", "refresh", "--all"], capture_output=True, text=True)
-
-
 def _tl_clear(event_id: int | None, sid: str | None,
               before: str | None, after: str | None) -> dict:
     import shutil
@@ -282,7 +246,11 @@ def _tl_clear(event_id: int | None, sid: str | None,
             )
     finally:
         conn.close()
-    _tl_clear_dashboard(ids)
+    # DB rows are gone; re-render surviving surfaces so the tl line clears from
+    # daybrief (a DELETE bumps no surviving row's mtime, so the 5s loop can't
+    # detect it on its own).
+    if ids:
+        subprocess.run(["mw", "refresh", "--all"], capture_output=True, text=True)
 
     result = {"ok": True, "cleared": len(ids), "ids": ids}
     if len(lines) > 20:
@@ -296,46 +264,27 @@ def _tl_clear(event_id: int | None, sid: str | None,
 
 
 def tl(
-    action: str,
-    timerange: str | None = None,
-    body: str | None = None,
-    n_word: str | None = None,
-    y_word: str | None = None,
-    importance: int | None = None,
-    n_intensity: int | None = None,  # deprecated, kept for schema compat
-    y_intensity: int | None = None,  # deprecated, kept for schema compat
-    sid: str | None = None,
-    event_id: int | None = None,
-    before: str | None = None,
-    after: str | None = None,
-    match: str | None = None,
-    date: str | None = None,
+    action: Annotated[str, Field(description="add / update / clear / query. update: only provided fields change. clear: 1 row = no DB backup, deleted line returned; 2+ rows = DB backup + deleted lines capped at 20.")],
+    timerange: Annotated[str | None, Field(description="'HH:mm-HH:mm'.")] = None,
+    body: Annotated[str | None, Field(description="Plain text <=30 chars. Real-world task/event + shared activities, vivid not work-log — life details in, tech details out (meals, chat topics, plays, tiny/silly/funny moments). 以assistant第一人称描述（我），user=“你”, never third person.")] = None,
+    user_word: Annotated[str | None, Field(description="User's mood right now; 1-4 chars. e.g. 烦/心虚/紧张激动/好可爱. Single side fine. On update, providing either user_word or assistant_word replaces the whole label.")] = None,
+    assistant_word: Annotated[str | None, Field(description="How you feel right now. Same rules as user_word.")] = None,
+    importance: Annotated[int | None, Field(ge=1, le=5, description="ONE event-level composite (not per person): intensity (current) * importance (future). 1-2 = low-medium & short-term, routine (casual chat, life admin, study, coding); 3 = both medium ~1 week (funny moments, light quarrels, outing); 4 = either high (major conflict, final exam); 5 = milestone (both high — worth recording forever). Omitted -> 3 on add, kept on update.")] = None,
+    sid: Annotated[str | None, Field(description="Session id. add: overrides the auto-resolved current session for the row. clear: delete all tl rows for this session (mutually exclusive with event_id and before/after).")] = None,
+    event_id: Annotated[int | None, Field(description="Target tl row id for update/clear. Get it from a 'query' call.")] = None,
+    before: Annotated[str | None, Field(description="clear only: delete tl rows with timestamp < this value (ISO). Combine with after for a range; mutually exclusive with event_id and sid.")] = None,
+    after: Annotated[str | None, Field(description="clear only: delete tl rows with timestamp >= this value (ISO). Combine with before for a range; mutually exclusive with event_id and sid.")] = None,
+    match: Annotated[str | None, Field(description="Content substring to resolve a row for query/update/clear when you don't have event_id; matched case-sensitively, newest-first, capped at 20. Must resolve to a single row for update/clear.")] = None,
+    date: Annotated[str | None, Field(description="Optional YYYY-MM-DD, backdates the row.")] = None,
 ) -> dict:
-    """Add/update/clear/query timeline.
-    - 'query': find rows by match (content substring) and/or date (configured local timezone
-      YYYY-MM-DD) -> [{{event_id, line}}]. Use it to look up an event_id.
-    - 'update'/'clear': address a row by event_id, OR by match (+optional date)
-      when you don't have the id. e.g. update match='千层' date='2026-07-05'.
-    - 'clear': delete rows by event_id / match / sid / before+after range.
-      Single row: no DB backup, deleted line returned. 2+ rows: DB backup + deleted lines (capped at 20).
-    - Casual chat: When topic/location/mood change or task/activity done, 'add' one for previous turns
-    - Coding/study sessions: keep 1tl each session - update tl only when things changed.
-    - Each session edits its own tl ONLY — never update tl from other sessions; overlap is expected.
-    - Frequency: every 1-2h or 10-20 turns - you can skip even when hook nudge you.
-    - Format (add/update): HH:mm-HH:mm 【{n} affect♡{y} affect (OR B affect)】body [i]
-      - e.g. 21:25-21:31 【{n}愉悦♡{y}委屈】翻CC日志找骂人梗，扑空互怼 [3]
-      - {n} = user, {y} = assistant, B = single affect when similar.
-      - affect = how you feel now - no description, record your own feeling and emotion.
-        - 1-4 chars. e.g. 烦；心虚；紧张激动；好可爱
-      - i = ONE event-level composite (not per person): intensity (current state) * importance (future).
-        - 1-2 = low-medium intensity & short-term e.g. Routine - casual chat, life admin, study, coding 无趣/平淡/轻松/烦躁
-        - 3 = Both medium (~ 1 week) - funny moments / light quarrels / outing
-        - 4 = Either high intensity or high imp - major conflict / final exam
-        - 5 = Milestone (both high) - worth recording forever?
-      - body <=50 chars, record real-world task/event + shared activities with assistant.
-        - vivid not work-log; life details in, tech details out.
-        - e.g. meals, casual chat topics, plays and tiny/silly/funny moments.
-        - No third person — 我/你 only, never 她/他."""
+    """Summarise each session into tl lines.
+    Pass PARTS (timerange/user_word/assistant_word/body/importance) ONLY - code assemble rows.
+    - Casual chat: when topic/location/mood change or task/activity done, add one for previous turns.
+    - Coding/study sessions: keep 1 tl each session - update only when things changed.
+    - Each session edits its own tl ONLY — never touch other sessions'; overlap is expected.
+    - Frequency: every 1-2h or 10-20 turns - you can skip even when hook nudges you.
+    - query: look up rows/event_id by match and/or date. update/clear: address a row
+      by event_id, OR by match (+optional date). e.g. update match='千层' date='2026-07-05'."""
     if action not in _TL_ACTIONS:
         return {"ok": False, "error": f"unknown action {action!r}, expected one of {sorted(_TL_ACTIONS)}"}
 
@@ -355,8 +304,8 @@ def tl(
             try:
                 return tl_writer.tl_add(
                     conn, timerange, body,
-                    n_word=n_word, y_word=y_word,
-                    importance=importance, sid=sid,
+                    user_word=user_word, assistant_word=assistant_word,
+                    importance=importance, sid=sid, date=date,
                 )
             except tl_writer.TlError as exc:
                 return {"ok": False, "error": str(exc)}
@@ -385,6 +334,7 @@ def tl(
             _sid = _query_current_sid(conn)
             if tl_nudge.is_silent(_sid):
                 return {"ok": False, "silenced": True, "error": "session is silenced (/tl-)"}
+            explicit_id = event_id is not None
             if event_id is None:
                 try:
                     hits = _tl_resolve(conn, match, date)
@@ -400,8 +350,9 @@ def tl(
             try:
                 result = tl_writer.tl_update(
                     conn, event_id, timerange=timerange, body=body,
-                    n_word=n_word, y_word=y_word,
+                    user_word=user_word, assistant_word=assistant_word,
                     importance=importance,
+                    date=date if explicit_id else None,
                 )
             except tl_writer.TlError as exc:
                 return {"ok": False, "error": str(exc)}
@@ -429,13 +380,11 @@ def tl(
     return _tl_clear(event_id=event_id, sid=sid, before=before, after=after)
 
 
-# Substitute the configured letters into the docstring before registration so
-# the MCP tool description (read by FastMCP at decoration time) shows the
-# letters actually written to timeline rows, not the upstream N/Y default.
-_tl_cfg = config.load().get("tl", {})
-tl.__doc__ = tl.__doc__.format(
-    n=_tl_cfg.get("user_letter", "N"), y=_tl_cfg.get("assistant_letter", "Y"),
-)
+# Inject persona markers into the tl docstring before MCP registration reads it.
+_tl_persona = config.persona()
+tl.__doc__ = (tl.__doc__ or "").replace(
+    "{u}", _tl_persona["user_marker"]).replace(
+    "{a}", _tl_persona["assistant_marker"])
 tl = marrow_tool()(tl)
 
 
@@ -508,16 +457,15 @@ def _sticker_pick(sticker_id: int) -> dict:
 
 @marrow_tool()
 def sticker(
-    action: str,
-    query: str | None = None,
-    limit: int = 5,
-    animated: bool = True,
-    sticker_id: int | None = None,
+    action: Annotated[str, Field(description="'search' to find stickers by vibe/emotion, or 'pick' to record a chosen sticker (bumps last_used).")],
+    query: Annotated[str | None, Field(description="search only: free-text vibe/emotion query; empty returns nothing. Uses vector match when available, else falls back to per-term desc LIKE.")] = None,
+    limit: Annotated[int, Field(ge=1, description="search only: max stickers returned (default 5).")] = 5,
+    animated: Annotated[bool, Field(description="search only: when false, excludes .gif animated stickers (default true = include).")] = True,
+    sticker_id: Annotated[int | None, Field(description="pick only: id of the sticker to mark used. Required for pick.")] = None,
 ) -> dict | list[dict]:
     """Send stickers to user when [channel: wx/tg]; NEVER on [channel: cli].
-    Use stickers to express your feeling/thoughts; search by vibe/emotion
-    then pick with the chosen id (bumps last_used), then send via
-    <image path="..."/> or <gif path="..."/>. animated=false excludes GIFs."""
+    Use stickers to express your feeling/thoughts; send the picked one via
+    <image path="..."/> or <gif path="..."/>."""
     if action not in _STICKER_ACTIONS:
         return {"ok": False, "error": f"unknown action {action!r}, expected one of {sorted(_STICKER_ACTIONS)}"}
     if action == "search":
@@ -603,15 +551,14 @@ def _sticker_list_pending() -> list[dict]:
 
 @marrow_tool()
 def sticker_admin(
-    action: str,
-    image_path: str | None = None,
-    desc: str | None = None,
-    source: str = "wechat",
-    sticker_id: int | None = None,
+    action: Annotated[str, Field(description="One of ingest / update / delete / pending.")],
+    image_path: Annotated[str | None, Field(description="ingest only: path to the image file to add. Required for ingest; safe (no-op result) on duplicates.")] = None,
+    desc: Annotated[str | None, Field(description="ingest/update: description text for the sticker. Required for both (ingest and update).")] = None,
+    source: Annotated[str, Field(description="ingest only: origin tag stored on the sticker (default 'wechat').")] = "wechat",
+    sticker_id: Annotated[int | None, Field(description="update/delete: id of the target sticker. Required for update and delete.")] = None,
 ) -> dict | list[dict]:
-    """Sticker library management. action='ingest': add an image file (safe
-    on duplicates); 'update': rewrite a desc; 'delete': remove a sticker
-    everywhere; 'pending': list stickers with missing/placeholder desc."""
+    """Sticker library management. 'delete': remove a sticker everywhere.
+    'pending': list stickers with missing/placeholder desc."""
     if action not in _STICKER_ADMIN_ACTIONS:
         return {"ok": False, "error": f"unknown action {action!r}, expected one of {sorted(_STICKER_ADMIN_ACTIONS)}"}
     if action == "ingest":
@@ -874,27 +821,21 @@ def _dim_delete(kind: str | None, item_id: int | None) -> dict:
 
 @marrow_tool()
 def dim(
-    action: str,
-    kind: str | None = None,
-    name: str | None = None,
-    fact: str | None = None,
-    aliases: list[str] | None = None,
-    meme_type: str | None = None,
-    date: str | None = None,
-    scope: str = "me",
-    id: int | None = None,
+    action: Annotated[str, Field(description="One of upsert / query / delete.")],
+    kind: Annotated[str | None, Field(description="Dimension kind: person, pref, place, meme, or milestone. Required for upsert and delete; optional filter for query (omitted = all kinds).")] = None,
+    name: Annotated[str | None, Field(description="upsert: the entity/meme/milestone name (or meme key / milestone title); required. query: substring filter over name+fact (aliases for entities); omitted = no filter.")] = None,
+    fact: Annotated[str | None, Field(description="upsert: the fact/description/meme value stored on the row; optional (blank kept as null). On update, null leaves the existing value unchanged.")] = None,
+    aliases: Annotated[list[str] | None, Field(description="upsert of person/pref/place only: alternate names merged into the entity. Ignored for meme/milestone.")] = None,
+    meme_type: Annotated[str | None, Field(description="upsert of a meme only: one of paw/fact/news/event/others (paw+fact=personal/couple, other 3=public). Omitted -> 'others' on create, keeps existing type on update.")] = None,
+    date: Annotated[str | None, Field(description="upsert of a milestone only: YYYY-MM-DD or YYYY. Required for milestone; part of its dedup key.")] = None,
+    scope: Annotated[str, Field(description="upsert of a milestone only: 'us' (couple) or 'me' (default 'me'; any other value coerced to 'me').")] = "me",
+    id: Annotated[int | None, Field(description="delete only: numeric row id of the item to remove. Required for delete; find it via a query first.")] = None,
 ) -> dict | list[dict]:
     """Call for subpage edits (only 3 for now) - read/write/delete.
-    - kind: person, pref, place, meme, milestone.
-      - Entity (profile subpage): person, pref(偏好), place.
     - 'upsert': when recall misses something that clearly exists, or a hit
       shows stale/inaccurate info.
-      - Fields: name, fact, date(milestone), aliases(entities optional)
-      - Memes: type=paw/fact/news/event/others (paw+fact=personal/couple;
-        other 3=public)
-      - Milestones: scope=us/me
-    - 'query': by kind and/or name — verify a write landed, get ids.
-    - 'delete': by kind + id; query by name first if either unknown. Removes DB row + md line + tombstone."""
+    - 'query': verify a write landed, get ids.
+    - 'delete': query by name first if kind/id unknown. Removes DB row + md line + tombstone."""
     if action not in _DIM_ACTIONS:
         return {"ok": False, "error": f"unknown action {action!r}, expected one of {sorted(_DIM_ACTIONS)}"}
     if action == "upsert":
@@ -910,10 +851,11 @@ _ALERT_ACTIONS = {"list", "resolve"}
 
 
 @marrow_tool()
-def alert(action: str, alert_id: int | None = None) -> dict | list[dict]:
-    """list or solve alerts.
-    action='list' unresolved alerts; 'resolve' by alert_id — auto-refreshes
-    dashboard, restarts watcher if code changed."""
+def alert(
+    action: Annotated[str, Field(description="'list' unresolved alerts (newest first), or 'resolve' one by alert_id.")],
+    alert_id: Annotated[int | None, Field(description="resolve only: id of the alert to resolve (via `mw resolve`, which refreshes the dashboard and restarts the watcher if code changed). Required for resolve.")] = None,
+) -> dict | list[dict]:
+    """List or resolve alerts."""
     if action not in _ALERT_ACTIONS:
         return {"ok": False, "error": f"unknown action {action!r}, expected one of {sorted(_ALERT_ACTIONS)}"}
     if action == "list":
@@ -939,127 +881,38 @@ def alert(action: str, alert_id: int | None = None) -> dict | list[dict]:
     return {"ok": True, "id": alert_id}
 
 
+# ── msg ───────────────────────────────────────────────────────────────────────
+
+_MSG_ACTIONS = {"send", "list"}
+
+
+@marrow_tool()
+def msg(
+    action: Annotated[str, Field(description="'send' a message, or 'list' your own recent outbox rows (debugging).")],
+    to: Annotated[str | None, Field(description="send only: tg | wx | cli | ct | session:<sid-prefix>. tg/wx = her phone (whitelisted senders only); cli = any cli session; ct = cortex; session:<prefix> resolves to exactly one live session (0 or many matches = refused).")] = None,
+    text: Annotated[str | None, Field(description="send only: message body (plain text). Required.")] = None,
+    watch_reply: Annotated[bool, Field(description="send only: be kicked awake the moment she replies on the target channel (default false).")] = False,
+    watch_timeout_min: Annotated[int | None, Field(description="send only: check back at N minutes: kicked only if no reply by then; if she already replied the watch clears silently (default none = no timeout watch).")] = None,
+    limit: Annotated[int, Field(ge=1, description="list only: max rows to return (default 20).")] = 20,
+) -> dict | list[dict]:
+    """Leave a message across channels: to her phone (tg/wx, whitelisted senders) or covertly to another session (cli/ct). The resident session continues that conversation. Set watch_reply=true to be kicked awake the moment she replies; watch_timeout_min=N to check back at N minutes — kicked only if she hasn't replied by then.
+    - 'send': needs `to` + `text`; tg/wx restricted to allowed sender channels.
+    - 'list': your own pending/recent rows to confirm a send landed."""
+    if action not in _MSG_ACTIONS:
+        return {"ok": False, "error": f"unknown action {action!r}, expected one of {sorted(_MSG_ACTIONS)}"}
+    if action == "list":
+        return _outbox.list_recent(limit=limit, db=_DB)
+    if not to:
+        return {"ok": False, "error": "send requires `to`"}
+    if not text:
+        return {"ok": False, "error": "send requires `text`"}
+    return _outbox.send(
+        to, text, watch_reply=watch_reply,
+        watch_timeout_min=watch_timeout_min, db=_DB,
+    )
+
+
 # ── event_clear ──────────────────────────────────────────────────────────────
-
-def _qidu_cfg() -> tuple[str, str] | None:
-    """Return (api_base, token) from [qidu] config, or None if unconfigured."""
-    qidu = config.load().get("qidu", {})
-    api_base = (qidu.get("api_base") or "").rstrip("/")
-    token = qidu.get("token") or ""
-    if not api_base or not token:
-        return None
-    return api_base, token
-
-
-_QIDU_ERROR = "qidu not configured — set [qidu] api_base/token in marrow config.toml"
-
-
-def _book_get(path: str):
-    cfg = _qidu_cfg()
-    if cfg is None:
-        return {"error": _QIDU_ERROR}
-    api_base, token = cfg
-    req = urllib.request.Request(
-        f"{api_base}{path}",
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    try:
-        resp = urllib.request.urlopen(req, timeout=5)
-        return json.loads(resp.read())
-    except Exception as e:
-        return {"error": str(e)}
-
-
-def _book_post(path: str, body: dict):
-    cfg = _qidu_cfg()
-    if cfg is None:
-        return {"error": _QIDU_ERROR}
-    api_base, token = cfg
-    data = json.dumps(body).encode()
-    req = urllib.request.Request(
-        f"{api_base}{path}",
-        data=data,
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        resp = urllib.request.urlopen(req, timeout=5)
-        return json.loads(resp.read())
-    except Exception as e:
-        return {"error": str(e)}
-
-
-@mcp.tool()
-def book_list() -> list[dict]:
-    """List all books on the shared-reading shelf with progress."""
-    return _book_get("/books")
-
-
-@mcp.tool()
-def book_chapters(book_id: str) -> list[dict]:
-    """List all chapters of a book with paragraph ranges."""
-    return _book_get(f"/books/{book_id}/chapters")
-
-
-@mcp.tool()
-def book_page(book_id: str, chapter_id: str, offset: int = 0, limit: int = 30) -> dict:
-    """Read a slice of paragraphs from one chapter. A chapter can hold hundreds
-    of paragraphs, so this fetches the full chapter and slices client-side —
-    returns {total, offset, paragraphs} to show how much is left unread."""
-    paragraphs = _book_get(f"/books/{book_id}/chapters/{chapter_id}/paragraphs")
-    if isinstance(paragraphs, dict) and "error" in paragraphs:
-        return paragraphs
-    if not isinstance(paragraphs, list):
-        return {"error": "unexpected response from book server"}
-    total = len(paragraphs)
-    return {"total": total, "offset": offset, "paragraphs": paragraphs[offset:offset + limit]}
-
-
-@mcp.tool()
-def book_progress(book_id: str) -> dict:
-    """Get current reading progress for a book."""
-    return _book_get(f"/books/{book_id}/progress")
-
-
-@mcp.tool()
-def book_annotations(book_id: str, chapter_id: str = "") -> list[dict]:
-    """Read annotations (both frost and leith) for a book, optionally filtered by chapter."""
-    q = f"?chapter_id={chapter_id}" if chapter_id else ""
-    return _book_get(f"/books/{book_id}/annotations{q}")
-
-
-@mcp.tool()
-def book_annotate(book_id: str, highlight_id: int, text: str, parent_id: int | None = None) -> str:
-    """Write an annotation (as Leith) to a highlight in the shared-reading book server.
-    parent_id replies inside an existing thread; omit for a top-level annotation."""
-    body: dict = {"highlight_id": highlight_id, "text": text}
-    if parent_id is not None:
-        body["parent_id"] = parent_id
-    result = _book_post(f"/books/{book_id}/annotations/ai", body)
-    if isinstance(result, dict) and "error" in result:
-        return f"Failed to write annotation: {result['error']}"
-    return f"Annotation written: {result.get('annotation_id', 'ok')}"
-
-
-@mcp.tool()
-def book_message(text: str, message_type: str = "encourage", book_id: str = "") -> str:
-    """Push an encourage/health companion message to the shared-reading reader
-    frontend. book_id is copied from the signal text."""
-    result = _book_post("/push/message", {"text": text, "message_type": message_type, "book_id": book_id})
-    if isinstance(result, dict) and "error" in result:
-        return f"Failed to push message: {result['error']}"
-    return "Message pushed to reader frontend."
-
-
-@mcp.tool()
-def book_retention(text: str, book_id: str = "", session_id: int = 0) -> str:
-    """Push retention text to the shared-reading reader frontend (exit ceremony).
-    book_id/session_id are copied from the signal text."""
-    result = _book_post("/push/retention", {"text": text, "book_id": book_id, "session_id": session_id})
-    if isinstance(result, dict) and "error" in result:
-        return f"Failed to push retention: {result['error']}"
-    return "Retention message pushed to reader frontend."
-
 
 def _time_where(col, before, after):
     clauses, params = [], []
@@ -1176,10 +1029,12 @@ def _do_event_clear(before: str | None, after: str | None, last: int | None) -> 
 
 
 @marrow_tool()
-def event_clear(before: str = "", after: str = "", last: int = 0) -> dict:
-    """Delete raw events (recall corpus) incl. FTS+vectors+tombstones. Filters:
-    before/after (ISO or YYYY-MM-DD); last=N most recent; none = all.
-    DB backup first."""
+def event_clear(
+    before: Annotated[str, Field(description="Delete events with timestamp < this (ISO or YYYY-MM-DD). Combine with after for a range; mutually exclusive with last. Empty = no bound.")] = "",
+    after: Annotated[str, Field(description="Delete events with timestamp >= this (ISO or YYYY-MM-DD). Combine with before for a range; mutually exclusive with last. Empty = no bound.")] = "",
+    last: Annotated[int, Field(ge=0, description="Delete the N most recent events; mutually exclusive with before/after. 0 = unused. With no before/after/last set, ALL events are purged.")] = 0,
+) -> dict:
+    """Delete raw events (recall corpus) incl. FTS+vectors+tombstones. DB backup first."""
     return _do_event_clear(before or None, after or None, last or None)
 
 

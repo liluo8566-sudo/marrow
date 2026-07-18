@@ -79,12 +79,15 @@ def _make_diary(db, date: str, content: str) -> None:
 # ── window filter: events FTS ─────────────────────────────────────────────────
 
 def test_fts_window_filters_in_range(db):
-    # AEST: 2026-06-09 15:00 local = 2026-06-09T05:00:00Z UTC
-    _make_event(db, "uniquetoken111 seen here", "s1", "2026-06-09T05:00:00Z")
-    # Out of window: 2026-06-07
-    _make_event(db, "uniquetoken111 seen here", "s2", "2026-06-07T05:00:00Z")
+    # Use dates relative to now so the recency component keeps the FTS-only
+    # score above min_score as real time advances (fixed past dates decay out).
+    day, in_ts = _recent_melb_event()
+    _, out_ts = _recent_melb_event(-2)
+    _make_event(db, "uniquetoken111 seen here", "s1", in_ts)
+    # Out of window: two days earlier
+    _make_event(db, "uniquetoken111 seen here", "s2", out_ts)
 
-    since, until = melb_day_range("2026-06-09")  # 2026-06-08T14:00Z..2026-06-09T14:00Z
+    since, until = melb_day_range(day)
 
     with patch("marrow.recall._ensure_embedder", return_value=None):
         hits = rm.recall_fusion(db, "uniquetoken111", limit=10,
@@ -95,8 +98,10 @@ def test_fts_window_filters_in_range(db):
 
 
 def test_fts_no_window_returns_all(db):
-    _make_event(db, "uniquetoken222 found everywhere", "s1", "2026-06-09T05:00:00Z")
-    _make_event(db, "uniquetoken222 found everywhere", "s2", "2026-06-07T05:00:00Z")
+    _, in_ts = _recent_melb_event()
+    _, out_ts = _recent_melb_event(-2)
+    _make_event(db, "uniquetoken222 found everywhere", "s1", in_ts)
+    _make_event(db, "uniquetoken222 found everywhere", "s2", out_ts)
 
     with patch("marrow.recall._ensure_embedder", return_value=None):
         hits = rm.recall_fusion(db, "uniquetoken222", limit=10)
@@ -109,10 +114,12 @@ def test_fts_no_window_returns_all(db):
 def test_vec_window_python_filter(db):
     # This test verifies that the Python-side timestamp filter on vec rows works.
     # We use FTS (no vec mock) to confirm the window filter logic path.
-    _make_event(db, "uniquetoken333 alpha", "s1", "2026-06-09T05:00:00Z")
-    _make_event(db, "uniquetoken333 alpha", "s2", "2026-06-07T05:00:00Z")
+    day, in_ts = _recent_melb_event()
+    _, out_ts = _recent_melb_event(-2)
+    _make_event(db, "uniquetoken333 alpha", "s1", in_ts)
+    _make_event(db, "uniquetoken333 alpha", "s2", out_ts)
 
-    since, until = melb_day_range("2026-06-09")
+    since, until = melb_day_range(day)
 
     with patch("marrow.recall._ensure_embedder", return_value=None):
         hits = rm.recall_fusion(db, "uniquetoken333", limit=10,

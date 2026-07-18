@@ -36,7 +36,7 @@ def env(tmp_path, monkeypatch):
 
 
 def _snap_dir(data_dir):
-    return data_dir / "backups" / "claude-json"
+    return data_dir / "backup" / "claude-json"
 
 
 def test_missing_file_returns_none(env):

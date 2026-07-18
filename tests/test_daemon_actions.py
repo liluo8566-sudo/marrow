@@ -128,14 +128,6 @@ def test_tl_unknown_action(env):
 
 # ── tl query + content-based (match/date) addressing ─────────────────────────
 
-def _no_dashboard(monkeypatch, tmp_path):
-    """Point tl_writer's dashboard path at a scratch file so update tests never
-    touch the real ~/Desktop/NY/dashboard.md."""
-    from marrow import tl_writer
-    monkeypatch.setattr(tl_writer, "_dashboard_path",
-                        lambda: tmp_path / "dashboard.md")
-
-
 def test_tl_query_by_match(env):
     eid = _insert_tl(env, "买千层蛋糕", ts="2026-07-05T05:00:00Z")
     _insert_tl(env, "别的事情", ts="2026-07-05T06:00:00Z")
@@ -178,8 +170,7 @@ def test_tl_query_bad_date(env):
     assert out["ok"] is False
 
 
-def test_tl_update_by_match_single_hit(env, monkeypatch, tmp_path):
-    _no_dashboard(monkeypatch, tmp_path)
+def test_tl_update_by_match_single_hit(env):
     eid = _insert_tl(env, "【N愉悦】买千层 [3]", ts="2026-07-05T05:00:00Z")
     out = daemon.tl("update", match="千层", body="买千层蛋糕")
     assert out["ok"] is True
@@ -193,8 +184,7 @@ def test_tl_update_by_match_single_hit(env, monkeypatch, tmp_path):
     assert "买千层蛋糕" in content
 
 
-def test_tl_update_by_match_multiple_does_not_execute(env, monkeypatch, tmp_path):
-    _no_dashboard(monkeypatch, tmp_path)
+def test_tl_update_by_match_multiple_does_not_execute(env):
     _insert_tl(env, "千层 one", ts="2026-07-05T05:00:00Z")
     _insert_tl(env, "千层 two", ts="2026-07-05T06:00:00Z")
     out = daemon.tl("update", match="千层", body="changed")
@@ -603,7 +593,7 @@ def test_tl_silence_removed_from_actions():
 def test_tl_add_refuses_when_silenced(env, monkeypatch):
     from marrow import tl_nudge
     monkeypatch.setattr(tl_nudge, "is_silent", lambda sid: True)
-    out = daemon.tl("add", timerange="10:00", body="test", n_word="calm")
+    out = daemon.tl("add", timerange="10:00", body="test", user_word="calm")
     assert out == {"ok": False, "silenced": True,
                    "error": "session is silenced (/tl-)"}
     assert _event_count(env) == 0

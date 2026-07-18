@@ -35,6 +35,77 @@ def _asst(model, text="reply", **kw):
     return o
 
 
+# ── machine-marker ingestion filter (Phase 3 item 1c) ────────────────────────
+
+_MARKERS = ("[CORTEX-WAKE]", "[NEW ROUND]", "[NIGHT]", "[FUSE]", "[CTL]", "[CMD")
+
+
+def _rows(records):
+    return transcript.rows_from_records(records, machine_markers=_MARKERS)
+
+
+def test_machine_marker_line_start_is_dropped():
+    recs = [
+        _user("⏳ [NEW ROUND] 15 min since the user's last message. Choose again."),
+        _user("[CORTEX-WAKE] 09:30"),
+        _asst("claude-opus-4-7", text="⚙️ [FUSE] Summarise this session"),
+        _user("⚙️ [CMD ct-sleep] $ARGUMENTS is a number"),
+    ]
+    assert _rows(recs) == []  # every machine line dropped, both roles
+
+
+def test_real_user_speech_is_kept():
+    recs = [_user("hey did the new round of tests pass?"),
+            _user("night night, going to bed")]
+    contents = [r["content"] for r in _rows(recs)]
+    assert contents == ["hey did the new round of tests pass?",
+                        "night night, going to bed"]
+
+
+def test_marker_quoted_mid_body_is_kept():
+    """Line-start match only — a message merely mentioning a marker keeps flowing
+    (zero false positives on real speech)."""
+    recs = [_user("the log line was [NEW ROUND] 15 min, is that a bug?")]
+    assert [r["content"] for r in _rows(recs)] == [
+        "the log line was [NEW ROUND] 15 min, is that a bug?"]
+
+
+def test_emoji_lead_before_marker_is_stripped_then_matched():
+    recs = [_user("☀️ [CORTEX-WAKE] 06:00"),
+            _user("⚙️  [CTL] Wrap up this turn: lie_down(next_wake_min=90).")]
+    assert _rows(recs) == []
+
+
+def test_no_markers_disables_filtering():
+    recs = [_user("[NEW ROUND] would normally drop")]
+    kept = transcript.rows_from_records(recs, machine_markers=())
+    assert [r["content"] for r in kept] == ["[NEW ROUND] would normally drop"]
+
+
+def test_cjk_lead_before_marker_is_not_stripped():
+    """P2-1 regression: the decoration class must NOT eat CJK/kana/hangul. A
+    Chinese message opening with a real word then quoting a marker keeps its lead
+    char, so its line-start is the CJK char (not the bracket) and it survives
+    ingestion. Previously U+4E00-9FFF fell inside the glyph range -> 「看」 was
+    stripped -> the row line-started with [FUSE] -> silently dropped."""
+    recs = [_user("看 [FUSE] path fired?"),
+            _user("查一下 [NEW ROUND] 是不是被误判了"),
+            _user("확인 [CTL] 이게 머신 라인인가")]
+    contents = [r["content"] for r in _rows(recs)]
+    assert contents == ["看 [FUSE] path fired?",
+                        "查一下 [NEW ROUND] 是不是被误判了",
+                        "확인 [CTL] 이게 머신 라인인가"]
+
+
+def test_real_machine_line_with_emoji_still_dropped():
+    """Both-direction guard: narrowing the class must not let real machine lines
+    through — the ⚙️/⏳/☀️-prefixed markers are still stripped + dropped."""
+    recs = [_user("⚙️ [CMD ct-sleep] wrap up this turn"),
+            _user("⏳ [NEW ROUND] 15 min since the user's last message"),
+            _user("☀️ [CORTEX-WAKE] 06:00")]
+    assert _rows(recs) == []
+
+
 # ── clean(): keep human dialogue verbatim ────────────────────────────────────
 
 def test_keeps_user_and_assistant_text(tmp_path):
@@ -164,18 +235,11 @@ def test_empty_model_set_spawn_prompt_head_is_headless(tmp_path):
     # spawn exited before any assistant flush; first user is a spawn prompt
     jl = _w(tmp_path / "e.jsonl", [
         {"type": "queue-operation", "content":
-            "You compress ONE long session of dialogue into a digest"},
-        _user("You compress ONE long session of dialogue into a digest"),
+            "Compress this file per the rules. Output ONLY"},
+        _user("Compress this file per the rules. Output ONLY"),
     ])
     assert transcript.is_headless(jl) is True
     assert transcript.clean(jl) == []
-
-
-def test_empty_model_set_stitch_prompt_head_is_headless(tmp_path):
-    jl = _w(tmp_path / "st.jsonl", [
-        _user("Extract per-episode affect from the session below."),
-    ])
-    assert transcript.is_headless(jl) is True
 
 
 def test_empty_model_set_human_first_message_is_not_headless(tmp_path):

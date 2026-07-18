@@ -51,9 +51,9 @@ def load() -> dict:
         Path.home() / "Library" / "Mobile Documents"
         / "com~apple~CloudDocs" / "Backup" / "marrow"
     )
-    dash = paths.get("dashboard") or (
-        str(_mpaths.dashboard_md) if _mpaths.dashboard_md != Path("") else
-        str(DATA_DIR / "dashboard.md")
+    daybrief = paths.get("daybrief") or (
+        str(_mpaths.daybrief_md) if _mpaths.daybrief_md != Path("") else
+        str(DATA_DIR / "daybrief.md")
     )
     # `db_pages` = folder of md files rendered from DB (was `sub_pages` until
     # 2026-05-24). Name signals provenance: rendered-from-DB vs hand-written
@@ -74,11 +74,15 @@ def load() -> dict:
     paths["db"] = db
     paths["backup_dir"] = backup
     paths["offsite_backup_dir"] = offsite
-    paths["dashboard"] = str(Path(dash).expanduser()) if dash else dash
+    paths["daybrief"] = str(Path(daybrief).expanduser())
     paths["db_pages"] = str(Path(sub).expanduser())
     paths["db_pages_state"] = str(Path(sub_state).expanduser())
+    # monitor.md (alerts surface). Empty = <db_pages>/monitor.md so it lands
+    # beside the other DB-rendered pages without manual path setup.
+    monitor = paths.get("monitor") or str(Path(paths["db_pages"]) / "monitor.md")
+    paths["monitor"] = str(Path(monitor).expanduser())
     # Legacy keys kept synchronised so any caller still using sub_pages_path()
-    # (uncommitted other-window edits in daily.py etc.) gets the same path.
+    # gets the same path.
     paths["sub_pages"] = paths["db_pages"]
     paths["sub_pages_state"] = paths["db_pages_state"]
     cfg.setdefault("backup", {}).setdefault("keep", 14)
@@ -91,12 +95,16 @@ def persona() -> dict:
     raw = load().get("persona", {})
     uname = (raw.get("user_name") or "").strip() or "User"
     aname = (raw.get("assistant_name") or "").strip() or "Assistant"
+    umark = (raw.get("user_marker") or "").strip() or "U"
+    amark = (raw.get("assistant_marker") or "").strip() or "A"
     def _strlist(key: str) -> list[str]:
         return [s.strip() for s in raw.get(key, [])
                 if isinstance(s, str) and s.strip()]
     return {
         "user_name": uname,
         "assistant_name": aname,
+        "user_marker": umark,
+        "assistant_marker": amark,
         "user_aliases": _strlist("user_aliases"),
         "assistant_aliases": _strlist("assistant_aliases"),
         "relationship_terms": _strlist("relationship_terms"),
@@ -119,8 +127,12 @@ def anchor_keys_set() -> frozenset[str]:
     return frozenset(persona()["anchor_keys"])
 
 
-def dashboard_path() -> str:
-    return load()["paths"]["dashboard"]
+def daybrief_path() -> str:
+    return load()["paths"]["daybrief"]
+
+
+def monitor_path() -> str:
+    return load()["paths"]["monitor"]
 
 
 def db_path() -> str:
@@ -135,8 +147,7 @@ def db_pages_state_path() -> str:
     return load()["paths"]["db_pages_state"]
 
 
-# Legacy aliases — kept until all callers move to db_pages_path(). Pending
-# uncommitted edits in marrow/daily.py and tests still call these.
+# Legacy aliases — kept until all callers move to db_pages_path().
 sub_pages_path = db_pages_path
 sub_pages_state_path = db_pages_state_path
 

@@ -53,11 +53,18 @@ _MARROW_HOOKS: dict[str, list[dict]] = {
 
 _ALL_PLISTS: list[tuple[str, str]] = [
     ("mw-aging.plist",          "com.marrow.aging"),
-    ("mw-daily-catchup.plist",  "com.marrow.daily-catchup"),
-    ("mw-daily-routine.plist",  "com.marrow.daily-routine"),
-    ("mw-dashboard-tick.plist", "com.marrow.dashboard-tick"),
     ("mw-db-backup.plist",      "com.marrow.db-backup"),
+    ("mw-refresh.plist",        "com.marrow.refresh"),
     ("mw-watcher.plist",        "com.marrow.watcher"),
+]
+
+# Retired labels (and any legacy plist filename they installed under). An
+# upgrade from an older install boots these out + removes their files so a
+# deleted module never keeps firing. Filenames cover both naming schemes.
+_OBSOLETE_PLISTS: list[tuple[str, ...]] = [
+    ("com.marrow.dashboard-tick", "mw-dashboard-tick.plist"),
+    ("com.marrow.daily-routine",  "mw-daily-routine.plist"),
+    ("com.marrow.daily-catchup",  "mw-daily-catchup.plist"),
 ]
 
 
@@ -157,7 +164,6 @@ def setup_config() -> bool:
         paths_cfg.write_text(
             'marrow_db = "~/.config/marrow/marrow.db"\n'
             'ny_root = "~/.config/marrow"\n'
-            'dashboard_md = "~/.config/marrow/dashboard.md"\n'
             'drift_pending_dir = "~/.config/marrow/drift_pending"\n'
             'drift_backup_dir = "~/.config/marrow/drift_backup"\n'
             'dir_tree_md = "~/.config/marrow/dir_tree.md"\n'
@@ -171,11 +177,6 @@ def setup_config() -> bool:
         src = _REPO_ROOT / "marrow" / "config.default.toml"
         shutil.copy(src, cfg)
         cfg_text = cfg.read_text(encoding="utf-8")
-        cfg_text = cfg_text.replace(
-            'dashboard = ""',
-            f'dashboard = "{(_CONFIG_DIR / "dashboard.md").as_posix()}"',
-            1,
-        )
         cfg_text = cfg_text.replace(
             'db_pages = "~/.config/marrow/db-pages"',
             f'db_pages = "{(_CONFIG_DIR / "db-pages").as_posix()}"',
@@ -217,13 +218,13 @@ def migrate_db() -> bool:
 
 
 def render_initial_surface() -> bool:
-    _act("rendering dashboard + sub-pages")
+    _act("rendering daybrief + monitor + sub-pages")
     r = subprocess.run([str(_VENV_PYTHON), "-m", "marrow.cli", "refresh", "--all"],
                        capture_output=True, text=True, cwd=str(_REPO_ROOT))
     if r.returncode != 0:
         _fail(f"initial render failed: {(r.stderr or r.stdout).strip()[-500:]}")
         return False
-    _ok((r.stdout.strip() or "dashboard rendered").splitlines()[-1])
+    _ok((r.stdout.strip() or "surface rendered").splitlines()[-1])
     return True
 
 
@@ -378,11 +379,25 @@ def _resolve_plist(text: str) -> str:
     )
 
 
+def _remove_obsolete_plists(domain: str) -> None:
+    """Boot out + delete any retired plist an older install left behind."""
+    for label, *legacy_fnames in _OBSOLETE_PLISTS:
+        targets = [_LAUNCH_AGENTS / f"{label}.plist"]
+        targets += [_LAUNCH_AGENTS / fn for fn in legacy_fnames]
+        for tgt in targets:
+            if not tgt.exists():
+                continue
+            _launchctl("bootout", domain, str(tgt))  # tolerated
+            tgt.unlink(missing_ok=True)
+            _ok(f"removed obsolete {tgt.name}")
+
+
 def install_plists() -> bool:
     _LAUNCH_AGENTS.mkdir(parents=True, exist_ok=True)
     (_CONFIG_DIR / "logs").mkdir(parents=True, exist_ok=True)
     uid = _uid()
     domain = f"gui/{uid}"
+    _remove_obsolete_plists(domain)
     errors = 0
     for fname, label in _ALL_PLISTS:
         src = _DEPLOY_DIR / fname

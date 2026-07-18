@@ -44,7 +44,7 @@ def _insert_digest(conn, sid: str, life_lines: str, segment_seq: int = 0) -> Non
     conn.commit()
 
 
-_TRAIL_SID_RE = re.compile(r"<!-- tl-rendered:[^>]*?s=([^;>]+?)\s*-->")
+_TRAIL_SID_RE = re.compile(r"<!-- tl-rendered:[^>]*?s=([^;>]+?)\s*(?:;|-->)")
 
 
 def _trail_sids(text: str) -> list[str]:

@@ -18,7 +18,7 @@ import sys
 from contextlib import contextmanager
 from pathlib import Path
 
-from . import config, dashboard, repo, storage, subpages
+from . import config, repo, storage, subpages
 
 
 PROTECTED = {"id", "created_at", "updated_at", "source_hash", "occurred_at"}
@@ -282,13 +282,6 @@ def cmd_tl_silence(args) -> int:
     return 0
 
 
-def cmd_done(args) -> int:
-    return _shortcut(
-        args, "tasks",
-        "UPDATE tasks SET status='done' WHERE id=?", "status=done",
-    )
-
-
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
@@ -320,31 +313,6 @@ def _add_milestone(conn, args) -> int:
 
 
 _ADD_TABLES = {"milestone": _add_milestone}
-
-
-def cmd_sessionend(args) -> int:
-    """mw sessionend rerun <sid> — force rerun sessionend_async, overwriting done marker."""
-    if getattr(args, "sessionend_action", None) != "rerun":
-        return _fail("usage: mw sessionend rerun <sid>")
-    target_sid = args.sid
-    if not target_sid:
-        return _fail("mw sessionend rerun requires a sid argument")
-    from .popen_detach import popen_detach
-    with _conn(args.db) as conn:
-        with conn:
-            conn.execute(
-                "INSERT INTO audit_log (target_table, target_id, action, summary)"
-                " VALUES ('events', ?, 'sessionend_extract', 'reset:mm_plus')",
-                (target_sid,),
-            )
-    log = config.DATA_DIR / "logs" / f"sessionend_async_{target_sid}.log"
-    popen_detach(
-        [sys.executable, "-m", "marrow.sessionend_async", "--sid", target_sid,
-         "--log-path", str(log)],
-        log_path=log,
-    )
-    print(f"sessionend rerun queued for sid={target_sid} (log: {log})")
-    return 0
 
 
 def cmd_export_pit(args) -> int:
@@ -515,17 +483,14 @@ def _refresh_scan(conn, *, include_subpages: bool) -> None:
     Observe-only: brand-new block_ids get a first-sight baseline so the
     inserter knows they exist; existing block_ids whose body changed
     leave their content_hash baseline UNTOUCHED — that is the signal the
-    dashboard inserter uses to recognise a user edit and preserve it.
+    subpage inserter uses to recognise a user edit and preserve it.
 
-    Always: dashboard.md. With include_subpages: db-pages.
+    daybrief/monitor reconcile inside their own update(); with
+    include_subpages: observe db-pages before subpage render.
     """
     from .md_index import MdIndex
     idx = MdIndex(conn)
-    file_roots = [config.dashboard_path()]
     dir_roots = [config.sub_pages_path()] if include_subpages else []
-    for f in file_roots:
-        if Path(f).exists():
-            idx.sync_file_observe(f)
     if dir_roots:
         idx.full_scan(dir_roots, observe=True)
 
@@ -535,11 +500,19 @@ def cmd_refresh(args) -> int:
     conn = storage.init_db(db)
     try:
         _refresh_scan(conn, include_subpages=args.all)
-        dashboard.write_dashboard(
-            config.dashboard_path(), conn,
-            state_dir=str(config.DATA_DIR / "state"), db=db,
-        )
-        msg = "dashboard refreshed"
+        msg = "refreshed"
+        from . import daybrief
+        try:
+            daybrief.update(conn)
+            msg += " daybrief"
+        except Exception as e:
+            print(f"mw: daybrief refresh failed: {e}", file=sys.stderr)
+        from . import monitor
+        try:
+            monitor.update(conn)
+            msg += " + monitor"
+        except Exception as e:
+            print(f"mw: monitor refresh failed: {e}", file=sys.stderr)
         if args.all:
             try:
                 subpages.write_all_subpages(
@@ -600,102 +573,9 @@ _DEPLOY_DIR = Path(__file__).resolve().parents[1] / "deploy"
 _WATCHER_PLIST_SRC = _DEPLOY_DIR / "mw-watcher.plist"
 _LAUNCH_AGENTS = Path.home() / "Library" / "LaunchAgents"
 
-# All plist templates shipped in deploy/ with their launchd labels.
-_ALL_PLISTS: list[tuple[str, str]] = [
-    ("mw-aging.plist",         "com.marrow.aging"),
-    ("mw-daily-catchup.plist", "com.marrow.daily-catchup"),
-    ("mw-daily-routine.plist", "com.marrow.daily-routine"),
-    ("mw-dashboard-tick.plist","com.marrow.dashboard-tick"),
-    ("mw-db-backup.plist",     "com.marrow.db-backup"),
-    ("mw-goose-bites.plist",   "com.marrow.goose-bites"),
-    ("mw-watcher.plist",       "com.marrow.watcher"),
-]
-
 
 def _watcher_plist_target() -> Path:
     return _LAUNCH_AGENTS / "com.marrow.watcher.plist"
-
-
-def _resolve_plist(template: str) -> str:
-    """Substitute __TOKENS__ in a plist template string with live paths."""
-    project_dir = _DEPLOY_DIR.parent
-    venv_python = project_dir / ".venv" / "bin" / "python"
-    venv_bin = str(venv_python.parent)
-    log_dir = Path.home() / "Library" / "Logs"
-    data_dir = config.DATA_DIR
-    path_env = f"{Path.home() / '.local' / 'bin'}:{venv_bin}:/usr/bin:/bin"
-
-    return (
-        template
-        .replace("__VENV_PYTHON__", str(venv_python))
-        .replace("__PROJECT_DIR__", str(project_dir))
-        .replace("__LOG_DIR__", str(log_dir))
-        .replace("__DATA_DIR__", str(data_dir))
-        .replace("__PATH_ENV__", path_env)
-    )
-
-
-def cmd_install_launchd(args) -> int:
-    """Install all 7 marrow launchd agents from deploy/ templates."""
-    _LAUNCH_AGENTS.mkdir(parents=True, exist_ok=True)
-    uid = subprocess.run(["id", "-u"], capture_output=True, text=True).stdout.strip()
-    domain = f"gui/{uid}"
-
-    project_dir = _DEPLOY_DIR.parent
-    venv_python = project_dir / ".venv" / "bin" / "python"
-    log_dir = Path.home() / "Library" / "Logs"
-    data_dir = config.DATA_DIR
-
-    print(f"project dir : {project_dir}")
-    print(f"venv python : {venv_python}")
-    print(f"log dir     : {log_dir}")
-    print(f"data dir    : {data_dir}")
-    print()
-
-    errors = 0
-    for fname, label in _ALL_PLISTS:
-        src = _DEPLOY_DIR / fname
-        if not src.exists():
-            print(f"  [skip] {fname} not found in deploy/")
-            errors += 1
-            continue
-        resolved = _resolve_plist(src.read_text(encoding="utf-8"))
-        tgt = _LAUNCH_AGENTS / fname.replace("mw-", "com.marrow.").replace(".plist", "").replace(".", "-") + ".plist"
-        # Target name matches label: com.marrow.<service>.plist
-        tgt = _LAUNCH_AGENTS / f"{label}.plist"
-        tgt.write_text(resolved, encoding="utf-8")
-        # Idempotent: bootout (tolerated), then bootstrap.
-        _launchctl("bootout", domain, str(tgt))
-        rc, msg = _launchctl("bootstrap", domain, str(tgt))
-        status = "ok" if rc == 0 else f"FAILED: {msg}"
-        print(f"  {label}: {status}")
-        if rc != 0:
-            errors += 1
-
-    print()
-    print(f"installed {len(_ALL_PLISTS) - errors}/{len(_ALL_PLISTS)} agents")
-    return 0 if errors == 0 else 1
-
-
-def cmd_uninstall_launchd(args) -> int:
-    """Bootout and remove all 7 marrow launchd agents from LaunchAgents."""
-    uid = subprocess.run(["id", "-u"], capture_output=True, text=True).stdout.strip()
-    domain = f"gui/{uid}"
-
-    errors = 0
-    for _fname, label in _ALL_PLISTS:
-        tgt = _LAUNCH_AGENTS / f"{label}.plist"
-        if not tgt.exists():
-            print(f"  [skip] {tgt.name} not installed")
-            continue
-        rc, msg = _launchctl("bootout", domain, str(tgt))
-        tgt.unlink(missing_ok=True)
-        status = "removed" if rc == 0 else f"bootout failed ({msg}), file removed anyway"
-        print(f"  {label}: {status}")
-
-    print()
-    print("uninstall complete")
-    return 0
 
 
 def _launchctl(*args: str) -> tuple[int, str]:
@@ -903,10 +783,6 @@ def build_parser() -> argparse.ArgumentParser:
                      help="override session id (default: current)")
     tls.set_defaults(fn=cmd_tl_silence)
 
-    dn = sub.add_parser("done", parents=[common])
-    dn.add_argument("id")
-    dn.set_defaults(fn=cmd_done)
-
     pn = sub.add_parser("pin", parents=[common],
                         help="set pinned=1 on a memes/milestones row")
     pn.add_argument("table")
@@ -947,20 +823,6 @@ def build_parser() -> argparse.ArgumentParser:
     wt = sub.add_parser("watcher", parents=[common])
     wt.add_argument("action", choices=["start", "stop", "status"])
     wt.set_defaults(fn=cmd_watcher)
-
-    il = sub.add_parser("install-launchd", parents=[common],
-                        help="install all 7 marrow launchd agents from deploy/ templates")
-    il.set_defaults(fn=cmd_install_launchd)
-
-    ul = sub.add_parser("uninstall-launchd", parents=[common],
-                        help="bootout and remove all 7 marrow launchd agents")
-    ul.set_defaults(fn=cmd_uninstall_launchd)
-
-    se = sub.add_parser("sessionend", parents=[common])
-    se_sub = se.add_subparsers(dest="sessionend_action", required=True)
-    se_rerun = se_sub.add_parser("rerun")
-    se_rerun.add_argument("sid", help="session id to rerun")
-    se_rerun.set_defaults(fn=cmd_sessionend)
 
     ep = sub.add_parser("export-pit", parents=[common],
                         help="export pit table rows to markdown (run before dropping table)")

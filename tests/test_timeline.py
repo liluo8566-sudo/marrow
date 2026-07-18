@@ -1,7 +1,7 @@
 """Tests for marrow/timeline.py — render_timeline.
 
 Covers:
-- ND attribution (00-05 belongs to previous diary day)
+- ND attribution (00-06 keeps ND label on its own calendar day)
 - Day dividers in 24h film-strip
 - 24h cap (20 lines)
 - 2472h period/day bucketing, empty period hidden
@@ -73,50 +73,6 @@ def _freeze_timeline_now(monkeypatch, melb_dt: _dt.datetime) -> None:
             return melb_dt.astimezone(tz)
 
     monkeypatch.setattr(timeline._dt, "datetime", FrozenDateTime)
-
-
-# ── open episodes ─────────────────────────────────────────────────────────────
-
-def test_open_episode_renders_at_top(conn):
-    _affect(conn, 0.2, 0.7, 3, "委屈", "吵架了", unresolved=1, hours_ago=5)
-    result = timeline.render_timeline(conn)
-    assert "未解: 吵架了" in result
-    assert "<!-- tl:ep:" in result
-    lines = result.splitlines()
-    top = [l for l in lines if l.startswith("未解:")]
-    assert top, "open episode must appear"
-    # Must be before any HH:MM content
-    content_idx = next((i for i, l in enumerate(lines)
-                        if len(l) >= 5 and l[2] == ":" and not l.startswith("未解:")), None)
-    open_idx = next((i for i, l in enumerate(lines)
-                     if l.startswith("未解:")), None)
-    if content_idx is not None and open_idx is not None:
-        assert open_idx < content_idx
-
-
-def test_open_episode_expired_hidden(conn):
-    """Episode older than 7 days must not appear in open line."""
-    ts_old = _utc(8 * 24)  # 8 days ago — outside _OPEN_EXPIRY_DAYS window
-    conn.execute(
-        "INSERT INTO affect (date, ep, valence, arousal, importance, label,"
-        " description, source, unresolved, created_at)"
-        " VALUES (?, 1, 0.2, 0.7, 3, '委屈', '旧事', 'test', 1, ?)",
-        (ts_old[:10], ts_old),
-    )
-    conn.commit()
-    result = timeline.render_timeline(conn)
-    assert "旧事" not in result
-
-
-def test_resolved_episode_not_in_open(conn):
-    row_id = _affect(conn, 0.2, 0.7, 3, "委屈", "已解决了",
-                     unresolved=1, hours_ago=5)
-    ts_now = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    conn.execute("UPDATE affect SET resolved_at=? WHERE id=?",
-                 (ts_now, row_id))
-    conn.commit()
-    result = timeline.render_timeline(conn)
-    assert "已解决了" not in result
 
 
 # ── 24h film-strip ────────────────────────────────────────────────────────────
@@ -329,8 +285,8 @@ def test_current_sid_excluded(conn):
 
 # ── ND attribution ────────────────────────────────────────────────────────────
 
-def test_nd_00_to_06_belongs_to_previous_day(conn):
-    """A session at 02:00 local time belongs to the PREVIOUS diary day's ND."""
+def test_nd_00_to_06_belongs_to_same_day(conn):
+    """A session at 02:00 local keeps the ND label on its OWN calendar day."""
     from zoneinfo import ZoneInfo
     melb = ZoneInfo("Australia/Melbourne")
     # Build a UTC timestamp such that local Melbourne time = 02:00 today
@@ -342,10 +298,9 @@ def test_nd_00_to_06_belongs_to_previous_day(conn):
     ts_iso = ts_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
 
     diary_date, period = timeline._period_diary_date(ts_iso)
-    # 02:00 local is ND and belongs to PREVIOUS diary day
+    # 02:00 local is ND, natural midnight → same calendar day
     assert period == "ND"
-    expected_date = (today_melb - _dt.timedelta(days=1)).date()
-    assert diary_date == expected_date
+    assert diary_date == today_melb.date()
 
 
 def test_nd_22_to_midnight_belongs_to_same_day(conn):
@@ -372,26 +327,17 @@ def test_zone_b_renders_overview_with_tone(conn):
     diary_data = {
         "2026-06-22": {"tone": "温暖", "overview": "今天散步了很开心。"},
     }
-    lines = timeline._render_zone_b(diary_data, [date], [], [])
+    lines = timeline._render_zone_b(diary_data, [date])
     assert lines[0] == "**06-22 Mon 【温暖】** <!-- tl:d:2026-06-22 -->"
     assert lines[1] == "今天散步了很开心。"
 
 
 def test_zone_b_empty_diary_returns_empty(conn):
-    """_render_zone_b with no diary data returns [] (no footer either)."""
+    """_render_zone_b with no diary data returns []."""
     import datetime as _dt2
     dates = [_dt2.date(2026, 6, 22), _dt2.date(2026, 6, 21)]
-    lines = timeline._render_zone_b({}, dates, [], [])
+    lines = timeline._render_zone_b({}, dates)
     assert lines == []
-
-
-def test_zone_b_week_footer_present_when_diary_data_exists():
-    """Week trend footer appended when diary days are rendered."""
-    import datetime as _dt2
-    date = _dt2.date(2026, 6, 22)
-    diary_data = {"2026-06-22": {"tone": "平淡", "overview": "普通的一天。"}}
-    lines = timeline._render_zone_b(diary_data, [date], [], [])
-    assert any("The Week" in l for l in lines)
 
 
 def test_query_diary_zone_b_skips_null_overview(conn):
@@ -427,7 +373,6 @@ def test_zone_b_diary_appears_in_render_timeline(conn):
     conn.commit()
     result = timeline.render_timeline(conn)
     assert "三天前很开心。" in result
-    assert "The Week" in result
 
 
 # ── trim order ────────────────────────────────────────────────────────────────
@@ -563,30 +508,22 @@ def test_life_line_hhmm_helper_parses_prefix():
 
 
 def test_life_line_local_date_helper_cutoff():
-    """00:30 local time → previous diary day; 07:00 → same day."""
+    """Natural midnight: any prefixed time stays on the session calendar day."""
     from zoneinfo import ZoneInfo
     melb = ZoneInfo("Australia/Melbourne")
     base_date = _dt.date(2026, 6, 10)
 
-    # 00:30 → before 6AM cutoff → previous day
+    # 00:30 → natural midnight → same calendar day
     d_early = timeline._life_line_local_date("00:30 热水", base_date, "23:00")
-    assert d_early == _dt.date(2026, 6, 9)
+    assert d_early == _dt.date(2026, 6, 10)
 
-    # 07:00 → after cutoff → same day
+    # 07:00 → same day
     d_day = timeline._life_line_local_date("07:00 早餐", base_date, "08:00")
     assert d_day == _dt.date(2026, 6, 10)
 
     # No prefix → inherits session date
     d_legacy = timeline._life_line_local_date("早餐", base_date, "08:00")
     assert d_legacy == base_date
-
-
-def test_prompt_life_hhmm_rule():
-    """Prompt must instruct model to prefix LIFE lines with HH:MM timestamp."""
-    from marrow.sessionend_prompts import TASK_AFFECT_DIGEST_PROMPT
-    assert "HH:MM" in TASK_AFFECT_DIGEST_PROMPT
-    # Example in ===DIGEST=== block should show a timestamped LIFE line
-    assert "21:40" in TASK_AFFECT_DIGEST_PROMPT
 
 
 # ── catchup backfill: window keyed on session start, not digest write ────────
@@ -781,14 +718,13 @@ def test_24h_first_life_line_sorts_by_own_display_time():
     assert lines.count("**06-13 Sat**") == 1
 
 
-# ── Bug 2: no double 6AM cutoff ───────────────────────────────────────────────
+# ── Bug 2: line date = session calendar date (natural midnight) ──────────────
 
-def test_life_line_utc_and_date_no_double_cutoff():
-    """_life_line_utc_and_date must not shift 6AM twice.
+def test_life_line_utc_and_date_matches_session_calendar_day():
+    """A 05:08 LIFE line lands on the session's own calendar day.
 
-    A 05:08 LIFE line from a session that starts at 05:30 (both before 6AM)
-    must land on the SAME diary date as the session's own 6AM-shifted date,
-    not one day earlier.
+    Natural midnight: an early-morning line and its 05:30 session both belong
+    to the same local calendar date, no previous-day shift.
     """
     from zoneinfo import ZoneInfo
     melb = ZoneInfo("Australia/Melbourne")
@@ -799,10 +735,8 @@ def test_life_line_utc_and_date_no_double_cutoff():
         sess_local -= _dt.timedelta(days=1)
     sess_utc = sess_local.astimezone(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    # 05:08 LIFE line — same diary day as session (both before 6AM → both on
-    # previous calendar day's diary date)
     _, line_date = timeline._life_line_utc_and_date("05:08 早起", sess_utc, "05:30")
-    sess_diary_date = timeline._local_date_from_utc(sess_utc)
+    sess_diary_date = timeline._calendar_date_from_utc(sess_utc)
 
     assert line_date == sess_diary_date, (
         f"05:08 line diary date {line_date} must equal session diary date {sess_diary_date}"

@@ -375,8 +375,8 @@ def build_all_configs(conn: sqlite3.Connection, *,
     """Config-driven sub-page list (DESIGN L43-65).
 
     Order: top items, then bottom items. Unknown keys = warn + skip + alert.
-    `hidden` keys still build (so md files stay current) but the dashboard
-    Content list excludes them — gate happens at content_list().
+    `hidden` keys still build (so md files stay current) but the Content
+    list excludes them — gate happens at content_list().
     """
     sub_cfg = _subpages_cfg()
     out: list[SubPageConfig] = []
@@ -409,11 +409,11 @@ def build_all_configs(conn: sqlite3.Connection, *,
 
 
 def content_list(*, folder: str | None = None) -> dict:
-    """Return ordered subpage display info for dashboard `## Content`.
+    """Return ordered subpage display info for the `## Content` list.
 
     Returns {"top": [(label, rel_path), ...], "bottom": [(label, rel_path), ...]}
     Hidden keys excluded. `folder` defaults to config.db_pages_path() so the
-    dashboard can compute md links relative to its own path.
+    caller can compute md links relative to its own path.
     """
     sub_cfg = _subpages_cfg()
     hidden = set(sub_cfg["hidden"])

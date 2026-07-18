@@ -7,24 +7,19 @@ Deterministic, no LLM. Output feeds repo.archive_events (idempotent).
 from __future__ import annotations
 
 import json
+import logging
 import re
+
+logger = logging.getLogger(__name__)
 
 # Empty-model backstop: a spawn that exited before any assistant flush has
 # no model signal. Its first user / queue-operation content head matches a
 # Marrow-pipeline or prompt-lint spawn prompt; a real interrupted session
-# carries a human prompt instead. Heads kept in sync with the prompt
-# constants in marrow/daily.py, marrow/sessionend_prompts.py, and
-# ~/.claude/hooks/prompt-lint.py.
+# carries a human prompt instead. Heads kept in sync with the surviving
+# handover + markdown-compressor prompts (~/.claude/hooks/prompt-lint.py).
 _SPAWN_HEADS = (
     "===== BEGIN ORIGINAL TRANSCRIPT",
-    "You compress ONE long session of dialogue",
-    "Extract per-episode affect from the session",
-    "Extract candidate entities mentioned in the session",
-    "Extract task-like items from the session",
-    "Extract candidate life-shaping milestones from the session",
-    "Extract candidate memes from the session",
     "Write the handover narrative",
-    "格式（单一/混合）：散文段落",
     "You are a ruthless markdown compressor",
     "You compress a markdown edit",
     "Compress this file per the rules",
@@ -180,6 +175,43 @@ def _is_control_command_row(raw: str) -> bool:
     return not (args and args.group(1).strip())
 
 
+# Leading decoration tolerated before a machine marker: whitespace + at most a
+# couple of pictographic glyphs and variation selectors (the ⚙️ / ⏳ / ☀️ that
+# prefix cortex lines). Narrowed to real decoration ranges — misc-technical +
+# symbols + dingbats (covers ⏳U+23F3 ☀️U+2600 ⚙️U+2699), arrows, emoji, plus
+# VS16 (U+FE0F) and ZWJ (U+200D). Deliberately EXCLUDES CJK/kana/hangul so a
+# Chinese message like 「看 [FUSE] …」 keeps its leading char and never collapses
+# into a false line-start marker hit.
+_MARKER_GLYPH = (
+    r"[\U00002300-\U000027BF\U00002B00-\U00002BFF"
+    r"\U0001F300-\U0001FAFF\U0000FE0F\U0000200D]"
+)
+_MACHINE_MARKER_LEAD_RE = re.compile(rf"^\s*(?:{_MARKER_GLYPH}\s*){{0,3}}")
+
+
+def _load_machine_markers() -> tuple[str, ...]:
+    """Config-driven line-start machine markers ([cortex].machine_markers). Read
+    lazily so this deterministic module keeps no import-time config dependency;
+    empty/missing config -> no filtering."""
+    try:
+        from . import config
+        cx = config.load().get("cortex", {}) or {}
+        return tuple(str(m) for m in (cx.get("machine_markers") or []) if str(m))
+    except Exception:
+        return ()
+
+
+def _is_machine_marker_row(text: str, markers: tuple[str, ...]) -> bool:
+    """True iff *text* (a stripped user/assistant turn) BEGINS with a machine
+    marker — after tolerating a leading emoji/symbol run. Line-start match only:
+    a message merely quoting a marker mid-body keeps flowing (zero false positives
+    on real speech)."""
+    if not markers:
+        return False
+    head = _MACHINE_MARKER_LEAD_RE.sub("", text, count=1)
+    return any(head.startswith(m) for m in markers)
+
+
 def _is_harness_row(text: str) -> bool:
     """True iff *text* (already stripped) is entirely CC-harness junk.
 
@@ -303,7 +335,8 @@ def parse_records(jsonl_path: str) -> list[dict]:
 
 
 def rows_from_records(records: list[dict], *, channel: str = "cli",
-                      active: set[str] | None = None) -> list[dict]:
+                      active: set[str] | None = None,
+                      machine_markers: tuple[str, ...] | None = None) -> list[dict]:
     """Build event rows from parsed jsonl records — shared by clean() and the
     per-turn Stop hook.
 
@@ -315,6 +348,8 @@ def rows_from_records(records: list[dict], *, channel: str = "cli",
     """
     if active is None:
         active = _active_chain_uuids(records)
+    if machine_markers is None:
+        machine_markers = _load_machine_markers()
     rows: list[dict] = []
     for o in records:
         if o.get("type") not in ("user", "assistant"):
@@ -332,6 +367,11 @@ def rows_from_records(records: list[dict], *, channel: str = "cli",
         if not text:
             continue
         if _is_harness_row(text):
+            continue
+        if _is_machine_marker_row(text, machine_markers):
+            # cortex-injected machine line, never memory. Trace each drop so a
+            # mis-tuned marker (over/under-filtering) is diagnosable.
+            logger.debug("transcript: dropped machine-marker row: %r", text[:60])
             continue
         rows.append({
             "session_id": o.get("sessionId") or o.get("session_id") or "",

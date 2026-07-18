@@ -6,6 +6,7 @@ import json as _json
 import os
 import re as _re
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -87,14 +88,78 @@ def get_data_mtime() -> float:
     return best
 
 
+_FAIL_LOG = config.DATA_DIR / "logs" / "cadence_fail.log"
+_ALERT_AFTER = 3
+_fail_streak = 0
+
+
+def _log_fail(kind: str, args: list[str], rc: int | None, err: str) -> None:
+    global _fail_streak
+    _fail_streak += 1
+    try:
+        _FAIL_LOG.parent.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().astimezone().isoformat(timespec="seconds")
+        caller = f"pid={os.getpid()} ppid={os.getppid()} argv0={sys.argv[0]}"
+        with open(_FAIL_LOG, "a") as f:
+            f.write(f"{ts} kind={kind} rc={rc} {caller} args={' '.join(args)}"
+                    f" err={(err or '').strip()[:500]!r}\n")
+    except OSError:
+        pass
+    if _fail_streak == _ALERT_AFTER:
+        try:
+            from . import repo
+            repo.add_alert(
+                "warn", "cadence",
+                "cadence rem/cal fetch failing in background context",
+                source="schedule",
+                message=_alert_message(kind, err),
+            )
+        except Exception:
+            pass
+
+
+def _alert_message(kind: str, err: str) -> str:
+    # TCC grants (Full Disk Access / Calendars) are a per-process snapshot
+    # taken at process start; a long-lived watcher keeps failing until it is
+    # restarted after (re)granting — a plain restart alone often heals it.
+    low = (err or "").lower()
+    is_auth = "authorization denied" in low or "reminders store" in low \
+        or "could not locate" in low or "access" in low
+    if kind == "timeout":
+        return ("cadence timing out (NOT an authorization issue). Retry or"
+                " restart watcher: launchctl kickstart -k gui/501/com.marrow.watcher."
+                " If it persists, investigate an EventKit hang.")
+    if is_auth:
+        return ("cadence failing in watcher (authorization). Fix order:"
+                " 1) restart watcher: launchctl kickstart -k gui/501/com.marrow.watcher"
+                " — TCC grants are a snapshot at process start; restart usually heals."
+                " 2) If still failing: grant Full Disk Access + Calendars to the"
+                " watcher python real binary (readlink -f <venv>/bin/python)."
+                " 3) Restart watcher again after granting.")
+    return f"cadence failing ({kind}): {(err or '').strip().splitlines()[0][:200] if (err or '').strip() else 'no error output'}"
+
+
 def _run_cadence(args: list[str], binary: str) -> str:
+    global _fail_streak
     try:
         r = subprocess.run(
             [binary] + args,
             capture_output=True, text=True, timeout=_TIMEOUT,
         )
-        return r.stdout.strip() if r.returncode == 0 else ""
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        if r.returncode == 0:
+            out = r.stdout.strip()
+            if not out:
+                _log_fail("empty", args, 0, r.stderr)
+                return out
+            _fail_streak = 0
+            return out
+        _log_fail("exit", args, r.returncode, r.stderr or r.stdout)
+        return ""
+    except subprocess.TimeoutExpired as exc:
+        _log_fail("timeout", args, None, str(exc))
+        return ""
+    except (FileNotFoundError, OSError) as exc:
+        _log_fail("oserror", args, None, str(exc))
         return ""
 
 

@@ -1,7 +1,6 @@
 """Shared semantic-dedup primitives (bge-m3 cosine).
 
-Callers: candidates.write_entity_cand / write_milestone_cand, memes_dedup,
-sessionend_writers.seg_task_cand, reconcile._insert_unanchored_tasks.
+Callers: candidates.match_entity (dim upsert), reconcile, memes_dedup.
 
 Embeds are L2-normalized → cosine = dot product. Embedder absent → returns
 None; callers raise a one-shot warn alert and skip the cosine layer (string
@@ -18,8 +17,8 @@ _DEFAULT_THRESHOLD = 0.85
 
 def threshold_for(table: str) -> float:
     """Per-table cosine threshold; falls back to 0.85.
-    Config key: `[<table>_dedup] cosine_threshold`. memes_dedup already
-    exists; tasks/milestones/entities read the same shape.
+    Config key: `[<table>_dedup] cosine_threshold`. memes/milestones/entities
+    read the same shape; absent section falls back to the default.
     """
     cfg = config.load().get(f"{table}_dedup", {}) or {}
     try:

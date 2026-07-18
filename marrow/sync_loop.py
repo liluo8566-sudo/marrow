@@ -1,7 +1,7 @@
-"""Sync loop — periodic md↔db reconcile/render for subpages + dashboard.
+"""Sync loop — periodic md↔db reconcile/render for subpages + daybrief + monitor.
 
-5s tick: for each target (subpage + dashboard.md), compare md mtime vs
-db mtime. md newer → reconcile; db newer → render. Race防御: re-check md
+5s tick: for each target (subpage + daybrief.md + monitor.md), compare md mtime
+vs db mtime. md newer → reconcile; db newer → render. Race防御: re-check md
 mtime after reconcile; if it advanced, skip render this tick.
 
 Runs in its own thread (SQLite WAL handles concurrent reads). Boot tick
@@ -31,7 +31,7 @@ log = logging.getLogger("marrow.watcher")
 
 
 # ---------------------------------------------------------------------------
-# db_mtime helpers — one per subpage key + dashboard
+# db_mtime helpers — one per subpage key + daybrief + monitor
 # ---------------------------------------------------------------------------
 
 def _max_updated(conn: sqlite3.Connection, table: str,
@@ -54,6 +54,37 @@ def _max_updated(conn: sqlite3.Connection, table: str,
         return dt.replace(tzinfo=datetime.timezone.utc).timestamp()
     except (ValueError, AttributeError):
         return None
+
+
+def _iso_to_posix(ts) -> float | None:
+    """ISO 8601 UTC string → POSIX float, or None if unparseable."""
+    try:
+        import datetime
+        ts_clean = ts.rstrip("Z").replace("T", " ")
+        dt = datetime.datetime.fromisoformat(ts_clean)
+        return dt.replace(tzinfo=datetime.timezone.utc).timestamp()
+    except (ValueError, AttributeError):
+        return None
+
+
+def _max_expr(conn: sqlite3.Connection, table: str, expr: str,
+              where: str | None = None) -> float | None:
+    """max(expr) over table with an optional WHERE, as POSIX float.
+
+    expr/where are internal literals (never user input) — the S608 warning
+    is suppressed. Lets a source count only the rows a page actually renders
+    (e.g. timeline events role='tl'/manual) so unrelated churn never fires
+    the sync loop."""
+    sql = f"SELECT max({expr}) FROM {table}"  # noqa: S608 — internal literals
+    if where:
+        sql += f" WHERE {where}"  # noqa: S608 — internal literals
+    try:
+        row = conn.execute(sql).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if row is None or row[0] is None:
+        return None
+    return _iso_to_posix(row[0])
 
 
 def _max_any(conn: sqlite3.Connection,
@@ -84,15 +115,26 @@ _SUBPAGE_DB_SOURCES: dict[str, list[tuple[str, str]]] = {
 # S2b sync_loop integration wires this after merge; scaffold lives here.
 _ATLAS_SWEEP_TICK_S = float(os.environ.get("MARROW_ATLAS_SWEEP_TICK_S", "60.0"))
 
-# Tables that feed dashboard.md. No separate milestone_candidate or monitor
-# table exists in current schema; milestones covers candidates.
-_DASHBOARD_DB_SOURCES: list[tuple[str, str]] = [
-    ("affect",          "created_at"),
-    ("tasks",           "updated_at"),
-    ("milestones",      "updated_at"),
-    ("alerts",          "created_at"),
-    ("session_digests", "ts"),
-    ("diary",           "updated_at"),
+# Timeline-only subset feeding daybrief.md. Restricted to the rows
+# render_timeline actually renders, via (table, expr, where) triples so raw
+# conversation churn cannot fire the loop:
+#   session_digests.ts — always populated (unlike mostly-NULL updated_at).
+#   diary.updated_at.
+#   events: ONLY role='tl' (self lines) or channel='manual'. The bare
+#     events.created_at moved forward on every chat turn (every turn inserts
+#     assistant/user rows) → the loop rendered daybrief every ~5s. Filtering to
+#     rendered rows + COALESCE(updated_at,created_at) catches new tl/manual
+#     lines AND in-place tl edits (updated_at now bumped) within one tick.
+#   affect: ONLY open episodes (the "未解" rows timeline renders).
+# Usage / rate-limit kv is EXCLUDED on purpose — Status-zone freshness rides
+# collect_tick, not the 5s loop, so its per-render churn cannot defeat the gate.
+_DAYBRIEF_DB_EXPRS: list[tuple[str, str, str | None]] = [
+    ("session_digests", "ts", None),
+    ("diary", "updated_at", None),
+    ("events", "COALESCE(updated_at, created_at)",
+     "role='tl' OR channel='manual'"),
+    ("affect", "COALESCE(updated_at, created_at)",
+     "superseded_by IS NULL AND unresolved=1 AND resolved_at IS NULL"),
 ]
 
 
@@ -104,9 +146,14 @@ def last_db_mtime_subpage(conn: sqlite3.Connection, key: str) -> float | None:
     return _max_any(conn, sources)
 
 
-def last_db_mtime_dashboard(conn: sqlite3.Connection) -> float | None:
-    """Return max db timestamp across all dashboard-feeding tables."""
-    return _max_any(conn, _DASHBOARD_DB_SOURCES)
+def last_db_mtime_daybrief(conn: sqlite3.Connection) -> float | None:
+    """Return max db timestamp across the timeline-only daybrief sources.
+
+    Uses filtered expressions so only the rows render_timeline actually shows
+    move the clock — raw conversation event churn stays invisible to the loop."""
+    vals = [_max_expr(conn, t, e, w) for t, e, w in _DAYBRIEF_DB_EXPRS]
+    valid = [v for v in vals if v is not None]
+    return max(valid) if valid else None
 
 
 # ---------------------------------------------------------------------------
@@ -114,7 +161,7 @@ def last_db_mtime_dashboard(conn: sqlite3.Connection) -> float | None:
 # ---------------------------------------------------------------------------
 
 class SyncTarget:
-    """One sync target: a subpage or dashboard.md."""
+    """One sync target: a subpage or daybrief.md / monitor.md."""
 
     def __init__(
         self,
@@ -355,16 +402,14 @@ class UsageSnapshotLoop:
 
 
 # ---------------------------------------------------------------------------
-# Factory: build targets from _REGISTRY + dashboard
+# Factory: build targets from _REGISTRY + daybrief + monitor
 # ---------------------------------------------------------------------------
 
 def build_targets(folder: str,
-                  state_dir: str,
-                  dashboard_path: str) -> list[SyncTarget]:
-    """Build SyncTarget list from subpages._REGISTRY + dashboard."""
+                  state_dir: str) -> list[SyncTarget]:
+    """Build SyncTarget list from subpages._REGISTRY + daybrief + monitor."""
     from . import config as _config
     from . import storage, subpages
-    from .dashboard import write_dashboard
 
     targets: list[SyncTarget] = []
 
@@ -401,21 +446,59 @@ def build_targets(folder: str,
             has_md_to_db=cfg.reconcile is not None,
         ))
 
-    # Dashboard target
-    _sd = state_dir
+    # Daybrief target — timeline zone is bidirectional. render_fn is
+    # daybrief.update, which reconciles md hand-edits BEFORE rendering (P2),
+    # so the loop must NOT reconcile again. db_mtime_fn is the timeline-only
+    # subset. Missing file (fresh install) is skipped gracefully: _process
+    # returns on stat() FileNotFoundError, and update() guards os.path.exists.
+    try:
+        daybrief_path = (_config.daybrief_path() or "").strip()
+    except KeyError:
+        daybrief_path = ""
+    if daybrief_path:
+        def _daybrief_db_mtime(c: sqlite3.Connection) -> float | None:
+            return last_db_mtime_daybrief(c)
 
-    def _dash_db_mtime(c: sqlite3.Connection) -> float | None:
-        return last_db_mtime_dashboard(c)
+        def _daybrief_render(c: sqlite3.Connection) -> None:
+            from . import daybrief
+            daybrief.update(c)
 
-    def _dash_render(c: sqlite3.Connection) -> None:
-        write_dashboard(dashboard_path, c, state_dir=_sd)
+        targets.append(SyncTarget(
+            name="daybrief",
+            md_path=daybrief_path,
+            db_mtime_fn=_daybrief_db_mtime,
+            render_fn=_daybrief_render,
+            has_md_to_db=True,
+        ))
 
-    targets.append(SyncTarget(
-        name="dashboard",
-        md_path=dashboard_path,
-        db_mtime_fn=_dash_db_mtime,
-        render_fn=_dash_render,
-        has_md_to_db=True,
-    ))
+    # Monitor target — alerts surface.
+    # render_fn is monitor.update, which reconciles md hand-edits (a deleted
+    # line = resolve) BEFORE rendering, so the loop must NOT reconcile again.
+    # db_mtime_fn tracks the alerts table so a new/updated alert re-renders;
+    # md-newer fires the delete=resolve path. Missing file (fresh install) is
+    # skipped gracefully (update() mkdir-guards, _process stat-guards).
+    try:
+        monitor_path = (_config.monitor_path() or "").strip()
+    except KeyError:
+        monitor_path = ""
+    if monitor_path:
+        def _monitor_db_mtime(c: sqlite3.Connection) -> float | None:
+            # resolved_at included so a resolve-only change (which never bumps
+            # updated_at) still advances the clock and re-renders monitor.md.
+            return _max_any(c, [("alerts", "updated_at"),
+                                ("alerts", "created_at"),
+                                ("alerts", "resolved_at")])
+
+        def _monitor_render(c: sqlite3.Connection) -> None:
+            from . import monitor
+            monitor.update(c)
+
+        targets.append(SyncTarget(
+            name="monitor",
+            md_path=monitor_path,
+            db_mtime_fn=_monitor_db_mtime,
+            render_fn=_monitor_render,
+            has_md_to_db=True,
+        ))
 
     return targets

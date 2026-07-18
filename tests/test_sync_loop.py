@@ -8,19 +8,15 @@ from __future__ import annotations
 
 import os
 import sqlite3
-import threading
 import time
 from pathlib import Path
 from typing import Callable
-
-import pytest
 
 from marrow.sync_loop import (
     SyncLoop,
     SyncTarget,
     USER_ACTIVE_WINDOW_S,
-    _MTIME_EPSILON_S,
-    last_db_mtime_dashboard,
+    last_db_mtime_daybrief,
     last_db_mtime_subpage,
 )
 
@@ -96,36 +92,40 @@ def test_last_db_mtime_subpage_with_data(tmp_path):
     c.close()
 
 
-# ---------------------------------------------------------------------------
-# last_db_mtime_dashboard
-# ---------------------------------------------------------------------------
-
-def test_last_db_mtime_dashboard_no_tables():
-    c = _conn()
-    assert last_db_mtime_dashboard(c) is None
-
-
-def test_last_db_mtime_dashboard_aggregates_across_tables(tmp_path):
-    """db_mtime = max across affect/tasks/milestones/alerts."""
+def test_monitor_db_mtime_advances_on_resolve_only(tmp_path):
+    """A resolve-only change bumps resolved_at but never updated_at. The monitor
+    clock must still advance so monitor.md re-renders (alert line disappears)."""
     from marrow import storage
+    from marrow.sync_loop import _max_any
+
+    specs = [("alerts", "updated_at"),
+             ("alerts", "created_at"),
+             ("alerts", "resolved_at")]
+
     db = str(tmp_path / "t.db")
     c = storage.init_db(db)
-    # Insert into affect (created_at) and tasks (updated_at) with different times
+    # Fixed past created_at/updated_at so neither dominates the max — the resolve
+    # timestamp is the only thing that can move the clock forward.
     c.execute(
-        "INSERT INTO affect (date,ep,valence,arousal,importance,created_at)"
-        " VALUES ('2026-05-27',1,0.7,0.5,3,'2026-05-27T09:00:00Z')"
-    )
-    c.execute(
-        "INSERT INTO tasks (category,title,updated_at)"
-        " VALUES ('project','t1','2026-05-27T12:00:00Z')"
+        "INSERT INTO alerts (severity, type, fingerprint, message, created_at,"
+        " updated_at, resolved) VALUES ('warn','tg','fp','m',"
+        "'2026-05-27T10:00:00Z','2026-05-27T10:00:00Z',0)"
     )
     c.commit()
-    ts = last_db_mtime_dashboard(c)
-    assert ts is not None
-    # Should pick max: tasks updated_at 12:00 > affect created_at 09:00
-    from datetime import datetime, timezone
-    expected = datetime(2026, 5, 27, 12, 0, 0, tzinfo=timezone.utc).timestamp()
-    assert abs(ts - expected) < 1.0
+    before = _max_any(c, specs)
+
+    # Resolve by stamping resolved_at only, without touching updated_at. With
+    # resolved_at in the spec list the clock still advances so monitor.md
+    # re-renders and the resolved line disappears.
+    c.execute(
+        "UPDATE alerts SET resolved_at='2026-05-27T12:00:00Z'"
+        " WHERE fingerprint='fp'"
+    )
+    c.commit()
+    after = _max_any(c, specs)
+
+    assert before is not None and after is not None
+    assert after > before
     c.close()
 
 
@@ -453,3 +453,160 @@ def test_db_mtime_none_skipped(tmp_path):
     time.sleep(0.1)
     loop.stop()
     assert rendered == []
+
+
+# ---------------------------------------------------------------------------
+# Daybrief target — timeline-only db subset + bidirectional wiring
+# ---------------------------------------------------------------------------
+
+def test_last_db_mtime_daybrief_timeline_subset(tmp_path):
+    """Only timeline tables count; a usage/rate-limit kv change does not move it."""
+    from datetime import datetime, timezone
+
+    from marrow import storage
+    db = str(tmp_path / "t.db")
+    c = storage.init_db(db)
+    assert last_db_mtime_daybrief(c) is None
+    # A new tl line (events.created_at) — this IS a timeline source.
+    c.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, created_at)"
+        " VALUES ('s1','2026-05-27T09:00:00Z','tl','x [3]',"
+        " '2026-05-27T09:00:00Z')"
+    )
+    c.commit()
+    ts = last_db_mtime_daybrief(c)
+    assert ts is not None
+    expected = datetime(2026, 5, 27, 9, 0, 0, tzinfo=timezone.utc).timestamp()
+    assert abs(ts - expected) < 1.0
+    c.close()
+
+
+def test_daybrief_raw_conversation_event_does_not_move_clock(tmp_path):
+    """D3: raw conversation events (role user/assistant, not tl/manual) must NOT
+    advance the daybrief clock, or the loop re-renders every chat turn."""
+    from datetime import datetime, timezone
+
+    from marrow import storage
+    db = str(tmp_path / "t.db")
+    c = storage.init_db(db)
+    assert last_db_mtime_daybrief(c) is None
+    # A rendered tl line establishes a baseline clock.
+    c.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, created_at)"
+        " VALUES ('s1','2026-05-27T09:00:00Z','tl','x [3]',"
+        " '2026-05-27T09:00:00Z')"
+    )
+    c.commit()
+    base = last_db_mtime_daybrief(c)
+    assert base is not None
+    # A later raw conversation turn (role='assistant') — NOT rendered by the
+    # timeline. Its created_at is far newer but must be ignored.
+    c.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, created_at)"
+        " VALUES ('s1','2026-05-27T10:00:00Z','assistant','chatter',"
+        " '2026-05-27T10:00:00Z')"
+    )
+    c.commit()
+    after = last_db_mtime_daybrief(c)
+    assert after == base, "raw conversation event must not move the daybrief clock"
+    expected = datetime(2026, 5, 27, 9, 0, 0, tzinfo=timezone.utc).timestamp()
+    assert abs(after - expected) < 1.0
+    c.close()
+
+
+def test_daybrief_tl_inplace_edit_moves_clock(tmp_path):
+    """D2/D3: an in-place tl edit bumps events.updated_at → daybrief clock
+    advances so the ≤5s loop reflects the edit to md."""
+    from datetime import datetime, timezone
+
+    from marrow import storage
+    db = str(tmp_path / "t.db")
+    c = storage.init_db(db)
+    c.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, created_at)"
+        " VALUES ('s1','2026-05-27T09:00:00Z','tl','x [3]',"
+        " '2026-05-27T09:00:00Z')"
+    )
+    c.commit()
+    base = last_db_mtime_daybrief(c)
+    # In-place edit stamps updated_at newer than created_at.
+    c.execute(
+        "UPDATE events SET content='y [3]', updated_at='2026-05-27T11:00:00Z'"
+        " WHERE role='tl'"
+    )
+    c.commit()
+    after = last_db_mtime_daybrief(c)
+    expected = datetime(2026, 5, 27, 11, 0, 0, tzinfo=timezone.utc).timestamp()
+    assert abs(after - expected) < 1.0
+    assert after > base
+    c.close()
+
+
+def test_daybrief_db_change_triggers_render(tmp_path):
+    """Insert a timeline row → db-newer → render_fn invoked (db→md path)."""
+    from marrow import storage
+    db = str(tmp_path / "t.db")
+    real_conn = storage.init_db(db)
+
+    md = tmp_path / "daybrief.md"
+    md.write_text("# daybrief")
+    _backdate(md, seconds=10.0)  # md older + outside user-active window
+
+    # A fresh tl line lands with created_at = now → db strictly newer than md.
+    now_iso = "2999-01-01T00:00:00Z"
+    real_conn.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, created_at)"
+        " VALUES ('s1','2026-05-27T09:00:00Z','tl','edit [3]', ?)",
+        (now_iso,),
+    )
+    real_conn.commit()
+
+    real_conn.close()  # loop opens its own thread conn via conn_factory
+
+    rendered: list[int] = []
+    t = _target(
+        str(md),
+        lambda c: last_db_mtime_daybrief(c),
+        render_fn=lambda c: rendered.append(1),
+        name="daybrief",
+    )
+    loop = SyncLoop(lambda: storage.connect(db), [t], tick_s=100.0)
+    loop.start()
+    time.sleep(0.1)
+    loop.stop()
+    assert rendered, "db-newer timeline row must trigger daybrief render_fn"
+
+
+def test_daybrief_md_edit_absorbs_to_db(tmp_path):
+    """md hand-edit (md-newer) → render_fn runs; daybrief.update reconciles it
+    into the DB before rendering (P2 reconcile-before-render)."""
+    from marrow import storage
+    db = str(tmp_path / "t.db")
+    storage.init_db(db).close()
+
+    md = tmp_path / "daybrief.md"
+    md.write_text("# daybrief hand-edited timeline line")
+    md_mtime = _backdate(md, seconds=5.0)  # md newer, but user-idle
+
+    # db older than md → md→db (reconcile-inside-render) path.
+    reconciled: list[str] = []
+
+    def render_fn(c):
+        # daybrief.update does reconcile-before-render internally; assert the
+        # loop dispatches a single render call for the md-newer branch.
+        reconciled.append("reconcile+render")
+
+    t = _target(
+        str(md),
+        lambda c: md_mtime - 10.0,
+        render_fn=render_fn,
+        has_md_to_db=True,
+        name="daybrief",
+    )
+    loop = SyncLoop(lambda: storage.connect(db), [t], tick_s=100.0)
+    loop.start()
+    time.sleep(0.1)
+    loop.stop()
+    assert reconciled == ["reconcile+render"], (
+        "md-newer edit must invoke render_fn exactly once (reconcile lives "
+        "inside daybrief.update, not a second loop call)")

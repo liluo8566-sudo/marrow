@@ -218,9 +218,9 @@ def write_subpage_inserter(spec: InserterSpec, conn: sqlite3.Connection,
 
     if new_rows_by_section:
         existing = _append_new_rows(spec, existing, new_rows_by_section)
-        # Write first, record hashes only on success — see dashboard.py for the
-        # same invariant. _atomic_write failure (ENOSPC / EACCES / SIGTERM)
-        # must not leave md_index pointing at content that never hit disk.
+        # Write first, record hashes only on success. _atomic_write failure
+        # (ENOSPC / EACCES / SIGTERM) must not leave md_index pointing at
+        # content that never hit disk.
         _atomic_write(path, existing)
         for _sec, items in new_rows_by_section.items():
             for bid, body in items:

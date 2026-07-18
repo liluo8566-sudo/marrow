@@ -4,11 +4,10 @@ One call -> a single events row (role='tl', channel=platform). No affect table
 write: the affect phrase lives verbatim inside content, importance lives in
 events.imp. Render/reconcile treat these rows by their tl:e:<event_id> anchor.
 
-Format: HH:mm[-HH:mm] 【N word♡Y word】body [i]
-  N = user affect, Y = assistant affect. word <=8 chars.
-  Letters are configurable via tl.user_letter / tl.assistant_letter
-  (default "N" / "Y"); parsing is letter-agnostic.
-  Single-side rows: just 【N word】 or 【Y word】.
+Format: HH:mm[-HH:mm] 【<u> word♡<a> word】body [i]
+  <u> = user marker (config persona.user_marker), <a> = assistant marker
+  (persona.assistant_marker). affect word <=8 chars.
+  Single-side rows: just 【<u> word】 or 【<a> word】.
   i = composite 1-5 (events.imp), one value for the whole row, not per side,
   rendered at the end as " [i]".
   body <=50 chars (config: tl.body_max).
@@ -18,7 +17,6 @@ from __future__ import annotations
 import datetime as _dt
 import os
 import re
-from pathlib import Path
 
 from . import config as _config
 
@@ -28,53 +26,8 @@ _WORD_MAX = 8
 
 def _body_max() -> int:
     return int(_config.load().get("tl", {}).get("body_max", 50))
-
-
-def _user_letter() -> str:
-    return str(_config.load().get("tl", {}).get("user_letter", "N"))
-
-
-def _assistant_letter() -> str:
-    return str(_config.load().get("tl", {}).get("assistant_letter", "Y"))
 _LABEL_RE = re.compile(r"^\s*(【[^】]*】)?(.*)$", re.DOTALL)
 _TRAIL_IMP_RE = re.compile(r"\s*\[\d\]\s*$")
-
-# Anchored letter positions inside a tl label: start-of-label, right after ♡,
-# right after "| " (old two-side format). Never matches inside a word/body.
-_LABEL_LETTER_RE = re.compile(r"(^|♡|\|\s*)([NY])")
-
-
-def canonicalize_label_letters(text: str) -> str:
-    """Rewrite legacy hardcoded N/Y label letters to the configured
-    tl.user_letter / tl.assistant_letter, anchored to label positions only
-    (start-of-label, right after ♡, right after '| '). Body text and
-    everything outside the leading 【...】 label segment is untouched.
-
-    No-op when configured letters are still the default N/Y (upstream-safe)
-    and naturally idempotent (rows already carrying the configured letters
-    have no N/Y left at anchor positions to match).
-
-    Shared by scripts/migrate_tl_letters.py (rewrites events.content) and
-    timeline.py render (canonicalizes display without touching the DB).
-    """
-    if not text:
-        return text
-    u, a = _user_letter(), _assistant_letter()
-    if u == "N" and a == "Y":
-        return text
-    m = re.search(r"【([^】]*)】", text)
-    if not m:
-        return text
-    label = m.group(1)
-
-    def _sub(mm: re.Match) -> str:
-        letter = mm.group(2)
-        return mm.group(1) + (u if letter == "N" else a)
-
-    new_label = _LABEL_LETTER_RE.sub(_sub, label)
-    if new_label == label:
-        return text
-    return text[:m.start(1)] + new_label + text[m.end(1):]
 
 
 class TlError(ValueError):
@@ -82,6 +35,15 @@ class TlError(ValueError):
 
 
 # ── validation helpers ───────────────────────────────────────────────────────
+
+def _check_body_plain(body: str) -> None:
+    """Reject a body carrying an affect block or trailing importance marker —
+    those parts are assembled server-side from user_word/assistant_word/importance."""
+    if "【" in body or "】" in body or _TRAIL_IMP_RE.search(body):
+        raise TlError(
+            "body is plain text — affect goes in user_word/assistant_word, "
+            "importance in importance")
+
 
 def _clamp_1_5(x, name: str, default: int) -> int:
     if x is None:
@@ -134,12 +96,13 @@ def _hhmm_to_utc(hhmm: str, base_date: _dt.date, now_local: _dt.datetime) -> str
     return local.astimezone(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _compose_label(n_word, y_word) -> str:
+def _compose_label(user_word, assistant_word) -> str:
+    p = _config.persona()
     seg = []
-    if n_word:
-        seg.append(f"{_user_letter()}{n_word}")
-    if y_word:
-        seg.append(f"{_assistant_letter()}{y_word}")
+    if user_word:
+        seg.append(f"{p['user_marker']}{user_word}")
+    if assistant_word:
+        seg.append(f"{p['assistant_marker']}{assistant_word}")
     return "♡".join(seg)
 
 
@@ -161,35 +124,44 @@ def _platform() -> str:
 # ── write path ───────────────────────────────────────────────────────────────
 
 def tl_add(conn, timerange: str, body: str,
-           n_word: str | None = None,
-           y_word: str | None = None,
+           user_word: str | None = None,
+           assistant_word: str | None = None,
            importance: int | None = None,
-           sid: str | None = None) -> dict:
+           sid: str | None = None,
+           date: str | None = None) -> dict:
     """Insert one self timeline row (events only) in a single txn."""
     body = (body or "").strip()
     if not body:
         raise TlError("body required")
+    _check_body_plain(body)
     body_max = _body_max()
     if len(body) > body_max:
         raise TlError(f"body exceeds {body_max} chars: {len(body)}")
 
-    n_word = _check_word(n_word, _user_letter())
-    y_word = _check_word(y_word, _assistant_letter())
-    if not n_word and not y_word:
-        raise TlError("at least one of n_word / y_word required")
+    user_word = _check_word(user_word, "user")
+    assistant_word = _check_word(assistant_word, "assistant")
+    if not user_word and not assistant_word:
+        raise TlError("at least one of user_word / assistant_word required")
     imp = _clamp_1_5(importance, "importance", 3)
 
-    label = _compose_label(n_word, y_word)
+    label = _compose_label(user_word, assistant_word)
     content = f"【{label}】{body} [{imp}]" if label else f"{body} [{imp}]"
 
     hhmm_start, hhmm_end = _parse_timerange(timerange)
     now_local = _dt.datetime.now(_TZ)
-    base_date = now_local.date()
-    ts_start = _hhmm_to_utc(hhmm_start, base_date, now_local)
-    now_utc = now_local.astimezone(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    if ts_start > now_utc:
-        base_date -= _dt.timedelta(days=1)
+    if date:
+        try:
+            base_date = _dt.date.fromisoformat(date)
+        except ValueError as exc:
+            raise TlError(f"bad date {date!r}: {exc}")
         ts_start = _hhmm_to_utc(hhmm_start, base_date, now_local)
+    else:
+        base_date = now_local.date()
+        ts_start = _hhmm_to_utc(hhmm_start, base_date, now_local)
+        now_utc = now_local.astimezone(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if ts_start > now_utc:
+            base_date -= _dt.timedelta(days=1)
+            ts_start = _hhmm_to_utc(hhmm_start, base_date, now_local)
     ts_end = None
     if hhmm_end is not None:
         ts_end = _hhmm_to_utc(hhmm_end, base_date, now_local)
@@ -229,9 +201,10 @@ def tl_add(conn, timerange: str, body: str,
 
 def tl_update(conn, event_id: int, timerange: str | None = None,
               body: str | None = None,
-              n_word: str | None = None,
-              y_word: str | None = None,
-              importance: int | None = None) -> dict:
+              user_word: str | None = None,
+              assistant_word: str | None = None,
+              importance: int | None = None,
+              date: str | None = None) -> dict:
     """Update an existing self row in place. Only provided fields change."""
     ev = conn.execute(
         "SELECT session_id, timestamp, ts_start, ts_end, content, role, imp"
@@ -245,32 +218,61 @@ def tl_update(conn, event_id: int, timerange: str | None = None,
     now_local = _dt.datetime.now(_TZ)
     ts_start = ev["ts_start"] or ev["timestamp"]
     ts_end = ev["ts_end"]
+    target_date = None
+    if date:
+        try:
+            target_date = _dt.date.fromisoformat(date)
+        except ValueError as exc:
+            raise TlError(f"bad date {date!r}: {exc}")
     if timerange is not None:
         hhmm_start, hhmm_end = _parse_timerange(timerange)
-        base_date = now_local.date()
-        ts_start = _hhmm_to_utc(hhmm_start, base_date, now_local)
+        if target_date:
+            base_date = target_date
+            ts_start = _hhmm_to_utc(hhmm_start, base_date, now_local)
+        else:
+            base_date = now_local.date()
+            ts_start = _hhmm_to_utc(hhmm_start, base_date, now_local)
+            now_utc = now_local.astimezone(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if ts_start > now_utc:
+                base_date -= _dt.timedelta(days=1)
+                ts_start = _hhmm_to_utc(hhmm_start, base_date, now_local)
         ts_end = _hhmm_to_utc(hhmm_end, base_date, now_local) if hhmm_end else None
         if ts_end and ts_end < ts_start:
             ts_end = _hhmm_to_utc(hhmm_end, base_date + _dt.timedelta(days=1), now_local)
+    elif target_date:
+        start_loc = _dt.datetime.fromisoformat(
+            ts_start.replace("Z", "+00:00")).astimezone(_TZ)
+        span = None
+        if ts_end:
+            end_loc = _dt.datetime.fromisoformat(
+                ts_end.replace("Z", "+00:00")).astimezone(_TZ)
+            span = end_loc - start_loc
+        ts_start = _hhmm_to_utc(f"{start_loc:%H:%M}", target_date, now_local)
+        if span is not None:
+            new_end = _dt.datetime.fromisoformat(
+                ts_start.replace("Z", "+00:00")) + span
+            ts_end = new_end.strftime("%Y-%m-%dT%H:%M:%SZ")
 
     label_part, body_part = _split_content(ev["content"])
     if body is not None:
         body_part = body.strip()
         if not body_part:
             raise TlError("body cannot be empty")
+        _check_body_plain(body_part)
         body_max = _body_max()
         if len(body_part) > body_max:
             raise TlError(f"body exceeds {body_max} chars")
-    n_word = _check_word(n_word, _user_letter())
-    y_word = _check_word(y_word, _assistant_letter())
-    if n_word or y_word:
-        label_part = f"【{_compose_label(n_word, y_word)}】"
+    user_word = _check_word(user_word, "user")
+    assistant_word = _check_word(assistant_word, "assistant")
+    if user_word or assistant_word:
+        label_part = f"【{_compose_label(user_word, assistant_word)}】"
     imp = _clamp_1_5(importance, "importance", ev["imp"] or 3)
     new_content = f"{label_part}{body_part} [{imp}]"
 
     with conn:
         conn.execute(
-            "UPDATE events SET content=?, ts_start=?, ts_end=?, timestamp=?, imp=?"
+            "UPDATE events SET content=?, ts_start=?, ts_end=?, timestamp=?, imp=?,"
+            " updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')"
             " WHERE id=?",
             (new_content, ts_start, ts_end, ts_start, imp, event_id),
         )
@@ -279,10 +281,6 @@ def tl_update(conn, event_id: int, timerange: str | None = None,
             " VALUES ('events', ?, 'tl_update', ?)",
             (ev["session_id"], f"event_id={event_id}"),
         )
-    from .timeline import _hhmm_local
-    hhmm_start = _hhmm_local(ts_start)
-    hhmm_end = _hhmm_local(ts_end) if ts_end else None
-    _sync_dashboard_line(event_id, hhmm_start, hhmm_end, new_content)
     return {"ok": True, "event_id": event_id}
 
 
@@ -291,31 +289,3 @@ def tl_update(conn, event_id: int, timerange: str | None = None,
 def render_line(hhmm_start: str, hhmm_end: str | None, content: str) -> str:
     rng = f"{hhmm_start}-{hhmm_end}" if hhmm_end else hhmm_start
     return f"{rng} {content}"
-
-
-# ── dashboard sync (md must mirror DB or reconcile reverts the edit) ─────────
-
-def _dashboard_path() -> Path:
-    return Path.home() / "Desktop" / "NY" / "dashboard.md"
-
-
-def _sync_dashboard_line(event_id: int, hhmm_start: str, hhmm_end: str | None,
-                          content: str) -> bool:
-    """Rewrite the dashboard.md line anchored `<!-- tl:e:<event_id> -->` so it
-    matches the just-written DB content. Without this, the resident md->DB
-    reconcile (_reconcile_self_edit) treats the stale md line as a user edit
-    and reverts the update within seconds. No-op if the row isn't rendered
-    yet (anchor absent) — the next render will pick up the DB content."""
-    dash = _dashboard_path()
-    if not dash.exists():
-        return False
-    anchor = f"<!-- tl:e:{event_id} -->"
-    new_line = f"{render_line(hhmm_start, hhmm_end, content)} {anchor}"
-    lines = dash.read_text(encoding="utf-8").splitlines(keepends=True)
-    for i, line in enumerate(lines):
-        if line.rstrip("\n").endswith(anchor):
-            eol = "\n" if line.endswith("\n") else ""
-            lines[i] = new_line + eol
-            dash.write_text("".join(lines), encoding="utf-8")
-            return True
-    return False
