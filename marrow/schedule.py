@@ -317,7 +317,9 @@ def render_daily(cadence_bin: str | None = None) -> str:
     rem_lines = _render_reminders(rem_json, done_json, today)
     cal_lines = _render_calendar(cal_json, today)
 
-    if not rem_lines and not cal_lines:
+    if not cal_json and not rem_json and not done_json:
+        # all three cadence calls failed — keep "" so refresh_daily's
+        # conservative fallback protects against transient auth/lock blips.
         return ""
 
     parts = [
@@ -325,9 +327,12 @@ def render_daily(cadence_bin: str | None = None) -> str:
         _flag_note(),
     ]
     body: list[str] = []
-    body.extend(rem_lines)
-    body.append("---")
-    body.extend(cal_lines)
+    if not rem_lines and not cal_lines:
+        body.append("- (nothing scheduled today)")
+    else:
+        body.extend(rem_lines)
+        body.append("---")
+        body.extend(cal_lines)
     parts.append("\n".join(body))
 
     out = "\n".join(parts)

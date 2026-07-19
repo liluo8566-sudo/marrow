@@ -256,6 +256,113 @@ def test_disabled_returns_none(monkeypatch, tmp_path):
     assert schedule.check_and_inject("any") is None
 
 
+# --- render_daily: fetch-failure vs legitimately-empty ---------------------
+
+@pytest.fixture()
+def fake_binary(tmp_path):
+    binary = tmp_path / "cadence"
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+    return str(binary)
+
+
+def test_render_daily_all_calls_fail_returns_empty(monkeypatch, fake_binary):
+    monkeypatch.setattr(schedule, "_run_cadence", lambda args, binary: "")
+    assert schedule.render_daily(fake_binary) == ""
+
+
+def test_render_daily_success_but_no_items_is_header_only(monkeypatch, fake_binary):
+    def _fake_run(args, binary):
+        if args[0] == "cal":
+            return "[]"
+        if "--all" in args:
+            return "[]"
+        return "[]"
+    monkeypatch.setattr(schedule, "_run_cadence", _fake_run)
+    out = schedule.render_daily(fake_binary)
+    assert out != ""
+    assert "## Daily Schedule" in out
+    assert "(nothing scheduled today)" in out
+
+
+def test_render_daily_partial_failure_still_renders_header_only(monkeypatch, fake_binary):
+    """Even if cal/done fail but rem succeeds empty, one success is enough
+    to distinguish from a total fetch failure."""
+    def _fake_run(args, binary):
+        if args[0] == "cal":
+            return ""
+        if "--all" in args:
+            return "[]"
+        return ""
+    monkeypatch.setattr(schedule, "_run_cadence", _fake_run)
+    out = schedule.render_daily(fake_binary)
+    assert out != ""
+    assert "(nothing scheduled today)" in out
+
+
+def test_render_daily_with_real_items_unchanged(monkeypatch, fake_binary):
+    rems = [{"id": 1, "list": "Chore", "title": "sweep", "completed": False,
+             "flagged": False, "priority": 0,
+             "due_date": "2026-07-10T00:00:00+10:00"}]
+    events = [{"calendar": "Routine", "title": "Wake up", "all_day": False,
+               "start": "2026-07-10T05:30:00+10:00",
+               "end": "2026-07-10T06:15:00+10:00"}]
+
+    def _fake_run(args, binary):
+        if args[0] == "cal":
+            return json.dumps(events)
+        if "--all" in args:
+            return json.dumps(rems)
+        return "[]"
+    monkeypatch.setattr(schedule, "_run_cadence", _fake_run)
+
+    from datetime import datetime, timezone
+
+    class _Now:
+        @staticmethod
+        def now(tz=None):
+            return datetime(2026, 7, 10, 10, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(schedule, "datetime", _Now)
+
+    out = schedule.render_daily(fake_binary)
+    assert "- [Chore] sweep" in out
+    assert "- [Routine] 05:30-06:15 Wake up" in out
+    assert "(nothing scheduled today)" not in out
+
+
+# --- refresh_daily: stale file gets replaced by header-only render ---------
+
+def test_refresh_daily_overwrites_stale_file_when_empty_but_fetched(
+    monkeypatch, tmp_path, fake_binary
+):
+    daily_path = tmp_path / "daily.md"
+    daily_path.write_text("## Daily Schedule  2026-07-11 Saturday | now 23:22\n"
+                           "stale content from days ago")
+
+    monkeypatch.setattr(schedule, "_run_cadence", lambda args, binary: "[]")
+
+    content, changed = schedule.refresh_daily(fake_binary, str(daily_path))
+    assert changed is True
+    assert "(nothing scheduled today)" in content
+    assert daily_path.read_text() == content
+    assert "stale content" not in daily_path.read_text()
+
+
+def test_refresh_daily_keeps_stale_file_when_all_calls_fail(
+    monkeypatch, tmp_path, fake_binary
+):
+    daily_path = tmp_path / "daily.md"
+    stale = "## Daily Schedule  2026-07-11 Saturday | now 23:22\nstale content"
+    daily_path.write_text(stale)
+
+    monkeypatch.setattr(schedule, "_run_cadence", lambda args, binary: "")
+
+    content, changed = schedule.refresh_daily(fake_binary, str(daily_path))
+    assert changed is False
+    assert content == stale
+    assert daily_path.read_text() == stale
+
+
 # --- cadence-failure alert message classification --------------------------
 
 def test_alert_message_authorization_denied():
