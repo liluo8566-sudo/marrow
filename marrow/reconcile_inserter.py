@@ -21,7 +21,7 @@ from pathlib import Path
 
 from ._atomic import atomic_write as _atomic_write
 from .inserter import InserterSpec
-from .reconcile import ReconcileReport
+from .reconcile import ReconcileReport, _today_melb
 
 _ANCHOR_RE = re.compile(r"<!-- id:(\d+) -->")
 _ANCHOR_STR_RE = re.compile(r"<!-- id:([^>]+?) -->")
@@ -145,7 +145,10 @@ def _insert_diary_blocks(
     md_text = md_path.read_text(encoding="utf-8")
     md_lines = md_text.splitlines()
 
-    today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+    # Local (configured) timezone, not UTC — Melbourne runs UTC+10/+11, so a
+    # UTC "today" would reject same-day entries written before ~10:00 local
+    # as future-dated.
+    today_str = _today_melb()
 
     # Scan for heading blocks that lack an anchor.
     # Each block: heading_line_idx, date, body lines, has_anchor flag.
