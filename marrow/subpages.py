@@ -437,7 +437,7 @@ def content_list(*, folder: str | None = None) -> dict:
 _FILENAME: dict[str, str] = {}
 
 
-# Display names for dashboard Content section. Falls back to key.capitalize().
+# Display names for daybrief Content section. Falls back to key.capitalize().
 _DISPLAY = {
     "profile":    "Profile",
     "milestone":  "Milestone",

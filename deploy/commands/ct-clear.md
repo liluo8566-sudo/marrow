@@ -2,4 +2,4 @@
 description: Cortex — write the handoff now, then rotate to a fresh window.
 ---
 
-⚙️ [CMD ct-clear] Summarise this whole session into one section and append it to handoff.md — follow the format and style of the preceding sections. Call lie_down, rotate, and set next wake to $ARGUMENTS.
+⚙️ [CMD ct-clear] Switch to new window now: update handoff, then lie_down(rotate=true, next_wake_min=$ARGUMENTS) — N=0 to start new session now.

@@ -199,6 +199,64 @@ def test_lie_down_non_json_stdout(env, monkeypatch, tmp_path):
     assert "next_wake" not in out
 
 
+def test_lie_down_surfaces_rotate_refused_text(env, monkeypatch, tmp_path):
+    """P17: rotate refused while the window's own ear tail is alive — the
+    refusal text must reach the calling session as the tool result text,
+    else the rotate precondition is invisible to the model."""
+    _fake_lie_down_run(
+        monkeypatch, tmp_path,
+        '{"skipped": "rotate_refused", "refused": '
+        '"TaskStop your monitor first, then call lie_down again."}')
+    out = cortex_bridge.lie_down(next_wake_min=20, rotate=True)
+    assert out["ok"] is True
+    assert out["refused"] == "TaskStop your monitor first, then call lie_down again."
+    assert out["text"] == "TaskStop your monitor first, then call lie_down again."
+
+
+def test_lie_down_passes_human_override_flag(env, monkeypatch, tmp_path):
+    fake_py = tmp_path / "python"
+    fake_root = tmp_path / "repo"
+    monkeypatch.setattr(config, "load", lambda: {
+        "cortex": {"venv_python": str(fake_py), "repo_root": str(fake_root)},
+    })
+    captured = {}
+
+    class _P:
+        returncode = 0
+        stdout = "{}"
+        stderr = ""
+
+    def _fake_run(cmd, cwd=None, **kw):
+        captured["cmd"] = cmd
+        return _P()
+
+    monkeypatch.setattr(cortex_bridge.subprocess, "run", _fake_run)
+    cortex_bridge.lie_down(next_wake_min=10, human_override=True)
+    assert "--human-override" in captured["cmd"]
+
+
+def test_lie_down_no_human_override_flag_by_default(env, monkeypatch, tmp_path):
+    fake_py = tmp_path / "python"
+    fake_root = tmp_path / "repo"
+    monkeypatch.setattr(config, "load", lambda: {
+        "cortex": {"venv_python": str(fake_py), "repo_root": str(fake_root)},
+    })
+    captured = {}
+
+    class _P:
+        returncode = 0
+        stdout = "{}"
+        stderr = ""
+
+    def _fake_run(cmd, cwd=None, **kw):
+        captured["cmd"] = cmd
+        return _P()
+
+    monkeypatch.setattr(cortex_bridge.subprocess, "run", _fake_run)
+    cortex_bridge.lie_down(next_wake_min=10)
+    assert "--human-override" not in captured["cmd"]
+
+
 def test_say_runs_module(env, monkeypatch, tmp_path):
     fake_py = tmp_path / "python"
     fake_root = tmp_path / "repo"
@@ -296,29 +354,360 @@ def test_switch_on_registers_wish_only(monkeypatch):
     names = set(m._tool_manager._tools.keys())
     assert "wish" in names
     assert "first" not in names and "goal" not in names
-    assert "lie_down" not in names and "wait" not in names and "say" not in names
+    assert "lie_down" not in names and "say" not in names
 
 
-def test_switch_on_cortex_session_registers_wish_and_cortex_trio(monkeypatch):
-    """enabled=true AND cortex session (_CORTEX) => wish + lie_down/wait/say
-    register; first/goal stay pending (not registered)."""
+def test_switch_on_cortex_session_registers_wish_and_cortex_pair(monkeypatch):
+    """enabled=true AND cortex session (_CORTEX) => wish + lie_down/say
+    register (wait retired T1); first/goal stay pending (not registered)."""
     _force_enabled(monkeypatch, True)
     m, mt = _fresh_mcp()
     monkeypatch.setattr(cortex_bridge, "_CORTEX", True)
     cortex_bridge.register(mt)
     names = set(m._tool_manager._tools.keys())
-    assert {"wish", "lie_down", "wait", "say"} <= names
+    assert {"wish", "lie_down", "say"} <= names
+    assert "wait" not in names
     assert "first" not in names and "goal" not in names
 
 
+def _register_as(monkeypatch, shell_env, shells=None):
+    """register() under a given MARROW_CORTEX value (T8 shell id). shells=None
+    keeps the config default (["cli"])."""
+    extra = None if shells is None else {"shells": shells}
+    _force_enabled(monkeypatch, True, extra=extra)
+    if shell_env is None:
+        monkeypatch.delenv("MARROW_CORTEX", raising=False)
+    else:
+        monkeypatch.setenv("MARROW_CORTEX", shell_env)
+    monkeypatch.setattr(cortex_bridge, "_CORTEX", shell_env is not None)
+    m, mt = _fresh_mcp()
+    cortex_bridge.register(mt)
+    return set(m._tool_manager._tools.keys())
+
+
+def test_shell_legacy_and_cli_register_lie_down_and_say(monkeypatch):
+    """T8: MARROW_CORTEX=1 (legacy) and =cli are the same shell — full cli kit."""
+    for value in ("1", "cli"):
+        names = _register_as(monkeypatch, value)
+        assert {"wish", "lie_down", "say"} <= names
+
+
+def test_shell_tg_registers_lie_down_without_say(monkeypatch):
+    """T8: say is cli-only; the tg shell still gets lie_down."""
+    names = _register_as(monkeypatch, "tg", shells=["cli", "tg"])
+    assert {"wish", "lie_down"} <= names
+    assert "say" not in names
+
+
+def test_shell_absent_from_shells_registers_no_cortex_tools(monkeypatch):
+    """T8: tg session while shells=["cli"] -> plain session (wish only)."""
+    names = _register_as(monkeypatch, "tg", shells=["cli"])
+    assert names == {"wish"}
+
+
+def test_empty_shells_disables_cortex_tools_for_cli(monkeypatch):
+    """T8: shells=[] switches every shell off; enabled stays the master switch."""
+    names = _register_as(monkeypatch, "cli", shells=[])
+    assert names == {"wish"}
+
+
+def test_shell_enabled_follows_env_and_config(monkeypatch):
+    """_shell_enabled: cortex env + listed shell id. Non-cortex always False."""
+    _force_enabled(monkeypatch, True, extra={"shells": ["cli", "tg"]})
+    monkeypatch.delenv("MARROW_CORTEX", raising=False)
+    assert cortex_bridge._shell_enabled() is False
+    monkeypatch.setenv("MARROW_CORTEX", "1")
+    assert cortex_bridge._shell_enabled() is True
+    monkeypatch.setenv("MARROW_CORTEX", "tg")
+    assert cortex_bridge._shell_enabled() is True
+    _force_enabled(monkeypatch, True, extra={"shells": ["cli"]})
+    assert cortex_bridge._shell_enabled() is False
+
+
+def test_shell_gates_go_plain_when_shell_not_listed(monkeypatch):
+    """T8: a cortex-env session off the shells list takes no cortex branch."""
+    _force_enabled(monkeypatch, True, extra={"shells": ["cli"]})
+    monkeypatch.setenv("MARROW_CORTEX", "tg")
+    inp = {"tool_name": "mcp__marrow__lie_down", "tool_input": {"rotate": True}}
+    assert cortex_bridge._cortex_lie_down_nudge(inp) is None
+    assert cortex_bridge._cortex_show_context("") == ""
+
+
+# ── per-shell state file ──────────────────────────────────────────────────────
+
+def test_shell_state_roundtrip_with_lock_file(monkeypatch, tmp_path):
+    """write -> read roundtrip; lock sibling created; only contract keys stored."""
+    _force_enabled(monkeypatch, True,
+                   extra={"shell_state_dir": str(tmp_path / "shells")})
+    p = cortex_bridge.shell_state_write(
+        {"session_id": "abc", "next_wake_at": "2026-07-25T10:00:00+00:00",
+         "last_note_ts": "2026-07-25T09:00:00+00:00", "junk": 1}, shell="tg")
+    assert p == tmp_path / "shells" / "tg.json"
+    assert (tmp_path / "shells" / "tg.lock").exists()
+    assert cortex_bridge.shell_state_read("tg") == {
+        "session_id": "abc", "next_wake_at": "2026-07-25T10:00:00+00:00",
+        "last_note_ts": "2026-07-25T09:00:00+00:00"}
+
+
+def test_shell_state_write_merges_and_drops_none(monkeypatch, tmp_path):
+    """Partial write keeps untouched keys; None drops its key; no temp residue."""
+    _force_enabled(monkeypatch, True,
+                   extra={"shell_state_dir": str(tmp_path / "shells")})
+    cortex_bridge.shell_state_write({"session_id": "abc", "next_wake_at": "t1"},
+                                    shell="tg")
+    cortex_bridge.shell_state_write({"next_wake_at": None, "last_note_ts": "t2"},
+                                    shell="tg")
+    assert cortex_bridge.shell_state_read("tg") == {"session_id": "abc",
+                                                    "last_note_ts": "t2"}
+    assert not list((tmp_path / "shells").glob("*.tmp.*"))
+
+
+def test_shell_state_read_missing_file(monkeypatch, tmp_path):
+    _force_enabled(monkeypatch, True,
+                   extra={"shell_state_dir": str(tmp_path / "shells")})
+    assert cortex_bridge.shell_state_read("tg") == {}
+
+
+def test_shell_state_path_defaults_to_data_dir_and_env_shell(monkeypatch):
+    """Empty shell_state_dir -> <DATA_DIR>/state/shells; shell=None -> env id."""
+    _force_enabled(monkeypatch, True, extra={"shell_state_dir": ""})
+    monkeypatch.setenv("MARROW_CORTEX", "tg")
+    p = cortex_bridge._shell_state_path()
+    assert p == config.DATA_DIR / "state" / "shells" / "tg.json"
+
+
+# ── T9: lie_down routing for a non-cli shell ──────────────────────────────────
+
+def _tg_lie_down_env(monkeypatch, tmp_path, sock=""):
+    """tg-shell window with its own state dir; cortex.toml supplies the clamp."""
+    (tmp_path / "cortex.toml").write_text("[wake]\nnext_wake_max = 240\n")
+    monkeypatch.setattr(cortex_bridge, "_cortex_toml_path",
+                        lambda: tmp_path / "cortex.toml")
+    _force_enabled(monkeypatch, True,
+                   extra={"shells": ["cli", "tg"], "shell_socket": sock,
+                          "shell_state_dir": str(tmp_path / "shells")})
+    monkeypatch.setenv("MARROW_CORTEX", "tg")
+
+
+def test_tg_lie_down_writes_ledger_and_kicks_without_running_cortex(
+        monkeypatch, tmp_path):
+    """T9: the tg shell host owns the timing — lie_down only writes
+    next_wake_at and pokes the socket. The cortex module is never spawned."""
+    _tg_lie_down_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(cortex_bridge.subprocess, "run",
+                        lambda *a, **k: pytest.fail("cortex module spawned"))
+    kicks = []
+    monkeypatch.setattr(cortex_bridge, "_shell_kick",
+                        lambda shell: kicks.append(shell) or True)
+
+    out = cortex_bridge.lie_down(next_wake_min=30)
+    assert out["ok"] is True and out["shell"] == "tg" and out["kicked"] is True
+    assert kicks == ["tg"]
+    from datetime import datetime
+    when = datetime.fromisoformat(
+        cortex_bridge.shell_state_read("tg")["next_wake_at"])
+    delta = (when - datetime.now(when.tzinfo)).total_seconds()
+    assert 29 * 60 < delta <= 30 * 60
+    assert out["next_wake"] == when.strftime("%H:%M")
+
+
+def test_tg_lie_down_zero_is_immediate(monkeypatch, tmp_path):
+    _tg_lie_down_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(cortex_bridge, "_shell_kick", lambda shell: True)
+    cortex_bridge.lie_down(next_wake_min=0)
+    from datetime import datetime
+    when = datetime.fromisoformat(
+        cortex_bridge.shell_state_read("tg")["next_wake_at"])
+    assert abs((when - datetime.now(when.tzinfo)).total_seconds()) < 5
+
+
+def test_tg_lie_down_clamps_to_next_wake_max(monkeypatch, tmp_path):
+    _tg_lie_down_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(cortex_bridge, "_shell_kick", lambda shell: True)
+    cortex_bridge.lie_down(next_wake_min=9999)
+    from datetime import datetime
+    when = datetime.fromisoformat(
+        cortex_bridge.shell_state_read("tg")["next_wake_at"])
+    delta = (when - datetime.now(when.tzinfo)).total_seconds()
+    assert 239 * 60 < delta <= 240 * 60
+
+
+def test_tg_lie_down_survives_a_dead_host(monkeypatch, tmp_path):
+    """Host down -> ledger still written, kicked=False, no raise (the host
+    picks the ledger up on its next recompute tick)."""
+    _tg_lie_down_env(monkeypatch, tmp_path,
+                     sock=str(tmp_path / "absent.sock"))
+    out = cortex_bridge.lie_down(next_wake_min=10)
+    assert out["ok"] is True and out["kicked"] is False
+    assert cortex_bridge.shell_state_read("tg")["next_wake_at"]
+
+
+def test_tg_lie_down_rotate_flags_the_ledger_and_kicks(monkeypatch, tmp_path):
+    """rotate=True from a tg-shell window: the host is told to end the window,
+    and the wake it booked is written alongside so the fresh session sleeps
+    until then. Same semantics as the cli shell's rotate."""
+    _tg_lie_down_env(monkeypatch, tmp_path)
+    kicks = []
+    monkeypatch.setattr(cortex_bridge, "_shell_kick",
+                        lambda shell: kicks.append(shell) or True)
+
+    out = cortex_bridge.lie_down(next_wake_min=30, rotate=True)
+
+    assert out["ok"] is True and out["rotate"] is True and out["kicked"] is True
+    assert kicks == ["tg"]
+    st = cortex_bridge.shell_state_read("tg")
+    assert st["rotate_pending"] is True and st["next_wake_at"]
+
+
+def test_tg_lie_down_without_rotate_leaves_no_flag(monkeypatch, tmp_path):
+    _tg_lie_down_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(cortex_bridge, "_shell_kick", lambda shell: True)
+    out = cortex_bridge.lie_down(next_wake_min=30)
+    assert out["rotate"] is False
+    assert "rotate_pending" not in cortex_bridge.shell_state_read("tg")
+
+
+def test_shell_direct_writes_pending_note_and_kicks(monkeypatch, tmp_path):
+    """T10 directed kick: the text lands in the ledger, then the host is poked."""
+    _force_enabled(monkeypatch, True,
+                   extra={"shell_state_dir": str(tmp_path / "shells")})
+    kicks = []
+    monkeypatch.setattr(cortex_bridge, "_shell_kick",
+                        lambda shell: kicks.append(shell) or True)
+    out = cortex_bridge.shell_direct("  go check the diary  ")
+    assert out == {"ok": True, "shell": "tg", "kicked": True}
+    assert kicks == ["tg"]
+    assert cortex_bridge.shell_state_read("tg")["pending_note"] == "go check the diary"
+
+
+def test_shell_direct_rejects_empty_text_without_kicking(monkeypatch, tmp_path):
+    _force_enabled(monkeypatch, True,
+                   extra={"shell_state_dir": str(tmp_path / "shells")})
+    monkeypatch.setattr(cortex_bridge, "_shell_kick",
+                        lambda shell: pytest.fail("must not kick"))
+    assert cortex_bridge.shell_direct("   ")["ok"] is False
+    assert cortex_bridge.shell_state_read("tg") == {}
+
+
+def test_shell_direct_survives_a_dead_host(monkeypatch, tmp_path):
+    """Host down -> kicked False, text still queued for its recompute tick."""
+    _force_enabled(monkeypatch, True,
+                   extra={"shell_state_dir": str(tmp_path / "shells"),
+                          "shell_socket": str(tmp_path / "absent.sock")})
+    out = cortex_bridge.shell_direct("wake up")
+    assert out["ok"] is True and out["kicked"] is False
+    assert cortex_bridge.shell_state_read("tg")["pending_note"] == "wake up"
+
+
+def test_cli_shell_direct_command(monkeypatch, tmp_path, capsys):
+    """mw shell-direct <text> — the slash-command entry point."""
+    from marrow import cli
+    _force_enabled(monkeypatch, True,
+                   extra={"shell_state_dir": str(tmp_path / "shells")})
+    monkeypatch.setattr(cortex_bridge, "_shell_kick", lambda shell: True)
+    assert cli.main(["shell-direct", "go", "check", "the", "diary"]) == 0
+    assert "kicked=True" in capsys.readouterr().out
+    assert cortex_bridge.shell_state_read("tg")["pending_note"] == "go check the diary"
+
+
+def test_shell_kick_wire_format_is_one_shell_line(monkeypatch, tmp_path):
+    """The datagram must match synapse_core.scheduler.send_kick: "<shell>\\n"
+    over an AF_UNIX stream socket. Real socket, short path (macOS 104-byte cap)."""
+    import shutil
+    import socket
+    import tempfile
+    import threading
+    d = tempfile.mkdtemp(prefix="mwk", dir="/tmp")
+    try:
+        path = f"{d}/s.sock"
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(path)
+        srv.listen(1)
+        got = []
+
+        def _accept():
+            conn, _ = srv.accept()
+            got.append(conn.recv(64))
+            conn.close()
+
+        t = threading.Thread(target=_accept, daemon=True)
+        t.start()
+        _force_enabled(monkeypatch, True, extra={"shell_socket": path})
+        assert cortex_bridge._shell_kick("tg") is True
+        t.join(timeout=5)
+        srv.close()
+        assert got == [b"tg\n"]
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_shell_kick_without_a_socket_for_that_shell(monkeypatch, tmp_path):
+    """The single shell_socket belongs to tg; another shell has none, so the
+    kick is skipped instead of poking tg's socket."""
+    _force_enabled(monkeypatch, True, extra={"shell_socket": str(tmp_path / "s.sock")})
+    assert cortex_bridge._shell_socket_path("tg") == tmp_path / "s.sock"
+    assert cortex_bridge._shell_socket_path("wx") is None
+    assert cortex_bridge._shell_kick("wx") is False
+
+
+def test_bad_marrow_cortex_value_is_refused_not_read_as_cli(monkeypatch, tmp_path):
+    """A malformed marker must never resolve to cli and claim its ledger."""
+    _force_enabled(monkeypatch, True,
+                   extra={"shell_state_dir": str(tmp_path / "shells")})
+    cortex_bridge._bad_shell_id_warned.clear()
+    alerts = []
+    monkeypatch.setattr(cortex_bridge, "_warn_bad_shell_id", alerts.append)
+    monkeypatch.setenv("MARROW_CORTEX", "../cli")
+    assert cortex_bridge._cortex_shell_id() is None
+    assert alerts == ["../cli"]
+    assert cortex_bridge._shell_enabled() is False
+    assert cortex_bridge._cortex_handoff_path() is None
+    assert cortex_bridge.wakeup_note_text("/t/x.jsonl") is None
+    assert cortex_bridge.lie_down(30)["ok"] is False
+    with pytest.raises(ValueError):
+        cortex_bridge._shell_state_path()
+
+
+def test_marrow_cortex_legacy_and_explicit_shell_ids(monkeypatch):
+    _force_enabled(monkeypatch, True)
+    monkeypatch.delenv("MARROW_CORTEX", raising=False)
+    assert cortex_bridge._cortex_shell_id() == "cli"
+    monkeypatch.setenv("MARROW_CORTEX", "1")
+    assert cortex_bridge._cortex_shell_id() == "cli"
+    monkeypatch.setenv("MARROW_CORTEX", "TG")
+    assert cortex_bridge._cortex_shell_id() == "tg"
+    monkeypatch.setenv("MARROW_CORTEX", "wx")
+    assert cortex_bridge._cortex_shell_id() == "wx"
+
+
+def test_cli_lie_down_path_untouched_by_the_shell_route(env, monkeypatch, tmp_path):
+    """Regression: the cli shell still spawns cortex.lie_down and writes no
+    shell state file."""
+    _force_enabled(monkeypatch, True,
+                   extra={"venv_python": str(tmp_path / "py"),
+                          "repo_root": str(tmp_path / "repo"),
+                          "shell_state_dir": str(tmp_path / "shells")})
+    monkeypatch.delenv("MARROW_CORTEX", raising=False)
+    captured = {}
+
+    class _P:
+        returncode = 0
+        stdout = '{"next_wake": "10:30"}'
+        stderr = ""
+
+    monkeypatch.setattr(cortex_bridge.subprocess, "run",
+                        lambda cmd, cwd=None, **kw: captured.update(cmd=cmd) or _P())
+    out = cortex_bridge.lie_down(next_wake_min=20)
+    assert out["next_wake"] == "10:30"
+    assert captured["cmd"][1:3] == ["-m", "cortex.lie_down"]
+    assert not (tmp_path / "shells").exists()
+
+
 def test_tool_descriptions_render_clamp_numbers_from_config(monkeypatch, tmp_path):
-    """C9/C10: lie_down + wait descriptions render clamp numbers from cortex.toml
-    at register(), never hardcoded. A shared cortex.toml supplies the values,
-    including the nested [wake.watchdog].silent_max_min auto-timer length."""
+    """C9: lie_down description renders the clamp range from cortex.toml at
+    register(), never hardcoded. T3: single 0-day_max band, night retired."""
     (tmp_path / "cortex.toml").write_text(
-        "[wake]\nwait_min = 2\nwait_max = 18\nnext_wake_min = 25\n"
-        "next_wake_max = 200\n[wake.watchdog]\nsilent_max_min = 12\n"
-        "[night]\nfloor_min = 90\nfloor_max = 300\n")
+        "[wake]\nnext_wake_max = 200\n")
     monkeypatch.setattr(cortex_bridge.config, "db_path",
                         lambda: str(tmp_path / "marrow.db"))
     _force_enabled(monkeypatch, True)
@@ -326,29 +715,24 @@ def test_tool_descriptions_render_clamp_numbers_from_config(monkeypatch, tmp_pat
     monkeypatch.setattr(cortex_bridge, "_CORTEX", True)
     cortex_bridge.register(mt)
     ld = m._tool_manager._tools["lie_down"].description
-    wd = m._tool_manager._tools["wait"].description
-    assert "N=25-200 (Day); 90-300 (Night)" in ld
-    assert "N=2-18" in wd
-    assert "no consecutive empty waits" in wd
-    assert "12-min auto timer" in wd  # rendered from [wake.watchdog].silent_max_min
-    assert "expiry brings the 3-choice menu" in wd
+    assert "N=0-200" in ld
     # No stale hardcoded ranges leaked in.
-    assert "16-55" not in wd and "90-360" not in ld
+    assert "16-55" not in ld
 
 
 def test_tool_descriptions_fall_back_to_defaults(monkeypatch, tmp_path):
-    """No cortex.toml -> tolerant defaults (day 21-240, wait 1-20, night 120-360,
-    auto timer 20)."""
+    """No cortex.toml -> tolerant default (day_max 360, T3 clamp)."""
     monkeypatch.setattr(cortex_bridge.config, "db_path",
                         lambda: str(tmp_path / "marrow.db"))  # no cortex.toml here
     _force_enabled(monkeypatch, True)
     m, mt = _fresh_mcp()
     monkeypatch.setattr(cortex_bridge, "_CORTEX", True)
     cortex_bridge.register(mt)
-    assert "N=21-240 (Day); 120-360 (Night)" in \
-        m._tool_manager._tools["lie_down"].description
-    assert "20-min auto timer" in m._tool_manager._tools["wait"].description
-    assert "N=1-20" in m._tool_manager._tools["wait"].description
+    ld = m._tool_manager._tools["lie_down"].description
+    assert "N=0-360" in ld and "rotate=True" in ld
+    assert 'mode="night"' not in ld and "night mode" not in ld
+    # Retired tail copy (Monitor-era TaskStop drill) must be gone.
+    assert "TaskStop" not in ld and "monitor" not in ld.lower()
 
 
 def test_switch_off_show_context_gated_empty(monkeypatch, tmp_path):
@@ -359,55 +743,11 @@ def test_switch_off_show_context_gated_empty(monkeypatch, tmp_path):
     assert cortex_bridge._cortex_show_context(str(tmp_path / "none.jsonl")) == ""
 
 
-def test_switch_off_lie_down_deny_inactive(monkeypatch):
-    """lie_down deny helper is inert without a cortex session; and enabled=false
-    means the PreToolUse call site never reaches it at all."""
-    _force_enabled(monkeypatch, False)
-    monkeypatch.delenv("MARROW_CORTEX", raising=False)
-    inp = {"tool_name": "mcp__marrow__lie_down", "tool_input": {"rotate": True}}
-    assert cortex_bridge._cortex_lie_down_deny(inp) is None
-
-
-
-
 # ── wake v2 (Item 1-3) ────────────────────────────────────────────────────────
-
-def test_arm_ear_text_substitutes_signal_log(monkeypatch, tmp_path):
-    """arm_ear_text substitutes {signal_log} with the path resolved under home."""
-    _force_enabled(monkeypatch, True, extra={
-        "home": str(tmp_path),
-        "arm_ear_text": "arm: tail {signal_log}",
-    })
-    assert cortex_bridge.arm_ear_text() == f"arm: tail {tmp_path/'state'/'wake_signal.log'}"
-
-
-def test_arm_ear_text_absolute_override(monkeypatch, tmp_path):
-    """An absolute wake_signal_log_file override is used as-is."""
-    log = tmp_path / "custom.log"
-    _force_enabled(monkeypatch, True, extra={
-        "home": str(tmp_path),
-        "wake_signal_log_file": str(log),
-        "arm_ear_text": "tail {signal_log}",
-    })
-    assert cortex_bridge.arm_ear_text() == f"tail {log}"
-
-
-def test_arm_ear_text_blank_returns_none(monkeypatch, tmp_path):
-    """Blank arm text -> None (caller injects nothing)."""
-    _force_enabled(monkeypatch, True,
-                   extra={"home": str(tmp_path), "arm_ear_text": ""})
-    assert cortex_bridge.arm_ear_text() is None
-
-
-def test_wake_marker_reads_config(monkeypatch):
-    """wake_marker reflects [cortex].wake_marker (stripped)."""
-    _force_enabled(monkeypatch, True, extra={"wake_marker": "  [CORTEX-WAKE] "})
-    assert cortex_bridge.wake_marker() == "[CORTEX-WAKE]"
-
 
 def test_wakeup_note_text_reads_file(monkeypatch, tmp_path):
     """wakeup_note_text returns the note file contents (stripped)."""
-    (tmp_path / "wakeup_note.md").write_text("  do the thing  ", encoding="utf-8")
+    (tmp_path / "wakeup_note.md").write_text("## cli\n  do the thing  \n", encoding="utf-8")
     _force_enabled(monkeypatch, True, extra={"home": str(tmp_path)})
     assert cortex_bridge.wakeup_note_text() == "do the thing"
 
@@ -425,41 +765,83 @@ def test_wakeup_note_text_empty_returns_none(monkeypatch, tmp_path):
     assert cortex_bridge.wakeup_note_text() is None
 
 
-def test_rearm_text_substitutes_signal_log(monkeypatch, tmp_path):
-    """rearm_text substitutes {signal_log}."""
-    _force_enabled(monkeypatch, True, extra={
-        "home": str(tmp_path),
-        "rearm_text": "rearm: tail {signal_log}",
-    })
-    assert cortex_bridge.rearm_text() == f"rearm: tail {tmp_path/'state'/'wake_signal.log'}"
-
-
-def test_rearm_text_blank_returns_none(monkeypatch, tmp_path):
-    """Blank rearm text -> None."""
-    _force_enabled(monkeypatch, True,
-                   extra={"home": str(tmp_path), "rearm_text": ""})
-    assert cortex_bridge.rearm_text() is None
-
-
-def test_is_monitor_death_matches_notification():
-    """Fires on the harness Monitor-stopped task-notification shape."""
-    prompt = ('<task-notification>\n<task-id>bwkjxl09h</task-id>\n'
-              '<summary>Monitor event: "ear"</summary>\n'
-              '<event>[Monitor stopped — too much output.]</event>\n'
-              '</task-notification>')
-    assert cortex_bridge.is_monitor_death(prompt) is True
-
-
-def test_is_monitor_death_silent_on_normal_chat():
-    """Never fires on ordinary chat, or on a live (non-stopped) monitor event."""
-    assert cortex_bridge.is_monitor_death("聊聊天，顺便说下 Monitor 怎么用") is False
-    assert cortex_bridge.is_monitor_death("") is False
-    live = ('<task-notification>\n<summary>Monitor event: "ear"</summary>\n'
-            '<event>[CORTEX-WAKE] 2026-07-11 wake</event>\n</task-notification>')
-    assert cortex_bridge.is_monitor_death(live) is False
-
-
 def test_boot_rules_helpers_removed():
     """The rejected boot_rules SessionStart mechanism is fully gone."""
     assert not hasattr(cortex_bridge, "cortex_boot_rules")
     assert not hasattr(cortex_bridge, "_cortex_boot_rules_path")
+
+
+# ── shell sleep ledger (ct_wake_log rows per shell) ───────────────────────────
+
+def _wake_log_db(tmp_path):
+    """A db carrying the live ct_wake_log shape (cortex owns the migration)."""
+    import sqlite3
+    db = str(tmp_path / "wake.db")
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE ct_wake_log (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "ts TEXT NOT NULL, wake INTEGER NOT NULL, dry_run INTEGER NOT NULL, "
+        "reasons TEXT, gated_by TEXT, explanation TEXT, tokens INTEGER, "
+        "force_slept TEXT, net_tokens INTEGER, "
+        "shell TEXT NOT NULL DEFAULT 'cli')")
+    conn.commit()
+    conn.close()
+    return db
+
+
+def _wake_rows(db):
+    import sqlite3
+    conn = sqlite3.connect(db)
+    try:
+        return conn.execute(
+            "SELECT shell, wake, dry_run, reasons, force_slept "
+            "FROM ct_wake_log ORDER BY id").fetchall()
+    finally:
+        conn.close()
+
+
+def test_tg_lie_down_writes_one_wake_log_row(monkeypatch, tmp_path):
+    """T2: a tg shell lie_down lands exactly one ct_wake_log row stamped
+    shell='tg' with force_slept empty (a voluntary sleep is no incident)."""
+    db = _wake_log_db(tmp_path)
+    monkeypatch.setattr(config, "db_path", lambda: db)
+    _force_enabled(monkeypatch, True,
+                   extra={"shell_state_dir": str(tmp_path / "shells")})
+    monkeypatch.setattr(cortex_bridge, "_cortex_toml_section",
+                        lambda *a, **k: 240)
+    monkeypatch.setattr(cortex_bridge, "_shell_kick", lambda shell: True)
+    monkeypatch.setenv("MARROW_CORTEX", "tg")
+
+    out = cortex_bridge.lie_down(30)
+
+    assert out["ok"] is True and out["shell"] == "tg"
+    rows = _wake_rows(db)
+    assert len(rows) == 1
+    shell, wake, dry_run, reasons, force_slept = rows[0]
+    assert shell == "tg"
+    assert (wake, dry_run, reasons) == (1, 0, "lie_down")
+    assert force_slept is None
+
+
+def test_cli_lie_down_writes_no_shell_row(monkeypatch, tmp_path):
+    """T2 regression: the cli path is unchanged — cortex writes its own row, so
+    the bridge must not add one here."""
+    db = _wake_log_db(tmp_path)
+    monkeypatch.setattr(config, "db_path", lambda: db)
+    _force_enabled(monkeypatch, True,
+                   extra={"shell_state_dir": str(tmp_path / "shells")})
+    monkeypatch.setattr(cortex_bridge, "_run_cortex_module",
+                        lambda module, args=None: {"ok": True, "stdout": "{}"})
+    monkeypatch.setenv("MARROW_CORTEX", "1")
+
+    assert cortex_bridge.lie_down(30)["ok"] is True
+    assert _wake_rows(db) == []
+
+
+def test_shell_sleep_row_survives_missing_table(monkeypatch, tmp_path):
+    """Best-effort: a db without ct_wake_log never fails the sleep."""
+    db = str(tmp_path / "empty.db")
+    import sqlite3
+    sqlite3.connect(db).close()
+    monkeypatch.setattr(config, "db_path", lambda: db)
+    assert cortex_bridge._log_shell_sleep_row("tg") is None

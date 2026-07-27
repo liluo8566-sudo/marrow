@@ -205,11 +205,49 @@ def _is_machine_marker_row(text: str, markers: tuple[str, ...]) -> bool:
     """True iff *text* (a stripped user/assistant turn) BEGINS with a machine
     marker — after tolerating a leading emoji/symbol run. Line-start match only:
     a message merely quoting a marker mid-body keeps flowing (zero false positives
-    on real speech)."""
+    on real speech). Also drops the human-text wake bell (template prefix + HH:MM),
+    whose machine data lives in the wake_state receipt, not an inline marker."""
+    if _is_wake_bell_row(text):
+        return True
     if not markers:
         return False
     head = _MACHINE_MARKER_LEAD_RE.sub("", text, count=1)
     return any(head.startswith(m) for m in markers)
+
+
+def _wake_bell_row_re():
+    """Compiled matcher for the visible wake bell ([cortex].wake_bell_template),
+    cached per template string. The bell is human text only (no inline marker),
+    so this shape match is what keeps it out of memory. A template WITH an '{hm}'
+    placeholder matches '<prefix> HH:MM$'; a fully STATIC template (no {hm})
+    matches its literal text exactly. None when the shape is empty/disabled.
+    Anchored to the whole (stripped) row so a message merely containing the text
+    keeps flowing."""
+    try:
+        from . import config
+        cx = config.load().get("cortex", {}) or {}
+        tmpl = str(cx.get("wake_bell_template") or "☀️ {hm}")
+    except Exception:
+        return None
+    cached = getattr(_wake_bell_row_re, "_cache", None)
+    if cached is not None and cached[0] == tmpl:
+        return cached[1]
+    if "{hm}" in tmpl:
+        prefix = tmpl.split("{hm}", 1)[0].strip()
+        rx = re.compile(rf"^{re.escape(prefix)}\s*\d{{1,2}}:\d{{2}}$") if prefix else None
+    else:
+        static = tmpl.strip()
+        rx = re.compile(rf"^{re.escape(static)}$") if static else None
+    _wake_bell_row_re._cache = (tmpl, rx)
+    return rx
+
+
+def _is_wake_bell_row(text: str) -> bool:
+    rx = _wake_bell_row_re()
+    if rx is None:
+        return False
+    head = _MACHINE_MARKER_LEAD_RE.sub("", text.strip(), count=1)
+    return bool(rx.match(text.strip()) or rx.match(head))
 
 
 def _is_harness_row(text: str) -> bool:

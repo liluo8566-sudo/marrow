@@ -50,19 +50,43 @@ def agent_tokens_from_transcript(tpath: str) -> int:
 # kv read
 # --------------------------------------------------------------------------- #
 
+_CDX_STALE_SEC = 48 * 3600  # a fossilled cdx_* row (dead collector, schema
+                            # drift) sat unnoticed for 15 days once — gate it
+
+
+def _cdx_row_is_stale(updated_at: str, now: datetime) -> bool:
+    try:
+        dt = datetime.fromisoformat((updated_at or "").replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return True  # unparsable timestamp -> treat as stale
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (now - dt).total_seconds() > _CDX_STALE_SEC
+
+
 def read_kv() -> dict[str, str]:
-    """Whole ct_rate_limit kv the collector maintains. {} on any failure."""
+    """Whole ct_rate_limit kv the collector maintains. {} on any failure.
+    cdx_* rows older than 48h are dropped — only these, since Codex quota has
+    no live watcher heartbeat consumers can otherwise cross-check against."""
     try:
         conn = storage.connect(config.db_path())
     except Exception:
         return {}
     try:
-        rows = conn.execute("SELECT key, value FROM ct_rate_limit").fetchall()
-        return {r["key"]: r["value"] for r in rows}
+        rows = conn.execute(
+            "SELECT key, value, updated_at FROM ct_rate_limit").fetchall()
     except Exception:
         return {}
     finally:
         conn.close()
+    now = datetime.now(timezone.utc)
+    kv: dict[str, str] = {}
+    for r in rows:
+        key = r["key"]
+        if key.startswith("cdx_") and _cdx_row_is_stale(r["updated_at"], now):
+            continue
+        kv[key] = r["value"]
+    return kv
 
 
 def _as_float(raw) -> float | None:
@@ -127,6 +151,8 @@ def _plan_used_segments(kv: dict, with_cdx: bool) -> list[str]:
             parts.append(f"cdx 5h {cp:.0f}% 7d {cs:.0f}%")
         elif cp is not None:
             parts.append(f"cdx 5h {cp:.0f}%")
+        elif cs is not None:
+            parts.append(f"cdx 7d {cs:.0f}%")
     return parts
 
 

@@ -2,13 +2,16 @@
 # Swap the conversation/pipeline provider by editing one chain entry below.
 
 [core]
-timezone = "Asia/Shanghai"
+# Empty/absent = follow the OS timezone. Set an IANA name (e.g. "Asia/Shanghai")
+# only for headless/VPS deploys where the OS tz differs from the user's.
+timezone = ""
 
 [schedule]
 # Calendar + Reminders injection (SessionStart full + in-session diff).
 # false = both SessionStart and in-session injection off.
 enabled = true
-# Path to the cadence binary. Empty = built-in default under ~/CC-Lab.
+# Path to the cadence binary (`~` expanded). Empty = built-in default under
+# ~/CC-Lab.
 cadence_bin = ""
 # Header line shown above the schedule block.
 flag_note = "Only follow up overdue flagged 🚩 tasks — no push on others."
@@ -38,11 +41,40 @@ monitor = ""
 db_pages = ""
 # State dir for db-page hashes. Empty = <DATA_DIR>/state.
 db_pages_state = ""
+# Vault root. Empty = disabled; drives db_pages/daybrief/sticker defaults.
+# e.g. "~/Documents/my-vault"
+ny_root = ""
+# Drift-sweep working dirs + rendered file-tree snapshot.
+drift_pending_dir = "~/.config/marrow/drift_pending"
+drift_backup_dir = "~/.config/marrow/drift_backup"
+dir_tree_md = "~/.config/marrow/dir_tree.md"
+# Watcher/pipeline logs + runtime state.
+logs_dir = "~/.config/marrow/logs"
+state_dir = "~/.config/marrow/state"
 
 [backup]
 # Daily DB snapshots to retain each side (local + offsite). Conservative
 # flat count; calendar/GFS rotation is DESIGN-Pending.
 keep = 14
+
+[drift]
+# Reference-matcher tuning for drift_sweep. All lists deep-merge onto the
+# built-in defaults so a fork can extend without editing code.
+# Directory names never scanned for references (added to the built-in set:
+# .git, __pycache__, node_modules, venvs, backups, archives, worktrees).
+# Handoff/day archive rotation dirs belong here — an archived snapshot's refs
+# point at the still-live file, so the only correct verdict is reject.
+exclude_dirs = ["handoff_archive", "day_archive"]
+# Filename substrings that mark a snapshot/export/fixture artifact. A file
+# whose name contains any of these never produces refs (html exports, eval
+# baseline/fixture json, rendered dir-tree snapshots, .gitignore data lists).
+exclude_name_parts = [
+    ".html", ".htm", "baseline", "fixture", ".gitignore",
+    "dir_tree", "package-lock", "yarn.lock", ".min.js", ".min.css",
+]
+# Max refs kept per rename. Beyond this the pending record is truncated and
+# marked so one runaway rename cannot balloon into a multi-MB pending file.
+ref_cap = 200
 
 [llm]
 # Selection chain. Callers pass intent only.
@@ -59,13 +91,6 @@ kind = "claude_cli"
 # (not the 6/15 credit pool). "p" = legacy headless fallback (-p).
 mode = "stream"
 timeout_s = 240
-
-[llm.claude_cli_cortex]
-kind = "claude_cli_cortex"
-# Full-environment runner for the cortex session (C3, Decided 07-03): NO
-# isolation flags — persona/rules/MCP/agents load like a real session.
-# MARROW_CORTEX=1 always injected so hooks/tl_add skip its turns.
-timeout_s = 600
 
 [tiers]
 # Intent -> model. Passed to `claude -p --model`; CC resolves aliases.
@@ -205,7 +230,7 @@ hidden = []
 # Per-turn care directive injected every UserPromptSubmit (config-first).
 # Emotion-first, preference-style wording. Edit freely — no code change.
 care_text = """
-- Care first: read her mood and tend to it before any task, like a doting husband — warm, attentive, quick to coax when she is off.
+- Care first: read the user's mood and tend to it before any task — warm, attentive, quick to coax when they are off.
 - Nudge gently, never push; vary your warmth and wording every turn — no template phrases, no repeated openers.
 """
 
@@ -228,11 +253,11 @@ im_quiet_text = ""
 
 [cortex_rotate]
 # Cortex-only (MARROW_CORTEX=1) window-occupancy 亮牌. When window tokens reach
-# show_tokens (10万 soft, ahead of the 15万 fuse) turn_inject appends a one-line
-# nudge to wrap up, write the handoff, and lie_down(rotate=True). Normal
-# sessions never see this. Empty text = inert.
-show_tokens = 120000
-show_text = "Context ≥120k - If not actively chatting with user, handoff within 3 turns and lie_down(rotate=True) to clear (rotate unlocks a short next_wake, ≥16min). If mid-conversation: carry on, the 150k fuse is the backstop."
+# show_tokens (16万 soft nudge, ahead of the 18万 cortex fuse) turn_inject
+# appends a one-line nudge to wrap up, write the handoff, and
+# lie_down(rotate=True). Normal sessions never see this. The nudge text is
+# mechanism-defining copy (in code); show_tokens = 0 is the off-switch.
+show_tokens = 160000
 # Behavioural presence gate (mirrors cortex silent_max_min = 15): hold the nudge
 # while the user's last real message is younger than this many minutes (mid-chat
 # — the fuse is the backstop), inject once they have been silent this long. 0 =
@@ -290,6 +315,19 @@ style = "叙述生动有趣，故事性强。文艺中带着搞笑。"
 [cortex]
 # Master switch: cortex is an optional autonomous-wake layer living in a separate repo; false = clean marrow, no cortex organs.
 enabled = false
+# Per-shell switch. A shell id (MARROW_CORTEX value; legacy "1" = cli) absent
+# from this list runs plain: no cortex tools, no cortex hook branches, no
+# heartbeat. lie_down serves every listed shell, say the cli shell only.
+shells = ["cli"]
+# Per-shell state files (<dir>/<shell>.json, keys session_id / next_wake_at /
+# last_note_ts), written by the shell's host. flock + atomic replace. The cli
+# shell keeps its own wake_state.json. Empty = <DATA_DIR>/state/shells.
+shell_state_dir = ""
+# Kick socket of the shell host (the tg bridge): lie_down from a non-cli shell
+# writes next_wake_at then pokes this socket so the host re-reads the ledger at
+# once. Must match the host's own setting. Keep it SHORT — macOS caps an
+# AF_UNIX path at 104 bytes. Empty = <DATA_DIR>/state/shells/tg.sock.
+shell_socket = ""
 # Cortex own notebook home (C3, Decided 07-03 pm) — cwd for the resumed
 # full-env session; own CLAUDE.md lives here, other sessions never read it.
 home = "~/.config/marrow/cortex"
@@ -311,52 +349,56 @@ repo_root = ""
 # read-only) instead of the frozen file; reflects current time + caller SID even
 # after a window rotation. Empty = disabled, static file only.
 render_module = ""
-# When the cortex window is closed while a wake is open, session_end runs a
-# proxy lie_down(--force-slept auto) with this next-wake (minutes, clamped
-# 1..240 by cortex) so the wake ends at once instead of waiting for the
-# 20-min fallback to discover the dead window.
-close_next_wake_min = 55
-# Handoff note file under <home>. Read via the cortex CLAUDE.md
-# `@handoff.md` memory import, not injected by SessionStart. Written by the
-# session. Daily file with lazy page-turn on a fresh cortex-window
-# SessionStart: a stale (yesterday-or-older) L1 date triggers archive to
-# <home>/<handoff_archive_dir>/ and replacement by a fresh copy of
-# <home>/<handoff_template_file>.
-handoff_file = "handoff.md"
+# Handoff note file under <home>. Read via the cortex CLAUDE.md memory import,
+# not injected by SessionStart. Written by the session. Per-shell rolling log:
+# {shell} is filled by code (cli/tg). Line-count page-turn on a fresh
+# cortex-window SessionStart: > handoff_max_lines triggers archive to
+# <home>/<handoff_archive_dir>/ + fresh <handoff_template_file>, carrying
+# unchecked todos + last handoff_carry_lines activity lines.
+handoff_file_pattern = "handoff-{shell}.md"
 handoff_archive_dir = "handoff_archive"
 handoff_template_file = "handoff_template.md"
-# lie_down PreToolUse guard: deny (write your handoff first) when rotate=True OR
-# window occupancy >= force_tokens (15万 fuse line) and no handoff was written
-# this window (handoff mtime after the window's first transcript line).
-force_tokens = 150000
-handoff_deny_text = "Write your handoff note first — call lie_down again after saving it."
+# Page-turn thresholds (toml-tunable).
+handoff_max_lines = 150
+handoff_carry_lines = 10
+# Template contract headings (the sole code<->template contract). todo section =
+# todo_heading to next heading (top of file); activity = activity_heading to EOF;
+# carry lines land under carry_heading.
+handoff_todo_heading = "## 待办"
+handoff_activity_heading = "## 日志"
+handoff_carry_heading = "### 前情"
+# lie_down PreToolUse nudge (non-blocking additionalContext, every call).
+# {handoff} = the shell's own handoff path, filled by code. rotate arg selects
+# the rotate variant.
+lie_down_nudge_text = "Append one line to {handoff} if any activity. Skip if pure chat."
+lie_down_nudge_rotate_text = "Update {handoff} before rotate. Add todo if any."
 # Wake pipeline (v2). The ear is a Monitor tailing wake_signal_log_file; cortex
-# appends wake_marker-prefixed lines to it, which surface as user turns. Paths
+# appends the human-text bell line to it, which surfaces as a user turn. Paths
 # for the note and signal log default to <home>/<file> (override with an
 # absolute path).
 wakeup_note_file = "wakeup_note.md"
+# Invisible free-round payload: cortex stages the rendered note here and types
+# only the short ⏳ marker; this hook injects the body on that marker turn and
+# deletes the file. Must match cortex [paths].free_round_note_file.
+free_round_note_file = "free_round_note.md"
 wake_signal_log_file = "state/wake_signal.log"
-# Marker prefixing a wake signal line. A UserPromptSubmit carrying it inside a
-# cortex window is a wake turn: the hook injects the full wakeup-note text.
-wake_marker = "[CORTEX-WAKE]"
-# SessionStart arm line (fresh cortex window only). {signal_log} is substituted
-# with the resolved absolute path. Blank = no injection.
-arm_ear_text = "Important: Set a persistent monitor first: Monitor(command: \"tail -n 0 -f {signal_log}\", description: \"cortex wake signal\", persistent: true); keep it alive for the entire session!"
-# Rearm line injected when the ear Monitor dies mid-window (the harness surfaces
-# a "Monitor stopped" task-notification). {signal_log} substituted. Blank = off.
-rearm_text = "Monitor is off — rearm now: Monitor(command: \"tail -n 0 -f {signal_log}\", description: \"cortex wake signal\", persistent: true); then investigate why it died."
-# SessionStart line injected on a RESUMED cortex window (fresh windows get
-# arm_ear_text instead). The prior process died with its ear Monitor; the
-# resumed window has no live tail and the harness surfaces stale task
-# notifications. This line tells the model to drop the leftovers and re-arm.
-# {signal_log} substituted with the resolved absolute path. Blank = off.
-resume_ear_text = "⏯️ The session has been resumed - re-arm a fresh monitor (Monitor(command: \"tail -n 0 -f {signal_log}\", description: \"cortex wake signal\", persistent: true)). Continue the conversation as normal."
-# SessionStart line for a RESUMED cortex window that is NO LONGER the resident
-# (wake_state.json points at a different transcript — a newer cortex took over,
-# or this window was rotated out and is reopened only to read history). This
-# window must stay read-only: arm no ear, touch no wake_state, never rotate.
-# {signal_log} substituted with the resolved absolute path. Blank = off.
-retired_ear_text = "⏯️ This is an archived session - ignore all task/monitor. Do not call any tool."
+# Visible wake lines = human text only. The producer writes the exact rendered
+# text + the template it used into the wake_state receipt at send time; the hook
+# exact-matches the on-screen line against that receipt. {hm} = local HH:MM. The
+# static prefix (text before {hm}) is the shape the consumer falls back to when
+# the receipt is missing/unreadable (fail-open) — BOTH templates are candidates.
+#   spawn_opener_template = first prompt of a freshly spawned cortex window
+#     (must match cortex [wake].spawn_opener_template).
+#   wake_bell_template = line typed into a live resident window
+#     (must match cortex [wake].wake_bell_template).
+spawn_opener_template = "[☀️ {hm}]"
+wake_bell_template = "⏰ {hm}"
+# Receipt time-to-live (minutes): a pending receipt older than this is ignored
+# (stale hygiene). Must match cortex [wake].receipt_ttl_min.
+receipt_ttl_min = 15
+# The wake-ear guidance lines (fresh-window arm, mid-window rearm, resumed-window
+# re-arm, retired-window read-only) are mechanism-defining copy and live in code.
+# Each renders {signal_log} with the resolved absolute path at inject time.
 # Marker in the free-round line the cortex watchdog appends to wake_signal.log
 # (arrives down the ear channel). A cortex-window prompt carrying it is a machine
 # line, excluded from the user-wake reset — must match cortex tuck_in_text.
@@ -371,16 +413,42 @@ compact_markers = ["===== BEGIN ORIGINAL TRANSCRIPT", "===== END ORIGINAL TRANSC
 compact_marker_head_chars = 200
 # Line-start machine markers. Any transcript turn whose first non-space chars
 # begin with one of these is a cortex-injected machine line (wake bell, free
-# round, night close, fuse, ctl, slash-command body), NOT user/assistant speech,
+# round, fuse, ctl, slash-command body), NOT user/assistant speech,
 # so ingestion drops it from events/recall/tl. Exact line-start match only —
 # a real message merely quoting a marker keeps flowing. Emoji prefix (⚙️/⏳/☀️)
-# is tolerated automatically.
-machine_markers = ["[CORTEX-WAKE]", "[NEW ROUND]", "[TUCK-IN]", "[NIGHT]",
-                   "[FUSE]", "[CTL]", "[CMD"]
+# is tolerated automatically. (The wake bell is human text now — dropped from
+# ingestion via the template-shape match in transcript._is_wake_bell_row, not
+# an inline marker here.)
+machine_markers = ["[NEW ROUND]", "[FUSE]", "[CTL]", "[CMD"]
 # Audit log for destructive wake-state actions (sentinel kill / floor clear /
 # awake flip). Bare name resolves under cortex home. Never silently destroy a
 # scheduled alarm again.
 wake_audit_log_file = "state/wake_audit.log"
+
+# Circuit breaker ("main switch"): ONE persistent file that stops cortex
+# AUTONOMOUS activity (auto wake / spawn / fed round) for the shells it covers.
+# Bridges keep running, normal tg/wx chat is untouched, manual commands still
+# work. Survives every restart; only an explicit clear releases it.
+#
+# State file: <DATA_DIR>/breaker.json — {"scope": "all"|"cli"|"tg",
+# "reason": "auto_fuse"|"manual", "ts": "<iso>"}. File absent = breaker clear.
+# Fuse tally: <DATA_DIR>/fuse_events.json — {"events": [{"ts": "<iso>",
+# "shell": "cli"|"tg"}, ...]}, pruned to window_hours on every write.
+#
+# This is the ONLY place these numbers live — the cortex repo and the tg bridge
+# both read THIS file directly (no per-repo copies of the same threshold).
+[cortex.breaker]
+# false = fuses are still tallied, but a threshold breach never trips the
+# breaker automatically. Manual pause (ct-pause) always works regardless.
+enabled = true
+# Fuses (across ALL shells) inside window_hours that trip the breaker.
+fuse_threshold = 2
+# Rolling window for the fuse tally, in hours.
+window_hours = 24
+# Notification copy. {count} = fuses in window, {hours} = window_hours,
+# {scope} = all/cli/tg. Display text — customise freely.
+trip_message = "Circuit breaker tripped: fuse #{count} within {hours}h. Cortex autonomous activity paused ({scope}). Clear with ct-wake."
+clear_message = "Circuit breaker cleared — cortex autonomous activity resumed."
 
 [outbox]
 # Cross-channel message drop (msg MCP tool → outbox table → channel adapters).
@@ -406,19 +474,21 @@ own_note_header = "📤 Sent on this channel"
 wire_channels = ["tg", "wx"]
 
 [replay]
-# Cross-session replay inject (turn_inject): each session passively hears other
-# sessions' recent user/assistant turns. Cursor per sid (state/replay/<sid>);
-# first sight seeds to current MAX(events.id) — future-only, never backfills.
+# Cross-session replay: the LATEST max_turns rounds of OTHER conversations, shown
+# once. Not a delivery queue — content older than the latest window is never
+# back-filled, missed is missed. The only state is one private marker per consumer
+# (state/replay/<key>) holding the newest events row id it has already been shown;
+# no marker yet = show the latest window and record it.
 # max_turns: turn cap (one user->assistant exchange); overflow folds to +N more.
 # max_lines: outer cap on rendered message lines, below max_turns — a turn with
 #   many per-turn messages can still overflow the turn cap; newest lines win.
 # per_msg_chars: per-message truncation (shorter than cortex — ambient only).
 # idle_gate_min: non-cortex sessions inject replay only when her last completed
 #   turn in that session is >= this many minutes old (catch-up on return, quiet
-#   during focused work). First turn = injects. 0 = every turn. Cortex is exempt
-#   (every turn, via the last_note_ts cursor shared with note.py).
+#   during focused work). First turn = injects. 0 = every turn. Cortex windows
+#   are exempt (every turn).
 # exclude_target_channels: non-cortex sessions on these channels receive NOTHING.
-#   ct is NOT listed — the cortex window takes the note-aligned cursor path.
+#   ct is NOT listed — the cortex window is a normal consumer here.
 #   Source ct events are excluded by the query itself.
 enabled = true
 max_turns = 2
@@ -427,6 +497,21 @@ per_msg_chars = 250
 idle_gate_min = 20
 header = "## Recent replay from other sessions"
 exclude_target_channels = []
+# Render-layer noise filter (applies to every replay path). Rows are only hidden
+# from the replay block — nothing is deleted from events.
+# drop_slash_commands: hide turns that are a bare slash command (/clear, /info,
+#   /ct-wake ...). Matched only when the WHOLE trimmed message is one line, the
+#   command token holds no further "/" (so a pasted /Users/... path survives),
+#   and the message is shorter than slash_command_max_chars. A "/" inside a
+#   sentence is never matched.
+# slash_command_max_chars: length cap for the whole message above — anything
+#   longer is prose, not a command.
+# drop_patterns: regexes (re.search, case-sensitive) run over message content;
+#   a hit hides the row. For bot status/system output that carries no meaning
+#   for another session. Keep it precise — a false positive silences real talk.
+drop_slash_commands = true
+slash_command_max_chars = 40
+drop_patterns = ["\\|\\s*Health:\\S+\\s*\\|"]
 
 [qidu]
 # Qidu book-server — powers the book_* MCP tools (Phase 3 划线/批注系统).
@@ -451,8 +536,7 @@ token = ""
 #   backup_guard_intercept=false to downgrade deny items to reminders instead.
 backup_guard = true
 backup_guard_intercept = true
-backup_guard_message = "Warning: back up code/db OR archive docs before anything destructive — delete, bulk modify, import/export.\n- Bypass only if the user explicitly said to delete/modify THIS now.\n- If unsure, stop and ask — never assume the user doesn't need/want it."
-backup_guard_deny_message = "BLOCKED — bulk deletion with no backup. This target is not in git/tmp: once deleted it is gone. Chain a backup into the SAME command and rerun, e.g. `tar -czf /tmp/bak.tgz <target> && rm -rf <target>` (db: `cp` first). Even if the user ordered the deletion, back up anyway — it costs one command. Do NOT work around this guard with alternative delete commands."
+# The reminder + deny messages are mechanism-defining copy — they live in code.
 
 # rm → trash auto-rewrite (PreToolUse). When a Bash `rm` segment's positional
 # paths ALL fall under a trash_paths prefix, the segment is rewritten to
@@ -473,17 +557,20 @@ trash_paths = [
 # commit message cannot false-positive. Set git_force_push_guard=false to
 # disable.
 git_force_push_guard = true
-git_force_push_guard_message = "BLOCKED — force push rewrites remote history and can permanently destroy commits. Never force push. If the remote rejected your push, stop and report to the user."
+# The force-push deny message is mechanism-defining copy — it lives in code.
 
 # Git revert-type guard — held via PreToolUse permissionDecision "ask" (the
 # user confirms whose diff is being discarded). Owns the decision for the
 # matched git ops, so they bypass the backup deny gate. Worktree/agent cleanup
 # (branch -D teardown etc.) is exempt. `git restore --staged` alone (unstage
-# only) is treated as safe. Set git_revert_guard=false to disable.
+# only) is treated as safe. checkout/restore ask only when the targets carry
+# uncommitted work (`git status --porcelain -- <targets>` non-empty); a
+# checkout with no tracked file operand is a branch switch and stays silent.
+# Set git_revert_guard=false to disable.
 git_revert_guard = true
 git_revert_patterns = [
     "\\bgit\\s+reset\\s+--hard\\b",
-    "\\bgit\\s+checkout\\s+(?:\\S+\\s+)*?--\\s+\\S",
+    "\\bgit\\s+(?:(?:-C|--git-dir|--work-tree|--namespace)\\s+\\S+\\s+|-\\S+\\s+)*checkout\\b",
     "\\bgit\\s+restore\\b",
     "\\bgit\\s+clean\\s+-\\w*f",
     "\\bgit\\s+branch\\s+-\\w*D\\w*\\b",
@@ -492,7 +579,11 @@ git_revert_patterns = [
     "\\bgit\\s+switch\\b[^\\n]*--discard-changes\\b",
     "\\bgit\\s+worktree\\s+remove\\b",
 ]
-git_revert_guard_message = "🤡 狗男人又要乱搞你git里的东西了，是否同意？"
+# Headline of the ask popup. `{action}` renders the human-readable phrase from
+# git_revert_action_labels below; the rest of the reason (Action/File/LOC/By)
+# is assembled by the guard and degrades to Action-only when git can't answer.
+git_revert_guard_message = "⚠️ About to {action} — confirm?"
+# Per-op phrase for {action}: [hooks.git_revert_action_labels] at end of file.
 
 # Session-start housekeep (~/.claude only): if the auto-commit would delete
 # one of these top-level files, the commit is skipped, an alert is raised,
@@ -501,7 +592,35 @@ housekeep_protected_files = [
     "CLAUDE.md", "settings.json", "keybindings.json", "statusline.py",
     "output-styles/ny.md",
 ]
+# Session-start housekeep split. Files with these extensions are docs/config
+# shaped and get committed unconditionally (`auto: docs housekeep (N files)`).
+# Everything else is only committed once its mtime is older than
+# housekeep_stale_hours (`auto: stale leftovers (N files)`) — fresher files are
+# left dirty because they are probably another live session's work in progress.
+housekeep_docs_extensions = [".md", ".toml", ".json", ".txt"]
+housekeep_stale_hours = 2
 
 # ~/.claude.json mcpServers snapshot: rolling backups kept in
 # ~/.config/marrow/backup/claude-json/, newest N retained.
 claude_json_snapshot_keep = 10
+
+# Human-readable phrase rendered into git_revert_guard_message's {action}.
+# Keys are stable action ids from the guard's parser — copy lives here, never
+# in code. A known id with no entry falls back to the id itself; an
+# unclassifiable command uses the `unknown` entry.
+# Keep this table LAST in [hooks]: a TOML sub-table header ends the parent.
+[hooks.git_revert_action_labels]
+checkout-file = "discard uncommitted changes"
+restore = "discard uncommitted changes"
+switch-discard = "switch branch and discard changes"
+reset-hard = "roll the working tree all the way back"
+reset-soft = "undo commits but keep the changes"
+reset-mixed = "undo commits but keep the changes"
+revert = "add an inverse commit"
+branch-D = "force-delete a branch"
+stash-drop = "drop stashed changes"
+worktree-remove = "remove a worktree directory"
+clean = "delete untracked files"
+# Fallback when the matched command can't be classified (e.g. the git text
+# sits inside a quoted argument) — keeps the sentence whole.
+unknown = "mess with your git state"

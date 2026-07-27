@@ -46,7 +46,7 @@ switch() {
     [[ -z "$title" || "$title" == "-" ]] && title="(untitled)"
     epoch=$(TZ=UTC date -jf '%Y-%m-%dT%H:%M:%SZ' "$last_active" '+%s' 2>/dev/null)
     if [[ -n "$epoch" ]]; then
-      hhmm=$(TZ=Australia/Melbourne date -r "$epoch" '+%H:%M')
+      hhmm=$(date -r "$epoch" '+%H:%M')
     else
       hhmm="${last_active:11:5}"
     fi

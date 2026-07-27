@@ -43,7 +43,10 @@ def is_enabled() -> bool:
 
 
 def _cadence_bin() -> str:
-    return _schedule_cfg().get("cadence_bin", "") or _CADENCE_DEFAULT
+    """Configured cadence binary, `~` expanded — the config comment offers a
+    home-relative example and subprocess does not expand it."""
+    raw = str(_schedule_cfg().get("cadence_bin", "") or "").strip()
+    return str(Path(raw).expanduser()) if raw else _CADENCE_DEFAULT
 
 
 def _flag_note() -> str:

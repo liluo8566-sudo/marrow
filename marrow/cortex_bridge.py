@@ -3,9 +3,8 @@ from daemon.py / hooks.py / llm.py into one module.
 
 Cortex is an optional layer that lives in a SEPARATE repo (~/CC-Lab/cortex);
 this module is marrow's side of that bridge: the MCP tools it exposes to a
-cortex session, the SessionStart / PreToolUse / turn_inject hook branches that
-only a cortex window takes, and the full-env LLM runner the cortex repo calls
-back into.
+cortex session and the SessionStart / PreToolUse / turn_inject hook branches
+that only a cortex window takes.
 
 Two independent gates, both must be open for any cortex behaviour:
 
@@ -13,8 +12,8 @@ Two independent gates, both must be open for any cortex behaviour:
      enabled() == False  => register() is a no-op (no cortex tool reaches
      the MCP schema) and every hook helper here short-circuits to its inert
      value. A clean marrow install shows ZERO cortex behaviour.
-  2. MARROW_CORTEX (env) — "is this the cortex session". Set by the cortex
-     runner (see run_claude_cortex below) on the spawned marrow subprocess.
+  2. MARROW_CORTEX (env) — "is this the cortex session". Set by the shell's
+     host on the cortex window it spawns.
      The lie_down / wait / say tools additionally require it at import time;
      the hook branches require it at call time.
 
@@ -26,12 +25,15 @@ sites into here.
 """
 from __future__ import annotations
 
+import contextlib as _contextlib
+import fcntl as _fcntl
+import json as _json_ws
 import os
 import re as _re
 import shutil
 import subprocess
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Annotated
 
@@ -47,8 +49,11 @@ def enabled() -> bool:
     return bool(config.load().get("cortex", {}).get("enabled", False))
 
 
-def is_cortex_session() -> bool:
-    """True inside a cortex-spawned marrow window (MARROW_CORTEX in env)."""
+def is_cortex_session(transcript_path: str | None = None) -> bool:
+    """True inside a cortex-spawned marrow window (MARROW_CORTEX in env). The
+    conversation is the identity: a resumed/manually-opened cortex window carries
+    the same env marker its spawn baked in. `transcript_path` is accepted for
+    call-site compatibility but not used."""
     return bool(os.environ.get("MARROW_CORTEX"))
 
 
@@ -57,6 +62,30 @@ def is_cortex_session() -> bool:
 # only when this daemon subprocess was spawned by a cortex window (the window
 # sets MARROW_CORTEX explicitly before spawn). Normal sessions never see them.
 _CORTEX = bool(os.environ.get("MARROW_CORTEX"))
+
+# Fallback when [cortex].shells is missing/malformed: the cli shell only.
+_DEFAULT_SHELLS = ("cli",)
+
+
+def _shells() -> list[str]:
+    """[cortex].shells — the shell ids that run as cortex shells. A shell absent
+    from the list runs plain: no cortex tools, no cortex hook branches."""
+    try:
+        raw = config.load().get("cortex", {}).get("shells")
+    except Exception:
+        raw = None
+    if not isinstance(raw, list):
+        raw = list(_DEFAULT_SHELLS)
+    return [str(s).strip().lower() for s in raw if str(s).strip()]
+
+
+def _shell_enabled() -> bool:
+    """True when this window is a cortex session (MARROW_CORTEX) AND its shell
+    id is listed in [cortex].shells. The per-shell switch every cortex hook
+    branch goes through."""
+    if not os.environ.get("MARROW_CORTEX"):
+        return False
+    return _cortex_shell_id() in _shells()
 
 
 # ── wish ─────────────────────────────────────────────────────────────────────
@@ -119,7 +148,7 @@ def wish(
     section: Annotated[str | None, Field(description="Heading substring (## or ###, e.g. 心愿单/约定/种草) to insert the line at that section's end; omit to append at end of file.")] = None,
     due: Annotated[str | None, Field(description="Optional due tag appended as ' [<due>]' after the text (free-form, e.g. a date).")] = None,
 ) -> dict:
-    """Our wishlist — personal wishes & cravings (hers and yours), promises
+    """Our wishlist — personal wishes & cravings, promises
     made, and shared plans. e.g. 你说好请我喝奶茶 / 最近想买耳钉 / 约好周末去看海.
     Markdown structure (headings, subsections) is user-managed — this tool
     only adds lines, never edits existing content: ~/.config/marrow/cortex/wishlist.md."""
@@ -318,18 +347,125 @@ def _run_cortex_module(module: str, extra_args: list[str] | None = None) -> dict
     return {"ok": True, "stdout": (p.stdout or "").strip()}
 
 
+def _shell_socket_path(shell: str) -> Path | None:
+    """[cortex].shell_socket — the tg host's kick socket. Empty =
+    <DATA_DIR>/state/shells/tg.sock. That single config value belongs to the tg
+    bridge, so any other shell has no socket: None (the caller skips the kick
+    and the host reads the ledger on its next tick). Short by contract: macOS
+    caps an AF_UNIX path at 104 bytes."""
+    if shell != "tg":
+        return None
+    cx = config.load().get("cortex", {}) or {}
+    raw = str(cx.get("shell_socket") or "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return config.DATA_DIR / "state" / "shells" / "tg.sock"
+
+
+def _shell_kick(shell: str) -> bool:
+    """Poke a shell host's scheduler: one line "<shell>\\n" over its unix
+    stream socket (the wire format synapse_core.scheduler.send_kick writes).
+    Best-effort — a host that is down, or a shell with no socket configured,
+    just means the ledger is read on its next recompute tick. Never raises."""
+    import socket as _socket
+    p = _shell_socket_path(shell)
+    if p is None:
+        return False
+    try:
+        with _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM) as s:
+            s.settimeout(2.0)
+            s.connect(str(p))
+            s.sendall((shell + "\n").encode("utf-8"))
+        return True
+    except OSError:
+        return False
+
+
+def shell_direct(text: str, shell: str = "tg") -> dict:
+    """Directed kick: leave `text` in the shell's ledger (pending_note) and poke
+    its host. The host claims the text on its next pass and feeds it as that
+    round's turn — asleep shells wake for it, live ones take it next turn. Host
+    down = the text still lands on the host's next recompute tick."""
+    body = (text or "").strip()
+    if not body:
+        return {"ok": False, "error": "empty direction"}
+    shell_state_write({"pending_note": body}, shell=shell)
+    return {"ok": True, "shell": shell, "kicked": _shell_kick(shell)}
+
+
+def _log_shell_sleep_row(shell: str) -> int | None:
+    """Insert this shell's ct_wake_log row for a voluntary lie_down, so the
+    sleep ledger covers every shell, not just cli (the cli row is written by
+    cortex itself). Same shape as the cli rows: wake=1, dry_run=0, reasons
+    tagging the origin, force_slept NULL (a voluntary call is no incident) and
+    the shell stamp the note's force-slept filter reads. Best-effort: None on
+    any error (old DB without the shell column included) — a missing ledger row
+    must never fail the sleep."""
+    import sqlite3
+    from datetime import timezone as _tz
+    try:
+        conn = sqlite3.connect(config.db_path(), timeout=30)
+    except sqlite3.Error:
+        return None
+    try:
+        cur = conn.execute(
+            "INSERT INTO ct_wake_log (ts, wake, dry_run, reasons, shell) "
+            "VALUES (?, 1, 0, 'lie_down', ?)",
+            (datetime.now(_tz.utc).isoformat(), shell))
+        conn.commit()
+        return int(cur.lastrowid)
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+
+
+def _lie_down_shell(shell: str, next_wake_min: float,
+                    rotate: bool = False) -> dict:
+    """lie_down for a non-cli shell: the host owns the timing, so this only
+    writes the wake ledger (<shell_state_dir>/<shell>.json) and kicks the host.
+    Minutes are clamped to cortex's [wake].next_wake_max band; 0 = wake now.
+
+    rotate=True adds the rotate_pending flag: the host claims it on the kicked
+    pass and respawns the resident session (same end-of-window semantics as the
+    cli shell's rotate) instead of feeding it a note. next_wake_at still stands,
+    so the fresh session sleeps until the wake booked here.
+
+    The sleep also lands one ct_wake_log row stamped with this shell, so the
+    ledger records every shell's sleep (_log_shell_sleep_row)."""
+    day_max = float(_cortex_toml_section("wake", "next_wake_max", 240))
+    mins = max(0.0, min(float(next_wake_min), day_max))
+    when = datetime.now(config.get_tz()) + timedelta(minutes=mins)
+    payload = {"next_wake_at": when.isoformat()}
+    if rotate:
+        payload["rotate_pending"] = True
+    shell_state_write(payload, shell=shell)
+    _log_shell_sleep_row(shell)
+    kicked = _shell_kick(shell)
+    hm = when.strftime("%H:%M")
+    return {"ok": True, "shell": shell, "next_wake": hm, "kicked": kicked,
+            "rotate": bool(rotate), "text": f"next wake ≈ {hm}"}
+
+
 def lie_down(next_wake_min: float, rotate: bool = False,
-             mode: str | None = None) -> dict:
+             mode: str | None = None, human_override: bool = False) -> dict:
     # Description rendered from cortex config at register() (C9); see
     # _lie_down_doc. Kept minimal here — FastMCP reads __doc__ at registration.
-    # mode='night' = the night package (forces rotate, clamps N to the night
-    # band, sets the persistent night flag). Cleared by the morning kick.
+    # human_override = explicit minutes pierce the rotate clamp band (threaded
+    # straight to cortex's --human-override).
     """lie_down(next_wake_min=N)."""
+    shell = _cortex_shell_id()
+    if not shell:
+        return {"ok": False, "error": "MARROW_CORTEX is not a valid shell id"}
+    if shell != "cli":
+        return _lie_down_shell(shell, next_wake_min, rotate)
     args = ["--next-wake-min", str(next_wake_min)]
     if rotate:
         args += ["--rotate"]
     if mode:
         args += ["--mode", str(mode)]
+    if human_override:
+        args += ["--human-override"]
     out = _run_cortex_module("cortex.lie_down", args)
     # Surface the chosen wake time (cortex.lie_down prints JSON with a
     # "next_wake":"HH:MM" field). Old cortex builds omit it — tolerate silently.
@@ -341,20 +477,22 @@ def lie_down(next_wake_min: float, rotate: bool = False,
             if nw:
                 out["next_wake"] = nw
                 out["text"] = f"next wake ≈ {nw}"
+            # Rotate precondition refusal (P17): cortex refused because this
+            # window's own wake-signal ear tail is still alive. Surface the
+            # refusal text as the tool result text — without this the model
+            # never sees "TaskStop your monitor first, then call lie_down
+            # again" and the whole rotate precondition is invisible.
+            refused = data.get("refused")
+            if data.get("skipped") == "rotate_refused" and refused:
+                out["refused"] = refused
+                out["text"] = refused
         except (ValueError, TypeError):
             pass
     return out
 
 
-def wait(minutes: float) -> dict:
-    # Description rendered from cortex config at register() (C10); see _wait_doc.
-    """wait(N)."""
-    return _run_cortex_module("cortex.wait", ["--minutes", str(minutes)])
-
-
 def say() -> dict:
-    """Urgent only: quiet notification ping for her attention (no focus steal).
-    Normal in-window talk needs no say — she reads when free."""
+    """Pop-up the window to seek attention. Use when you really want to find me."""
     return _run_cortex_module("cortex.say")
 
 
@@ -366,28 +504,13 @@ _DB = config.db_path()
 
 
 def _lie_down_doc() -> str:
-    """C9 (user-final): lie_down description with all four clamp numbers rendered
-    from cortex config — day bounds [wake].next_wake_min/max, night bounds
-    [night].floor_min/max. Never hardcoded in the string."""
-    day_min = int(_cortex_toml_section("wake", "next_wake_min", 21))
-    day_max = int(_cortex_toml_section("wake", "next_wake_max", 240))
-    night_min = int(_cortex_toml_section("night", "floor_min", 120))
-    night_max = int(_cortex_toml_section("night", "floor_max", 360))
-    return (f"lie_down(next_wake_min=N) "
-            f"[N={day_min}-{day_max} (Day); {night_min}-{night_max} (Night)]")
-
-
-def _wait_doc() -> str:
-    """C10 (user-final): wait description with the wait clamp numbers rendered
-    from cortex config [wake].wait_min/wait_max, and the idle-bar auto timer
-    length from [wake.watchdog].silent_max_min. Never hardcoded."""
-    lo = int(_cortex_toml_section("wake", "wait_min", 1))
-    hi = int(_cortex_toml_section("wake", "wait_max", 20))
-    auto = int(_cortex_toml_section("wake.watchdog", "silent_max_min", 20))
-    return (f"wait(N) [N={lo}-{hi}] — no consecutive empty waits; any activity "
-            f"(tool call, user reply, kick, note delivery) restores the quota "
-            f"and resets all other timers. A {auto}-min auto timer runs "
-            f"regardless — expiry brings the 3-choice menu.")
+    """C9 (user-final): lie_down description with the clamp range rendered
+    from cortex config — [wake].next_wake_max (T3: 0-day_max for every hour,
+    night band retired). Never hardcoded in the string."""
+    day_max = int(_cortex_toml_section("wake", "next_wake_max", 360))
+    return (f'lie_down(next_wake_min=N) [N=0-{day_max}]; '
+            f'rotate to next window - lie_down(next_wake_min=N, rotate=True) '
+            f'[N=0-{day_max}, 0=rotate now]')
 
 
 def register(marrow_tool, db: str | None = None) -> None:
@@ -398,8 +521,10 @@ def register(marrow_tool, db: str | None = None) -> None:
       - wish registers for ALL sessions;
       - first / goal are PENDING — not registered anywhere yet (no injection
         mechanism wired; keep the functions + storage, just don't expose them);
-      - lie_down / wait / say register ONLY in a cortex session (_CORTEX, the
-        import-time MARROW_CORTEX capture — the original inner env gate).
+      - lie_down / say register ONLY in a cortex session (_CORTEX, the
+        import-time MARROW_CORTEX capture — the original inner env gate) whose
+        shell id is listed in [cortex].shells (shell resolved lazily here);
+        lie_down serves every listed shell, say the cli shell only.
     Idempotent per process (FastMCP tolerates re-adding the same tool name)."""
     global _DB
     if db is not None:
@@ -408,115 +533,93 @@ def register(marrow_tool, db: str | None = None) -> None:
         return
     marrow_tool()(wish)
     if _CORTEX:
-        # Render the clamp numbers from cortex config into the tool descriptions
-        # at registration (C9/C10) — never hardcoded in the docstring.
+        shell = _cortex_shell_id()
+        if shell not in _shells():
+            return
+        # Render the clamp numbers from cortex config into the tool description
+        # at registration (C9) — never hardcoded in the docstring.
         lie_down.__doc__ = _lie_down_doc()
-        wait.__doc__ = _wait_doc()
         marrow_tool()(lie_down)
-        marrow_tool()(wait)
-        marrow_tool()(say)
+        if shell == "cli":
+            marrow_tool()(say)
 
 
-# ── hooks: kickout immunity / lie_down deny / handoff page-turn / show 亮牌 ──────
+# ── hooks: kickout immunity / lie_down nudge / handoff page-turn / show 亮牌 ────
 # _window_tokens_from_transcript stays in hooks.py (shared with the all-session
 # _usage_threshold_context); it is imported lazily where needed below.
 
-
-def _cortex_lie_down_deny(inp: dict) -> str | None:
-    """Deny lie_down until the handoff is written this window, when the
-    session asked to rotate OR the window is at the fuse line (force_tokens).
-    A plain lie_down under the line is allowed. Cortex window only. None = allow."""
-    if not os.environ.get("MARROW_CORTEX"):
+def _cortex_lie_down_nudge(inp: dict) -> str | None:
+    """Non-blocking PreToolUse additionalContext for every cortex lie_down call:
+    reminds the session to log/handoff. Never denies. rotate arg selects the
+    rotate copy. Cortex window + lie_down only; None otherwise."""
+    if not _shell_enabled():
         return None
     if inp.get("tool_name") != "mcp__marrow__lie_down":
         return None
     ti = inp.get("tool_input", {}) or {}
-    tpath = inp.get("transcript_path") or ""
-    cx = config.load().get("cortex", {}) or {}
-    force = int(cx.get("force_tokens", 150_000) or 0)
     wants_rotate = bool(ti.get("rotate"))
-    from .hooks import _window_tokens_from_transcript
-    occupancy = _window_tokens_from_transcript(tpath)
-    if not wants_rotate and not (force > 0 and occupancy >= force):
-        return None  # plain lie_down under the line — allow
-    # Guard fires: require a handoff written after this window's spawn.
-    p = _cortex_handoff_path()
-    spawn = _window_spawn_epoch(tpath)
-    written = False
-    if p is not None and spawn is not None:
-        try:
-            written = p.stat().st_mtime >= spawn and bool(
-                p.read_text(encoding="utf-8").strip())
-        except OSError:
-            written = False
-    if written:
+    cx = config.load().get("cortex", {}) or {}
+    key = "lie_down_nudge_rotate_text" if wants_rotate else "lie_down_nudge_text"
+    text = cx.get(key)
+    if not text:
         return None
-    return (cx.get("handoff_deny_text")
-            or "Write your handoff first, then call lie_down again.")
+    return _fill_handoff(text)
 
 
-# The one tool that does NOT restore the wait quota (F5): calling wait() is the
-# "still waiting" action, not activity. Every other cortex tool clears
-# wait_spent so a wait may follow (play mode then wait again = allowed).
-_WAIT_TOOL_NAME = "mcp__marrow__wait"
+# MARROW_CORTEX values that mean "the default (cli) shell": unset, or the
+# legacy boolean marker from before the var carried a shell id.
+_LEGACY_CLI_MARKERS = frozenset({"1", "true", "yes", "on"})
+# A shell id names files (handoff-<shell>.md, <shell>.json) and is passed as a
+# subprocess argument, so it must be a bare token.
+_SHELL_ID_RE = _re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+_bad_shell_id_warned: set[str] = set()
 
 
-def _cortex_round_activity(inp: dict) -> None:
-    """F5 activity feed: any cortex tool call OTHER than wait() marks the round
-    active -> restore the wait quota (clear wait_spent) so a following wait is
-    allowed. Cortex session only; wait() itself is excluded (a consecutive empty
-    wait stays refused). Best-effort under the shared wake_state lock — never
-    blocks the tool. Runs in PreToolUse so the flag is cleared before the round's
-    wait() (if any) is evaluated."""
-    if not os.environ.get("MARROW_CORTEX"):
+def _warn_bad_shell_id(value: str) -> None:
+    """Alert once per process per bad MARROW_CORTEX value. Never raises."""
+    if value in _bad_shell_id_warned:
         return
-    if not isinstance(inp, dict) or inp.get("tool_name") == _WAIT_TOOL_NAME:
-        return
-    p = _cortex_wake_state_path()
+    _bad_shell_id_warned.add(value)
     try:
-        with _wake_state_lock(p):
-            d = _wake_state_load(p)
-            if d.get("awake") and d.pop("wait_spent", None):
-                _wake_state_save(p, d)
-    except Exception:
+        from . import repo
+        repo.add_alert(
+            "warn", "cortex_bad_shell_id", "cortex_bad_shell_id",
+            source="cortex_bridge.py",
+            message=f"MARROW_CORTEX={value!r} is not a valid shell id — "
+                    "cortex shell state refused for this window",
+            db=config.db_path(),
+        )
+    except Exception:  # noqa: BLE001 — a bad env var must not break the window
         pass
 
 
-def _window_spawn_epoch(tpath: str) -> float | None:
-    """Wall-clock start of this window = the first timestamp in the transcript
-    (a resume opens a new file; a fresh window's first line is its birth).
-    Leading metadata lines carry no timestamp, so scan up to the first ~50 lines
-    for one. Falls back to the file's birthtime (never mtime — the transcript is
-    a live file appended every turn), then None."""
-    if not tpath:
+def _cortex_shell_id() -> str | None:
+    """This window's shell id, from MARROW_CORTEX. Unset or a legacy truthy
+    marker -> "cli"; any other value is the id itself ("tg"). A value that is
+    not a bare id token is refused (alert + None) instead of collapsing onto
+    cli — a malformed marker must never read or overwrite the cli shell's
+    ledger, handoff or replay state."""
+    v = (os.environ.get("MARROW_CORTEX") or "").strip().lower()
+    if not v or v in _LEGACY_CLI_MARKERS:
+        return "cli"
+    if not _SHELL_ID_RE.match(v):
+        _warn_bad_shell_id(v)
         return None
-    try:
-        with open(tpath, encoding="utf-8") as f:
-            for i, line in enumerate(f):
-                if i >= 50:
-                    break
-                m = _re.search(r'"timestamp":"([^"]+)"', line)
-                if m:
-                    try:
-                        return datetime.fromisoformat(
-                            m.group(1).replace("Z", "+00:00")).timestamp()
-                    except ValueError:
-                        break
-    except OSError:
-        return None
-    try:
-        return os.stat(tpath).st_birthtime
-    except (OSError, AttributeError):
-        return None
+    return v
 
 
 def _cortex_handoff_path():
-    """<[cortex].home>/<[cortex].handoff_file> — the handoff file a fresh cortex
-    window reads at SessionStart. None on config error."""
+    """<[cortex].home>/handoff-<shell>.md — the per-shell handoff file a fresh
+    cortex window reads at SessionStart. None on config error or unusable
+    shell id."""
+    shell = _cortex_shell_id()
+    if not shell:
+        return None
     try:
         cx = config.load().get("cortex", {}) or {}
         home = (cx.get("home") or "~/.config/marrow/cortex")
-        name = (cx.get("handoff_file") or "handoff.md")
+        pattern = (cx.get("handoff_file_pattern") or "handoff-{shell}.md")
+        name = pattern.replace("{shell}", shell)
         return Path(home).expanduser() / name
     except Exception:
         return None
@@ -536,89 +639,18 @@ def _cortex_path(key: str, default_name: str) -> Path:
     return p if p.is_absolute() else _cortex_home() / raw
 
 
-def arm_ear_text() -> str | None:
-    """SessionStart arm line for a fresh cortex window: the one-shot reminder to
-    start the ear tail. {signal_log} is substituted with the resolved absolute
-    path (config-routed). None when disabled/blanked so the caller injects
-    nothing."""
-    try:
-        cx = config.load().get("cortex", {}) or {}
-        tmpl = str(cx.get("arm_ear_text") or "").strip()
-        if not tmpl:
-            return None
-        signal_log = _cortex_path("wake_signal_log_file", "wake_signal.log")
-        return tmpl.replace("{signal_log}", str(signal_log))
-    except Exception:
-        return None
-
-
-def resume_ear_text() -> str | None:
-    """SessionStart line for a RESUMED cortex window ([cortex].resume_ear_text):
-    drop stale pre-resume task notifications and re-arm a fresh ear tail. The
-    fresh-window counterpart is arm_ear_text. {signal_log} substituted with the
-    resolved absolute path. None when disabled/blanked so the caller injects
-    nothing."""
-    try:
-        cx = config.load().get("cortex", {}) or {}
-        tmpl = str(cx.get("resume_ear_text") or "").strip()
-        if not tmpl:
-            return None
-        signal_log = _cortex_path("wake_signal_log_file", "wake_signal.log")
-        return tmpl.replace("{signal_log}", str(signal_log))
-    except Exception:
-        return None
-
-
-def retired_ear_text() -> str | None:
-    """SessionStart line for a RESUMED cortex window that is NO LONGER the
-    resident ([cortex].retired_ear_text): a newer cortex has taken over, or this
-    window was rotated out and is being reopened only to read history. Tells the
-    model to stay an archive/read-only window — arm nothing, touch no wake_state.
-    {signal_log} substituted with the resolved absolute path. None when
-    disabled/blanked so the caller injects nothing."""
-    try:
-        cx = config.load().get("cortex", {}) or {}
-        tmpl = str(cx.get("retired_ear_text") or "").strip()
-        if not tmpl:
-            return None
-        signal_log = _cortex_path("wake_signal_log_file", "wake_signal.log")
-        return tmpl.replace("{signal_log}", str(signal_log))
-    except Exception:
-        return None
-
-
-def is_resident_session(transcript_path: str | None) -> bool:
-    """True when the given transcript is the active resident cortex, per
-    wake_state.json's `transcript` pointer. Deterministic — no model judgement.
-
-    MATCH (resident): the recorded transcript equals this one, OR no transcript
-    is recorded yet (no newer cortex has claimed residency — mirrors the
-    cortex_window_closed empty-pointer semantics).
-    NO MATCH (retired): wake_state records a DIFFERENT transcript — a newer
-    cortex took over, or this window was rotated out. On any read failure defaults
-    to True (resident) so a transient error never silently retires a live window."""
-    try:
-        d = _wake_state_load(_cortex_wake_state_path())
-    except Exception:
-        return True
-    state_tpath = d.get("transcript")
-    if not state_tpath or not transcript_path:
-        return True
-    return str(state_tpath) == str(transcript_path)
-
-
-def wake_marker() -> str:
-    """Marker prefixing a cortex wake signal line ([cortex].wake_marker). A
-    UserPromptSubmit carrying it is a wake turn (full wakeup-note inject)."""
-    cx = config.load().get("cortex", {}) or {}
-    return str(cx.get("wake_marker") or "").strip()
-
-
-def _render_note_fresh(transcript_path: str | None) -> str | None:
+def _render_note_fresh(transcript_path: str | None,
+                       shell: str | None = None) -> str | None:
     """Fresh render via the cortex venv (config [cortex].render_module, e.g.
     cortex.note_render). Reflects the current time + the CALLER's transcript SID
     even after a window rotation, unlike the frozen file. Unset module / any
-    failure / empty output -> None so the caller falls back to the static file."""
+    failure / empty output -> None so the caller falls back to the static file.
+    The window note carries no replay block — turn_inject is that outlet.
+
+    `shell` (caller's shell id) is passed through as --shell so the render is
+    scoped to THIS shell — its wake ledger, its own session's activity rows and
+    its breaker pause state; without it every note rendered here silently used
+    the default (cli) shell's data, even on tg."""
     c = config.load().get("cortex", {})
     module = str(c.get("render_module") or "").strip()
     py, root = _cortex_paths()
@@ -626,7 +658,15 @@ def _render_note_fresh(transcript_path: str | None) -> str | None:
         return None
     py = str(Path(py).expanduser())
     root = str(Path(root).expanduser())
-    cmd = [py, "-m", module]
+    # --no-ct: the wake-branch hook delivers ct notes via outbox.deliver, so the
+    # fresh render must not also peek them (would double them in one payload).
+    # --mirror: the renderer itself writes this shell's section of the on-disk
+    # note (cortex owns that file format — see cortex/note_file.py), so marrow
+    # never rewrites the whole file and never clobbers another shell.
+    shell = shell or _cortex_shell_id()
+    if not shell:
+        return None
+    cmd = [py, "-m", module, "--no-ct", "--mirror", "--shell", shell]
     if transcript_path:
         cmd += ["--transcript", str(transcript_path)]
     try:
@@ -635,28 +675,162 @@ def _render_note_fresh(transcript_path: str | None) -> str | None:
         return None
     if p.returncode != 0:
         return None
-    text = (p.stdout or "").strip()
-    return text or None
+    return (p.stdout or "").strip() or None
 
 
-import re as _re_ws
+# ── wake bell: receipt sidecar (new) + shape fallback ─────────────────────────
+# The visible bell line is human text only ([cortex].wake_bell_template). The
+# machine data (gen/state_id/rearm) lives in a wake_state `wake_receipt` written
+# by the producer at send time. Recognition order (match_wake_bell):
+#   (a) receipt exact full-text match -> machine bell, consume receipt, epoch-
+#       check as today (stale -> suppress).
+#   (b) receipt missing/unreadable/expired -> shape fallback: the line starts
+#       with the persisted template prefix -> treat as bell, fail OPEN on
+#       staleness (process it), audit the degraded path.
+#   (c) none -> normal user prompt.
+# Failure direction (mirrors wake_token_current): never DROP a genuine wake; a
+# swallowed user message is the only unacceptable outcome, so the receipt path
+# is EXACT-match only.
 
-_GEN_TOKEN_RE = _re_ws.compile(r"\{g(\d+):([0-9a-fA-F]+)\}")
+def wake_bell_template(cfg: dict | None = None) -> str:
+    """Template of the bell TYPED into a live resident cortex window."""
+    cx = (cfg or config.load()).get("cortex", {}) or {}
+    return str(cx.get("wake_bell_template") or "⏰ {hm}")
 
 
-def parse_gen_token(line: str) -> tuple[int, str] | None:
-    """Extract the cancellation-epoch token ' {g<gen>:<state_id>}' a wake signal
-    line may carry. None when absent (legacy token-less line = process as before)
-    or unparseable."""
-    if not line:
-        return None
-    m = _GEN_TOKEN_RE.search(line)
-    if not m:
-        return None
+def spawn_opener_template(cfg: dict | None = None) -> str:
+    """Template of the first prompt baked into a FRESHLY SPAWNED cortex window
+    (cortex [wake].spawn_opener_template). A distinct shape from the resident
+    bell, so the receipt-less shape fallback must accept both."""
+    cx = (cfg or config.load()).get("cortex", {}) or {}
+    return str(cx.get("spawn_opener_template") or "☀️ {hm}")
+
+
+def _receipt_ttl_sec(cfg: dict | None = None) -> float:
+    cx = (cfg or config.load()).get("cortex", {}) or {}
     try:
-        return int(m.group(1)), m.group(2)
+        return float(cx.get("receipt_ttl_min", 15)) * 60.0
     except (TypeError, ValueError):
+        return 15 * 60.0
+
+
+def _load_wake_receipt() -> dict | None:
+    """Read the pending bell receipt from wake_state (no consume). None when
+    absent/unreadable/expired past receipt_ttl_min."""
+    try:
+        d = _wake_state_load(_cortex_wake_state_path())
+    except Exception:
         return None
+    r = d.get("wake_receipt")
+    if not isinstance(r, dict) or not r.get("text"):
+        return None
+    raw = r.get("ts")
+    if raw:
+        try:
+            ts = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            from datetime import timezone as _tz
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=_tz.utc)
+            if (datetime.now(_tz.utc) - ts).total_seconds() > _receipt_ttl_sec():
+                return None
+        except (ValueError, TypeError):
+            pass
+    return r
+
+
+def _consume_wake_receipt() -> None:
+    """Drop the pending receipt under the flock (consume-once). Best-effort."""
+    p = _cortex_wake_state_path()
+    try:
+        with _wake_state_lock(p):
+            d = _wake_state_load(p)
+            if d.pop("wake_receipt", None) is not None:
+                _wake_state_save(p, d)
+    except Exception:
+        pass
+
+
+def _receipt_matches(prompt: str, receipt: dict) -> bool:
+    """Exact full-text match of the on-screen bell against the receipt text,
+    tolerating the ear envelope/decoration wrapper (the ear delivers the line
+    wrapped as '<event>☀️ HH:MM'). Line-by-line exact compare of the unwrapped
+    text — never a substring, so a user message quoting the bell text mid-line
+    is not swallowed."""
+    text = str(receipt.get("text") or "").strip()
+    if not text:
+        return False
+    for line in prompt.splitlines() or [prompt]:
+        if _strip_envelope(line) == text:
+            return True
+    return False
+
+
+_ENVELOPE_TRAIL_RE = _re.compile(r"(?:\s*</?[a-z][a-z0-9_-]*>){0,3}\s*$")
+
+
+def _strip_envelope(line: str) -> str:
+    """Drop the ear-Monitor envelope tags around a delivered line (leading
+    <event>/<task-notification> and their trailing closers) for an exact compare."""
+    head = _ENVELOPE_LEAD_RE.sub("", line, count=1)
+    head = _ENVELOPE_TRAIL_RE.sub("", head, count=1)
+    return head.strip()
+
+
+def match_wake_bell(prompt: str) -> tuple[str, tuple[int, str] | None, bool] | None:
+    """Classify a cortex-window prompt as a wake bell. Returns
+    (kind, token, degraded) or None (not a bell):
+      kind='receipt' -> exact receipt match; token=(gen,state_id) or None;
+                        caller consumes the receipt + epoch-checks (suppress stale).
+      kind='shape'   -> receipt missing but the line starts with the template
+                        prefix; token=None, degraded=True; caller fails OPEN.
+    A blank template prefix disables the shape fallback (never matches on empty)."""
+    if not prompt:
+        return None
+    # (a) receipt exact match
+    receipt = _load_wake_receipt()
+    if receipt is not None and _receipt_matches(prompt, receipt):
+        gen = receipt.get("gen")
+        state_id = receipt.get("state_id")
+        token = (int(gen), str(state_id)) if gen is not None and state_id else None
+        return ("receipt", token, False)
+    # (b) shape fallback: match the on-screen line against the template shape.
+    #   - template WITH an {hm} placeholder -> '<prefix> HH:MM' (whole line), so
+    #     an ordinary user message merely OPENING with the prefix emoji is NOT
+    #     swallowed — only the near-exact bell shape is (documented accepted
+    #     residue: a user typing the literal '<prefix> HH:MM' with no live receipt).
+    #   - fully STATIC template (no {hm}) -> exact match of the static text.
+    # Two producer shapes exist (resident bell + fresh-spawn opener); with no
+    # usable receipt BOTH are candidates, else the receipt's own template wins.
+    cands = [receipt.get("template")] if receipt and receipt.get("template") else []
+    cands += [wake_bell_template(), spawn_opener_template()]
+    for tmpl in cands:
+        if tmpl and _line_matches_bell_shape(prompt, str(tmpl)):
+            return ("shape", None, True)
+    return None
+
+
+def _line_matches_bell_shape(prompt: str, template: str) -> bool:
+    """True iff ANY line of *prompt* matches the bell *template* shape after
+    tolerating the ear envelope wrapper. A template with an '{hm}' placeholder
+    matches '<prefix> HH:MM' (whole line); a fully static template (no {hm})
+    matches its literal text exactly. Blank prefix on an {hm} template disables
+    the fallback (never matches on empty)."""
+    if "{hm}" in template:
+        head, tail = template.split("{hm}", 1)
+        prefix = head.strip()
+        suffix = tail.strip()
+        if not prefix:
+            return False
+        # Honor whatever wraps {hm} on BOTH sides (e.g. a bracketed template
+        # '[<prefix> HH:MM]'): build the anchor from prefix AND suffix rather
+        # than hardcoding a bare end-of-line, so a fully-bracketed bell matches.
+        rx = _re.compile(
+            rf"^{_re.escape(prefix)}\s*\d{{1,2}}:\d{{2}}\s*{_re.escape(suffix)}$")
+        return any(rx.match(_strip_envelope(line)) for line in (prompt.splitlines() or [prompt]))
+    static = template.strip()
+    if not static:
+        return False
+    return any(_strip_envelope(line) == static for line in (prompt.splitlines() or [prompt]))
 
 
 def wake_token_current(token: tuple[int, str] | None) -> bool:
@@ -681,72 +855,78 @@ def wake_token_current(token: tuple[int, str] | None) -> bool:
         return True
 
 
-def wakeup_note_text(transcript_path: str | None = None) -> str | None:
-    """Full text of the wakeup note. Tries a fresh render first (current time +
-    caller's transcript SID, correct after rotation); on any failure falls back
-    to the frozen file (config wakeup_note_file under home). None when both yield
-    nothing so the caller injects nothing."""
-    fresh = _render_note_fresh(transcript_path)
+def wakeup_note_text(transcript_path: str | None = None,
+                     shell: str | None = None) -> str | None:
+    """Note text for the wake-bell injection. Tries a fresh render first (current
+    time + caller's transcript SID, correct after rotation); on any failure falls
+    back to the frozen file (config wakeup_note_file under home). None when both
+    yield nothing so the caller injects nothing.
+
+    `shell` defaults to this window's shell id (MARROW_CORTEX) — the same
+    resolver the handoff file uses. Both paths are shell-scoped: the fresh
+    render passes --shell, and the fallback slices THIS shell's section out of
+    the sectioned note file (never another shell's, and never the heading —
+    that line is display-only)."""
+    shell = shell or _cortex_shell_id()
+    if not shell:
+        return None
+    fresh = _render_note_fresh(transcript_path, shell)
     if fresh:
-        _mirror_wakeup_note(fresh)
         return fresh
     try:
-        note = _cortex_path("wakeup_note_file", "wakeup_note.md")
-        text = note.read_text(encoding="utf-8").strip()
-        return text or None
+        raw = _cortex_path("wakeup_note_file", "wakeup_note.md").read_text(
+            encoding="utf-8")
     except OSError:
         return None
+    return _note_section(raw, shell)
 
 
-def _mirror_wakeup_note(text: str) -> None:
-    """Best-effort mirror of the injected note to wakeup_note_file so the on-disk
-    copy always equals the latest full note the session received. Never raises —
-    a write failure must not break injection."""
+# Cross-repo contract with cortex/note_file.py: `## <shell> · sid=<8 chars>`
+# (sid optional). Duplicated as a 10-line reader rather than imported — marrow
+# and cortex are separate repos/venvs with no shared package.
+_NOTE_HEADING = "## "
+_NOTE_SEP = " · "
+
+
+def _note_section(text: str, shell: str) -> str | None:
+    """Body of THIS shell's section, heading stripped. None when the section is
+    absent or empty. A legacy heading-less file belongs to no shell -> None."""
+    body: list[str] = []
+    inside = False
+    for line in (text or "").splitlines():
+        if line.startswith(_NOTE_HEADING):
+            rest = line[len(_NOTE_HEADING):].strip().split(_NOTE_SEP)[0].strip()
+            head = rest.split()[0] if rest else ""
+            if inside:
+                break
+            inside = head == shell
+            continue
+        if inside:
+            body.append(line)
+    return "\n".join(body).strip() or None
+
+
+def free_round_note_text() -> str | None:
+    """Read + CONSUME the invisible free-round payload cortex staged before it
+    typed the ⏳ marker (cortex wake_state.free_round_note_path). Same
+    marker->body pattern as the wake bell: only the short marker line is on
+    screen, the note itself is injected as additionalContext.
+
+    Consume-once (the file is deleted on read) and TTL-guarded by
+    receipt_ttl_min: a payload whose marker turn never arrived (window died
+    between staging and the prompt landing) is dropped instead of surfacing on
+    an unrelated later round. None when absent/empty/stale."""
+    p = _cortex_path("free_round_note_file", "free_round_note.md")
     try:
-        path = _cortex_path("wakeup_note_file", "wakeup_note.md")
-        from ._atomic import atomic_write
-        atomic_write(str(path), text)
-    except Exception:
-        pass
-
-
-def rearm_text() -> str | None:
-    """Rearm line injected when the ear Monitor dies mid-window ([cortex].
-    rearm_text). {signal_log} substituted with the resolved absolute path. None
-    when blanked so the caller injects nothing."""
-    try:
-        cx = config.load().get("cortex", {}) or {}
-        tmpl = str(cx.get("rearm_text") or "").strip()
-        if not tmpl:
-            return None
-        signal_log = _cortex_path("wake_signal_log_file", "wake_signal.log")
-        return tmpl.replace("{signal_log}", str(signal_log))
-    except Exception:
+        text = p.read_text(encoding="utf-8").strip()
+        fresh = (datetime.now().timestamp() - p.stat().st_mtime) <= _receipt_ttl_sec()
+    except OSError:
         return None
-
-
-# Monitor-death signature (Item 3). Verified against live cortex/synapse
-# transcripts (~/.claude/projects/**/*.jsonl): a Monitor that exits or is
-# killed arrives as a user-turn wrapped in <task-notification>…</task-notification>
-# whose <event> body is `[Monitor stopped — …]`. Matching on both the
-# task-notification wrapper AND the literal "Monitor stopped" event marker is
-# conservative — normal chat never contains this harness-generated pair.
-def is_monitor_death(prompt: str) -> bool:
-    """True when the incoming prompt is the harness notification for a Monitor
-    (the ear tail) that stopped. Conservative two-token match — never fires on
-    ordinary chat.
-
-    Explicitly excludes the on-resume "No completion record was found for this
-    background shell command" notice: the harness emits it for every background
-    shell that outlived the prior process (the ear tail among them), and its
-    correct handling is the resume_ear_text re-arm at SessionStart, NOT the
-    mid-window rearm flow. Treating it as a death fires a spurious wake/rotate.
-    """
-    if not prompt:
-        return False
-    if "No completion record was found" in prompt:
-        return False
-    return "<task-notification>" in prompt and "Monitor stopped" in prompt
+    try:
+        p.unlink()
+    except OSError:
+        pass
+    return text if (text and fresh) else None
 
 
 def tuck_in_marker() -> str:
@@ -755,29 +935,6 @@ def tuck_in_marker() -> str:
     machine line, not a real user message — excluded from the user-wake reset."""
     cx = config.load().get("cortex", {}) or {}
     return str(cx.get("tuck_in_marker") or "[NEW ROUND]").strip()
-
-
-# C2 free-round menu body (user-final, verbatim). The cortex watchdog writes ONLY
-# the [NEW ROUND] marker to wake_signal.log; that marker line renders on screen in
-# the ear Monitor event. This menu body is injected INVISIBLY via UserPromptSubmit
-# additionalContext on the marker turn, so she never SEES the menu text in the
-# cortex window. Config-first: override via marrow [cortex].tuck_in_menu_text.
-_DEFAULT_TUCK_IN_MENU = (
-    "No need to wait in silence — 3 choices: "
-    "1) talk to her in session (second person) or msg another session  "
-    "2) do your own things — see Playbook  3) lie_down..."
-)
-
-
-def tuck_in_menu_text() -> str | None:
-    """The 3-choice free-round menu (C2) injected as additionalContext when the
-    cortex ear surfaces a [NEW ROUND] marker turn — the covert half that never
-    renders on screen. None/blank -> inject nothing (marker-only round)."""
-    cx = config.load().get("cortex", {}) or {}
-    if "tuck_in_menu_text" in cx:
-        txt = str(cx.get("tuck_in_menu_text") or "").strip()
-        return txt or None
-    return _DEFAULT_TUCK_IN_MENU
 
 
 # ── Covert machine-marker bodies (FUSE / CTL). Cortex writes only the marker line
@@ -789,34 +946,47 @@ _FUSE_MARKER = "[FUSE]"
 _CTL_MARKER = "[CTL]"
 
 _DEFAULT_FUSE_PROMPT = (
-    "Summarise this whole session into one section and append it to handoff.md — "
-    "follow the format and style of the preceding sections. Call "
-    "lie_down(rotate=True) when done."
+    "Session context fused. Update {handoff} before rotate. Add todo if any. "
+    "lie_down(rotate=True)"
 )
 
 _DEFAULT_CTL_SLEEP = (
-    "Wrap up this turn: {rotate}lie_down(next_wake_min={mins}{rotate_arg})."
+    "Wrap up this turn: {rotate}lie_down(next_wake_min={mins}{rotate_arg}{human_arg})."
 )
 
-_CTL_ARGS_RE = _re.compile(r"mins=(\d+)\s+rotate=(true|false)", _re.IGNORECASE)
+_CTL_ARGS_RE = _re.compile(
+    r"mins=(\d+)\s+rotate=(true|false)(?:\s+human=(true|false))?", _re.IGNORECASE)
 
 
 def fuse_prompt_text() -> str | None:
     """FUSE instruction body injected as additionalContext when the cortex ear
     surfaces a [FUSE] marker turn. Override [cortex].fuse_prompt_text; blank/None
-    -> inject nothing (marker-only)."""
+    -> inject nothing (marker-only). {handoff} = this shell's own handoff path."""
     cx = config.load().get("cortex", {}) or {}
     if "fuse_prompt_text" in cx:
         txt = str(cx.get("fuse_prompt_text") or "").strip()
-        return txt or None
-    return _DEFAULT_FUSE_PROMPT
+        if not txt:
+            return None
+    else:
+        txt = _DEFAULT_FUSE_PROMPT
+    return _fill_handoff(txt)
+
+
+def _fill_handoff(text: str) -> str:
+    """Render {handoff} as this shell's own handoff path (shared by the lie_down
+    nudge + the FUSE body); bare "handoff" when the path is unresolvable."""
+    p = _cortex_handoff_path()
+    return text.replace("{handoff}", str(p) if p is not None else "handoff")
 
 
 def ctl_sleep_text(marker_line: str) -> str | None:
     """CTL sleep instruction body injected as additionalContext when the cortex
     ear surfaces a [CTL] marker turn. The marker line carries the dynamic args
-    ('mins=N rotate=true|false'); this renders {mins}/{rotate}/{rotate_arg} from
-    them. Override [cortex].ctl_sleep_text; blank/None -> inject nothing."""
+    ('mins=N rotate=true|false [human=true|false]'); this renders
+    {mins}/{rotate}/{rotate_arg}/{human_arg} from them. human=true (an explicit
+    /ct-sleep minutes choice) renders human_override=True into the lie_down(...)
+    call so it pierces the rotate clamp band end to end. Override
+    [cortex].ctl_sleep_text; blank/None -> inject nothing."""
     cx = config.load().get("cortex", {}) or {}
     if "ctl_sleep_text" in cx:
         tmpl = str(cx.get("ctl_sleep_text") or "").strip()
@@ -827,10 +997,13 @@ def ctl_sleep_text(marker_line: str) -> str | None:
     m = _CTL_ARGS_RE.search(marker_line or "")
     mins = m.group(1) if m else ""
     rotate = bool(m and m.group(2).lower() == "true")
+    human = bool(m and m.group(3) and m.group(3).lower() == "true")
     rot = "write your handoff then " if rotate else ""
     rotate_arg = ", rotate=true" if rotate else ""
+    human_arg = ", human_override=True" if human else ""
     return (tmpl.replace("{mins}", str(mins))
             .replace("{rotate_arg}", rotate_arg)
+            .replace("{human_arg}", human_arg)
             .replace("{rotate}", rot))
 
 
@@ -877,7 +1050,7 @@ _ENVELOPE_LEAD_RE = _re.compile(r"^\s*(?:</?[a-z][a-z0-9_-]*>\s*){0,3}")
 
 def machine_markers() -> tuple[str, ...]:
     """Line-start machine-marker family ([cortex].machine_markers) — the wake
-    bell, free-round, night, fuse, ctl and ⚙️ [CMD ct-*] slash-command bodies.
+    bell, free-round, fuse, ctl and ⚙️ [CMD ct-*] slash-command bodies.
     Shared by the user-wake reset (below) and marrow.transcript ingestion."""
     cx = config.load().get("cortex", {}) or {}
     return tuple(str(m) for m in (cx.get("machine_markers") or []) if str(m))
@@ -918,7 +1091,7 @@ def _starts_with_machine_marker(prompt: str) -> bool:
 
 def is_machine_line(prompt: str) -> bool:
     """True when the incoming cortex-window prompt is a machine line arriving
-    down the ear channel (wake bell / monitor death / free-round / night / fuse /
+    down the ear channel (wake bell / monitor death / free-round / fuse /
     ctl / slash-command body), NOT a real user message. The user-wake reset must
     fire ONLY on real user messages."""
     if not prompt:
@@ -934,13 +1107,15 @@ def is_machine_line(prompt: str) -> bool:
     # Line-start (not substring): a machine wake bell / tuck-in always opens its
     # line with the marker; a real user prompt quoting it mid-sentence ("did the
     # [NEW ROUND] path fire?") stays a user message.
-    m = wake_marker()
-    if m and _line_starts_with(p, m):
-        return True
+    # New wake bell = human text: recognized via the receipt sidecar / template
+    # prefix (match_wake_bell).
+    try:
+        if match_wake_bell(p) is not None:
+            return True
+    except Exception:
+        pass
     tm = tuck_in_marker()
     if tm and _line_starts_with(p, tm):
-        return True
-    if is_monitor_death(p):
         return True
     if _starts_with_machine_marker(p):
         return True
@@ -980,16 +1155,22 @@ def _cortex_watchdog_pidfile() -> Path:
     return _cortex_path("watchdog_pidfile", "state/watchdog.pid")
 
 
-import contextlib as _contextlib
-import fcntl as _fcntl
-import json as _json_ws
+class WakeStateLockTimeout(RuntimeError):
+    """_wake_state_lock(required=True) could not take the lock in time."""
 
 
 @_contextlib.contextmanager
-def _wake_state_lock(p: Path):
+def _wake_state_lock(p: Path, *, required: bool = False):
     """Blocking exclusive flock on <wake_state>.lock, byte-compatible with
-    cortex.wake_state._flock (same sibling .lock, same protocol). Best-effort:
-    an unacquirable lock still proceeds (matches cortex's fallback).
+    cortex.wake_state._flock (same sibling .lock, same protocol). Best-effort by
+    default: an unacquirable lock still proceeds (matches cortex's fallback).
+
+    required=True raises WakeStateLockTimeout instead of proceeding unlocked —
+    for the replay read/advance paths, where an unlocked cursor read-modify-write
+    can lose an update and re-inject rows another writer already consumed.
+    Callers skip that round; the cursor is untouched, so its rows replay next
+    round.
+
     COUPLED: base = marrow [cortex].wake_state_file / [cortex].home. Cortex's
     side (wake_state.lock_path) resolves from cortex [paths].wake_state_file /
     [paths].cortex_home — override one without the other and the two lock files
@@ -1010,6 +1191,8 @@ def _wake_state_lock(p: Path):
                 if time.monotonic() >= deadline:
                     break
                 time.sleep(0.02)
+        if required and not got:
+            raise WakeStateLockTimeout(str(lp))
         yield
     finally:
         if fd is not None:
@@ -1048,39 +1231,97 @@ def _wake_state_save(p: Path, data: dict) -> None:
     os.replace(tmp, p)
 
 
-def _clear_floor_deadline() -> None:
-    """Clear the pending floor deadline (next_floor_due_at) on the single-row
-    ct_pacemaker_state JSON. Semantics: cortex triggers._floor_trigger treats
-    None as DUE (fail-safe = a spurious wake, heartbeat preserved). Net effect
-    is still correct — the awake gate blocks any signal while awake, and the
-    user-wake reset that calls this also flips awake=true, so the next lie_down
-    redraws a fresh floor before None could fire a wake."""
-    import sqlite3
-    dbp = config.db_path()
+# ── per-shell state file (<shell_state_dir>/<shell>.json) ─────────────────────
+# The non-cli shells' ledger, written by their host (tg bridge). The cli shell
+# keeps wake_state.json. Same flock + atomic-replace protocol as above.
+
+_SHELL_STATE_KEYS = ("session_id", "next_wake_at", "last_note_ts", "pending_note",
+                     "rotate_pending", "last_note_row_id", "pending_note_row_id")
+
+
+def _shell_state_path(shell: str | None = None) -> Path:
+    """<[cortex].shell_state_dir>/<shell>.json. Empty config value =
+    <marrow DATA_DIR>/state/shells. shell=None -> this window's shell id;
+    ValueError when that id is unusable (bad MARROW_CORTEX), so a malformed
+    marker can never claim another shell's ledger."""
+    shell = shell or _cortex_shell_id()
+    if not shell:
+        raise ValueError("no usable cortex shell id")
+    cx = config.load().get("cortex", {}) or {}
+    raw = str(cx.get("shell_state_dir") or "").strip()
+    base = (Path(raw).expanduser() if raw
+            else config.DATA_DIR / "state" / "shells")
+    return base / f"{shell}.json"
+
+
+def shell_state_read(shell: str | None = None) -> dict:
+    """Read a shell's state file under the flock. Missing/corrupt file -> {}."""
+    p = _shell_state_path(shell)
+    with _wake_state_lock(p):
+        return _wake_state_load(p)
+
+
+def shell_state_write(data: dict, shell: str | None = None) -> Path:
+    """Merge the contract keys of `data` (_SHELL_STATE_KEYS) into the shell's
+    state file under the flock; a None value drops its key. Unknown keys are
+    ignored. Returns the file path."""
+    p = _shell_state_path(shell)
+    with _wake_state_lock(p):
+        d = _wake_state_load(p)
+        for k in _SHELL_STATE_KEYS:
+            if k not in data:
+                continue
+            if data[k] is None:
+                d.pop(k, None)
+            else:
+                d[k] = data[k]
+        _wake_state_save(p, d)
+    return p
+
+
+def next_wake_at(shell: str) -> str | None:
+    """Raw next_wake_at ISO string for `shell`, or None when unset/no alarm.
+    cli reads the cortex wake_state.json ledger (same lock as hooks.py's read);
+    every other shell reads <shell_state_dir>/<shell>.json via shell_state_read."""
+    if shell == "cli":
+        p = _cortex_wake_state_path()
+        with _wake_state_lock(p):
+            d = _wake_state_load(p)
+    else:
+        d = shell_state_read(shell)
+    v = d.get("next_wake_at")
+    return str(v) if v else None
+
+
+def _daemon_socket_path() -> Path:
+    """The cortex wake daemon's kick socket. cortex.toml [daemon].socket_path,
+    or <cortex home>/state/cortex-daemon.sock when unset — same resolution as
+    cortex.config.daemon_socket_path (marrow's venv cannot import cortex)."""
+    raw = str(_cortex_toml_section("daemon", "socket_path", "") or "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return _cortex_home() / "state" / "cortex-daemon.sock"
+
+
+def _notify_daemon() -> None:
+    """Best-effort kick to the cortex wake daemon so it re-reads the ledger
+    immediately instead of waiting for its next tick. Pure notification: never
+    replaces a state write, and a missing socket / dead daemon is a silent
+    no-op. Stdlib socket only."""
+    import socket as _socket
+    shell = str(_cortex_toml_section("daemon", "shell", "cli") or "cli")
     try:
-        conn = sqlite3.connect(dbp, timeout=30)
-    except sqlite3.Error:
-        return
+        timeout = float(_cortex_toml_section("daemon", "kick_timeout_sec", 1.0))
+    except (TypeError, ValueError):
+        timeout = 1.0
     try:
-        row = conn.execute(
-            "SELECT state FROM ct_pacemaker_state WHERE id = 1").fetchone()
-        if not row:
-            return
-        try:
-            obj = _json_ws.loads(row[0])
-        except (ValueError, TypeError):
-            return
-        if obj.get("next_floor_due_at") is None:
-            return
-        obj["next_floor_due_at"] = None
-        conn.execute(
-            "UPDATE ct_pacemaker_state SET state = ? WHERE id = 1",
-            (_json_ws.dumps(obj),))
-        conn.commit()
-    except sqlite3.Error:
+        path = _daemon_socket_path()
+        with _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
+            s.connect(str(path))
+            s.sendall((shell + "\n").encode("utf-8"))
+    except (OSError, ValueError):
         pass
-    finally:
-        conn.close()
 
 
 def _kill_pid(pid_val) -> None:
@@ -1095,43 +1336,6 @@ def _kill_pid(pid_val) -> None:
         os.kill(pid, _signal.SIGTERM)
     except (ProcessLookupError, PermissionError):
         pass
-
-
-def kill_orphan_ear_tails() -> int:
-    """Kill leftover ear-tail processes (`tail … -f <signal_log>`) whose owning
-    cc session already exited. Called at resume SessionStart: the resumed window
-    has not armed its own tail yet, so every match at this instant is an orphan
-    from the dead prior process. Match is narrowed to the exact resolved
-    signal-log path (pgrep -f) so unrelated tails are never touched; our own pid
-    is skipped defensively. Best-effort — returns the count signalled for kill,
-    0 on any failure (missing pgrep, no matches, disabled path)."""
-    try:
-        signal_log = str(_cortex_path("wake_signal_log_file", "wake_signal.log"))
-    except Exception:
-        return 0
-    if not signal_log:
-        return 0
-    try:
-        proc = subprocess.run(
-            ["pgrep", "-f", f"-f {signal_log}"],
-            capture_output=True, text=True, timeout=5,
-        )
-    except (subprocess.SubprocessError, OSError):
-        return 0
-    if proc.returncode not in (0, 1):
-        return 0
-    killed = 0
-    me = os.getpid()
-    for raw in (proc.stdout or "").split():
-        try:
-            pid = int(raw)
-        except ValueError:
-            continue
-        if pid <= 0 or pid == me:
-            continue
-        _kill_pid(pid)
-        killed += 1
-    return killed
 
 
 def _pid_alive(pid_val) -> bool:
@@ -1221,8 +1425,8 @@ def _log_user_wake_row() -> int | None:
     try:
         ts = datetime.now(_tz.utc).isoformat()
         cur = conn.execute(
-            "INSERT INTO ct_wake_log (ts, wake, dry_run, reasons) "
-            "VALUES (?, 1, 0, 'user')", (ts,))
+            "INSERT INTO ct_wake_log (ts, wake, dry_run, reasons, shell) "
+            "VALUES (?, 1, 0, 'user', 'cli')", (ts,))
         conn.commit()
         return int(cur.lastrowid)
     except sqlite3.Error:
@@ -1233,14 +1437,20 @@ def _log_user_wake_row() -> int | None:
 
 def _cortex_user_wake_reset(inp: dict) -> None:
     """Real user message in a cortex window -> flip awake, kill the pending
-    alarm (floor deadline + sentinel), mark the user reply, and ensure a
-    watchdog is alive. F5: a user message is an external trigger that restores
-    the round's wait quota, so wait_spent is cleared unconditionally (the old
-    live-wait refund is subsumed — any activity resets the quota). Fast +
-    idempotent: already-awake + watchdog-alive collapses to cheap no-op
-    writes. Cortex session only; the caller has already excluded machine
-    lines (is_machine_line)."""
-    if not os.environ.get("MARROW_CORTEX"):
+    alarm (next_wake_at ledger + sentinel), mark the user reply, reset the
+    free-round silence cycle (drop any pending kick carrier + last-injection
+    marker so it re-arms fresh from this message), and ensure a watchdog is
+    alive. Fast + idempotent: already-awake + watchdog-alive collapses to cheap
+    no-op writes. Cortex session only; the caller has already excluded machine
+    lines (is_machine_line).
+
+    cli shell ONLY. wake_state.json is the cli window's alarm; a non-cli shell
+    (tg/wx) is host-driven and its host already cancels its own booked wake on
+    every inbound user message (synapse_tg.shell.on_user_message). Writing here
+    from a tg turn cleared the CLI ledger's next_wake_at and flipped it awake, so
+    cortex reconcile then read the closed cli window as "accidental close of an
+    awake window" and respawned it mid-sleep."""
+    if not _shell_enabled() or _cortex_shell_id() != "cli":
         return
     p = _cortex_wake_state_path()
     tpath = inp.get("transcript_path") if isinstance(inp, dict) else None
@@ -1286,10 +1496,10 @@ def _cortex_user_wake_reset(inp: dict) -> None:
         # never counts an injected/machine turn as user presence.
         from datetime import timezone as _tz_u
         d["last_user_msg_ts"] = datetime.now(_tz_u.utc).isoformat()
-        d.pop("silence_wait_until", None)
-        # F5: external trigger restores the round's wait quota (subsumes the old
-        # live-wait refund — any activity clears wait_spent).
-        d.pop("wait_spent", None)
+        # A user arrival resets the free-round silence cycle: drop the pending
+        # kick carrier + the last-injection marker so the cycle re-arms fresh
+        # from this message.
+        d.pop("kick_round", None)
         d.pop("tuck_pending", None)
         # Clear the durable next-wake ledger too: a user arrival cancels any
         # scheduled alarm, so the tick reconcile must not later fire a stale
@@ -1301,13 +1511,14 @@ def _cortex_user_wake_reset(inp: dict) -> None:
         _wake_audit("awake_flip", trigger, "false->true")
     if old_gen is not None:
         _wake_audit("user_reset_gen", trigger, f"gen {old_gen}->{new_gen}")
-    # Kill the pending alarm: floor deadline + the exact-time sentinel.
+    # Kill the pending alarm: the exact-time sentinel.
     if sentinel_pid is not None:
         _wake_audit("sentinel_kill", trigger, f"pid={sentinel_pid}")
-    _wake_audit("floor_clear", trigger, "next_floor_due_at->None")
-    _clear_floor_deadline()
     _kill_pid(sentinel_pid)
     _spawn_watchdog_if_absent()
+    # Notify-only: the alarm was already cancelled by the state write above;
+    # this just tells a live daemon to re-read now instead of on its next tick.
+    _notify_daemon()
     # BUG A wake-row log, done OUTSIDE the wake-state lock (P2 fix, see above):
     # log this user-triggered wake as its own ct_wake_log row so the wakeup
     # note's "Last wake" counts it. Best-effort — bind wake_log_id back only if
@@ -1324,12 +1535,12 @@ def _cortex_user_wake_reset(inp: dict) -> None:
                     _wake_state_save(p, d2)
 
 
-# ── external wake (cortex.kick) — cli morning flag-pull (P6) ──────────────────
+# ── external wake (cortex.kick) ────────────────────────────────────────────────
 
 def _cortex_toml_path() -> Path:
     """cortex.toml lives beside marrow's config (shared config dir). Read
-    directly (marrow venv cannot import cortex) for the few kick knobs the cli
-    morning path needs."""
+    directly (marrow venv cannot import cortex) for the few knobs marrow needs
+    from cortex's own config."""
     return Path(config.db_path()).parent / "cortex.toml"
 
 
@@ -1337,8 +1548,8 @@ def _cortex_toml_section(section: str, key: str, default):
     """One value from cortex.toml [section] (dotted `section` walks nested TOML
     tables, e.g. "wake.watchdog" -> data["wake"]["watchdog"]). Tolerant: missing
     file/key -> default. marrow venv cannot import cortex, so the few numbers the
-    tool descriptions render (wait/lie_down clamps) are read straight from the
-    shared cortex.toml."""
+    tool descriptions render (lie_down clamps) are read straight from the shared
+    cortex.toml."""
     import tomllib
     try:
         p = _cortex_toml_path()
@@ -1355,43 +1566,10 @@ def _cortex_toml_section(section: str, key: str, default):
         return default
 
 
-def _cortex_night(key: str, default):
-    """One value from cortex.toml [night]. Tolerant: missing file/key -> default."""
-    return _cortex_toml_section("night", key, default)
-
-
-def _cortex_night_mode() -> bool:
-    """True when cortex wake_state carries the night flag (mode == 'night').
-    Absent / unreadable file -> False (day = no morning kick). The flag lifecycle
-    itself is P8; this only reads it."""
-    try:
-        d = _wake_state_load(_cortex_wake_state_path())
-        return str(d.get("mode") or "") == "night"
-    except Exception:
-        return False
-
-
-def _past_morning_start() -> bool:
-    """True when local time is at/after night.morning_start (default 06:00)."""
-    from zoneinfo import ZoneInfo
-    raw = str(_cortex_night("morning_start", "06:00") or "06:00")
-    try:
-        hh, mm = (int(x) for x in raw.split(":"))
-    except (ValueError, TypeError):
-        hh, mm = 6, 0
-    tz = str(config.load().get("core", {}).get("timezone")
-             or config.load().get("timezone") or "Australia/Melbourne")
-    try:
-        now = datetime.now(ZoneInfo(tz))
-    except Exception:
-        now = datetime.now()
-    return (now.hour, now.minute) >= (hh, mm)
-
-
 def kick_cortex(kind: str, note_id=None, minutes=None) -> None:
     """Fire cortex.kick as a detached, fire-and-forget subprocess in the cortex
     venv (marrow venv cannot import cortex). Never blocks the caller; any launch
-    failure is swallowed. `kind` in {reply, timeout, morning}."""
+    failure is swallowed. `kind` in {reply, timeout, note}."""
     py, root = _cortex_paths()
     if not py or not root:
         return
@@ -1414,128 +1592,153 @@ def kick_cortex(kind: str, note_id=None, minutes=None) -> None:
         pass
 
 
-def maybe_morning_kick_cli() -> None:
-    """cli morning flag-pull: a real user turn in a NON-cortex cli session, with
-    the cortex night flag set and local time past morning_start, pokes cortex to
-    clear the flag and return to day cadence. The caller has already excluded
-    machine/subagent turns and confirmed this is NOT the cortex session.
-    No-op unless enabled + configured + night + past morning_start."""
-    if not enabled():
-        return
-    if os.environ.get("MARROW_CORTEX"):
-        return  # cortex session takes its own reset path, not this
-    if not (_cortex_night_mode() and _past_morning_start()):
-        return
-    kick_cortex("morning")
+_HANDOFF_LOG_DATE_RE = _re.compile(r"^###\s*(\d{4}-\d{2}-\d{2})\b")
+_HANDOFF_UNCHECKED_RE = _re.compile(r"^\s*(?:-\s*)?\[\s*\]")
+_HANDOFF_HEADING_RE = _re.compile(r"^#{1,6}\s")
 
 
-def cortex_window_closed(transcript_path: str | None) -> None:
-    """Cortex window really ending (session_end, non-'clear' reason): if the
-    wake_state is awake AND (no transcript recorded yet OR it matches this
-    session's), end the wake immediately via a proxy lie_down instead of
-    waiting for a 20-min fallback to discover the dead window. Idempotent —
-    lie_down already no-ops when not awake. Best-effort: never raises."""
-    if not os.environ.get("MARROW_CORTEX"):
-        return
-    try:
-        p = _cortex_wake_state_path()
-        d = _wake_state_load(p)
-        if not d.get("awake"):
-            return
-        state_tpath = d.get("transcript")
-        if state_tpath and transcript_path and str(state_tpath) != str(transcript_path):
-            return
-        cx = config.load().get("cortex", {}) or {}
-        next_wake_min = cx.get("close_next_wake_min", 55)
-        py, root = _cortex_paths()
-        if not py or not root:
-            return
-        py = str(Path(py).expanduser())
-        root = str(Path(root).expanduser())
-        cmd = [py, "-m", "cortex.lie_down",
-               "--force-slept", "auto",
-               "--next-wake-min", str(next_wake_min)]
-        subprocess.run(cmd, cwd=root, capture_output=True, text=True, timeout=10)
-    except Exception:  # noqa: BLE001 — never block session_end
-        pass
+def _handoff_headings() -> tuple[str, str, str]:
+    """(todo, activity, carry) headings — the sole code<->template contract."""
+    cx = config.load().get("cortex", {}) or {}
+    return (
+        cx.get("handoff_todo_heading") or "## 待办",
+        cx.get("handoff_activity_heading") or "## 日志",
+        cx.get("handoff_carry_heading") or "### 前情",
+    )
 
 
-_HANDOFF_DATE_RE = _re.compile(
-    r"\[(\d{4}-\d{2}-\d{2})\]|(\d{4}-\d{2}-\d{2})\s*$")
-
-
-def _handoff_l1_date(text: str) -> str | None:
-    """L1 date: `[YYYY-MM-DD]` bracketed or a bare trailing YYYY-MM-DD.
-    None if L1 is missing/unparsable (e.g. the literal template placeholder)."""
-    l1 = text.splitlines()[0] if text else ""
-    m = _HANDOFF_DATE_RE.search(l1)
-    if not m:
+def _section_span(lines: list[str], heading: str) -> tuple[int, int] | None:
+    """Index of *heading* to the next heading (exclusive). None if absent.
+    End = EOF when no later heading exists."""
+    start = None
+    for i, ln in enumerate(lines):
+        if ln.strip() == heading.strip():
+            start = i
+            break
+    if start is None:
         return None
-    date_str = m.group(1) or m.group(2)
-    try:
-        datetime.strptime(date_str, "%Y-%m-%d")
-    except ValueError:
-        return None
-    return date_str
+    for j in range(start + 1, len(lines)):
+        if _HANDOFF_HEADING_RE.match(lines[j]):
+            return start, j
+    return start, len(lines)
+
+
+def _handoff_page_range(old_text: str) -> tuple[str | None, str]:
+    """(start_date, end_date) for the archive name. start = first
+    `### YYYY-MM-DD` in the page's log; end = today (rotate day)."""
+    end = datetime.now(config.get_tz()).date().isoformat()
+    for ln in old_text.splitlines():
+        m = _HANDOFF_LOG_DATE_RE.match(ln)
+        if m:
+            return m.group(1), end
+    return None, end
+
+
+def _handoff_archive_stem(shell: str, old_text: str) -> str:
+    """{shell}-{date} single day, {shell}-{date~date} range."""
+    start, end = _handoff_page_range(old_text)
+    if start is None or start == end:
+        return f"{shell}-{end}"
+    _, e_md = start[5:], end[5:]  # strip year for the range tail
+    return f"{shell}-{start}~{e_md}" if start[:4] == end[:4] else f"{shell}-{start}~{end}"
+
+
+def _build_fresh_page(template_text: str, todos: list[str], carry: list[str]) -> str:
+    """Fresh template with carried unchecked todos merged into the todo section
+    and the last activity lines placed under the carry heading."""
+    todo_h, _act_h, carry_h = _handoff_headings()
+    lines = template_text.splitlines()
+
+    if todos:
+        span = _section_span(lines, todo_h)
+        if span is not None:
+            _s, e = span
+            lines[e:e] = todos
+            # recompute after insert so the carry heading index stays valid
+    if carry:
+        span = _section_span(lines, carry_h)
+        if span is not None:
+            s, _e = span
+            lines[s + 1:s + 1] = carry
+    return "\n".join(lines) + ("\n" if template_text.endswith("\n") else "")
 
 
 def _cortex_page_turn(p: Path, old_text: str) -> None:
-    """Archive a stale handoff.md and replace it with a fresh dated copy of the
-    template. Best-effort: any failure leaves the stale file in place (the
-    NEXT SessionStart will retry the page-turn)."""
+    """Archive the full page and replace it with a fresh template carrying
+    unchecked todos + the last handoff_carry_lines activity lines. Best-effort:
+    any failure leaves the file in place (the next SessionStart retries)."""
     cx = config.load().get("cortex", {}) or {}
-    home = (cx.get("home") or "~/.config/marrow/cortex")
-    home_p = Path(home).expanduser()
+    home_p = Path(cx.get("home") or "~/.config/marrow/cortex").expanduser()
     archive_dir = home_p / (cx.get("handoff_archive_dir") or "handoff_archive")
-    template_name = cx.get("handoff_template_file") or "handoff_template.md"
-    template_p = home_p / template_name
-    old_date = _handoff_l1_date(old_text)
-    try:
-        old_mtime = p.stat().st_mtime
-    except OSError:
-        old_mtime = time.time()
+    template_p = home_p / (cx.get("handoff_template_file") or "handoff_template.md")
+    carry_n = int(cx.get("handoff_carry_lines", 10) or 0)
+    todo_h, act_h, _carry_h = _handoff_headings()
     try:
         template_text = template_p.read_text(encoding="utf-8")
     except OSError:
-        return  # no template to copy from — leave the stale file in place
+        return  # no template — leave the file in place
+
+    old_lines = old_text.splitlines()
+    # Unchecked todo lines from the old todo section.
+    todos: list[str] = []
+    span = _section_span(old_lines, todo_h)
+    if span is not None:
+        s, e = span
+        todos = [ln for ln in old_lines[s + 1:e]
+                 if _HANDOFF_UNCHECKED_RE.match(ln)]
+    # Last N non-blank activity lines from the old activity section
+    # (activity_heading to EOF; sub-headings excluded, their content kept).
+    carry: list[str] = []
+    if carry_n > 0:
+        for i, ln in enumerate(old_lines):
+            if ln.strip() == act_h.strip():
+                body = [x for x in old_lines[i + 1:]
+                        if x.strip() and not _HANDOFF_HEADING_RE.match(x)]
+                carry = body[-carry_n:]
+                break
+
     try:
         archive_dir.mkdir(parents=True, exist_ok=True)
-        dest = archive_dir / f"{old_date}.md"
+        stem = _handoff_archive_stem(_cortex_shell_id(), old_text)
+        dest = archive_dir / f"{stem}.md"
         n = 1
         while dest.exists():
             n += 1
-            dest = archive_dir / f"{old_date}-{n}.md"
+            dest = archive_dir / f"{stem}-{n}.md"
         shutil.move(str(p), str(dest))
 
-        today = datetime.now(config.get_tz()).date().isoformat()
-        new_text = template_text.replace("[YYYY-MM-DD]", f"[{today}]")
-        p.write_text(new_text, encoding="utf-8")
-        # Backdate mtime so _cortex_lie_down_deny's "written this window" gate
-        # doesn't wrongly read the fresh copy as this window's own handoff.
-        os.utime(p, (old_mtime, old_mtime))
+        p.write_text(_build_fresh_page(template_text, todos, carry),
+                     encoding="utf-8")
     except OSError:
         pass
 
 
 def _cortex_handoff_page_turn_if_stale() -> None:
-    """Daily file side effect for a fresh cortex window: a stale (before-today)
-    L1 date triggers archive + fresh dated template copy for tomorrow's read.
-    No parsable date or unreadable file -> no-op. No content is returned; the
-    user's cortex CLAUDE.md `@handoff.md` import is the sole read path now."""
+    """Line-count page-turn side effect for a fresh cortex window: own handoff
+    over handoff_max_lines -> archive + fresh template carrying todos/activity.
+    First cli run migrates a legacy handoff.md -> handoff-cli.md (one-time mv).
+    Under the line cap or unreadable -> no-op. No content returned; the cortex
+    CLAUDE.md memory import is the sole read path."""
     p = _cortex_handoff_path()
     if p is None:
         return
+    # One-time legacy migration: handoff.md -> handoff-cli.md (cli only).
+    if _cortex_shell_id() == "cli" and not p.exists():
+        legacy = p.parent / "handoff.md"
+        if legacy.exists():
+            try:
+                shutil.move(str(legacy), str(p))
+            except OSError:
+                pass
     try:
-        text = p.read_text(encoding="utf-8").strip()
+        text = p.read_text(encoding="utf-8")
     except OSError:
         return
-    if not text:
+    if not text.strip():
         return
-    date_str = _handoff_l1_date(text)
-    if date_str is None:
-        return
-    today = datetime.now(config.get_tz()).date().isoformat()
-    if date_str < today:
+    cx = config.load().get("cortex", {}) or {}
+    max_lines = int(cx.get("handoff_max_lines", 150) or 0)
+    if max_lines > 0 and len(text.splitlines()) > max_lines:
         _cortex_page_turn(p, text)
 
 
@@ -1582,29 +1785,56 @@ def _user_active_within(ws: dict, minutes: int) -> bool:
     return age < minutes * 60
 
 
+def _shell_presence_state() -> dict:
+    """Presence + handoff-header view for THIS window's shell. cli reads
+    wake_state.json; a non-cli shell reads its OWN host-written ledger and is
+    normalised onto the same keys (the host writes last_user_ts / session_id), so
+    a tg window never judges presence off the cli shell's state. Missing/corrupt
+    -> {}."""
+    if _cortex_shell_id() == "cli":
+        try:
+            return _wake_state_load(_cortex_wake_state_path())
+        except Exception:
+            return {}
+    try:
+        st = shell_state_read()
+    except Exception:
+        return {}
+    out: dict = {}
+    if st.get("last_user_ts"):
+        out["last_user_msg_ts"] = st["last_user_ts"]
+    if st.get("session_id"):
+        out["transcript"] = f"{st['session_id']}.jsonl"
+    return out
+
+
+# Window-occupancy 亮牌 nudge (mechanism-defining copy). show_tokens is the
+# off-switch (<= 0 = inert).
+_SHOW_TEXT = (
+    "Context ≥160k - If not actively chatting with user, handoff within 3 turns "
+    "and lie_down(rotate=True) to clear (rotate unlocks a short next_wake, "
+    "≥16min). If mid-conversation: carry on, the 180k fuse is the backstop."
+)
+
+
 def _cortex_show_context(tpath: str) -> str:
-    """Cortex-only (MARROW_CORTEX=1) window-occupancy 亮牌 at show_tokens (12万
-    soft, ahead of the 15万 fuse). Suppressed when user is chatting
+    """Cortex-only (MARROW_CORTEX=1) window-occupancy 亮牌 at show_tokens (16万
+    soft, ahead of the 18万 cortex fuse). Suppressed when user is chatting
     (user_replied_this_wake). Empty for normal sessions, below threshold,
-    or with the text blanked out."""
-    if not os.environ.get("MARROW_CORTEX"):
+    or when show_tokens <= 0 (the off-switch)."""
+    if not _shell_enabled():
         return ""
     cr = config.load().get("cortex_rotate", {}) or {}
-    text = (cr.get("show_text") or "").strip()
-    if not text:
-        return ""
-    show = int(cr.get("show_tokens", 100_000) or 0)
+    text = _SHOW_TEXT
+    show = int(cr.get("show_tokens", 160_000) or 0)
     if show <= 0:
         return ""
     from .hooks import _window_tokens_from_transcript
     if _window_tokens_from_transcript(tpath) < show:
         return ""
-    try:
-        ws = _wake_state_load(_cortex_wake_state_path())
-    except Exception:
-        ws = {}
+    ws = _shell_presence_state()
     # Presence gate: hold the nudge while the user's last real message is younger
-    # than show_silent_min (mid-chat — the 150k fuse is the backstop). It retries
+    # than show_silent_min (mid-chat — the 180k fuse is the backstop). It retries
     # on a later turn while tokens stay over threshold. Falls back to the boolean
     # user_replied_this_wake when no timestamp is stored (legacy state / gate off).
     silent_min = int(cr.get("show_silent_min", 0) or 0)
@@ -1616,165 +1846,3 @@ def _cortex_show_context(tpath: str) -> str:
     if header:
         text = f"{text}\nHandoff section header: {header}"
     return text
-
-
-# ── llm: full-env cortex runner + per-wake accounting ─────────────────────────
-
-def _cortex_stream_timer():
-    """Env-driven stream-event timing probe for cortex wakes (wake latency
-    diagnosis). Returns a callback appending one line per notable stage to
-    CORTEX_WAKE_TIMING_LOG, or None when cortex did not request it. Best-effort:
-    never raises into the stream loop. spawned -> first_event isolates claude
-    CLI startup cost (MCP/env load) before the first token."""
-    from .llm import _utcnow_iso
-    path = os.environ.get("CORTEX_WAKE_TIMING_LOG")
-    if not path:
-        return None
-    path = os.path.expanduser(path)
-    wake_id = os.environ.get("CORTEX_WAKE_ID", "?")
-    origin = time.monotonic()
-    seen: set[str] = set()
-
-    def _emit(ev: dict, mono: float) -> None:
-        try:
-            etype = ev.get("type", "?")
-            if etype == "__spawned__":
-                label = "spawned"
-            elif "first" not in seen:
-                seen.add("first")
-                label = "first_event"
-            else:
-                sub = ev.get("subtype")
-                key = f"{etype}/{sub}" if sub else etype
-                if key in seen:
-                    return
-                seen.add(key)
-                label = f"ev.{key}"
-            ms = (mono - origin) * 1000.0
-            with open(path, "a") as f:
-                f.write(f"{_utcnow_iso()} wake={wake_id} stream.{label} +{ms:.0f}ms\n")
-        except Exception:
-            pass
-
-    return _emit
-
-
-def call_cortex(client, prompt: str, *, cwd: str | None = None,
-                resume_sid: str | None = None,
-                timeout: float | None = None,
-                max_tokens: int | None = None) -> dict:
-    """Full-environment resumed session for cortex (C3, Decided 07-03):
-    no isolation flags — persona/rules/MCP/agents load like a real
-    session. Always injects MARROW_CORTEX=1 (identity marker, e.g. B8
-    kickout immunity) and MARROW_CHANNEL=ct so this session's turns get
-    full marrow memory (events/recall/tl) attributed to the cortex
-    channel, same as any other session. cwd defaults to [cortex].home;
-    resume_sid=None starts a fresh
-    session (daily rebirth). Single attempt — no chain/retry, caller
-    (cortex pacemaker) owns retry policy. `timeout` (s) overrides the
-    provider default so the caller's config is the single source of truth
-    for the call budget (cortex derives its outer kill from the same value).
-    `max_tokens` (>0) caps the per-wake CURRENT WINDOW SIZE — the latest
-    turn's (input+cache_read+cache_creation), i.e. the same figure the
-    caller reasons about via the statusline "total" (Decided 07-04, not
-    cumulative consumption across turns): accumulated mid-stream (usage
-    deduped by request_id — a single turn streams as several assistant
-    lines each repeating identical usage), breach terminates the
-    subprocess and returns capped=True so the caller rebirths. Returns
-    {"text": str, "session_id": str | None} (+ capped / total_tokens
-    [= final window size] when a cap is active).
-    """
-    from .llm import LLMError
-    spec = client.specs.get("claude_cli_cortex")
-    if not spec:
-        raise LLMError("no claude_cli_cortex provider configured")
-    cortex_cfg = client.cfg.get("cortex", {})
-    run_cwd = os.path.expanduser(
-        cwd or cortex_cfg.get("home") or "~/.config/marrow/cortex")
-    Path(run_cwd).mkdir(parents=True, exist_ok=True)
-    tier = cortex_cfg.get("tier", "top")
-    model = cortex_cfg.get("model") or client.tiers.get(tier) or client.tiers.get("top")
-    effort = cortex_cfg.get("effort") or ""
-    return run_claude_cortex(
-        client, spec, model, prompt, cwd=run_cwd, resume_sid=resume_sid,
-        timeout=timeout, effort=effort, max_tokens=max_tokens)
-
-
-def run_claude_cortex(client, spec: dict, model: str, prompt: str, *,
-                      cwd: str, resume_sid: str | None,
-                      timeout: float | None = None,
-                      effort: str = "",
-                      max_tokens: int | None = None) -> dict:
-    """Stream-json runner with NO isolation flags (cortex full-env, C3).
-    Mirrors _run_claude_stream's spawn/timeout/kill contract exactly —
-    only the isolation flags, env var, cwd, --resume, and --effort differ.
-    When max_tokens>0, accumulates per-wake usage mid-stream (deduped by
-    request_id) and terminates cleanly when the current turn's window
-    size breaches the cap (capped=True). Env-driven stream-event timing
-    is attached best-effort for wake-latency diagnosis."""
-    from .llm import _claude_bin, _snapshot_window_tokens
-    timeout = timeout if timeout is not None else spec.get("timeout_s", 600)
-    cmd = [_claude_bin(), "--output-format", "stream-json",
-           "--input-format", "stream-json", "--verbose", "--model", model,
-           "--permission-mode", "bypassPermissions"]
-    if effort:
-        cmd.extend(["--effort", effort])
-    if resume_sid:
-        cmd.extend(["--resume", resume_sid])
-    env = {**os.environ, "MARROW_CORTEX": "1", "MARROW_CHANNEL": "ct"}
-    on_event = _cortex_stream_timer()
-    cap_active = bool(max_tokens and max_tokens > 0)
-    extra: dict = {}
-    if on_event is not None:
-        extra["on_event"] = on_event
-    sink = None
-    if cap_active:
-        sink = {"in": 0, "out": 0, "cache_read": 0, "cache_write": 0,
-                "window": 0, "capped": False, "by_request": {},
-                "has_usage": False}
-        extra["max_tokens"] = max_tokens
-        extra["usage_sink"] = sink
-    raw = client._stream_subprocess(cmd, prompt, timeout, env, cwd=cwd, **extra)
-    if sink is not None and sink["capped"]:
-        client._log_usage(client._sink_usage(sink), model, "stream-json",
-                          window=sink["window"])
-        _log_cortex_cap(sink, max_tokens, model)
-        _snapshot_window_tokens(sink["window"])
-        return {"text": "", "session_id": None, "capped": True,
-                "total_tokens": sink["window"]}
-    text = client._parse_claude(raw, "stream-json")
-    session_id = client._extract_session_id(raw)
-    if sink is not None:
-        if sink["has_usage"]:
-            client._log_usage(client._sink_usage(sink), model, "stream-json",
-                             window=sink["window"])
-        else:
-            client._log_usage(client._extract_usage(raw, "stream-json"),
-                             model, "stream-json")
-        _snapshot_window_tokens(sink["window"])
-        return {"text": text, "session_id": session_id,
-                "total_tokens": sink["window"]}
-    client._log_usage(client._extract_usage(raw, "stream-json"), model, "stream-json")
-    return {"text": text, "session_id": session_id}
-
-
-def _log_cortex_cap(sink: dict, cap: int, model: str) -> None:
-    """One audit line marking a per-wake token-cap breach. Reports the
-    breaching turn's window size (input+cache_read+cache_creation — the
-    figure compared against cap) alongside the deduped cumulative usage
-    fields (true consumption across the wake so far) so a breach is
-    auditable without ambiguity about what tripped it. Best-effort."""
-    try:
-        conn = storage.connect()
-        with conn:
-            conn.execute(
-                "INSERT INTO audit_log (target_table, action, summary)"
-                " VALUES (?, ?, ?)",
-                ("llm_usage", "llm_cortex_cap",
-                 f"model={model} capped window={sink['window']} cap={cap} "
-                 f"cumulative(in={sink['in']} out={sink['out']} "
-                 f"cache_read={sink['cache_read']} cache_write={sink['cache_write']})"),
-            )
-        conn.close()
-    except Exception:
-        pass

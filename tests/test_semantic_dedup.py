@@ -69,14 +69,14 @@ def test_cosine_top_match_picks_highest(db, monkeypatch):
 # ── entities: match_entity cosine layer (dim upsert dedup) ──────────────────
 
 def test_match_entity_cosine_hit_returns_row(db, monkeypatch):
-    # Seed existing entity; cosine-high candidate "Stellan" matches "屿忱".
+    # Seed existing entity; cosine-high candidate "Stellan" matches "言澈".
     db.execute(
         "INSERT INTO entities (kind, name, source) VALUES (?, ?, ?)",
-        ("person", "屿忱", "test"),
+        ("person", "言澈", "test"),
     )
     db.commit()
     rid = db.execute(
-        "SELECT id FROM entities WHERE name='屿忱'"
+        "SELECT id FROM entities WHERE name='言澈'"
     ).fetchone()["id"]
     monkeypatch.setattr(
         semantic_dedup, "cosine_top_match", lambda conn, q, t: (0, 0.91),
@@ -88,7 +88,7 @@ def test_match_entity_cosine_hit_returns_row(db, monkeypatch):
 def test_match_entity_cosine_hit_merge_absorbs_alias(db, monkeypatch):
     db.execute(
         "INSERT INTO entities (kind, name, source) VALUES (?, ?, ?)",
-        ("person", "屿忱", "test"),
+        ("person", "言澈", "test"),
     )
     db.commit()
     monkeypatch.setattr(
@@ -97,7 +97,7 @@ def test_match_entity_cosine_hit_merge_absorbs_alias(db, monkeypatch):
     hit = candidates.match_entity(db, "person", "Stellan", [])
     candidates._merge_aliases_into(db, hit, "Stellan", [])
     row = db.execute(
-        "SELECT aliases FROM entities WHERE name='屿忱'"
+        "SELECT aliases FROM entities WHERE name='言澈'"
     ).fetchone()
     aliases = json.loads(row["aliases"])
     assert "Stellan" in aliases
@@ -110,7 +110,7 @@ def test_match_entity_cosine_hit_merge_absorbs_alias(db, monkeypatch):
 def test_match_entity_cosine_miss_returns_none(db, monkeypatch):
     db.execute(
         "INSERT INTO entities (kind, name, source) VALUES (?, ?, ?)",
-        ("person", "屿忱", "test"),
+        ("person", "言澈", "test"),
     )
     db.commit()
     monkeypatch.setattr(

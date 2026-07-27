@@ -61,7 +61,7 @@ def test_turn_inject_emits_care_text(monkeypatch, capsys):
 def test_turn_inject_wx_emits_schedule_no_time_line(monkeypatch, capsys):
     """WX branch: schedule fragment injected, but no '# Context — <time>' line."""
     monkeypatch.setenv("MARROW_CHANNEL", "wx")
-    monkeypatch.setattr(hooks, "_kickout_context", lambda channel, now: "")
+    monkeypatch.setattr(hooks, "_kickout_context", lambda channel, now, transcript_path=None: "")
     from marrow import schedule as _sched
     monkeypatch.setattr(_sched, "check_and_inject", lambda sid: "Schedule update:\n+[X] a")
     _stdin(monkeypatch, {"session_id": "wx1", "transcript_path": "/x/a.jsonl"})
@@ -96,7 +96,7 @@ def test_kickout_cli_wind_down_window(monkeypatch, capsys):
     _freeze_melb(monkeypatch, 21, 45)
     monkeypatch.delenv("MARROW_CORTEX", raising=False)
     monkeypatch.delenv("MARROW_CHANNEL", raising=False)
-    monkeypatch.setattr(hooks, "_kickout_context", lambda channel, now: "9点半啦-test")
+    monkeypatch.setattr(hooks, "_kickout_context", lambda channel, now, transcript_path=None: "9点半啦-test")
     _stdin(monkeypatch, {"session_id": "s1", "transcript_path": "/x/a.jsonl"})
     hooks.turn_inject()
     ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
@@ -107,7 +107,7 @@ def test_kickout_cli_leave_window(monkeypatch, capsys):
     _freeze_melb(monkeypatch, 22, 30)
     monkeypatch.delenv("MARROW_CORTEX", raising=False)
     monkeypatch.delenv("MARROW_CHANNEL", raising=False)
-    monkeypatch.setattr(hooks, "_kickout_context", lambda channel, now: "该回卧室了-test")
+    monkeypatch.setattr(hooks, "_kickout_context", lambda channel, now, transcript_path=None: "该回卧室了-test")
     _stdin(monkeypatch, {"session_id": "s1", "transcript_path": "/x/a.jsonl"})
     hooks.turn_inject()
     ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
@@ -140,7 +140,7 @@ def test_kickout_wx_quiet_window(monkeypatch, capsys):
     _freeze_melb(monkeypatch, 23, 30)
     monkeypatch.delenv("MARROW_CORTEX", raising=False)
     monkeypatch.setenv("MARROW_CHANNEL", "wx")
-    monkeypatch.setattr(hooks, "_kickout_context", lambda channel, now: "老婆该睡了-test")
+    monkeypatch.setattr(hooks, "_kickout_context", lambda channel, now, transcript_path=None: "老婆该睡了-test")
     _stdin(monkeypatch, {"session_id": "s1", "transcript_path": "/x/a.jsonl"})
     hooks.turn_inject()
     ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]

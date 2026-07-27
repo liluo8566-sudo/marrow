@@ -1,18 +1,34 @@
 """Centralised path registry. Single source of truth for all Marrow data paths.
 
+Values come from the [paths] section of the config pair:
+  repo config.default.toml (defaults) + ~/.config/marrow/config.toml (overrides).
+Read directly with tomllib here (no config import) to avoid a circular import.
+
 Usage:
     from marrow.paths import paths
     db = paths.marrow_db
 """
 from __future__ import annotations
 
-import os
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
 _DATA_DIR = Path.home() / ".config" / "marrow"
-_DEFAULT_TOML = _DATA_DIR / "paths.toml"
+_USER_CONFIG = _DATA_DIR / "config.toml"
+_DEFAULT_CONFIG = Path(__file__).with_name("config.default.toml")
+
+# Config [paths] key -> Paths attribute. Legacy config keys read as fallback.
+_KEYS: dict[str, tuple[str, ...]] = {
+    "marrow_db": ("db", "marrow_db"),
+    "ny_root": ("ny_root",),
+    "daybrief_md": ("daybrief", "daybrief_md"),
+    "drift_pending_dir": ("drift_pending_dir",),
+    "drift_backup_dir": ("drift_backup_dir",),
+    "dir_tree_md": ("dir_tree_md",),
+    "logs_dir": ("logs_dir",),
+    "state_dir": ("state_dir",),
+}
 
 _DEFAULTS = {
     "marrow_db": "~/.config/marrow/marrow.db",
@@ -38,36 +54,35 @@ class Paths:
     state_dir: Path
 
 
-def load_paths(toml_path: str | Path | None = None) -> Paths:
-    """Load from toml_path (or MARROW_PATHS_FILE env), fallback to hardcoded defaults."""
-    env_val = os.environ.get("MARROW_PATHS_FILE", "")
-    if toml_path is not None:
-        resolved: Path | None = Path(toml_path)
-    elif env_val:
-        resolved = Path(env_val)
-    else:
-        resolved = _DEFAULT_TOML
-    raw: dict[str, str] = {}
-    if resolved is not None and resolved.is_file():
-        with resolved.open("rb") as f:
-            raw = tomllib.load(f)
+def _read_paths_section(toml_path: Path) -> dict[str, str]:
+    if not toml_path.is_file():
+        return {}
+    with toml_path.open("rb") as f:
+        return tomllib.load(f).get("paths", {})
 
-    def _p(key: str) -> Path:
-        val = raw.get(key) or _DEFAULTS[key]
+
+def load_paths(toml_path: str | Path | None = None) -> Paths:
+    """Merge [paths] from config.default.toml + user config.toml (overrides win).
+
+    toml_path overrides the user config location (for tests).
+    """
+    merged = dict(_read_paths_section(_DEFAULT_CONFIG))
+    user_file = Path(toml_path) if toml_path is not None else _USER_CONFIG
+    merged.update(_read_paths_section(user_file))
+
+    def _p(attr: str) -> Path:
+        val = ""
+        for key in _KEYS[attr]:
+            if merged.get(key):
+                val = merged[key]
+                break
+        if not val:
+            val = _DEFAULTS[attr]
         if not val:
             return Path("")
         return Path(val).expanduser()
 
-    return Paths(
-        marrow_db=_p("marrow_db"),
-        ny_root=_p("ny_root"),
-        daybrief_md=_p("daybrief_md"),
-        drift_pending_dir=_p("drift_pending_dir"),
-        drift_backup_dir=_p("drift_backup_dir"),
-        dir_tree_md=_p("dir_tree_md"),
-        logs_dir=_p("logs_dir"),
-        state_dir=_p("state_dir"),
-    )
+    return Paths(**{attr: _p(attr) for attr in _KEYS})
 
 
 paths: Paths = load_paths()

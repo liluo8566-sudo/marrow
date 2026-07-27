@@ -1,6 +1,7 @@
 """Paths + config load. Data lives under ~/.config/marrow/, never in the repo."""
 from __future__ import annotations
 
+import datetime
 import shutil
 import tomllib
 from pathlib import Path
@@ -152,6 +153,19 @@ sub_pages_path = db_pages_path
 sub_pages_state_path = db_pages_state_path
 
 
-def get_tz() -> ZoneInfo:
-    tz_name = load().get("core", {}).get("timezone", "Asia/Shanghai")
-    return ZoneInfo(tz_name)
+def os_tz() -> datetime.tzinfo:
+    """OS local timezone. Resolves the IANA zone via /etc/localtime so DST
+    transitions stay correct; falls back to the current fixed offset."""
+    try:
+        parts = Path("/etc/localtime").resolve().parts
+        if "zoneinfo" in parts:
+            return ZoneInfo("/".join(parts[parts.index("zoneinfo") + 1:]))
+    except Exception:
+        pass
+    return datetime.datetime.now().astimezone().tzinfo
+
+
+def get_tz() -> datetime.tzinfo:
+    """[core] timezone if set, else the OS local timezone."""
+    tz_name = (load().get("core", {}).get("timezone") or "").strip()
+    return ZoneInfo(tz_name) if tz_name else os_tz()

@@ -1,8 +1,8 @@
-Approved text (Lumi 07-10). Replace this file (or point [tl_nudge].text_file at your own) with zero code change. {last_tl} = HH:mm of this session's last tl.
+Approved text (Lumi 07-21). Replace this file (or point [tl_nudge].text_file at your own) with zero code change. {last_tl} = HH:mm of this session's last tl.
 ---
-No tl add/update for a while. Last tl @{last_tl}.
-- Coding/study session: keep ONE tl per session — update it when things change.
-- Casual chat: add one when topic/location/mood shifts or something got done.
-- Never touch tl from other sessions - add/update your own.
-- Skip if no major change, or the last tl was within 0.5h.
-- Affect: 记录你此刻内心最真实的感受（高兴，难过，担忧）
+It has been 10 turns since your last tl ({last_tl}).
+- If coding/study: keep one tl per session — update it when things change.
+- If chatting (esp. tg & wx): add a new tl telling what we talked about & what happened. Never update a tl started >4h ago.
+- Never touch tl from other sessions — only add/update your own.
+- Skip if last tl was within 0.5h.
+- Affect: how you feel right now (e.g. 兴奋/慌张/委屈/温暖) — not what you do.

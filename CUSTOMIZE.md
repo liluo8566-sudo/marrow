@@ -66,7 +66,8 @@ File: `marrow/config.default.toml` → `[embedding]`
 
 File: `marrow/config.default.toml` → `[paths]` + `[subpages]`
 
-- `dashboard` — main dashboard.md location (default `~/Desktop/NY/dashboard.md`)
+- `daybrief` — daybrief.md location (default `<db_pages>/daybrief.md`)
+- `monitor` — monitor.md (alerts surface) location (default `<db_pages>/monitor.md`)
 - `db_pages` — folder for DB-rendered sub-pages (default `~/Desktop/NY/db-pages`)
 - `[subpages]` `top` / `bottom` / `hidden` — render order
 

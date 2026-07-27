@@ -1196,8 +1196,8 @@ def test_pretool_use_placement(tmp_path, monkeypatch, capsys):
     assert str((tmp_path / "CC-Lab").resolve()) in captured.out
 
 
-def test_pretool_use_literal(tmp_path, monkeypatch, capsys):
-    """Edit JSON -> emit only literal path reminder."""
+def test_pretool_use_non_placement_silent(tmp_path, monkeypatch, capsys):
+    """Edit (non-placement, no target path) -> no [Path] noise, empty stdout."""
     import json
     from marrow import hooks, drift_sweep
 
@@ -1218,17 +1218,39 @@ def test_pretool_use_literal(tmp_path, monkeypatch, capsys):
         sys.stdin = old_stdin
 
     captured = capsys.readouterr()
-    # PreToolUse hook ships its message inside a JSON envelope
-    # ({"hookSpecificOutput": {"hookEventName": "PreToolUse",
-    # "additionalContext": "..."}}) — the only stdout form cc injects into
-    # assistant context. Plain-string stdout was the Phase 1 shape.
+    # No guard_line, no rm-rewrite for a plain Edit -> hook stays fully silent.
+    # The old "[Path] Use paths with /, not bare filenames." literal is gone.
+    assert captured.out == ""
+
+
+def test_pretool_use_non_placement_keeps_backup_guard(tmp_path, monkeypatch, capsys):
+    """Bash rm (non-placement, no atlas target) -> [Path] literal gone, but
+    the backup-guard reminder still surfaces via the same fallback shape."""
+    import json
+    from marrow import hooks, drift_sweep
+
+    monkeypatch.setattr(drift_sweep, "AUTHORIZED_ROOTS", [tmp_path])
+
+    inp = json.dumps({
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "rm ~/projects/note.txt"},
+    })
+
+    import io, sys
+    old_stdin = sys.stdin
+    sys.stdin = io.TextIOWrapper(io.BytesIO(inp.encode()), encoding="utf-8")
+    try:
+        hooks.pretool_use()
+    finally:
+        sys.stdin = old_stdin
+
+    captured = capsys.readouterr()
     payload = json.loads(captured.out.strip())
-    assert (
-        payload["hookSpecificOutput"]["additionalContext"]
-        == "[Path] Use paths with /, not bare filenames."
-    )
+    ctx = payload["hookSpecificOutput"]["additionalContext"]
+    assert "[Path] Use paths with /, not bare filenames." not in ctx
+    assert "back up code/db OR archive docs" in ctx
     assert payload["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
-    assert "[Path/Naming rules]" not in captured.out
 
 
 def test_pretool_use_outside_root(tmp_path, monkeypatch, capsys):

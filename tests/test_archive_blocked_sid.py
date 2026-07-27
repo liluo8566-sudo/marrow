@@ -163,3 +163,32 @@ def test_archive_events_blocked_no_audit_row(db):
     ).fetchall()
     assert len(audit) == 0
     conn.close()
+
+
+# ── machine-line filter: wake bell rows never reach the events table ───────────
+
+_BELL = "[🧚‍♀️ 笨鸭换岗成功]"
+
+
+def test_archive_events_skips_machine_line_keeps_user_line(db, monkeypatch):
+    """A user-role row whose content is the wake bell (is_machine_line) gets no
+    DB row; a normal user line in the same batch is inserted. Transcript file
+    stays the audit trail."""
+    from marrow import cortex_bridge
+    # Deterministic bell shape (no receipt on disk -> shape fallback, exact static).
+    monkeypatch.setattr(cortex_bridge, "wake_bell_template", lambda cfg=None: _BELL)
+    monkeypatch.setattr(cortex_bridge, "_load_wake_receipt", lambda: None)
+    conn = storage.connect(db)
+    sid = "machine-line-sid"
+    rows = [
+        {"session_id": sid, "timestamp": "2026-06-07T10:00:00Z",
+         "role": "user", "content": _BELL},
+        {"session_id": sid, "timestamp": "2026-06-07T10:01:00Z",
+         "role": "user", "content": "早安，今天做什么"},
+    ]
+    n = archive_events(conn, rows)
+    assert n == 1
+    contents = [r[0] for r in conn.execute(
+        "SELECT content FROM events WHERE session_id=?", (sid,)).fetchall()]
+    assert contents == ["早安，今天做什么"]
+    conn.close()

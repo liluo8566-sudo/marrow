@@ -282,6 +282,18 @@ def cmd_tl_silence(args) -> int:
     return 0
 
 
+def cmd_shell_direct(args) -> int:
+    """mw shell-direct — hand a direction to a cortex shell host: it lands in
+    the shell's ledger and the host feeds it as the next turn (asleep shells
+    wake for it)."""
+    from . import cortex_bridge
+    out = cortex_bridge.shell_direct(" ".join(args.text), shell=args.shell)
+    if not out.get("ok"):
+        return _fail(out.get("error") or "shell-direct failed")
+    print(f"queued for shell={out['shell']} kicked={out['kicked']}")
+    return 0
+
+
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
@@ -788,6 +800,12 @@ def build_parser() -> argparse.ArgumentParser:
     tls.add_argument("--sid", default=None,
                      help="override session id (default: current)")
     tls.set_defaults(fn=cmd_tl_silence)
+
+    sd = sub.add_parser("shell-direct", parents=[common],
+                        help="queue a direction for a cortex shell + kick its host")
+    sd.add_argument("text", nargs="+", help="direction text")
+    sd.add_argument("--shell", default="tg", help="target shell id (default: tg)")
+    sd.set_defaults(fn=cmd_shell_direct)
 
     pn = sub.add_parser("pin", parents=[common],
                         help="set pinned=1 on a memes/milestones row")

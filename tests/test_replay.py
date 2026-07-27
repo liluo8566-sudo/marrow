@@ -1,18 +1,23 @@
-"""P3 — cross-session replay inject (hooks._replay_context).
+"""Cross-session replay — stateless latest-window query + private marker.
 
-Covers: first-sight cursor seed (no backfill), cursor advance, turn grouping +
-cap + fold line, own-sid exclusion, source-ct exclusion, destination-channel
-exclusion, enabled=false, nothing-new → empty inject; F11 SessionStart seed.
+Covers: seed on first call, nothing-new -> empty, marker advance, whole-turn
+slash drop, drop_patterns, 2/4 caps from config, exclusion semantics (own sid,
+own-shell channels, ct for plain sessions), exclude_target_channels, idle gate,
+enabled=false, and the marker-lock busy skip (no unlocked write).
 """
 from __future__ import annotations
 
+import fcntl
 import io
 import json
+import os
+from datetime import datetime, timedelta, timezone
 
-from marrow import config, hooks, storage
+from marrow import config, cortex_bridge, hooks, replay, storage
 
 SID_SELF = "self1111-2222"
 SID_OTHER = "othr9999-8888"
+SID_CT = "ctsid0000"
 
 
 def _fresh_db(tmp_path):
@@ -21,7 +26,11 @@ def _fresh_db(tmp_path):
     return p
 
 
-def _ev(db, sid, role, content, *, channel="cli", ts="2026-07-17T04:00:00Z"):
+def _iso(dt):
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def _ev(db, sid, role, content, *, channel="cli", ts="2026-07-26T04:00:00Z"):
     conn = storage.connect(db)
     try:
         with conn:
@@ -33,10 +42,6 @@ def _ev(db, sid, role, content, *, channel="cli", ts="2026-07-17T04:00:00Z"):
         conn.close()
 
 
-def _cursor(sid):
-    return hooks._load_replay_cursor(sid)
-
-
 def _setup(monkeypatch, tmp_path, db, replay_extra=None):
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     monkeypatch.setattr(config, "db_path", lambda: db)
@@ -45,6 +50,7 @@ def _setup(monkeypatch, tmp_path, db, replay_extra=None):
     def _patched():
         cfg = dict(real())
         rp = dict(cfg.get("replay", {}))
+        rp["idle_gate_min"] = 0
         if replay_extra:
             rp.update(replay_extra)
         cfg["replay"] = rp
@@ -53,262 +59,317 @@ def _setup(monkeypatch, tmp_path, db, replay_extra=None):
     monkeypatch.setattr(config, "load", _patched)
 
 
-# ── first-sight seed: no backfill ───────────────────────────────────────────
+def _marker(key):
+    return replay.load_marker(key)
 
-def test_first_sight_seeds_no_backfill(tmp_path, monkeypatch):
+
+# ── seed + no backfill beyond the latest window ─────────────────────────────
+
+def test_first_call_renders_the_latest_window_and_seeds(tmp_path, monkeypatch):
     db = _fresh_db(tmp_path)
     _setup(monkeypatch, tmp_path, db)
-    _ev(db, SID_OTHER, "user", "old history one")
-    _ev(db, SID_OTHER, "assistant", "old history two")
-    # first sight → seed to MAX(id), inject nothing
-    assert hooks._replay_context(SID_SELF, "cli") == ""
-    assert _cursor(SID_SELF) == 2
+    for i in range(6):
+        _ev(db, SID_OTHER, "user", f"q{i}")
+        _ev(db, SID_OTHER, "assistant", f"a{i}")
+    out = replay.context(SID_SELF, "cli")
+    # 2 turns / 4 lines from config defaults — the OLDEST rounds never appear
+    body = [ln for ln in out.splitlines() if ln.startswith("[")]
+    assert len(body) == 4
+    assert "q5" in out and "a5" in out and "q4" in out
+    assert "q0" not in out and "q3" not in out
+    assert _marker(SID_SELF) == 12
 
 
-def test_first_sight_empty_db_seeds_zero(tmp_path, monkeypatch):
+def test_second_call_with_no_new_rows_renders_nothing(tmp_path, monkeypatch):
     db = _fresh_db(tmp_path)
     _setup(monkeypatch, tmp_path, db)
-    assert hooks._replay_context(SID_SELF, "cli") == ""
-    assert _cursor(SID_SELF) == 0
+    _ev(db, SID_OTHER, "user", "hello there")
+    _ev(db, SID_OTHER, "assistant", "hi back")
+    assert replay.context(SID_SELF, "cli") != ""
+    assert replay.context(SID_SELF, "cli") == ""
+    assert replay.context(SID_SELF, "cli") == ""
+    assert _marker(SID_SELF) == 2
 
 
-# ── nothing new after seed ──────────────────────────────────────────────────
-
-def test_nothing_new_empty_inject(tmp_path, monkeypatch):
+def test_only_rows_newer_than_the_marker_render(tmp_path, monkeypatch):
     db = _fresh_db(tmp_path)
     _setup(monkeypatch, tmp_path, db)
-    _ev(db, SID_OTHER, "user", "existing")
-    hooks._replay_context(SID_SELF, "cli")  # seed
-    assert hooks._replay_context(SID_SELF, "cli") == ""  # no new rows
+    _ev(db, SID_OTHER, "user", "first question")
+    _ev(db, SID_OTHER, "assistant", "first answer")
+    assert "first question" in replay.context(SID_SELF, "cli")
+    _ev(db, SID_OTHER, "user", "second question")
+    out = replay.context(SID_SELF, "cli")
+    assert "second question" in out
+    assert "first question" not in out
+    assert _marker(SID_SELF) == 3
 
 
-# ── happy render + cursor advance ───────────────────────────────────────────
-
-def test_render_and_cursor_advance(tmp_path, monkeypatch):
+def test_missed_content_is_never_backfilled(tmp_path, monkeypatch):
+    """A consumer away for 20 rounds sees the latest window only."""
     db = _fresh_db(tmp_path)
     _setup(monkeypatch, tmp_path, db)
-    hooks._replay_context(SID_SELF, "cli")  # seed at 0
-    _ev(db, SID_OTHER, "user", "hey there", ts="2026-07-17T04:10:00Z")
-    aid = _ev(db, SID_OTHER, "assistant", "hi back", ts="2026-07-17T04:11:00Z")
-    out = hooks._replay_context(SID_SELF, "cli")
-    assert out.startswith("## Recent replay from other sessions")
-    assert "N: hey there" in out
-    assert "Y: hi back" in out
-    assert "othr" in out  # source sid[:4]
-    assert "cli·" in out
-    assert _cursor(SID_SELF) == aid
-    # consumed → next call empty
-    assert hooks._replay_context(SID_SELF, "cli") == ""
+    _ev(db, SID_OTHER, "user", "seed row")
+    replay.context(SID_SELF, "cli")
+    for i in range(20):
+        _ev(db, SID_OTHER, "user", f"missed{i}")
+        _ev(db, SID_OTHER, "assistant", f"reply{i}")
+    out = replay.context(SID_SELF, "cli")
+    assert "missed19" in out and "reply19" in out
+    assert "missed0" not in out and "missed17" not in out
 
 
-# ── turn grouping: consecutive user msgs = one turn ─────────────────────────
-
-def test_consecutive_user_same_turn(tmp_path, monkeypatch):
+def test_empty_db_writes_no_marker(tmp_path, monkeypatch):
     db = _fresh_db(tmp_path)
-    _setup(monkeypatch, tmp_path, db, {"max_turns": 1})
-    hooks._replay_context(SID_SELF, "cli")
-    _ev(db, SID_OTHER, "user", "part one", ts="2026-07-17T04:10:00Z")
-    _ev(db, SID_OTHER, "user", "part two", ts="2026-07-17T04:10:30Z")
-    _ev(db, SID_OTHER, "assistant", "reply", ts="2026-07-17T04:11:00Z")
-    out = hooks._replay_context(SID_SELF, "cli")
-    # both user msgs + assistant land in the single kept turn, no fold
-    assert "part one" in out and "part two" in out and "reply" in out
-    assert "more turns" not in out
+    _setup(monkeypatch, tmp_path, db)
+    assert replay.context(SID_SELF, "cli") == ""
+    assert _marker(SID_SELF) is None
 
 
-# ── cap + fold ──────────────────────────────────────────────────────────────
+# ── caps come from config ───────────────────────────────────────────────────
 
-def test_cap_and_fold(tmp_path, monkeypatch):
+def test_turn_and_line_caps_are_config_driven(tmp_path, monkeypatch):
     db = _fresh_db(tmp_path)
-    _setup(monkeypatch, tmp_path, db, {"max_turns": 2})
-    hooks._replay_context(SID_SELF, "cli")
-    for i in range(4):  # 4 distinct turns
-        _ev(db, SID_OTHER, "user", f"q{i}", ts=f"2026-07-17T05:0{i}:00Z")
-        _ev(db, SID_OTHER, "assistant", f"a{i}", ts=f"2026-07-17T05:0{i}:30Z")
-    out = hooks._replay_context(SID_SELF, "cli")
-    # Keep the NEWEST turns; the older overflow folds (cursor advances to max_id
-    # unconditionally, so the folded turns would be silenced forever otherwise).
-    assert "q2" in out and "q3" in out          # newest kept
-    assert "q0" not in out and "q1" not in out  # oldest folded
-    assert "+2 earlier turns" in out
-    # cursor advanced past ALL rows despite fold (ambient)
-    conn = storage.connect(db)
-    try:
-        maxid = conn.execute("SELECT MAX(id) m FROM events").fetchone()["m"]
-    finally:
-        conn.close()
-    assert _cursor(SID_SELF) == maxid
+    _setup(monkeypatch, tmp_path, db, {"max_turns": 1, "max_lines": 2})
+    for i in range(3):
+        _ev(db, SID_OTHER, "user", f"q{i}")
+        _ev(db, SID_OTHER, "assistant", f"a{i}")
+    out = replay.context(SID_SELF, "cli")
+    body = [ln for ln in out.splitlines() if ln.startswith("[")]
+    assert len(body) == 2
+    assert "q2" in out and "a2" in out and "q1" not in out
 
 
-# ── per_msg_chars truncation ────────────────────────────────────────────────
-
-def test_truncation(tmp_path, monkeypatch):
+def test_per_msg_chars_truncates(tmp_path, monkeypatch):
     db = _fresh_db(tmp_path)
     _setup(monkeypatch, tmp_path, db, {"per_msg_chars": 10})
-    hooks._replay_context(SID_SELF, "cli")
-    _ev(db, SID_OTHER, "user", "abcdefghijklmnopqrstuvwxyz")
-    out = hooks._replay_context(SID_SELF, "cli")
-    assert "abcdefghi…" in out
+    _ev(db, SID_OTHER, "user", "x" * 50)
+    assert "x" * 9 + "…" in replay.context(SID_SELF, "cli")
 
 
-# ── max_lines cap: newest lines win ─────────────────────────────────────────
-
-def test_max_lines_caps_to_newest(tmp_path, monkeypatch):
-    db = _fresh_db(tmp_path)
-    _setup(monkeypatch, tmp_path, db, {"max_turns": 1, "max_lines": 4})
-    hooks._replay_context(SID_SELF, "cli")
-    # a single turn (consecutive user msgs stay open) carrying 6 messages —
-    # within max_turns=1 but over max_lines=4.
-    for i in range(3):
-        _ev(db, SID_OTHER, "user", f"u{i}", ts=f"2026-07-17T05:0{i}:00Z")
-    _ev(db, SID_OTHER, "assistant", "a0", ts="2026-07-17T05:10:00Z")
-    _ev(db, SID_OTHER, "assistant", "a1", ts="2026-07-17T05:11:00Z")
-    _ev(db, SID_OTHER, "assistant", "a2", ts="2026-07-17T05:12:00Z")
-    out = hooks._replay_context(SID_SELF, "cli")
-    lines = [l for l in out.splitlines() if l.startswith("[")]
-    assert len(lines) == 4
-    assert "u0" not in out and "u1" not in out  # oldest dropped
-    assert "u2" in out and "a2" in out          # newest kept
-
-
-def test_max_lines_zero_disables_cap(tmp_path, monkeypatch):
-    db = _fresh_db(tmp_path)
-    _setup(monkeypatch, tmp_path, db, {"max_turns": 1, "max_lines": 0})
-    hooks._replay_context(SID_SELF, "cli")
-    for i in range(3):
-        _ev(db, SID_OTHER, "user", f"u{i}", ts=f"2026-07-17T05:0{i}:00Z")
-    _ev(db, SID_OTHER, "assistant", "a0", ts="2026-07-17T05:10:00Z")
-    _ev(db, SID_OTHER, "assistant", "a1", ts="2026-07-17T05:11:00Z")
-    _ev(db, SID_OTHER, "assistant", "a2", ts="2026-07-17T05:12:00Z")
-    out = hooks._replay_context(SID_SELF, "cli")
-    lines = [l for l in out.splitlines() if l.startswith("[")]
-    assert len(lines) == 6  # single turn, no line cap
-
-
-# ── own-sid exclusion ───────────────────────────────────────────────────────
-
-def test_own_sid_excluded(tmp_path, monkeypatch):
-    db = _fresh_db(tmp_path)
-    _setup(monkeypatch, tmp_path, db)
-    hooks._replay_context(SID_SELF, "cli")
-    _ev(db, SID_SELF, "user", "my own message")
-    assert hooks._replay_context(SID_SELF, "cli") == ""
-
-
-# ── source ct exclusion ─────────────────────────────────────────────────────
-
-def test_source_ct_excluded(tmp_path, monkeypatch):
-    db = _fresh_db(tmp_path)
-    _setup(monkeypatch, tmp_path, db)
-    hooks._replay_context(SID_SELF, "cli")
-    _ev(db, SID_OTHER, "user", "cortex monologue", channel="ct")
-    assert hooks._replay_context(SID_SELF, "cli") == ""
-
-
-# ── destination channel exclusion ──────────────────────────────────────────
-
-def test_destination_channel_excluded(tmp_path, monkeypatch):
-    db = _fresh_db(tmp_path)
-    _setup(monkeypatch, tmp_path, db, {"exclude_target_channels": ["foo"]})
-    _ev(db, SID_OTHER, "user", "should never reach an excluded channel")
-    # a session ON an excluded channel receives nothing — no seed, no cursor write
-    assert hooks._replay_context(SID_SELF, "foo") == ""
-    assert _cursor(SID_SELF) is None
-
-
-# ── enabled=false kills feature ─────────────────────────────────────────────
-
-def test_enabled_false(tmp_path, monkeypatch):
+def test_disabled_renders_nothing_and_writes_no_marker(tmp_path, monkeypatch):
     db = _fresh_db(tmp_path)
     _setup(monkeypatch, tmp_path, db, {"enabled": False})
-    _ev(db, SID_OTHER, "user", "hi")
-    assert hooks._replay_context(SID_SELF, "cli") == ""
-    assert _cursor(SID_SELF) is None
+    _ev(db, SID_OTHER, "user", "anything")
+    assert replay.context(SID_SELF, "cli") == ""
+    assert _marker(SID_SELF) is None
 
 
-# ── F11: SessionStart seed, moves the first inject earlier ─────────────────
+# ── noise filters ───────────────────────────────────────────────────────────
 
-def _run_hook(monkeypatch, event, payload):
+def test_slash_command_drops_the_whole_turn(tmp_path, monkeypatch):
+    db = _fresh_db(tmp_path)
+    _setup(monkeypatch, tmp_path, db, {"max_turns": 5, "max_lines": 0})
+    _ev(db, SID_OTHER, "user", "real question here")
+    _ev(db, SID_OTHER, "assistant", "real answer here")
+    _ev(db, SID_OTHER, "user", "/ct-wake")
+    _ev(db, SID_OTHER, "assistant", "command output nobody needs")
+    out = replay.context(SID_SELF, "cli")
+    assert "real question here" in out and "real answer here" in out
+    assert "/ct-wake" not in out
+    assert "command output nobody needs" not in out
+    # the dropped rows still moved the marker — they can only ever drop
+    assert _marker(SID_SELF) == 4
+
+
+def test_slash_lookalikes_survive(tmp_path, monkeypatch):
+    db = _fresh_db(tmp_path)
+    _setup(monkeypatch, tmp_path, db, {"max_turns": 5, "max_lines": 0})
+    _ev(db, SID_OTHER, "user", "/Users/Gabrielle/CC-Lab/marrow what is this")
+    _ev(db, SID_OTHER, "user", "/clear " + "z" * 60)
+    out = replay.context(SID_SELF, "cli")
+    assert "/Users/Gabrielle" in out
+    assert "zzz" in out
+
+
+def test_drop_patterns_hide_matching_rows(tmp_path, monkeypatch):
+    db = _fresh_db(tmp_path)
+    _setup(monkeypatch, tmp_path, db,
+           {"max_turns": 5, "max_lines": 0, "drop_patterns": ["BOTNOISE"]})
+    _ev(db, SID_OTHER, "user", "keep this line")
+    _ev(db, SID_OTHER, "assistant", "BOTNOISE status dump")
+    out = replay.context(SID_SELF, "cli")
+    assert "keep this line" in out and "BOTNOISE" not in out
+
+
+def test_all_noise_batch_still_advances_the_marker(tmp_path, monkeypatch):
+    db = _fresh_db(tmp_path)
+    _setup(monkeypatch, tmp_path, db)
+    _ev(db, SID_OTHER, "user", "/info")
+    assert replay.context(SID_SELF, "cli") == ""
+    assert _marker(SID_SELF) == 1
+
+
+def test_fold_line_counts_overflow_turns(tmp_path, monkeypatch):
+    db = _fresh_db(tmp_path)
+    _setup(monkeypatch, tmp_path, db, {"max_turns": 2, "max_lines": 0})
+    for i in range(4):
+        _ev(db, SID_OTHER, "user", f"q{i}")
+        _ev(db, SID_OTHER, "assistant", f"a{i}")
+    out = replay.context(SID_SELF, "cli")
+    assert out.splitlines()[-1] == "+2 earlier turns"
+
+
+# ── exclusion semantics ─────────────────────────────────────────────────────
+
+def test_own_sid_never_replays_to_itself(tmp_path, monkeypatch):
+    db = _fresh_db(tmp_path)
+    _setup(monkeypatch, tmp_path, db)
+    _ev(db, SID_SELF, "user", "my own words")
+    _ev(db, SID_SELF, "assistant", "my own reply")
+    assert replay.context(SID_SELF, "cli") == ""
+
+
+def test_plain_session_excludes_ct_source_rows(tmp_path, monkeypatch):
+    db = _fresh_db(tmp_path)
+    _setup(monkeypatch, tmp_path, db)
+    _ev(db, SID_CT, "assistant", "cortex self-talk", channel="ct")
+    _ev(db, SID_OTHER, "user", "human words", channel="tg")
+    out = replay.context(SID_SELF, "cli")
+    assert "human words" in out and "cortex self-talk" not in out
+
+
+def test_exclude_target_channels_silences_a_destination(tmp_path, monkeypatch):
+    db = _fresh_db(tmp_path)
+    _setup(monkeypatch, tmp_path, db, {"exclude_target_channels": ["wx"]})
+    _ev(db, SID_OTHER, "user", "something happened")
+    assert replay.context(SID_SELF, "wx") == ""
+    assert replay.context(SID_SELF, "cli") != ""
+
+
+def test_shell_exclude_defaults(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "db_path", lambda: str(tmp_path / "none.db"))
+    assert replay.shell_exclude_channels("cli") == ["ct"]
+    assert replay.shell_exclude_channels("tg") == ["tg"]
+    assert replay.shell_exclude_channels("wx") == ["ct"]  # unmapped -> unqualified
+
+
+def test_cortex_cli_window_excludes_ct_and_ignores_the_idle_gate(tmp_path, monkeypatch):
+    db = _fresh_db(tmp_path)
+    _setup(monkeypatch, tmp_path, db, {"idle_gate_min": 999})
+    monkeypatch.setattr(cortex_bridge, "is_cortex_session", lambda t: True)
+    monkeypatch.setenv("MARROW_CORTEX", "1")
+    _ev(db, SID_CT, "assistant", "own cortex chatter", channel="ct")
+    _ev(db, SID_OTHER, "user", "someone else typed", channel="cli")
+    _ev(db, SID_SELF, "user", "just now", ts=_iso(datetime.now(timezone.utc)))
+    out = replay.context(SID_SELF, "cli", transcript_path="/t/x.jsonl")
+    assert "someone else typed" in out and "own cortex chatter" not in out
+
+
+def test_cortex_tg_shell_excludes_tg_and_keeps_ct(tmp_path, monkeypatch):
+    db = _fresh_db(tmp_path)
+    _setup(monkeypatch, tmp_path, db)
+    monkeypatch.setattr(cortex_bridge, "is_cortex_session", lambda t: True)
+    monkeypatch.setenv("MARROW_CORTEX", "tg")
+    _ev(db, "tgsid111", "user", "telegram window talking", channel="tg")
+    _ev(db, SID_CT, "assistant", "cli cortex talking", channel="ct")
+    out = replay.context(SID_SELF, "tg", transcript_path="/t/x.jsonl")
+    assert "cli cortex talking" in out and "telegram window talking" not in out
+
+
+# ── idle gate (non-cortex only) ─────────────────────────────────────────────
+
+def _age(db, minutes):
+    _ev(db, SID_SELF, "user", "her earlier turn",
+        ts=_iso(datetime.now(timezone.utc) - timedelta(minutes=minutes)))
+
+
+def test_idle_gate_holds_a_busy_session(tmp_path, monkeypatch):
+    db = _fresh_db(tmp_path)
+    _setup(monkeypatch, tmp_path, db, {"idle_gate_min": 20})
+    _ev(db, SID_OTHER, "user", "other session news")
+    _age(db, 19)
+    assert replay.context(SID_SELF, "cli") == ""
+    assert _marker(SID_SELF) is None
+
+
+def test_idle_gate_releases_and_shows_the_latest_window(tmp_path, monkeypatch):
+    db = _fresh_db(tmp_path)
+    _setup(monkeypatch, tmp_path, db, {"idle_gate_min": 20})
+    _ev(db, SID_OTHER, "user", "other session news")
+    _age(db, 21)
+    assert "other session news" in replay.context(SID_SELF, "cli")
+
+
+def test_first_turn_is_never_gated(tmp_path, monkeypatch):
+    db = _fresh_db(tmp_path)
+    _setup(monkeypatch, tmp_path, db, {"idle_gate_min": 20})
+    _ev(db, SID_OTHER, "user", "other session news")
+    assert "other session news" in replay.context(SID_SELF, "cli")
+
+
+# ── marker files ────────────────────────────────────────────────────────────
+
+def test_busy_marker_lock_skips_the_round_without_writing(tmp_path, monkeypatch):
+    db = _fresh_db(tmp_path)
+    _setup(monkeypatch, tmp_path, db)
+    _ev(db, SID_OTHER, "user", "content nobody may consume")
+    lock = replay.marker_path(SID_SELF)
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock) + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        assert replay.context(SID_SELF, "cli") == ""
+        assert _marker(SID_SELF) is None
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+    # lock released -> the same content is still the latest window
+    assert "content nobody may consume" in replay.context(SID_SELF, "cli")
+
+
+def test_markers_are_private_per_consumer(tmp_path, monkeypatch):
+    db = _fresh_db(tmp_path)
+    _setup(monkeypatch, tmp_path, db)
+    _ev(db, SID_OTHER, "user", "shared news")
+    assert "shared news" in replay.context(SID_SELF, "cli")
+    assert "shared news" in replay.context("other-consumer", "cli")
+    assert _marker(SID_SELF) == 1 and _marker("other-consumer") == 1
+
+
+# ── hook outlets ────────────────────────────────────────────────────────────
+
+def _run_hook(monkeypatch, fn, payload):
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
-    monkeypatch.setattr("sys.stdout", io.StringIO())
-    import sys as _sys
-    buf = io.StringIO()
-    monkeypatch.setattr(_sys, "stdout", buf)
-    rc = hooks.main([event])
-    return rc, buf.getvalue()
+    out = io.StringIO()
+    monkeypatch.setattr("sys.stdout", out)
+    fn()
+    return out.getvalue()
 
 
-def test_session_start_shows_last_turns_regardless_of_cursor(tmp_path, monkeypatch):
-    # F11: SessionStart renders the last [replay].max_turns turns of other-
-    # session activity even on first sight (fresh sid, no cursor yet) —
-    # opening context is never empty just because the cursor never moved.
+def test_turn_inject_is_the_only_outlet_on_a_wake_turn(tmp_path, monkeypatch):
+    """A wake turn is an ordinary user-prompt turn: the note carries no replay,
+    so turn_inject renders it exactly once and never again."""
     db = _fresh_db(tmp_path)
     _setup(monkeypatch, tmp_path, db)
-    aid = _ev(db, SID_OTHER, "user", "earlier chatter", ts="2026-07-17T04:00:00Z")
-    _ev(db, SID_OTHER, "assistant", "earlier reply", ts="2026-07-17T04:00:30Z")
-
-    rc, out = _run_hook(monkeypatch, "session_start", {"session_id": SID_SELF})
-    assert rc == 0
-    ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
-    assert "## Recent replay from other sessions" in ctx
-    assert "earlier chatter" in ctx and "earlier reply" in ctx
-    # Cursor advanced forward to the seed's rendered cutoff (not left at None).
-    assert _cursor(SID_SELF) == aid + 1
-
-
-def test_session_start_seed_cursor_forward_only_no_repeat_on_turn1(tmp_path, monkeypatch):
-    # The seed's cursor advance is forward-only to the rendered cutoff, so a
-    # normal turn_inject call right after never re-shows the same lines.
-    db = _fresh_db(tmp_path)
-    _setup(monkeypatch, tmp_path, db)
-    _ev(db, SID_OTHER, "user", "seeded content", ts="2026-07-17T04:00:00Z")
-    _ev(db, SID_OTHER, "assistant", "seeded reply", ts="2026-07-17T04:00:30Z")
-
-    rc, out = _run_hook(monkeypatch, "session_start", {"session_id": SID_SELF})
-    assert rc == 0
-    ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
-    assert "seeded content" in ctx
-
-    rc, out = _run_hook(
-        monkeypatch, "turn_inject",
-        {"session_id": SID_SELF, "prompt": "hi", "cwd": str(tmp_path)})
-    assert rc == 0
-    ctx2 = json.loads(out)["hookSpecificOutput"]["additionalContext"] if out else ""
-    assert "seeded content" not in ctx2
+    monkeypatch.setattr(cortex_bridge, "is_cortex_session", lambda t: True)
+    monkeypatch.setenv("MARROW_CORTEX", "1")
+    _ev(db, SID_OTHER, "user", "news from elsewhere")
+    payload = {"session_id": SID_SELF, "transcript_path": "/t/x.jsonl",
+               "prompt": "☀️ 21:47"}
+    first = _run_hook(monkeypatch, hooks.turn_inject, payload)
+    assert first.count("news from elsewhere") == 1
+    second = _run_hook(monkeypatch, hooks.turn_inject, payload)
+    assert "news from elsewhere" not in second
 
 
-def test_session_start_seed_then_new_activity_shows_on_turn1(tmp_path, monkeypatch):
-    # Genuinely new activity landing AFTER the seed's cutoff, before her first
-    # message, still surfaces on turn 1 as before.
-    db = _fresh_db(tmp_path)
-    _setup(monkeypatch, tmp_path, db)
-    _ev(db, SID_OTHER, "user", "seeded content", ts="2026-07-17T04:00:00Z")
-    _ev(db, SID_OTHER, "assistant", "seeded reply", ts="2026-07-17T04:00:30Z")
-
-    rc, out = _run_hook(monkeypatch, "session_start", {"session_id": SID_SELF})
-    assert rc == 0
-
-    _ev(db, SID_OTHER, "user", "activity before her first message",
-        ts="2026-07-17T04:10:00Z")
-    _ev(db, SID_OTHER, "assistant", "reply before her first message",
-        ts="2026-07-17T04:11:00Z")
-
-    rc, out = _run_hook(
-        monkeypatch, "turn_inject",
-        {"session_id": SID_SELF, "prompt": "hi", "cwd": str(tmp_path)})
-    assert rc == 0
-    ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
-    assert "activity before her first message" in ctx
-    assert "seeded content" not in ctx  # already rendered by the seed
+def test_wakeup_note_text_falls_back_to_this_shells_section(tmp_path, monkeypatch):
+    """Render failure -> the frozen file, sliced to the CALLER's own section
+    (heading stripped); another shell's section is never returned."""
+    monkeypatch.setattr(cortex_bridge, "_render_note_fresh", lambda t, s=None: None)
+    note = tmp_path / "wakeup_note.md"
+    note.write_text("## cli · sid=aaaaaaaa\nfrozen note body\n\n"
+                    "## tg · sid=bbbbbbbb\nother shell body\n")
+    monkeypatch.setattr(cortex_bridge, "_cortex_path", lambda *a, **k: note)
+    monkeypatch.setenv("MARROW_CORTEX", "1")
+    assert cortex_bridge.wakeup_note_text("/t/x.jsonl") == "frozen note body"
+    monkeypatch.setenv("MARROW_CORTEX", "tg")
+    assert cortex_bridge.wakeup_note_text("/t/x.jsonl") == "other shell body"
 
 
-def test_session_start_seed_empty_db_seeds_zero(tmp_path, monkeypatch):
-    # No other-session activity exists yet -> seed falls back to the old
-    # empty-inject, cursor-at-zero behaviour (nothing to render).
-    db = _fresh_db(tmp_path)
-    _setup(monkeypatch, tmp_path, db)
-    rc, out = _run_hook(monkeypatch, "session_start", {"session_id": SID_SELF})
-    assert rc == 0
-    ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
-    assert "## Recent replay from other sessions" not in ctx
-    assert _cursor(SID_SELF) == 0
+def test_wakeup_note_text_none_when_this_shell_has_no_section(tmp_path, monkeypatch):
+    monkeypatch.setattr(cortex_bridge, "_render_note_fresh", lambda t, s=None: None)
+    note = tmp_path / "wakeup_note.md"
+    note.write_text("## cli\nonly the cli section here\n")
+    monkeypatch.setattr(cortex_bridge, "_cortex_path", lambda *a, **k: note)
+    monkeypatch.setenv("MARROW_CORTEX", "tg")
+    assert cortex_bridge.wakeup_note_text("/t/x.jsonl") is None

@@ -1,4 +1,4 @@
-"""Atomic file-write helper shared by dashboard / inserter / subpages."""
+"""Atomic file-write helper shared by daybrief / inserter / subpages."""
 import os
 import tempfile
 

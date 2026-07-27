@@ -58,7 +58,7 @@ def test_same_root_mv_dry_run(drift_env):
     c = root / "gamma.md"
 
     a.write_text('import alpha\nfrom alpha import foo\npath = "alpha.py"\n', encoding="utf-8")
-    b.write_text('see alpha.py for details\nref: alpha.py\n', encoding="utf-8")
+    b.write_text('see src/alpha.py for details\nref: "alpha.py"\n', encoding="utf-8")
     c.write_text('load "alpha.py" here\n', encoding="utf-8")
 
     # Simulate mv alpha.py → new_alpha.py (just pass paths — file needn't actually exist at dest)
@@ -94,7 +94,7 @@ def test_confirm_applies(drift_env):
     ref3 = root / "doc3.md"
 
     a.write_text('# widget.py placeholder\n', encoding="utf-8")
-    ref1.write_text('see widget.py\n', encoding="utf-8")
+    ref1.write_text('see src/widget.py\n', encoding="utf-8")
     ref2.write_text('load "widget.py" for info\n', encoding="utf-8")
     ref3.write_text('path = "widget.py"\n', encoding="utf-8")
 
@@ -134,7 +134,7 @@ def test_reject_discards(drift_env):
     a = root / "engine.py"
     ref = root / "readme.md"
     a.write_text('# engine.py\n', encoding="utf-8")
-    ref.write_text('see engine.py in root\n', encoding="utf-8")
+    ref.write_text('see "engine.py" in root\n', encoding="utf-8")
 
     from marrow.drift_sweep import handle_move, apply_reject
 
@@ -165,7 +165,7 @@ def test_dangling_delete(drift_env):
     ref2 = root / "config.md"
 
     a.write_text('# service.py\n', encoding="utf-8")
-    ref1.write_text('import from service.py\n', encoding="utf-8")
+    ref1.write_text('import from src/service.py\n', encoding="utf-8")
     ref2.write_text('path = "service.py"\n', encoding="utf-8")
 
     original1 = ref1.read_text()
@@ -377,10 +377,10 @@ def test_find_refs_skips_bak_suffix_dirs(drift_env):
     env = drift_env
     backup_dir = env.root_a / "data.db.bak-20260518-220058"
     backup_dir.mkdir()
-    (backup_dir / "stale.md").write_text("see widget.py here\n", encoding="utf-8")
+    (backup_dir / "stale.md").write_text("see src/widget.py here\n", encoding="utf-8")
 
     live = env.root_a / "live.md"
-    live.write_text("see widget.py here\n", encoding="utf-8")
+    live.write_text("see src/widget.py here\n", encoding="utf-8")
 
     from marrow.drift_sweep import find_refs
     refs = find_refs("widget.py", roots=[env.root_a, env.root_b])
@@ -398,7 +398,7 @@ def test_find_refs_skips_drift_pending_dir(drift_env):
     (pending_inside_root / "abc.json").write_text(
         '{"src":"widget.py","dest":"gadget.py"}', encoding="utf-8")
     live = env.root_a / "live.md"
-    live.write_text("see widget.py here\n", encoding="utf-8")
+    live.write_text("see src/widget.py here\n", encoding="utf-8")
 
     from marrow.drift_sweep import find_refs
     refs = find_refs("widget.py", roots=[env.root_a, env.root_b])
@@ -609,9 +609,9 @@ def test_handle_move_unsafe_keeps_pending(drift_env, monkeypatch):
     env = drift_env
     root = env.root_a
 
-    # bare-word ref (no slash) → unsafe
+    # quoted bare filename (no slash in text) → survives scan gate, unsafe
     bare = root / "prose.md"
-    bare.write_text("the widget.py thing\n", encoding="utf-8")
+    bare.write_text('the "widget.py" thing\n', encoding="utf-8")
 
     alerts: list[tuple] = []
     monkeypatch.setattr(
@@ -679,7 +679,7 @@ def test_cli_drift_apply(drift_env, capsys):
     env = drift_env
     root = env.root_a
     bare = root / "prose.md"
-    bare.write_text("the widget.py thing\n", encoding="utf-8")
+    bare.write_text('the "widget.py" thing\n', encoding="utf-8")
 
     from marrow.drift_sweep import handle_move
     pid = handle_move(str(root / "widget.py"), str(root / "gadget.py"),
@@ -701,7 +701,7 @@ def test_cli_drift_reject(drift_env, capsys):
     env = drift_env
     root = env.root_a
     bare = root / "prose.md"
-    bare.write_text("the widget.py thing\n", encoding="utf-8")
+    bare.write_text('the "widget.py" thing\n', encoding="utf-8")
 
     from marrow.drift_sweep import handle_move
     pid = handle_move(str(root / "widget.py"), str(root / "gadget.py"),
@@ -764,3 +764,130 @@ def test_on_moved_drops_icloud_dup(drift_env):
     assert dw._batch == []  # dup-as-dest filtered
     dw.on_moved(str(env.root_a / "AT2 2.docx"), str(env.root_a / "AT2.docx"))
     assert dw._batch == []  # dup-as-src filtered
+
+
+# ---------------------------------------------------------------------------
+# F. Path-shaped gate: prose mention vs backticked/slash path
+# ---------------------------------------------------------------------------
+
+def test_path_in_line_bare_prose_rejected():
+    """A bare `file.ext` mentioned in prose (no quotes, no slash) does NOT count."""
+    from marrow.drift_sweep import _path_in_line
+    assert not _path_in_line("baseline.json", "the baseline.json fixture is stale")
+    assert not _path_in_line("widget.py", "see widget.py for details")
+
+
+def test_path_in_line_backtick_and_slash_accepted():
+    """Backtick/quoted bare filename and slash-path tokens both count."""
+    from marrow.drift_sweep import _path_in_line
+    assert _path_in_line("widget.py", "see `widget.py` here")
+    assert _path_in_line("widget.py", 'load "widget.py" now')
+    assert _path_in_line("widget.py", "path = src/widget.py")
+
+
+def test_find_refs_bare_prose_not_flagged(drift_env, monkeypatch):
+    """find_refs skips a bare prose mention but keeps a slash/quoted path."""
+    env = drift_env
+    prose = env.root_a / "prose.md"
+    prose.write_text("the baseline.json fixture is old\n", encoding="utf-8")
+    real = env.root_a / "real.md"
+    real.write_text("load `note.json` from src/note.json\n", encoding="utf-8")
+
+    from marrow.drift_sweep import find_refs
+    monkeypatch.setattr("marrow.drift_sweep._rg_binary", lambda: None)
+    prose_refs = find_refs("baseline.json", roots=[env.root_a])
+    assert {r["file"] for r in prose_refs} == set(), "prose mention leaked"
+    real_refs = find_refs("note.json", roots=[env.root_a])
+    assert str(real) in {r["file"] for r in real_refs}
+
+
+# ---------------------------------------------------------------------------
+# G. Artifact-file exclusion (html/baseline/.gitignore/dir_tree)
+# ---------------------------------------------------------------------------
+
+def _set_drift_cfg(monkeypatch, **overrides):
+    import marrow.drift_sweep as ds
+    cfg = {
+        "exclude_dirs": ["handoff_archive"],
+        "exclude_name_parts": [".html", "baseline", ".gitignore", "dir_tree"],
+        "ref_cap": 200,
+    }
+    cfg.update(overrides)
+    monkeypatch.setattr(ds, "_DRIFT_CFG", cfg)
+
+
+def test_is_artifact_file(monkeypatch):
+    from marrow.drift_sweep import _is_artifact_file
+    _set_drift_cfg(monkeypatch)
+    assert _is_artifact_file("AS320.html")
+    assert _is_artifact_file("eval_baseline.json")
+    assert _is_artifact_file(".gitignore")
+    assert _is_artifact_file("dir_tree.md")
+    assert not _is_artifact_file("widget.py")
+    assert not _is_artifact_file("notes.md")
+
+
+def test_find_refs_skips_artifact_files(drift_env, monkeypatch):
+    """html export / baseline json / .gitignore must not produce refs."""
+    env = drift_env
+    _set_drift_cfg(monkeypatch)
+    (env.root_a / "export.html").write_text("<a>src/widget.py</a>\n", encoding="utf-8")
+    (env.root_a / "eval_baseline.json").write_text('"src/widget.py"\n', encoding="utf-8")
+    (env.root_a / ".gitignore").write_text("src/widget.py\n", encoding="utf-8")
+    live = env.root_a / "live.md"
+    live.write_text("see src/widget.py here\n", encoding="utf-8")
+
+    from marrow.drift_sweep import find_refs
+    monkeypatch.setattr("marrow.drift_sweep._rg_binary", lambda: None)
+    refs = find_refs("widget.py", roots=[env.root_a])
+    files = {r["file"] for r in refs}
+    assert files == {str(live)}, f"artifact files leaked: {files}"
+
+
+def test_find_refs_skips_archive_dir(drift_env, monkeypatch):
+    """Config-listed archive dir (handoff_archive) is excluded from scan."""
+    env = drift_env
+    _set_drift_cfg(monkeypatch)
+    arch = env.root_a / "handoff_archive"
+    arch.mkdir()
+    (arch / "old.md").write_text("see src/widget.py here\n", encoding="utf-8")
+    live = env.root_a / "live.md"
+    live.write_text("see src/widget.py here\n", encoding="utf-8")
+
+    from marrow.drift_sweep import find_refs
+    monkeypatch.setattr("marrow.drift_sweep._rg_binary", lambda: None)
+    refs = find_refs("widget.py", roots=[env.root_a])
+    files = {r["file"] for r in refs}
+    assert str(live) in files
+    assert not any("handoff_archive" in f for f in files), \
+        f"archive dir leaked: {files}"
+
+
+# ---------------------------------------------------------------------------
+# H. Runaway ref cap
+# ---------------------------------------------------------------------------
+
+def test_write_pending_caps_refs(drift_env, monkeypatch):
+    """Refs beyond ref_cap are truncated; record notes the truncation."""
+    env = drift_env
+    _set_drift_cfg(monkeypatch, ref_cap=5)
+    refs = [{"file": f"/x/f{i}.md", "line": 1, "col": 1,
+             "text": "src/widget.py"} for i in range(20)]
+    from marrow.drift_sweep import write_pending
+    pid = write_pending("/x/widget.py", "/x/gadget.py", refs)
+    data = json.loads((env.pending_dir / f"{pid}.json").read_text())
+    assert len(data["refs"]) == 5
+    assert data["total_refs"] == 20
+    assert data["truncated"] is True
+
+
+def test_write_pending_no_cap_under_limit(drift_env, monkeypatch):
+    env = drift_env
+    _set_drift_cfg(monkeypatch, ref_cap=200)
+    refs = [{"file": f"/x/f{i}.md", "line": 1, "col": 1,
+             "text": "src/widget.py"} for i in range(3)]
+    from marrow.drift_sweep import write_pending
+    pid = write_pending("/x/widget.py", "/x/gadget.py", refs)
+    data = json.loads((env.pending_dir / f"{pid}.json").read_text())
+    assert len(data["refs"]) == 3
+    assert data["truncated"] is False

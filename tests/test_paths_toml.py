@@ -22,36 +22,37 @@ def test_load_default(tmp_path):
     assert p.marrow_db.is_absolute()
 
 
-def test_load_custom(tmp_path, monkeypatch):
-    """MARROW_PATHS_FILE env override: values from the custom toml are returned."""
-    custom_db = tmp_path / "custom.db"
-    custom_toml = tmp_path / "test_paths.toml"
-    custom_toml.write_text(
-        f'marrow_db = "{custom_db}"\n'
-        f'ny_root = "{tmp_path}"\n'
-        f'daybrief_md = "{tmp_path / "db.md"}"\n',
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("MARROW_PATHS_FILE", str(custom_toml))
-    p = load_paths()  # picks up env var
-    assert p.marrow_db == custom_db
-    assert p.ny_root == tmp_path
-    assert p.daybrief_md == tmp_path / "db.md"
-    # Keys not in the custom toml fall back to defaults
-    assert p.logs_dir == Path(_DEFAULTS["logs_dir"]).expanduser()
-
-
 def test_load_custom_via_arg(tmp_path):
-    """Explicit toml_path arg overrides default."""
-    custom_toml = tmp_path / "explicit.toml"
+    """toml_path (user config.toml-shaped) [paths] section overrides defaults."""
+    custom_db = tmp_path / "custom.db"
+    custom_toml = tmp_path / "config.toml"
     custom_toml.write_text(
+        "[paths]\n"
+        f'db = "{custom_db}"\n'
+        f'ny_root = "{tmp_path}"\n'
+        f'daybrief = "{tmp_path / "db.md"}"\n'
         f'logs_dir = "{tmp_path / "my_logs"}"\n',
         encoding="utf-8",
     )
     p = load_paths(toml_path=custom_toml)
+    assert p.marrow_db == custom_db
+    assert p.ny_root == tmp_path
+    assert p.daybrief_md == tmp_path / "db.md"
     assert p.logs_dir == tmp_path / "my_logs"
-    # Other keys still default
-    assert p.marrow_db == Path(_DEFAULTS["marrow_db"]).expanduser()
+
+
+def test_legacy_key_fallback(tmp_path):
+    """Legacy config keys (marrow_db/daybrief_md) still read as a fallback."""
+    custom_toml = tmp_path / "config.toml"
+    custom_toml.write_text(
+        "[paths]\n"
+        f'marrow_db = "{tmp_path / "legacy.db"}"\n'
+        f'daybrief_md = "{tmp_path / "legacy.md"}"\n',
+        encoding="utf-8",
+    )
+    p = load_paths(toml_path=custom_toml)
+    assert p.marrow_db == tmp_path / "legacy.db"
+    assert p.daybrief_md == tmp_path / "legacy.md"
 
 
 def test_no_regression_paths_import(tmp_path, monkeypatch):

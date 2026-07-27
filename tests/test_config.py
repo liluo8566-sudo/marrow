@@ -82,3 +82,34 @@ def test_legacy_sub_pages_key_still_honoured(monkeypatch, tmp_path):
     assert config.db_pages_state_path() == str(tmp_path / "old_state")
     # Legacy aliases still resolve.
     assert config.sub_pages_path() == str(tmp_path / "old")
+
+
+# ── timezone ─────────────────────────────────────────────────────────────────
+
+def _write_cfg(monkeypatch, tmp_path, body: str):
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(body)
+    monkeypatch.setattr(config, "CONFIG_PATH", cfg_path)
+
+
+def test_os_tz_matches_system_offset():
+    import datetime as _dt
+    now = _dt.datetime.now()
+    assert now.astimezone(config.os_tz()).utcoffset() == now.astimezone().utcoffset()
+
+
+def test_get_tz_missing_key_falls_back_to_os(monkeypatch, tmp_path):
+    _write_cfg(monkeypatch, tmp_path, "[core]\n")
+    assert config.get_tz() == config.os_tz()
+
+
+def test_get_tz_empty_value_falls_back_to_os(monkeypatch, tmp_path):
+    _write_cfg(monkeypatch, tmp_path, '[core]\ntimezone = ""\n')
+    assert config.get_tz() == config.os_tz()
+
+
+def test_get_tz_explicit_name_wins(monkeypatch, tmp_path):
+    from zoneinfo import ZoneInfo
+    _write_cfg(monkeypatch, tmp_path, '[core]\ntimezone = "Asia/Tokyo"\n')
+    assert config.get_tz() == ZoneInfo("Asia/Tokyo")

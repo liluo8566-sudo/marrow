@@ -6,7 +6,7 @@ independent of cortex, so usage stays fresh even when cortex is off. Cortex's
 tick collector may also call it as a subprocess; either caller's write is an
 idempotent upsert, so overlap is harmless. Single writer of the usage kv every
 consumer (wakeup note render, SessionStart line, in-window threshold inject,
-dashboard) reads.
+daybrief Status block) reads.
 
 Writes:
 - five_hour_pct / seven_day_pct + *_reset_at: Anthropic OAuth /api/oauth/usage
@@ -171,7 +171,12 @@ def _write_kv_rows(rows: list[tuple[str, str]]) -> None:
 
 def _codex_rows() -> list[tuple[str, str]]:
     """Codex 5h/7d used-% from ~/.codex/auth.json + chatgpt usage endpoint.
-    Best-effort — any failure returns no rows (line drops in consumers)."""
+    Windows are classified by `limit_window_seconds` (<=6h -> 5h bucket, else
+    7d bucket), not by primary/secondary position — OpenAI has been known to
+    report a single 7d-only window in primary_window with secondary_window
+    null. Missing limit_window_seconds falls back to the old positional
+    meaning (primary=5h, secondary=7d). Best-effort — any failure returns no
+    rows (line drops in consumers)."""
     try:
         auth = json.loads(CDX_AUTH.read_text())
     except (OSError, json.JSONDecodeError):
@@ -196,11 +201,17 @@ def _codex_rows() -> list[tuple[str, str]]:
     rl = data.get("rate_limit", {}) if isinstance(data, dict) else {}
     rows: list[tuple[str, str]] = []
     pw = rl.get("primary_window") or {}
-    if isinstance(pw.get("used_percent"), (int, float)):
-        rows.append(("cdx_five_hour_pct", str(float(pw["used_percent"]))))
     sw = rl.get("secondary_window") or {}
-    if isinstance(sw.get("used_percent"), (int, float)):
-        rows.append(("cdx_seven_day_pct", str(float(sw["used_percent"]))))
+    for i, w in enumerate((pw, sw)):
+        pct = w.get("used_percent")
+        if not isinstance(pct, (int, float)):
+            continue
+        secs = w.get("limit_window_seconds")
+        if isinstance(secs, (int, float)):
+            key = "cdx_five_hour_pct" if secs <= 21600 else "cdx_seven_day_pct"
+        else:
+            key = "cdx_five_hour_pct" if i == 0 else "cdx_seven_day_pct"
+        rows.append((key, str(float(pct))))
     return rows
 
 

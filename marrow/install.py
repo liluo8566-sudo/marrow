@@ -159,19 +159,8 @@ def setup_config() -> bool:
     _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     (_CONFIG_DIR / "logs").mkdir(parents=True, exist_ok=True)
     (_CONFIG_DIR / "db-pages").mkdir(parents=True, exist_ok=True)
-    paths_cfg = _CONFIG_DIR / "paths.toml"
-    if not paths_cfg.exists():
-        paths_cfg.write_text(
-            'marrow_db = "~/.config/marrow/marrow.db"\n'
-            'ny_root = "~/.config/marrow"\n'
-            'drift_pending_dir = "~/.config/marrow/drift_pending"\n'
-            'drift_backup_dir = "~/.config/marrow/drift_backup"\n'
-            'dir_tree_md = "~/.config/marrow/dir_tree.md"\n'
-            'logs_dir = "~/.config/marrow/logs"\n'
-            'state_dir = "~/.config/marrow/state"\n',
-            encoding="utf-8",
-        )
-        _ok("paths.toml written")
+    # [paths] now lives in config.toml (seeded from config.default.toml below);
+    # defaults under ~/.config/marrow suffice, so no separate seed step.
     cfg = _CONFIG_DIR / "config.toml"
     if not cfg.exists():
         src = _REPO_ROOT / "marrow" / "config.default.toml"

@@ -1,7 +1,6 @@
 """Wake-pipeline v2 injections in hooks (cortex window only):
-- SessionStart arm line (fresh window)
 - UserPromptSubmit wake-turn full-note inject
-- UserPromptSubmit monitor-death rearm inject
+- SessionStart injects nothing (Monitor ear retired; wake is typed in)
 """
 from __future__ import annotations
 
@@ -41,136 +40,160 @@ def _enable(monkeypatch, tmp_path, extra=None):
 
 
 # ── Item 2: wake-turn full-note inject ────────────────────────────────────────
+# The visible bell is human text ([cortex].wake_bell_template, default "☀️ {hm}").
+# Machine data lives in the wake_state receipt; recognition is receipt-exact then
+# template-shape fallback. Legacy '[CORTEX-WAKE]' recognition was removed (5f7efe7).
+
+def _seed_epoch(tmp_path, gen, state_id):
+    (tmp_path / "state").mkdir(exist_ok=True)
+    p = tmp_path / "state" / "wake_state.json"
+    d = json.loads(p.read_text()) if p.exists() else {}
+    d.update({"gen": gen, "state_id": state_id})
+    p.write_text(json.dumps(d), encoding="utf-8")
+
+
+def _seed_receipt(tmp_path, text="☀️ 14:00", gen=None, state_id=None):
+    from datetime import datetime, timezone
+    (tmp_path / "state").mkdir(exist_ok=True)
+    p = tmp_path / "state" / "wake_state.json"
+    d = json.loads(p.read_text()) if p.exists() else {}
+    r = {"text": text, "ts": datetime.now(timezone.utc).isoformat()}
+    if gen is not None:
+        r["gen"] = gen
+        r["state_id"] = state_id
+    d["wake_receipt"] = r
+    p.write_text(json.dumps(d), encoding="utf-8")
+
 
 def test_wake_turn_injects_full_note(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("MARROW_CORTEX", "1")
-    (tmp_path / "wakeup_note.md").write_text("read me and act", encoding="utf-8")
-    _enable(monkeypatch, tmp_path, {"wake_marker": "[CORTEX-WAKE]"})
-    _stdin(monkeypatch, {"session_id": "s1",
-                         "prompt": "[CORTEX-WAKE] 2026-07-11 14:00 wake"})
+    (tmp_path / "wakeup_note.md").write_text("## cli\nread me and act", encoding="utf-8")
+    _enable(monkeypatch, tmp_path)
+    _seed_receipt(tmp_path, text="☀️ 14:00")
+    _stdin(monkeypatch, {"session_id": "s1", "prompt": "☀️ 14:00"})
     assert hooks.main(["user_prompt_submit"]) == 0
     assert _ctx(capsys) == "read me and act"
 
 
-def _seed_epoch(tmp_path, gen, state_id):
-    (tmp_path / "state").mkdir(exist_ok=True)
-    (tmp_path / "state" / "wake_state.json").write_text(
-        json.dumps({"gen": gen, "state_id": state_id}), encoding="utf-8")
-
-
 def test_wake_turn_current_token_injects(tmp_path, monkeypatch, capsys):
-    """A wake line carrying a token that matches the live epoch injects the note."""
+    """A receipt whose token matches the live epoch injects the note."""
     monkeypatch.setenv("MARROW_CORTEX", "1")
-    (tmp_path / "wakeup_note.md").write_text("read me and act", encoding="utf-8")
-    _enable(monkeypatch, tmp_path, {"wake_marker": "[CORTEX-WAKE]"})
+    (tmp_path / "wakeup_note.md").write_text("## cli\nread me and act", encoding="utf-8")
+    _enable(monkeypatch, tmp_path)
     _seed_epoch(tmp_path, 7, "abcd1234")
-    _stdin(monkeypatch, {"session_id": "s1",
-                         "prompt": "[CORTEX-WAKE] 14:00 {g7:abcd1234}"})
+    _seed_receipt(tmp_path, text="☀️ 14:00", gen=7, state_id="abcd1234")
+    _stdin(monkeypatch, {"session_id": "s1", "prompt": "☀️ 14:00"})
     assert hooks.main(["user_prompt_submit"]) == 0
     assert _ctx(capsys) == "read me and act"
 
 
 def test_wake_turn_stale_token_suppressed(tmp_path, monkeypatch, capsys):
-    """A wake line whose token was superseded (newer gen) is NOT processed as a
+    """A receipt whose token was superseded (newer gen) is NOT processed as a
     wake: no note injected."""
     monkeypatch.setenv("MARROW_CORTEX", "1")
-    (tmp_path / "wakeup_note.md").write_text("read me and act", encoding="utf-8")
-    _enable(monkeypatch, tmp_path, {"wake_marker": "[CORTEX-WAKE]"})
-    _seed_epoch(tmp_path, 8, "abcd1234")  # live gen moved past the line's gen 7
-    _stdin(monkeypatch, {"session_id": "s1",
-                         "prompt": "[CORTEX-WAKE] 14:00 {g7:abcd1234}"})
+    (tmp_path / "wakeup_note.md").write_text("## cli\nread me and act", encoding="utf-8")
+    _enable(monkeypatch, tmp_path)
+    _seed_epoch(tmp_path, 8, "abcd1234")  # live gen moved past the receipt's gen 7
+    _seed_receipt(tmp_path, text="☀️ 14:00", gen=7, state_id="abcd1234")
+    _stdin(monkeypatch, {"session_id": "s1", "prompt": "☀️ 14:00"})
     assert hooks.main(["user_prompt_submit"]) == 0
     assert _ctx(capsys) == ""  # suppressed
 
 
-def test_wake_turn_legacy_tokenless_line_still_injects(tmp_path, monkeypatch, capsys):
-    """A token-less (legacy) wake line is processed as before even when an epoch
-    is recorded."""
+def test_wake_turn_tokenless_receipt_still_injects(tmp_path, monkeypatch, capsys):
+    """A token-less receipt is processed as before even when an epoch is recorded."""
     monkeypatch.setenv("MARROW_CORTEX", "1")
-    (tmp_path / "wakeup_note.md").write_text("read me and act", encoding="utf-8")
-    _enable(monkeypatch, tmp_path, {"wake_marker": "[CORTEX-WAKE]"})
+    (tmp_path / "wakeup_note.md").write_text("## cli\nread me and act", encoding="utf-8")
+    _enable(monkeypatch, tmp_path)
     _seed_epoch(tmp_path, 8, "abcd1234")
-    _stdin(monkeypatch, {"session_id": "s1", "prompt": "[CORTEX-WAKE] 14:00"})
+    _seed_receipt(tmp_path, text="☀️ 14:00")  # no gen/state_id on the receipt
+    _stdin(monkeypatch, {"session_id": "s1", "prompt": "☀️ 14:00"})
     assert hooks.main(["user_prompt_submit"]) == 0
     assert _ctx(capsys) == "read me and act"
 
 
 def test_wake_turn_missing_note_silent(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("MARROW_CORTEX", "1")
-    _enable(monkeypatch, tmp_path, {"wake_marker": "[CORTEX-WAKE]"})
-    _stdin(monkeypatch, {"session_id": "s1", "prompt": "[CORTEX-WAKE] wake"})
+    _enable(monkeypatch, tmp_path)
+    _seed_receipt(tmp_path, text="☀️ 14:00")
+    _stdin(monkeypatch, {"session_id": "s1", "prompt": "☀️ 14:00"})
     assert hooks.main(["user_prompt_submit"]) == 0
     assert _ctx(capsys) == ""
 
 
 def test_ordinary_chat_no_note_inject(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("MARROW_CORTEX", "1")
-    (tmp_path / "wakeup_note.md").write_text("secret note", encoding="utf-8")
-    _enable(monkeypatch, tmp_path, {"wake_marker": "[CORTEX-WAKE]"})
+    (tmp_path / "wakeup_note.md").write_text("## cli\nsecret note", encoding="utf-8")
+    _enable(monkeypatch, tmp_path)
+    _seed_receipt(tmp_path, text="☀️ 14:00")
     _stdin(monkeypatch, {"session_id": "s1", "prompt": "今天过得怎么样"})
     assert hooks.main(["user_prompt_submit"]) == 0
     assert "secret note" not in _ctx(capsys)
 
 
-# ── GAP 2: WAKE branch is line-start shaped, not substring ─────────────────────
+# ── GAP 2: WAKE branch is exact/line-start shaped, not substring ───────────────
 
-def test_wake_marker_mid_sentence_not_swallowed(tmp_path, monkeypatch, capsys):
-    """A REAL user prompt quoting the wake marker mid-sentence ("grep for
-    [CORTEX-WAKE]") must NOT be swallowed by the wake branch: no note injected,
-    and the user-wake reset fires (it is user speech). Previously the substring
-    guard (`marker in prompt`) swallowed it, skipping reset + recall."""
+def test_wake_bell_mid_sentence_not_swallowed(tmp_path, monkeypatch, capsys):
+    """A REAL user prompt merely quoting the bell text mid-sentence must NOT be
+    swallowed by the wake branch: no note injected, and the user-wake reset fires
+    (it is user speech). Receipt match is exact full-line, never a substring."""
     monkeypatch.setenv("MARROW_CORTEX", "1")
-    (tmp_path / "wakeup_note.md").write_text("secret note", encoding="utf-8")
-    _enable(monkeypatch, tmp_path, {"wake_marker": "[CORTEX-WAKE]"})
+    (tmp_path / "wakeup_note.md").write_text("## cli\nsecret note", encoding="utf-8")
+    _enable(monkeypatch, tmp_path)
+    _seed_receipt(tmp_path, text="☀️ 14:00")
     called = {"reset": False}
     monkeypatch.setattr(cortex_bridge, "_cortex_user_wake_reset",
                         lambda inp: called.__setitem__("reset", True))
     _stdin(monkeypatch, {"session_id": "s1", "transcript_path": "/t/s.jsonl",
-                         "prompt": "grep for [CORTEX-WAKE] in the log"})
+                         "prompt": "did ☀️ 14:00 fire in the log?"})
     assert hooks.main(["user_prompt_submit"]) == 0
     assert "secret note" not in _ctx(capsys)  # wake note NOT injected
     assert called["reset"] is True            # treated as a real user message
 
 
-def test_wake_bell_line_start_fires_wake_branch(tmp_path, monkeypatch, capsys):
-    """A real wake bell (marker at line start, no epoch token) fires the wake
-    branch — full note injected, no user-wake reset."""
+def test_wake_bell_shape_fallback_fires_wake_branch(tmp_path, monkeypatch, capsys):
+    """A real wake bell with NO receipt on disk still fires the wake branch via
+    the template-shape fallback (fail-open) — full note injected, no user-wake
+    reset."""
     monkeypatch.setenv("MARROW_CORTEX", "1")
-    (tmp_path / "wakeup_note.md").write_text("read me and act", encoding="utf-8")
-    _enable(monkeypatch, tmp_path, {"wake_marker": "[CORTEX-WAKE]"})
+    (tmp_path / "wakeup_note.md").write_text("## cli\nread me and act", encoding="utf-8")
+    _enable(monkeypatch, tmp_path)
     called = {"reset": False}
     monkeypatch.setattr(cortex_bridge, "_cortex_user_wake_reset",
                         lambda inp: called.__setitem__("reset", True))
+    # No receipt on disk -> shape fallback matches the config template exactly
+    # (default = "[☀️ {hm}]").
     _stdin(monkeypatch, {"session_id": "s1", "transcript_path": "/t/s.jsonl",
-                         "prompt": "[CORTEX-WAKE] 2026-07-14 14:00 wake"})
+                         "prompt": "[☀️ 14:00]"})
     assert hooks.main(["user_prompt_submit"]) == 0
     assert _ctx(capsys) == "read me and act"  # wake branch fired
     assert called["reset"] is False           # NOT a user message
 
 
-def test_wake_bell_with_epoch_token_fires_wake_branch(tmp_path, monkeypatch, capsys):
-    """The wake line may carry a ' {g<gen>:<sid>}' epoch suffix — the line-start
-    shape check tolerates it and the wake branch still fires (current token)."""
+def test_wake_bell_receipt_fires_wake_branch(tmp_path, monkeypatch, capsys):
+    """A receipt exact match with a current epoch token fires the wake branch."""
     monkeypatch.setenv("MARROW_CORTEX", "1")
-    (tmp_path / "wakeup_note.md").write_text("read me and act", encoding="utf-8")
-    _enable(monkeypatch, tmp_path, {"wake_marker": "[CORTEX-WAKE]"})
+    (tmp_path / "wakeup_note.md").write_text("## cli\nread me and act", encoding="utf-8")
+    _enable(monkeypatch, tmp_path)
     _seed_epoch(tmp_path, 7, "abcd1234")
+    _seed_receipt(tmp_path, text="☀️ 14:00", gen=7, state_id="abcd1234")
     _stdin(monkeypatch, {"session_id": "s1", "transcript_path": "/t/s.jsonl",
-                         "prompt": "[CORTEX-WAKE] 14:00 wake {g7:abcd1234}"})
+                         "prompt": "☀️ 14:00"})
     assert hooks.main(["user_prompt_submit"]) == 0
     assert _ctx(capsys) == "read me and act"
 
 
 def test_wake_bell_wrapped_envelope_fires_wake_branch(tmp_path, monkeypatch, capsys):
     """Delivered by the ear Monitor the bell arrives wrapped:
-    `<event>⏳ [CORTEX-WAKE] … {g7:abcd1234}</event>` — the envelope-aware
-    line-start check still fires the wake branch."""
+    `<event>☀️ 14:00</event>` — the envelope-aware exact match still fires the
+    wake branch."""
     monkeypatch.setenv("MARROW_CORTEX", "1")
-    (tmp_path / "wakeup_note.md").write_text("read me and act", encoding="utf-8")
-    _enable(monkeypatch, tmp_path, {"wake_marker": "[CORTEX-WAKE]"})
+    (tmp_path / "wakeup_note.md").write_text("## cli\nread me and act", encoding="utf-8")
+    _enable(monkeypatch, tmp_path)
     _seed_epoch(tmp_path, 7, "abcd1234")
+    _seed_receipt(tmp_path, text="☀️ 14:00", gen=7, state_id="abcd1234")
     _stdin(monkeypatch, {"session_id": "s1", "transcript_path": "/t/s.jsonl",
-                         "prompt": "<event>⏳ [CORTEX-WAKE] 14:00 {g7:abcd1234}</event>"})
+                         "prompt": "<event>☀️ 14:00</event>"})
     assert hooks.main(["user_prompt_submit"]) == 0
     assert _ctx(capsys) == "read me and act"
 
@@ -183,47 +206,74 @@ def _read_gen(tmp_path):
     return d.get("gen")
 
 
-def test_tuck_in_line_injects_menu_not_note(tmp_path, monkeypatch, capsys):
-    """A [NEW ROUND] free-round line carries its diff-mode note inline (visible in
-    the ear Monitor event); the hook must NOT re-inject the note (no duplicate),
-    but DOES inject the C2 menu body covertly via additionalContext (never on
-    screen)."""
+def test_tuck_in_line_with_nothing_staged_injects_nothing(tmp_path, monkeypatch, capsys):
+    """A [NEW ROUND] marker turn with no staged payload injects nothing — and it
+    never falls back to the frozen wakeup note (no double note, 07-14)."""
     monkeypatch.setenv("MARROW_CORTEX", "1")
-    (tmp_path / "wakeup_note.md").write_text("FROZEN note", encoding="utf-8")
-    _enable(monkeypatch, tmp_path,
-            {"wake_marker": "[CORTEX-WAKE]", "tuck_in_marker": "[NEW ROUND]"})
+    (tmp_path / "wakeup_note.md").write_text("## cli\nFROZEN note", encoding="utf-8")
+    _enable(monkeypatch, tmp_path, {"tuck_in_marker": "[NEW ROUND]"})
     _stdin(monkeypatch, {"session_id": "s1",
-                         "prompt": "📮 note inline\n\nNow: 14:00\n⏳ [NEW ROUND] 15 min"})
+                         "prompt": "⏳ [NEW ROUND] 15 min"})
     assert hooks.main(["user_prompt_submit"]) == 0
     ctx = _ctx(capsys)
-    assert "FROZEN note" not in ctx     # note NOT re-injected (no double note)
-    assert "3 choices" in ctx           # C2 menu injected covertly
-    assert "lie_down" in ctx
+    assert "FROZEN note" not in ctx     # never the frozen note
+    assert ctx == ""
 
 
-def test_tuck_in_menu_blank_injects_nothing(tmp_path, monkeypatch, capsys):
-    """[cortex].tuck_in_menu_text = "" -> marker-only round, hook injects nothing."""
+def test_tuck_in_line_injects_staged_note_covertly(tmp_path, monkeypatch, capsys):
+    """Only the short ⏳ marker is typed into the window; the free-round note
+    cortex staged is injected as additionalContext (invisible), then CONSUMED so
+    a later marker turn can never replay it."""
     monkeypatch.setenv("MARROW_CORTEX", "1")
-    _enable(monkeypatch, tmp_path,
-            {"tuck_in_marker": "[NEW ROUND]", "tuck_in_menu_text": ""})
-    _stdin(monkeypatch, {"session_id": "s1",
-                         "prompt": "note\n⏳ [NEW ROUND] 15 min"})
+    staged = tmp_path / "free_round_note.md"
+    staged.write_text("📮 小道消息\nNow: 14:00", encoding="utf-8")
+    _enable(monkeypatch, tmp_path, {"tuck_in_marker": "[NEW ROUND]"})
+    _stdin(monkeypatch, {"session_id": "s1", "prompt": "⏳ [NEW ROUND] 15 min"})
+    assert hooks.main(["user_prompt_submit"]) == 0
+    ctx = _ctx(capsys)
+    assert "小道消息" in ctx and "Now: 14:00" in ctx
+    assert not staged.exists()          # consume-once
+
+    # Second marker turn with nothing staged -> nothing injected (no replay).
+    _stdin(monkeypatch, {"session_id": "s1", "prompt": "⏳ [NEW ROUND] 15 min"})
     assert hooks.main(["user_prompt_submit"]) == 0
     assert _ctx(capsys) == ""
+
+
+def test_tuck_in_staged_note_expired_is_dropped(tmp_path, monkeypatch, capsys):
+    """A payload whose marker turn never arrived (window died between staging
+    and the prompt) is dropped past receipt_ttl_min instead of surfacing on an
+    unrelated later round."""
+    import os
+    import time
+    monkeypatch.setenv("MARROW_CORTEX", "1")
+    staged = tmp_path / "free_round_note.md"
+    staged.write_text("STALE payload", encoding="utf-8")
+    old = time.time() - 3600
+    os.utime(staged, (old, old))
+    _enable(monkeypatch, tmp_path, {"tuck_in_marker": "[NEW ROUND]",
+                                    "receipt_ttl_min": 15})
+    _stdin(monkeypatch, {"session_id": "s1", "prompt": "⏳ [NEW ROUND] 15 min"})
+    assert hooks.main(["user_prompt_submit"]) == 0
+    assert _ctx(capsys) == ""
+    assert not staged.exists()          # dropped, not left to rot
 
 
 # ── Item 4: FUSE / CTL covert body inject (marker on screen, body via hook) ────
 
 def test_fuse_marker_injects_body_covertly(tmp_path, monkeypatch, capsys):
     """A ⚙️ [FUSE] marker turn (bare or ear-wrapped) injects the FUSE body via
-    additionalContext — the body never rode the log line."""
+    additionalContext — the body never rode the log line. {handoff} renders as
+    this shell's own handoff path (cli here)."""
     monkeypatch.setenv("MARROW_CORTEX", "1")
     _enable(monkeypatch, tmp_path, {})
     _stdin(monkeypatch, {"session_id": "s1",
                          "prompt": '<event>⚙️ [FUSE]</event>'})
     assert hooks.main(["user_prompt_submit"]) == 0
     ctx = _ctx(capsys)
-    assert "handoff.md" in ctx and "lie_down(rotate=True)" in ctx
+    assert str(tmp_path / "handoff-cli.md") in ctx
+    assert "{handoff}" not in ctx
+    assert "lie_down(rotate=True)" in ctx
 
 
 def test_fuse_blank_body_injects_nothing(tmp_path, monkeypatch, capsys):
@@ -256,6 +306,43 @@ def test_ctl_marker_no_rotate_omits_rotate_arg(tmp_path, monkeypatch, capsys):
     ctx = _ctx(capsys)
     assert "lie_down(next_wake_min=15)" in ctx
     assert "rotate=true" not in ctx
+
+
+def test_ctl_marker_human_true_renders_human_override(tmp_path, monkeypatch, capsys):
+    """P17: an explicit /ct-sleep minutes marker carries human=true — the
+    rendered lie_down(...) call must include human_override=True so it pierces
+    the clamp band end to end."""
+    monkeypatch.setenv("MARROW_CORTEX", "1")
+    _enable(monkeypatch, tmp_path, {})
+    _stdin(monkeypatch, {"session_id": "s1",
+                         "prompt": "⚙️ [CTL] mins=10 rotate=false human=true"})
+    assert hooks.main(["user_prompt_submit"]) == 0
+    ctx = _ctx(capsys)
+    assert "lie_down(next_wake_min=10, human_override=True)" in ctx
+
+
+def test_ctl_marker_human_false_omits_human_override(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("MARROW_CORTEX", "1")
+    _enable(monkeypatch, tmp_path, {})
+    _stdin(monkeypatch, {"session_id": "s1",
+                         "prompt": "⚙️ [CTL] mins=30 rotate=true human=false"})
+    assert hooks.main(["user_prompt_submit"]) == 0
+    ctx = _ctx(capsys)
+    assert "lie_down(next_wake_min=30, rotate=true)" in ctx
+    assert "human_override" not in ctx
+
+
+def test_ctl_marker_no_human_field_backward_compatible(tmp_path, monkeypatch, capsys):
+    """A marker line with no human= field (older cortex build) still renders
+    cleanly — no human_override arg, no crash."""
+    monkeypatch.setenv("MARROW_CORTEX", "1")
+    _enable(monkeypatch, tmp_path, {})
+    _stdin(monkeypatch, {"session_id": "s1",
+                         "prompt": "⚙️ [CTL] mins=15 rotate=false"})
+    assert hooks.main(["user_prompt_submit"]) == 0
+    ctx = _ctx(capsys)
+    assert "lie_down(next_wake_min=15)" in ctx
+    assert "human_override" not in ctx
 
 
 def test_fuse_ctl_markers_not_swallowed_mid_sentence(tmp_path, monkeypatch, capsys):
@@ -314,7 +401,7 @@ def test_marker_mention_mid_sentence_not_swallowed(tmp_path, monkeypatch, capsys
 def test_wakeup_note_fresh_render_wins(tmp_path, monkeypatch):
     """render_module configured + subprocess succeeds => fresh stdout is used,
     not the frozen file."""
-    (tmp_path / "wakeup_note.md").write_text("frozen", encoding="utf-8")
+    (tmp_path / "wakeup_note.md").write_text("## cli\nfrozen", encoding="utf-8")
     _enable(monkeypatch, tmp_path, {"render_module": "cortex.note_render",
                                     "venv_python": "/x/py", "repo_root": "/x"})
 
@@ -326,43 +413,32 @@ def test_wakeup_note_fresh_render_wins(tmp_path, monkeypatch):
     assert cortex_bridge.wakeup_note_text("/t/feed1234ab.jsonl") == "FRESH note SID feed1234"
 
 
-def test_wakeup_note_fresh_render_mirrors_to_file(tmp_path, monkeypatch):
-    """A successful fresh render overwrites wakeup_note.md so the on-disk copy
-    equals the note actually injected."""
-    note = tmp_path / "wakeup_note.md"
-    note.write_text("stale frozen", encoding="utf-8")
+def test_wakeup_note_render_asks_the_renderer_to_mirror_this_shell(tmp_path, monkeypatch):
+    """marrow no longer rewrites wakeup_note.md itself — it tells the renderer
+    which shell it is and asks it to store that shell's section (--mirror), so a
+    tg render can never overwrite the cli section."""
+    monkeypatch.setenv("MARROW_CORTEX", "tg")
     _enable(monkeypatch, tmp_path, {"render_module": "cortex.note_render",
                                     "venv_python": "/x/py", "repo_root": "/x"})
+    seen = {}
 
     class _P:
         returncode = 0
         stdout = "FRESH mirrored note"
         stderr = ""
-    monkeypatch.setattr(cortex_bridge.subprocess, "run", lambda *a, **k: _P())
-    cortex_bridge.wakeup_note_text("/t/x.jsonl")
-    assert note.read_text(encoding="utf-8") == "FRESH mirrored note"
 
-
-def test_wakeup_note_mirror_failure_never_breaks_injection(tmp_path, monkeypatch):
-    """A mirror write failure (atomic_write raising) is swallowed inside
-    _mirror_wakeup_note, so the injected text still returns."""
-    _enable(monkeypatch, tmp_path, {"render_module": "cortex.note_render",
-                                    "venv_python": "/x/py", "repo_root": "/x"})
-
-    class _P:
-        returncode = 0
-        stdout = "FRESH note"
-        stderr = ""
-    monkeypatch.setattr(cortex_bridge.subprocess, "run", lambda *a, **k: _P())
-    import marrow._atomic as _atomic
-    monkeypatch.setattr(_atomic, "atomic_write",
-                        lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
-    assert cortex_bridge.wakeup_note_text("/t/x.jsonl") == "FRESH note"
+    def _run(cmd, **k):
+        seen["cmd"] = cmd
+        return _P()
+    monkeypatch.setattr(cortex_bridge.subprocess, "run", _run)
+    assert cortex_bridge.wakeup_note_text("/t/x.jsonl") == "FRESH mirrored note"
+    assert "--mirror" in seen["cmd"]
+    assert seen["cmd"][seen["cmd"].index("--shell") + 1] == "tg"
 
 
 def test_wakeup_note_falls_back_on_render_failure(tmp_path, monkeypatch):
     """Subprocess failure / non-zero / empty => frozen file is returned."""
-    (tmp_path / "wakeup_note.md").write_text("frozen fallback", encoding="utf-8")
+    (tmp_path / "wakeup_note.md").write_text("## cli\nfrozen fallback", encoding="utf-8")
     _enable(monkeypatch, tmp_path, {"render_module": "cortex.note_render",
                                     "venv_python": "/x/py", "repo_root": "/x"})
 
@@ -374,7 +450,7 @@ def test_wakeup_note_falls_back_on_render_failure(tmp_path, monkeypatch):
 
 def test_wakeup_note_no_render_module_uses_file(tmp_path, monkeypatch):
     """render_module unset => never spawns, static file only (feature disabled)."""
-    (tmp_path / "wakeup_note.md").write_text("static only", encoding="utf-8")
+    (tmp_path / "wakeup_note.md").write_text("## cli\nstatic only", encoding="utf-8")
     _enable(monkeypatch, tmp_path, {"venv_python": "/x/py", "repo_root": "/x"})
 
     def _fail(*a, **k):
@@ -386,46 +462,41 @@ def test_wakeup_note_no_render_module_uses_file(tmp_path, monkeypatch):
 def test_non_cortex_session_no_wake_inject(tmp_path, monkeypatch, capsys):
     """No MARROW_CORTEX => the whole cortex branch is skipped."""
     monkeypatch.delenv("MARROW_CORTEX", raising=False)
-    (tmp_path / "wakeup_note.md").write_text("note", encoding="utf-8")
-    _enable(monkeypatch, tmp_path, {"wake_marker": "[CORTEX-WAKE]"})
-    _stdin(monkeypatch, {"session_id": "s1", "prompt": "[CORTEX-WAKE] wake"})
+    (tmp_path / "wakeup_note.md").write_text("## cli\nnote", encoding="utf-8")
+    _enable(monkeypatch, tmp_path)
+    _seed_receipt(tmp_path, text="☀️ 14:00")
+    _stdin(monkeypatch, {"session_id": "s1", "prompt": "☀️ 14:00"})
     assert hooks.main(["user_prompt_submit"]) == 0
     assert "note" not in _ctx(capsys)
 
 
-# ── Item 3: monitor-death rearm inject ────────────────────────────────────────
+# ── Monitor burial: no arm/rearm/orphan-tail machinery survives ───────────────
 
 _DEATH = ('<task-notification>\n<summary>Monitor event: "ear"</summary>\n'
           '<event>[Monitor stopped — too much output.]</event>\n'
           '</task-notification>')
 
 
-def test_monitor_death_injects_rearm(tmp_path, monkeypatch, capsys):
+def test_monitor_death_prompt_passes_through_untouched(tmp_path, monkeypatch, capsys):
+    """A Monitor-stopped notification is no longer a special shape: the hook
+    injects nothing for it (the ear it referred to no longer exists)."""
     monkeypatch.setenv("MARROW_CORTEX", "1")
-    _enable(monkeypatch, tmp_path,
-            {"rearm_text": "rearm: tail {signal_log}"})
+    _enable(monkeypatch, tmp_path, {})
     _stdin(monkeypatch, {"session_id": "s1", "prompt": _DEATH})
-    assert hooks.main(["user_prompt_submit"]) == 0
-    assert _ctx(capsys) == f"rearm: tail {tmp_path/'state'/'wake_signal.log'}"
-
-
-def test_monitor_death_silent_on_normal_chat(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("MARROW_CORTEX", "1")
-    _enable(monkeypatch, tmp_path, {"rearm_text": "rearm {signal_log}"})
-    _stdin(monkeypatch, {"session_id": "s1", "prompt": "Monitor 工具怎么用啊"})
     assert hooks.main(["user_prompt_submit"]) == 0
     assert "rearm" not in _ctx(capsys)
 
 
-def test_monitor_death_blank_text_silent(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("MARROW_CORTEX", "1")
-    _enable(monkeypatch, tmp_path, {"rearm_text": ""})
-    _stdin(monkeypatch, {"session_id": "s1", "prompt": _DEATH})
-    assert hooks.main(["user_prompt_submit"]) == 0
-    assert _ctx(capsys) == ""
+def test_rearm_helpers_removed():
+    """The Monitor arm/rearm/orphan-tail machinery is gone from the bridge."""
+    for name in ("arm_ear_text", "resume_ear_text", "retired_ear_text",
+                 "rearm_text", "is_monitor_death", "is_resident_session",
+                 "kill_orphan_ear_tails", "_ARM_EAR_TEXT", "_RESUME_EAR_TEXT",
+                 "_RETIRED_EAR_TEXT", "_REARM_TEXT"):
+        assert not hasattr(cortex_bridge, name), name
 
 
-# ── Item 1: SessionStart arm line (fresh cortex window) ───────────────────────
+# ── SessionStart: cortex window gets no injection at all ──────────────────────
 
 def _ss_db(tmp_path, monkeypatch):
     db = str(tmp_path / "t.db")
@@ -434,44 +505,6 @@ def _ss_db(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     return db
 
-
-def test_arm_line_injected_fresh_cortex_window(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("MARROW_CORTEX", "1")
-    _ss_db(tmp_path, monkeypatch)
-    _enable(monkeypatch, tmp_path, {"arm_ear_text": "arm: tail {signal_log}"})
-    jl = tmp_path / "s.jsonl"
-    jl.write_text("", encoding="utf-8")
-    _stdin(monkeypatch, {"session_id": "fresh1", "cwd": str(tmp_path),
-                         "transcript_path": str(jl)})
-    assert hooks.main(["session_start"]) == 0
-    assert f"arm: tail {tmp_path/'state'/'wake_signal.log'}" in _ctx(capsys)
-
-
-def test_arm_line_blank_silent(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("MARROW_CORTEX", "1")
-    _ss_db(tmp_path, monkeypatch)
-    _enable(monkeypatch, tmp_path, {"arm_ear_text": ""})
-    jl = tmp_path / "s.jsonl"
-    jl.write_text("", encoding="utf-8")
-    _stdin(monkeypatch, {"session_id": "fresh2", "cwd": str(tmp_path),
-                         "transcript_path": str(jl)})
-    assert hooks.main(["session_start"]) == 0
-    assert "arm:" not in _ctx(capsys)
-
-
-def test_arm_line_skipped_non_cortex(tmp_path, monkeypatch, capsys):
-    monkeypatch.delenv("MARROW_CORTEX", raising=False)
-    _ss_db(tmp_path, monkeypatch)
-    _enable(monkeypatch, tmp_path, {"arm_ear_text": "arm: tail {signal_log}"})
-    jl = tmp_path / "s.jsonl"
-    jl.write_text("", encoding="utf-8")
-    _stdin(monkeypatch, {"session_id": "fresh3", "cwd": str(tmp_path),
-                         "transcript_path": str(jl)})
-    assert hooks.main(["session_start"]) == 0
-    assert "arm:" not in _ctx(capsys)
-
-
-# ── Resume: resume_ear_text inject + no arm regression ────────────────────────
 
 def _mark_resume(db, sid):
     """Seed a prior lifecycle:start row so SessionStart classifies sid a resume."""
@@ -492,124 +525,62 @@ def _write_wake_state(tmp_path, transcript):
         encoding="utf-8")
 
 
-def test_resume_resident_injects_resume_ear_text(tmp_path, monkeypatch, capsys):
-    """Resident resume (wake_state transcript == this session) → re-arm guidance
-    + orphan cleanup, never the fresh-window arm line."""
+def _ss_ctx(tmp_path, monkeypatch, capsys, sid, jl):
+    _stdin(monkeypatch, {"session_id": sid, "cwd": str(tmp_path),
+                         "transcript_path": str(jl)})
+    assert hooks.main(["session_start"]) == 0
+    return _ctx(capsys)
+
+
+def test_fresh_cortex_window_injects_no_ear_copy(tmp_path, monkeypatch, capsys):
+    """Fresh window: page-turn still runs, but no Monitor/arm copy is injected."""
+    monkeypatch.setenv("MARROW_CORTEX", "1")
+    _ss_db(tmp_path, monkeypatch)
+    _enable(monkeypatch, tmp_path, {})
+    jl = tmp_path / "s.jsonl"
+    jl.write_text("", encoding="utf-8")
+    ctx = _ss_ctx(tmp_path, monkeypatch, capsys, "fresh1", jl)
+    assert "wake_signal.log" not in ctx
+    assert "persistent monitor" not in ctx
+
+
+def test_resume_cortex_window_injects_no_ear_copy(tmp_path, monkeypatch, capsys):
+    """Resident resume: no re-arm guidance, no orphan-tail cleanup."""
     monkeypatch.setenv("MARROW_CORTEX", "1")
     db = _ss_db(tmp_path, monkeypatch)
-    _enable(monkeypatch, tmp_path,
-            {"arm_ear_text": "arm: tail {signal_log}",
-             "resume_ear_text": "resume: retail {signal_log}",
-             "retired_ear_text": "retired: read only"})
-    called = {"n": 0}
-    monkeypatch.setattr(cortex_bridge, "kill_orphan_ear_tails",
-                        lambda: called.__setitem__("n", called["n"] + 1) or 0)
+    _enable(monkeypatch, tmp_path, {})
     _mark_resume(db, "res1")
     jl = tmp_path / "s.jsonl"
     jl.write_text("", encoding="utf-8")
     _write_wake_state(tmp_path, jl)
-    _stdin(monkeypatch, {"session_id": "res1", "cwd": str(tmp_path),
-                         "transcript_path": str(jl)})
-    assert hooks.main(["session_start"]) == 0
-    ctx = _ctx(capsys)
-    assert f"resume: retail {tmp_path/'state'/'wake_signal.log'}" in ctx
-    assert "arm: tail" not in ctx
-    assert "retired:" not in ctx
-    assert called["n"] == 1  # orphan cleanup ran in the resident case
+    ctx = _ss_ctx(tmp_path, monkeypatch, capsys, "res1", jl)
+    assert "has been resumed" not in ctx
+    assert "wake_signal.log" not in ctx
 
 
-def test_resume_retired_injects_retired_text_no_cleanup(tmp_path, monkeypatch, capsys):
-    """Retired resume (wake_state transcript points at a DIFFERENT session) →
-    read-only guidance, NO orphan cleanup (must not kill resident's tail)."""
+def test_retired_cortex_window_injects_no_ear_copy(tmp_path, monkeypatch, capsys):
+    """Retired resume (wake_state points at a newer transcript): still nothing."""
     monkeypatch.setenv("MARROW_CORTEX", "1")
     db = _ss_db(tmp_path, monkeypatch)
-    _enable(monkeypatch, tmp_path,
-            {"resume_ear_text": "resume: retail {signal_log}",
-             "retired_ear_text": "retired: read only"})
-    called = {"n": 0}
-    monkeypatch.setattr(cortex_bridge, "kill_orphan_ear_tails",
-                        lambda: called.__setitem__("n", called["n"] + 1) or 0)
+    _enable(monkeypatch, tmp_path, {})
     _mark_resume(db, "res3")
     jl = tmp_path / "old.jsonl"
     jl.write_text("", encoding="utf-8")
-    # Resident pointer is a NEWER transcript, not this one.
     _write_wake_state(tmp_path, tmp_path / "newer.jsonl")
-    _stdin(monkeypatch, {"session_id": "res3", "cwd": str(tmp_path),
-                         "transcript_path": str(jl)})
-    assert hooks.main(["session_start"]) == 0
-    ctx = _ctx(capsys)
-    assert "retired: read only" in ctx
-    assert "resume: retail" not in ctx
-    assert called["n"] == 0  # orphan cleanup must NOT run for a retired window
+    ctx = _ss_ctx(tmp_path, monkeypatch, capsys, "res3", jl)
+    assert "archived session" not in ctx
+    assert "wake_signal.log" not in ctx
 
 
-def test_is_resident_session_branch_decision(tmp_path, monkeypatch):
-    """Deterministic match/no-match decision off wake_state.transcript."""
-    _enable(monkeypatch, tmp_path, {})
-    # Match.
-    _write_wake_state(tmp_path, tmp_path / "a.jsonl")
-    assert cortex_bridge.is_resident_session(str(tmp_path / "a.jsonl")) is True
-    # No match → retired.
-    assert cortex_bridge.is_resident_session(str(tmp_path / "b.jsonl")) is False
-    # Empty/missing pointer defaults to resident.
-    (tmp_path / "state").mkdir(exist_ok=True)
-    (tmp_path / "state" / "wake_state.json").write_text(
-        json.dumps({"awake": True}), encoding="utf-8")
-    assert cortex_bridge.is_resident_session(str(tmp_path / "a.jsonl")) is True
-
-
-def test_fresh_window_still_arms_not_resume(tmp_path, monkeypatch, capsys):
-    """Regression: a fresh window keeps injecting arm_ear_text, never resume."""
+def test_page_turn_still_runs_on_fresh_window(tmp_path, monkeypatch, capsys):
+    """The surviving SessionStart side effect: the handoff page-turn call."""
     monkeypatch.setenv("MARROW_CORTEX", "1")
     _ss_db(tmp_path, monkeypatch)
-    _enable(monkeypatch, tmp_path,
-            {"arm_ear_text": "arm: tail {signal_log}",
-             "resume_ear_text": "resume: retail {signal_log}"})
+    _enable(monkeypatch, tmp_path, {})
+    seen = {"n": 0}
+    monkeypatch.setattr(cortex_bridge, "_cortex_handoff_page_turn_if_stale",
+                        lambda: seen.__setitem__("n", seen["n"] + 1))
     jl = tmp_path / "s.jsonl"
     jl.write_text("", encoding="utf-8")
-    _stdin(monkeypatch, {"session_id": "freshR", "cwd": str(tmp_path),
-                         "transcript_path": str(jl)})
-    assert hooks.main(["session_start"]) == 0
-    ctx = _ctx(capsys)
-    assert f"arm: tail {tmp_path/'state'/'wake_signal.log'}" in ctx
-    assert "resume: retail" not in ctx
-
-
-def test_resume_blank_text_silent(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("MARROW_CORTEX", "1")
-    db = _ss_db(tmp_path, monkeypatch)
-    _enable(monkeypatch, tmp_path, {"resume_ear_text": ""})
-    monkeypatch.setattr(cortex_bridge, "kill_orphan_ear_tails", lambda: 0)
-    _mark_resume(db, "res2")
-    jl = tmp_path / "s.jsonl"
-    jl.write_text("", encoding="utf-8")
-    _stdin(monkeypatch, {"session_id": "res2", "cwd": str(tmp_path),
-                         "transcript_path": str(jl)})
-    assert hooks.main(["session_start"]) == 0
-    assert "resume:" not in _ctx(capsys)
-
-
-# ── Resume no-completion-record notice is NOT monitor death ───────────────────
-
-_NO_COMPLETION = (
-    '<task-notification>\n<task-id>bxybfk5js</task-id>\n'
-    '<tool-use-id>toolu_x</tool-use-id>\n<status>stopped</status>\n'
-    '<summary>No completion record was found for this background shell command '
-    'from the previous session. It may have been stopped (via the UI, Monitor '
-    'timeout, or agent teardown — these leave no transcript marker), or it may '
-    'have been running when the previous Claude Code process exited.</summary>\n'
-    '</task-notification>'
-)
-
-
-def test_no_completion_record_not_monitor_death():
-    assert cortex_bridge.is_monitor_death(_NO_COMPLETION) is False
-
-
-def test_no_completion_record_no_rearm_inject(tmp_path, monkeypatch, capsys):
-    """The resume notice must not trigger the mid-window rearm flow."""
-    monkeypatch.setenv("MARROW_CORTEX", "1")
-    _enable(monkeypatch, tmp_path, {"rearm_text": "rearm: tail {signal_log}"})
-    _stdin(monkeypatch, {"session_id": "s1", "prompt": _NO_COMPLETION})
-    assert hooks.main(["user_prompt_submit"]) == 0
-    assert "rearm" not in _ctx(capsys)
+    _ss_ctx(tmp_path, monkeypatch, capsys, "freshP", jl)
+    assert seen["n"] == 1

@@ -726,3 +726,24 @@ def test_event_clear_backs_up_db_first(env, tmp_path):
     import os
     assert os.path.exists(out["backup"])
     os.remove(out["backup"])
+
+
+# ── _localize_ts ─────────────────────────────────────────────────────────────
+
+def test_localize_ts_converts_utc_fields(monkeypatch):
+    from zoneinfo import ZoneInfo
+    from marrow import timeutil
+    monkeypatch.setattr(timeutil, "_MELB", ZoneInfo("Asia/Tokyo"))
+    row = {"id": 1, "created_at": "2026-07-27T00:30:00Z", "sent_at": None, "body": "x"}
+    out = daemon._localize_ts(row, ("created_at", "sent_at", "replied_at"))
+    assert out["created_at"] == "2026-07-27 09:30"  # UTC+9
+    assert out["sent_at"] is None
+    assert out["body"] == "x"
+    assert out["id"] == 1
+
+
+def test_localize_ts_leaves_unlisted_fields(monkeypatch):
+    row = {"created_at": "2026-07-27T00:30:00Z", "other": "2026-07-27T00:30:00Z"}
+    out = daemon._localize_ts(dict(row), ("created_at",))
+    assert out["other"] == row["other"]
+    assert out["created_at"] != row["created_at"]

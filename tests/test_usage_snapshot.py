@@ -151,6 +151,29 @@ def test_codex_rows_parses_used_percent(monkeypatch, tmp_path):
     assert rows["cdx_seven_day_pct"] == "12.5"
 
 
+def test_codex_rows_classifies_by_window_seconds_not_position(monkeypatch, tmp_path):
+    """Live OpenAI payload shape: only primary_window present (7d, 604800s),
+    secondary_window null — the 5h window is gone. Must land on
+    cdx_seven_day_pct, not the old positional cdx_five_hour_pct."""
+    monkeypatch.setattr(us, "_codex_rows", _REAL_CODEX_ROWS)
+    auth = tmp_path / "auth.json"
+    auth.write_text(json.dumps({"tokens": {"access_token": "t", "account_id": "a"}}))
+    monkeypatch.setattr(us, "CDX_AUTH", auth)
+
+    class R:
+        def read(self_inner):
+            return json.dumps({"rate_limit": {
+                "primary_window": {"used_percent": 6, "limit_window_seconds": 604800},
+                "secondary_window": None}}).encode()
+        def __enter__(self_inner):
+            return self_inner
+        def __exit__(self_inner, *a):
+            return False
+    monkeypatch.setattr("marrow.usage_snapshot.urllib.request.urlopen",
+                        lambda *a, **k: R())
+    assert dict(us._codex_rows()) == {"cdx_seven_day_pct": "6.0"}
+
+
 def test_codex_rows_empty_without_auth(monkeypatch, tmp_path):
     monkeypatch.setattr(us, "_codex_rows", _REAL_CODEX_ROWS)
     monkeypatch.setattr(us, "CDX_AUTH", tmp_path / "nope.json")

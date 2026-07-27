@@ -10,7 +10,7 @@ import threading
 
 import pytest
 
-from marrow import config, daemon, outbox, storage
+from marrow import config, cortex_bridge, daemon, outbox, storage
 
 
 @pytest.fixture()
@@ -241,6 +241,33 @@ def test_ct_cap_blocked_send_does_not_kick(db, monkeypatch):
     assert outbox.send("ct", "first", db=db)["ok"]     # this one kicks
     assert not outbox.send("ct", "second", db=db)["ok"]  # cap hit -> no kick
     assert calls == ["note"]                              # exactly one kick
+
+
+def test_kick_cortex_argv(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    py = tmp_path / "venv" / "bin" / "python"
+    py.parent.mkdir(parents=True)
+    py.write_text("")
+    root = tmp_path / "repo"
+    root.mkdir()
+    monkeypatch.setattr(config, "load", lambda: {
+        "cortex": {"enabled": True, "home": str(home),
+                   "venv_python": str(py), "repo_root": str(root),
+                   "wake_audit_log_file": "wake_audit.log"},
+    })
+    monkeypatch.setattr(config, "db_path", lambda: str(tmp_path / "t.db"))
+    captured = {}
+
+    class _P:
+        def __init__(self, argv, **kw):
+            captured["argv"] = argv
+
+    monkeypatch.setattr(cortex_bridge.subprocess, "Popen", _P)
+    cortex_bridge.kick_cortex("timeout", note_id=5, minutes=30)
+    argv = captured["argv"]
+    assert argv[1:] == ["-m", "cortex.kick", "--kind", "timeout",
+                        "--note-id", "5", "--minutes", "30"]
 
 
 def test_cap_under_concurrency(db, monkeypatch):

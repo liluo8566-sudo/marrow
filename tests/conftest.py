@@ -1,6 +1,6 @@
 """Global test fixtures.
 
-Two autouse guards:
+Two autouse guards, plus a one-time import-time pin:
 
 1. `_redirect_marrow_data_dir` (session-scope, autouse): patches
    `marrow.config.DATA_DIR` and `CONFIG_PATH` to a per-session tmp dir.
@@ -17,6 +17,22 @@ Two autouse guards:
    in-process only) and would write to the real db. Neutering the
    hook-side reference keeps tests isolated. The direct popen_detach
    contract test imports from `marrow.popen_detach` and is unaffected.
+
+3. `_pin_module_tz_caches_to_melbourne()` (module-level, runs once at
+   collection): several modules cache their working timezone as a
+   MODULE-LEVEL constant computed once via `config.get_tz()` at import time
+   (`timeline._TZ`, `tl_writer._TZ`, `timecue._MELB`, `timeutil._MELB`,
+   `reconcile._TZ_MELB`, `hooks._RECALL_TZ`, `scripts.backfill_tl_range._TZ`)
+   — a perf choice to avoid a get_tz() call per line. Test fixtures across
+   the suite build timestamps against the literal
+   `ZoneInfo("Australia/Melbourne")` and expect these caches to match. On
+   the author's machine the OS timezone happens to be Melbourne, masking
+   the dependency; on any other host (or CI) these caches would resolve
+   elsewhere and the fixtures would silently mismatch. We import the
+   affected modules here, once, with `config.get_tz` briefly patched to
+   force Melbourne, then restore the real `get_tz` — so
+   `tests/test_config.py`'s own os_tz()/get_tz() behaviour tests still see
+   genuine host behaviour.
 """
 from __future__ import annotations
 
@@ -40,6 +56,29 @@ import marrow.config as _marrow_config
 _marrow_config.get_tz = lambda: ZoneInfo("Australia/Melbourne")
 
 import pytest
+
+
+def _pin_module_tz_caches_to_melbourne() -> None:
+    from zoneinfo import ZoneInfo
+
+    from marrow import config as _config
+
+    melbourne = ZoneInfo("Australia/Melbourne")
+    real_get_tz = _config.get_tz
+    _config.get_tz = lambda: melbourne
+    try:
+        import marrow.timeutil    # noqa: F401 (also backs reconcile._TZ_MELB)
+        import marrow.timeline    # noqa: F401
+        import marrow.timecue     # noqa: F401
+        import marrow.tl_writer   # noqa: F401
+        import marrow.reconcile   # noqa: F401
+        import marrow.hooks       # noqa: F401
+        import scripts.backfill_tl_range  # noqa: F401
+    finally:
+        _config.get_tz = real_get_tz
+
+
+_pin_module_tz_caches_to_melbourne()
 
 
 # ── hard wall: no test may WRITE under the real ~/.config/marrow/ tree ─────────

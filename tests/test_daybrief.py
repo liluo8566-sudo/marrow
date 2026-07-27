@@ -73,6 +73,31 @@ def test_status_body_from_usage(conn):
     assert "Net Token Used today: 1.2M" in out
 
 
+def test_status_body_shows_sleeping_shell(conn, monkeypatch):
+    """next_wake_at set + in the future -> compact `😴 <shell> → HH:MM` line,
+    tz-converted via config.get_tz(); a shell with no alarm is omitted."""
+    future = (_dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(hours=2))
+    monkeypatch.setattr(daybrief.cortex_bridge, "_shells", lambda: ["cli", "tg"])
+    monkeypatch.setattr(
+        daybrief.cortex_bridge, "next_wake_at",
+        lambda shell: future.isoformat() if shell == "cli" else None)
+    out = daybrief.render(conn)
+    expected_hm = future.astimezone(config.get_tz()).strftime("%H:%M")
+    assert f"😴 cli → {expected_hm}" in out
+    assert "😴 tg" not in out
+
+
+def test_status_body_no_sleep_line_when_awake_or_overdue(conn, monkeypatch):
+    """No alarm, or an alarm already in the past, adds nothing to Status."""
+    past = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=1)).isoformat()
+    monkeypatch.setattr(daybrief.cortex_bridge, "_shells", lambda: ["cli", "tg"])
+    monkeypatch.setattr(
+        daybrief.cortex_bridge, "next_wake_at",
+        lambda shell: past if shell == "cli" else None)
+    out = daybrief.render(conn)
+    assert "😴" not in out
+
+
 def test_remcal_strips_daily_schedule_header(conn):
     out = daybrief.render(conn)
     assert "## Daily Schedule" not in out          # header stripped

@@ -14,13 +14,13 @@ import os
 import sqlite3
 from datetime import datetime, timezone
 
-from . import config, repo, schedule, timeline, usage
+from . import config, cortex_bridge, repo, schedule, timeline, usage
 from ._atomic import atomic_write
 from .md_index import MdIndex, _hash
 from .reconcile import emit_conflict_alerts, reconcile_timeline
 
 # Timeline zone id marker — lets md_index/watcher track the block by the same
-# `<!-- id:... -->` convention the dashboard uses. Stamped on the H2 line so
+# `<!-- id:... -->` convention the other subpages use. Stamped on the H2 line so
 # reconcile_timeline still locates `## Timeline` and Obsidian hides the comment.
 _TIMELINE_BLOCK_ID = "daybrief.timeline"
 
@@ -53,9 +53,35 @@ def _extract_bounded(existing: str | None, start: str, end: str, default: str) -
     return body or default
 
 
+def _sleep_status_line() -> str:
+    """Compact per-shell alarm line: a shell with a future next_wake_at shows
+    `😴 <shell> → HH:MM` (config tz); an awake shell is omitted entirely. Empty
+    string when nobody is asleep, so the Status block gains no extra line."""
+    now = datetime.now(timezone.utc)
+    tz = config.get_tz()
+    parts = []
+    for shell in cortex_bridge._shells():
+        raw = cortex_bridge.next_wake_at(shell)
+        if not raw:
+            continue
+        try:
+            when = datetime.fromisoformat(raw)
+        except ValueError:
+            continue
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=tz)
+        if when <= now:
+            continue
+        parts.append(f"😴 {shell} → {when.astimezone(tz).strftime('%H:%M')}")
+    return " · ".join(parts)
+
+
 def _status_body() -> str:
     lines = usage.sessionstart_lines()
     body = "\n".join(lines) if lines else "(no usage data)"
+    sleep_line = _sleep_status_line()
+    if sleep_line:
+        body += "\n" + sleep_line
     return "### Status\n" + body
 
 
@@ -103,7 +129,7 @@ def _timeline_body(conn: sqlite3.Connection, existing: str | None,
                    absorbed: bool = False) -> str:
     """render_timeline output verbatim — H2 header, line anchors and trail all
     kept — with the id marker stamped and the render timestamp carried over an
-    unchanged block (carry_trail_t). Identical to the dashboard timeline zone.
+    unchanged block (carry_trail_t).
 
     absorbed=True (reconcile just wrote an edit into the DB) forces a fresh t=
     so the per-row db-win gate does not deadlock on the next reconcile."""

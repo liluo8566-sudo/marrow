@@ -331,6 +331,7 @@ def archive_events(conn: sqlite3.Connection, rows: list[dict]) -> int:
     # Defensive gate: drop rows whose sid has session_block=archive regardless
     # of when the block was written. Catches sid-drift and any future write path
     # that bypasses the hooks.py gate (belt-and-braces).
+    from .cortex_bridge import is_machine_line
     n = 0
     sessions: set[str] = set()
     inserted: list[dict] = []
@@ -341,6 +342,11 @@ def archive_events(conn: sqlite3.Connection, rows: list[dict]) -> int:
             if sid not in _blocked_cache:
                 _blocked_cache[sid] = _sid_is_blocked(conn, sid)
             if _blocked_cache[sid]:
+                continue
+            # Machine lines (wake bell / tuck-in / injections) down the ear are
+            # not real user speech: no DB row, no FTS, no embed, no recall. The
+            # transcript file stays the audit trail.
+            if r["role"] == "user" and is_machine_line(r["content"]):
                 continue
             h = _hash(sid, r["timestamp"], r["role"],
                       r["content"])

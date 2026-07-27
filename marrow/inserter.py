@@ -26,7 +26,7 @@ from ._atomic import atomic_write as _atomic_write
 from .md_index import TombstoneStore, parse_blocks
 
 # Marker emitted around the auto-managed block. Same shape as legacy
-# subpages so dashboard ## Content links stay stable.
+# subpages so daybrief/monitor ## Content links stay stable.
 _M0 = "<!-- marrow:{key}:start -->"
 _M1 = "<!-- marrow:{key}:end -->"
 

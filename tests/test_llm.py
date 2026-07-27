@@ -5,7 +5,6 @@ import time
 import pytest
 
 from marrow.llm import LLMClient, LLMError
-from marrow import cortex_bridge
 
 CFG = {
     "llm": {
@@ -55,9 +54,31 @@ def test_parse_is_error_raises():
         LLMClient._parse_claude(_json_out("boom", is_error=True), "json")
 
 
-def test_parse_empty_raises():
-    with pytest.raises(LLMError, match="empty result"):
-        LLMClient._parse_claude(_json_out(""), "json")
+def test_parse_empty_result_no_error_returns_blank():
+    # Empty result field with is_error=false is a benign completion (a turn
+    # that ended on a tool_use with no trailing prose). Must NOT raise — this
+    # crashed cortex headless wakes. The cortex wake path ignores text entirely.
+    assert LLMClient._parse_claude(_json_out(""), "json") == ""
+
+
+def test_parse_empty_result_is_error_still_raises():
+    with pytest.raises(LLMError, match="is_error"):
+        LLMClient._parse_claude(_json_out("", is_error=True), "json")
+
+
+def test_parse_empty_result_salvages_last_assistant_text():
+    # Turn ends on a tool_use so `result` is blank, but the last assistant
+    # event carried spoken text — salvage it instead of returning "".
+    out = "\n".join([
+        json.dumps({"type": "system"}),
+        json.dumps({"type": "assistant",
+                    "message": {"content": [{"type": "text", "text": "spoken"}]}}),
+        json.dumps({"type": "assistant",
+                    "message": {"content": [
+                        {"type": "tool_use", "name": "Bash", "input": {}}]}}),
+        json.dumps({"type": "result", "result": "", "is_error": False}),
+    ])
+    assert LLMClient._parse_claude(out, "stream-json") == "spoken"
 
 
 def test_retry_absorbs_transient_miss_no_alert(monkeypatch):
@@ -87,8 +108,6 @@ def test_claude_only_failure_is_warn(monkeypatch):
         c.call("diary", "body", tier="cheap")
     assert alerts and alerts[-1][0] == "warn"
     assert "no fallback configured" in alerts[-1][2]
-
-
 
 
 def test_p_timeout_kills_process_group(tmp_path, monkeypatch):
@@ -168,49 +187,17 @@ def test_stream_timeout_kills_process_group(tmp_path, monkeypatch):
     assert _wait_dead(gc), f"orphan grandchild {gc} survived stream timeout"
 
 
-def _fake_claude_usage_stream(tmp_path, events: list[dict], result="ok"):
+def _fake_claude_event_stream(tmp_path, events: list[dict], result="ok"):
     """A claude stand-in that emits the given raw stream-json events
-    (assistant usage lines, verbatim) then a result event, for exercising
-    the real (unmocked) _stream_subprocess cap-accumulation loop
-    end-to-end."""
+    verbatim then a result event, for exercising the real (unmocked)
+    _stream_subprocess event loop end-to-end."""
     lines = [json.dumps(ev) for ev in events]
     lines.append(json.dumps({"type": "result", "result": result, "is_error": False}))
-    s = tmp_path / "fake_claude_usage"
+    s = tmp_path / "fake_claude_events"
     body = "\n".join(f"print({ln!r})" for ln in lines)
     s.write_text(f"#!/usr/bin/env python3\n{body}\n")
     s.chmod(0o755)
     return str(s)
-
-
-def _new_sink():
-    return {"in": 0, "out": 0, "cache_read": 0, "cache_write": 0,
-            "window": 0, "capped": False, "by_request": {}, "has_usage": False}
-
-
-def test_stream_subprocess_dedupes_repeated_requestid_lines(tmp_path):
-    """Regression (07-04 live incident): one API turn streams as multiple
-    assistant lines (thinking/tool_use/text) each repeating identical usage
-    under the same request_id. Corrected true numbers for the two live turns:
-    turn1 in=3 cache_creation=24159 out=290 (x2 duplicate lines); turn2 in=3
-    cache_read=24159 cache_creation=1572 out=417 (x3 duplicate lines). True
-    cumulative: in=6 out=707 cache_read=24159 cache_write=25731; final
-    window (last turn's in+cache_read+cache_creation) = 25734."""
-    turn1_usage = {"input_tokens": 3, "output_tokens": 290,
-                   "cache_creation_input_tokens": 24159}
-    turn2_usage = {"input_tokens": 3, "output_tokens": 417,
-                   "cache_read_input_tokens": 24159, "cache_creation_input_tokens": 1572}
-    events = (
-        [{"type": "assistant", "request_id": "req-1", "message": {"usage": turn1_usage}}] * 2
-        + [{"type": "assistant", "request_id": "req-2", "message": {"usage": turn2_usage}}] * 3
-    )
-    bin_ = _fake_claude_usage_stream(tmp_path, events)
-    sink = _new_sink()
-    LLMClient._stream_subprocess(
-        [bin_], "hi", 10, dict(os.environ), max_tokens=150000, usage_sink=sink)
-    assert sink["capped"] is False
-    assert (sink["in"], sink["out"], sink["cache_read"], sink["cache_write"]) \
-        == (6, 707, 24159, 25731)
-    assert sink["window"] == 25734
 
 
 # --- rate_limit_event -> ct_rate_limit kv snapshot (HANDOVER queue item 2) ---
@@ -220,7 +207,6 @@ def test_stream_subprocess_dedupes_repeated_requestid_lines(tmp_path):
 # live probe: status/resetsAt/rateLimitType/overageStatus/overageResetsAt/
 # isUsingOverage only) — *_pct keys are never written from this source,
 # only *_reset_at (+ extra raw fields under their own snake_case keys).
-# window_tokens comes from the cap-tracking sink, not this event.
 
 def _kv(db_connect, key):
     row = db_connect.execute(
@@ -325,55 +311,11 @@ def test_stream_subprocess_snapshots_rate_limit_event(tmp_path, monkeypatch):
 
     events = [{"type": "rate_limit_event", "rate_limit_info": {
         "status": "allowed", "rateLimitType": "five_hour"}}]
-    bin_ = _fake_claude_usage_stream(tmp_path, events)
+    bin_ = _fake_claude_event_stream(tmp_path, events)
     LLMClient._stream_subprocess([bin_], "hi", 10, dict(os.environ))
 
     read_conn = _real_connect(db)
     assert _kv(read_conn, "five_hour_status") == "allowed"
-    read_conn.close()
-
-
-def test_snapshot_window_tokens_writes_contract_key(tmp_path, monkeypatch):
-    from marrow import storage as stor
-
-    db = str(tmp_path / "test.db")
-    _real_connect = stor.connect
-    stor.init_db(db)
-    monkeypatch.setattr("marrow.llm.storage.connect",
-                        lambda path=None: _real_connect(db))
-    from marrow.llm import _snapshot_window_tokens
-
-    _snapshot_window_tokens(25734)
-    read_conn = _real_connect(db)
-    assert _kv(read_conn, "window_tokens") == "25734"
-    read_conn.close()
-
-
-def test_run_claude_cortex_snapshots_window_tokens(monkeypatch, tmp_path):
-    """_run_claude_cortex writes window_tokens from the cap sink on a
-    normal (non-capped) completion, reusing the already-computed figure."""
-    from marrow import storage as stor
-
-    db = str(tmp_path / "test.db")
-    _real_connect = stor.connect
-    stor.init_db(db)
-    monkeypatch.setattr("marrow.llm.storage.connect",
-                        lambda path=None: _real_connect(db))
-
-    turn_usage = {"input_tokens": 100, "output_tokens": 20,
-                  "cache_read_input_tokens": 5000, "cache_creation_input_tokens": 0}
-    events = [{"type": "assistant", "request_id": "r1",
-               "message": {"usage": turn_usage}}]
-    bin_ = _fake_claude_usage_stream(tmp_path, events, result="hi")
-    monkeypatch.setattr("marrow.llm._claude_bin", lambda: bin_)
-    c = LLMClient({"llm": {"claude_cli_cortex": {"kind": "claude_cli", "timeout_s": 5}},
-                   "tiers": {}, "cortex": {}})
-    out = cortex_bridge.run_claude_cortex(
-        c, {"kind": "claude_cli", "timeout_s": 5}, "m", "hi",
-        cwd=str(tmp_path), resume_sid=None, max_tokens=150000)
-    assert out.get("capped") is not True
-    read_conn = _real_connect(db)
-    assert _kv(read_conn, "window_tokens") == "5100"
     read_conn.close()
 
 
@@ -490,191 +432,6 @@ def test_log_usage_none_does_not_write(tmp_path, monkeypatch):
     assert written == []
 
 
-# --- Cortex full-env runner (C3) ---
-
-CORTEX_CFG = {
-    "llm": {
-        "default": "claude_cli",
-        "claude_cli": {"kind": "claude_cli", "mode": "stream", "timeout_s": 5},
-        "claude_cli_cortex": {"kind": "claude_cli_cortex", "timeout_s": 5},
-    },
-    "tiers": {"cheap": "claude-haiku", "top": "claude-opus"},
-    "cortex": {"home": "/tmp/does-not-matter-mocked", "tier": "top"},
-}
-
-
-def _cortex_stream_out(result, session_id="sess-abc"):
-    rec = {"type": "result", "result": result, "is_error": False,
-           "session_id": session_id}
-    return "\n".join([
-        json.dumps({"type": "system", "session_id": session_id}),
-        json.dumps(rec),
-    ])
-
-
-def test_extract_session_id():
-    out = _cortex_stream_out("ok", session_id="sess-xyz")
-    assert LLMClient._extract_session_id(out) == "sess-xyz"
-
-
-def test_extract_session_id_missing_returns_none():
-    out = json.dumps({"type": "result", "result": "ok"})
-    assert LLMClient._extract_session_id(out) is None
-
-
-def test_extract_session_id_garbage_returns_none():
-    assert LLMClient._extract_session_id("not json") is None
-
-
-def test_call_cortex_no_isolation_flags(monkeypatch, tmp_path):
-    c = LLMClient(CORTEX_CFG)
-    captured = {}
-
-    def fake_stream(cmd, prompt, timeout, env, cwd=None):
-        captured["cmd"] = cmd
-        captured["env"] = env
-        captured["cwd"] = cwd
-        return _cortex_stream_out("hi there")
-
-    monkeypatch.setattr(c, "_stream_subprocess", fake_stream)
-    out = c.call_cortex("hello", cwd=str(tmp_path))
-    assert out == {"text": "hi there", "session_id": "sess-abc"}
-    assert "--setting-sources" not in captured["cmd"]
-    assert "--strict-mcp-config" not in captured["cmd"]
-    assert captured["env"]["MARROW_CORTEX"] == "1"
-    assert captured["env"]["MARROW_CHANNEL"] == "ct"
-    assert "MARROW_PIPELINE" not in captured["env"]
-    assert captured["cwd"] == str(tmp_path)
-    assert "--model" in captured["cmd"]
-    assert captured["cmd"][captured["cmd"].index("--model") + 1] == "claude-opus"
-    assert "--permission-mode" in captured["cmd"]
-    assert captured["cmd"][captured["cmd"].index("--permission-mode") + 1] == "bypassPermissions"
-
-
-def test_call_cortex_model_override_bypasses_tier(monkeypatch, tmp_path):
-    cfg = {**CORTEX_CFG, "cortex": {**CORTEX_CFG["cortex"],
-                                     "model": "claude-opus-4-6"}}
-    c = LLMClient(cfg)
-    captured = {}
-
-    def fake_stream(cmd, prompt, timeout, env, cwd=None):
-        captured["cmd"] = cmd
-        return _cortex_stream_out("hi there")
-
-    monkeypatch.setattr(c, "_stream_subprocess", fake_stream)
-    c.call_cortex("hello", cwd=str(tmp_path))
-    assert captured["cmd"][captured["cmd"].index("--model") + 1] == "claude-opus-4-6"
-
-
-def test_call_cortex_effort_flag_passed_when_set(monkeypatch, tmp_path):
-    cfg = {**CORTEX_CFG, "cortex": {**CORTEX_CFG["cortex"], "effort": "medium"}}
-    c = LLMClient(cfg)
-    captured = {}
-
-    def fake_stream(cmd, prompt, timeout, env, cwd=None):
-        captured["cmd"] = cmd
-        return _cortex_stream_out("hi there")
-
-    monkeypatch.setattr(c, "_stream_subprocess", fake_stream)
-    c.call_cortex("hello", cwd=str(tmp_path))
-    assert "--effort" in captured["cmd"]
-    assert captured["cmd"][captured["cmd"].index("--effort") + 1] == "medium"
-
-
-def test_call_cortex_effort_flag_omitted_when_empty(monkeypatch, tmp_path):
-    c = LLMClient(CORTEX_CFG)
-    captured = {}
-
-    def fake_stream(cmd, prompt, timeout, env, cwd=None):
-        captured["cmd"] = cmd
-        return _cortex_stream_out("hi there")
-
-    monkeypatch.setattr(c, "_stream_subprocess", fake_stream)
-    c.call_cortex("hello", cwd=str(tmp_path))
-    assert "--effort" not in captured["cmd"]
-
-
-def test_call_cortex_default_timeout_is_600(monkeypatch, tmp_path):
-    cfg = {**CORTEX_CFG, "llm": {**CORTEX_CFG["llm"],
-           "claude_cli_cortex": {"kind": "claude_cli_cortex"}}}
-    c = LLMClient(cfg)
-    captured = {}
-
-    def fake_stream(cmd, prompt, timeout, env, cwd=None):
-        captured["timeout"] = timeout
-        return _cortex_stream_out("ok")
-
-    monkeypatch.setattr(c, "_stream_subprocess", fake_stream)
-    c.call_cortex("hello", cwd=str(tmp_path))
-    assert captured["timeout"] == 600
-
-
-def test_call_cortex_timeout_override(monkeypatch, tmp_path):
-    """Caller-supplied timeout overrides the provider default so the cortex
-    config is the single source of truth for the call budget."""
-    c = LLMClient(CORTEX_CFG)
-    captured = {}
-
-    def fake_stream(cmd, prompt, timeout, env, cwd=None):
-        captured["timeout"] = timeout
-        return _cortex_stream_out("ok")
-
-    monkeypatch.setattr(c, "_stream_subprocess", fake_stream)
-    c.call_cortex("hello", cwd=str(tmp_path), timeout=123)
-    assert captured["timeout"] == 123
-
-
-def test_call_cortex_resume_sid_passes_resume_flag(monkeypatch, tmp_path):
-    c = LLMClient(CORTEX_CFG)
-    captured = {}
-
-    def fake_stream(cmd, prompt, timeout, env, cwd=None):
-        captured["cmd"] = cmd
-        return _cortex_stream_out("ok")
-
-    monkeypatch.setattr(c, "_stream_subprocess", fake_stream)
-    c.call_cortex("hello", cwd=str(tmp_path), resume_sid="prior-sid")
-    assert "--resume" in captured["cmd"]
-    assert captured["cmd"][captured["cmd"].index("--resume") + 1] == "prior-sid"
-
-
-def test_call_cortex_fresh_omits_resume_flag(monkeypatch, tmp_path):
-    c = LLMClient(CORTEX_CFG)
-    captured = {}
-
-    def fake_stream(cmd, prompt, timeout, env, cwd=None):
-        captured["cmd"] = cmd
-        return _cortex_stream_out("ok")
-
-    monkeypatch.setattr(c, "_stream_subprocess", fake_stream)
-    c.call_cortex("hello", cwd=str(tmp_path))
-    assert "--resume" not in captured["cmd"]
-
-
-def test_call_cortex_defaults_cwd_and_creates_dir(monkeypatch, tmp_path):
-    cfg = {**CORTEX_CFG, "cortex": {"home": str(tmp_path / "cortex_home"),
-                                     "tier": "top"}}
-    c = LLMClient(cfg)
-    captured = {}
-
-    def fake_stream(cmd, prompt, timeout, env, cwd=None):
-        captured["cwd"] = cwd
-        return _cortex_stream_out("ok")
-
-    monkeypatch.setattr(c, "_stream_subprocess", fake_stream)
-    c.call_cortex("hello")
-    assert captured["cwd"] == str(tmp_path / "cortex_home")
-    assert (tmp_path / "cortex_home").is_dir()
-
-
-def test_call_cortex_missing_provider_raises():
-    c = LLMClient({"llm": {"default": "claude_cli",
-                            "claude_cli": {"kind": "claude_cli"}},
-                    "tiers": {"cheap": "haiku"}})
-    with pytest.raises(LLMError, match="claude_cli_cortex"):
-        c.call_cortex("hello")
-
-
 def test_isolation_flags_still_present_on_default_stream(monkeypatch):
     """Untouched-path guard: the existing pipeline stream runner must keep
     the isolation flags + MARROW_PIPELINE after the shared-helper refactor."""
@@ -701,138 +458,3 @@ def test_log_usage_db_failure_does_not_raise(monkeypatch):
     monkeypatch.setattr("marrow.llm.storage.connect",
                         lambda path=None: (_ for _ in ()).throw(OSError("db gone")))
     c._log_usage({"input_tokens": 1}, "m", "json")  # must not raise
-
-
-# --- Cortex per-wake token cap (accumulator + dedupe + window breach) ---
-
-def _assistant(request_id="req-1", **usage):
-    ev = {"type": "assistant", "message": {"usage": usage}}
-    if request_id is not None:
-        ev["request_id"] = request_id
-    return ev
-
-
-def test_add_event_usage_sums_four_fields_and_window():
-    sink = _new_sink()
-    LLMClient._add_event_usage(sink, _assistant(
-        input_tokens=100, output_tokens=50,
-        cache_read_input_tokens=10, cache_creation_input_tokens=5))
-    assert (sink["in"], sink["out"], sink["cache_read"], sink["cache_write"]) \
-        == (100, 50, 10, 5)
-    assert sink["window"] == 115  # in+cache_read+cache_creation this turn
-
-
-def test_add_event_usage_ignores_non_assistant_no_double_count():
-    sink = _new_sink()
-    LLMClient._add_event_usage(sink, _assistant(output_tokens=100))
-    # result event: top-level usage, no message.usage -> must not add
-    LLMClient._add_event_usage(sink, {"type": "result", "usage": {"input_tokens": 999}})
-    # tool-result / user event -> no usage -> must not add
-    LLMClient._add_event_usage(sink, {"type": "user", "message": {"content": "x"}})
-    assert (sink["in"], sink["out"], sink["cache_read"], sink["cache_write"]) \
-        == (0, 100, 0, 0)
-
-
-def test_add_event_usage_dedupes_repeated_requestid():
-    """A single API turn streams as several assistant lines (thinking/
-    tool_use/text) all repeating the identical usage under the same
-    request_id — the accumulator must count it once, not N times."""
-    sink = _new_sink()
-    usage = dict(input_tokens=100, output_tokens=50,
-                 cache_read_input_tokens=10, cache_creation_input_tokens=5)
-    for _ in range(3):  # three duplicate lines, same turn
-        LLMClient._add_event_usage(sink, _assistant(request_id="req-1", **usage))
-    assert (sink["in"], sink["out"], sink["cache_read"], sink["cache_write"]) \
-        == (100, 50, 10, 5)  # counted once, not tripled
-    assert sink["window"] == 115
-
-
-def test_add_event_usage_repeated_small_turns_do_not_breach_window_cap():
-    """Window semantics (Decided 07-04): the cap compares the LATEST turn's
-    window, not a cumulative sum. Many small distinct turns whose cumulative
-    total exceeds the cap must NOT breach as long as each turn's own window
-    stays under it."""
-    sink = _new_sink()
-    cap = 150
-    breached = False
-    for n in range(5):  # 5 turns x 60 input tokens = 300 cumulative, over cap
-        LLMClient._add_event_usage(sink, _assistant(
-            request_id=f"req-{n}", input_tokens=60))
-        if sink["window"] >= cap:
-            breached = True
-            break
-    assert not breached
-    assert sink["window"] == 60  # each turn's own window, not cumulative
-    assert sink["in"] == 300  # cumulative (audit) sum still correct
-
-
-def test_add_event_usage_fat_single_turn_breaches_window_cap():
-    """A single turn whose own window (input+cache_read+cache_creation)
-    exceeds the cap breaches immediately — even on turn 1 of a resumed
-    session replaying a large cache."""
-    sink = _new_sink()
-    cap = 150000
-    LLMClient._add_event_usage(sink, _assistant(
-        input_tokens=16, output_tokens=97,
-        cache_read_input_tokens=74049, cache_creation_input_tokens=77643))
-    assert sink["window"] == 151708  # in+cache_read+cache_creation
-    assert sink["window"] >= cap
-
-
-def test_sink_usage_maps_to_audit_fields():
-    sink = {"in": 1, "out": 2, "cache_read": 3, "cache_write": 4,
-            "window": 8, "capped": False, "by_request": {}, "has_usage": True}
-    assert LLMClient._sink_usage(sink) == {
-        "input_tokens": 1, "output_tokens": 2,
-        "cache_read_input_tokens": 3, "cache_creation_input_tokens": 4}
-
-
-def test_run_claude_cortex_cap_breach_returns_capped(monkeypatch, tmp_path):
-    c = LLMClient(CORTEX_CFG)
-    monkeypatch.setattr(c, "_log_usage", lambda *a, **k: None)
-    cap_rows = []
-    monkeypatch.setattr(cortex_bridge, "_log_cortex_cap",
-                        lambda sink, cap, model: cap_rows.append((sink["window"], cap)))
-
-    def fake_stream(cmd, prompt, timeout, env, cwd=None,
-                    on_event=None, max_tokens=None, usage_sink=None):
-        LLMClient._add_event_usage(usage_sink, _assistant(input_tokens=max_tokens))
-        if usage_sink["window"] >= max_tokens:
-            usage_sink["capped"] = True
-        return ""  # killed mid-stream, no result event
-
-    monkeypatch.setattr(c, "_stream_subprocess", fake_stream)
-    out = c.call_cortex("hi", cwd=str(tmp_path), max_tokens=1000)
-    assert out["capped"] is True
-    assert out["session_id"] is None
-    assert out["total_tokens"] == 1000
-    assert cap_rows == [(1000, 1000)]
-
-
-def test_run_claude_cortex_cap_active_reports_window(monkeypatch, tmp_path):
-    c = LLMClient(CORTEX_CFG)
-    monkeypatch.setattr(c, "_log_usage", lambda *a, **k: None)
-
-    def fake_stream(cmd, prompt, timeout, env, cwd=None,
-                    on_event=None, max_tokens=None, usage_sink=None):
-        LLMClient._add_event_usage(
-            usage_sink, _assistant(input_tokens=100, output_tokens=50))
-        return _cortex_stream_out("done")
-
-    monkeypatch.setattr(c, "_stream_subprocess", fake_stream)
-    out = c.call_cortex("hi", cwd=str(tmp_path), max_tokens=1000)
-    assert out["text"] == "done"
-    assert out["session_id"] == "sess-abc"
-    assert out["total_tokens"] == 100  # window = in+cache_read+cache_creation
-
-
-def test_call_cortex_cap_zero_disables_and_keeps_plain_shape(monkeypatch, tmp_path):
-    # max_tokens=0 -> cap inactive -> legacy return shape (no total_tokens)
-    c = LLMClient(CORTEX_CFG)
-
-    def fake_stream(cmd, prompt, timeout, env, cwd=None):
-        return _cortex_stream_out("ok")
-
-    monkeypatch.setattr(c, "_stream_subprocess", fake_stream)
-    out = c.call_cortex("hi", cwd=str(tmp_path), max_tokens=0)
-    assert out == {"text": "ok", "session_id": "sess-abc"}

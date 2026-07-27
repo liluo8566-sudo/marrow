@@ -106,6 +106,56 @@ def test_ct_delivered_only_when_cortex(tmp_path):
     assert _status(db, rid)["status"] == "sent"
 
 
+# ── pending-visible: claim ≠ settled (F-A / P14 Fix 1) ──────────────────────
+
+def test_deliver_no_settle_leaves_claimed_pending_visible(tmp_path):
+    """settle=False claims the row (pending -> claimed) and renders it, but does
+    NOT mark it sent — a real injection is the sole settle point."""
+    db = _fresh_db(tmp_path)
+    rid = _mk(db, "ct", "covert", from_channel="tg")
+    out = outbox.deliver(SID_A, "ct", is_cortex=True, db=db, settle=False)
+    assert out and "covert" in out
+    row = _status(db, rid)
+    assert row["status"] == "claimed"         # pending-visible, not settled
+    assert row["sent_at"] is None
+    assert row["claimed_by"] == "marrow.deliver"
+
+
+def test_deliver_rerenders_unsettled_claim_then_settles(tmp_path):
+    """An un-settled claimed row re-renders on the next deliver (at-least-once
+    visible); a settling deliver marks it sent so it stops re-rendering."""
+    db = _fresh_db(tmp_path)
+    rid = _mk(db, "ct", "covert", from_channel="tg")
+    # first injection failed to land -> left claimed
+    assert "covert" in outbox.deliver(SID_A, "ct", is_cortex=True, db=db,
+                                      settle=False)
+    # next deliver re-renders the same un-settled claim (duplicate acceptable)
+    out2 = outbox.deliver(SID_A, "ct", is_cortex=True, db=db, settle=True)
+    assert out2 and "covert" in out2
+    assert _status(db, rid)["status"] == "sent"
+    # now settled -> gone
+    assert outbox.deliver(SID_A, "ct", is_cortex=True, db=db) is None
+
+
+def test_deliver_settles_cross_path_frozen_claim(tmp_path):
+    """A row cortex's assemble claimed into a discarded frozen note
+    (claimed_by='cortex.note') is re-rendered + settled by the marrow hook
+    deliver (owner-agnostic settle; claim stays exactly-one-owner)."""
+    db = _fresh_db(tmp_path)
+    conn = storage.connect(db)
+    try:
+        with conn:
+            conn.execute(
+                "INSERT INTO outbox(from_channel, target, body, status,"
+                " claimed_by, claimed_at) VALUES('tg','ct','frozen','claimed',"
+                " 'cortex.note', strftime('%Y-%m-%dT%H:%M:%SZ','now'))")
+    finally:
+        conn.close()
+    out = outbox.deliver(SID_A, "ct", is_cortex=True, db=db, settle=True)
+    assert out and "frozen" in out
+    assert _status(db, 1)["status"] == "sent"
+
+
 # ── at-most-once under concurrency ──────────────────────────────────────────
 
 def test_concurrent_claim_exactly_one_winner(tmp_path):
@@ -180,16 +230,27 @@ def _enable_cortex(monkeypatch, tmp_path, db, extra=None):
     monkeypatch.setattr(config, "db_path", lambda: db)
 
 
+def _seed_receipt(tmp_path, text="☀️ 14:00"):
+    from datetime import datetime, timezone
+    import json as _json
+    (tmp_path / "state").mkdir(exist_ok=True)
+    p = tmp_path / "state" / "wake_state.json"
+    d = _json.loads(p.read_text()) if p.exists() else {}
+    d["wake_receipt"] = {"text": text,
+                         "ts": datetime.now(timezone.utc).isoformat()}
+    p.write_text(_json.dumps(d), encoding="utf-8")
+
+
 def test_ct_note_merged_into_wake_payload(tmp_path, monkeypatch, capsys):
     """A ct-targeted outbox note is consumed inside the wake branch and appended
     below the wakeup note (the normal delivery path never runs on a wake turn)."""
     monkeypatch.setenv("MARROW_CORTEX", "1")
     db = _fresh_db(tmp_path)
-    (tmp_path / "wakeup_note.md").write_text("wake body", encoding="utf-8")
-    _enable_cortex(monkeypatch, tmp_path, db, {"wake_marker": "[CORTEX-WAKE]"})
+    (tmp_path / "wakeup_note.md").write_text("## cli\nwake body", encoding="utf-8")
+    _enable_cortex(monkeypatch, tmp_path, db)
+    _seed_receipt(tmp_path, text="☀️ 14:00")
     _mk(db, "ct", "covert note for cortex", from_channel="tg", from_sid="tgtg0001")
-    _stdin(monkeypatch, {"session_id": "ctsid1",
-                         "prompt": "[CORTEX-WAKE] 14:00 wake"})
+    _stdin(monkeypatch, {"session_id": "ctsid1", "prompt": "☀️ 14:00"})
     assert hooks.main(["user_prompt_submit"]) == 0
     ctx = _ctx(capsys)
     assert "wake body" in ctx
@@ -202,10 +263,10 @@ def test_wake_payload_note_only_when_no_wakeup(tmp_path, monkeypatch, capsys):
     """No frozen wakeup note but a pending ct note → the note alone is injected."""
     monkeypatch.setenv("MARROW_CORTEX", "1")
     db = _fresh_db(tmp_path)
-    _enable_cortex(monkeypatch, tmp_path, db, {"wake_marker": "[CORTEX-WAKE]"})
+    _enable_cortex(monkeypatch, tmp_path, db)
+    _seed_receipt(tmp_path, text="☀️ 14:00")
     _mk(db, "ct", "lone note")
-    _stdin(monkeypatch, {"session_id": "ctsid2",
-                         "prompt": "[CORTEX-WAKE] 14:00 wake"})
+    _stdin(monkeypatch, {"session_id": "ctsid2", "prompt": "☀️ 14:00"})
     assert hooks.main(["user_prompt_submit"]) == 0
     assert "lone note" in _ctx(capsys)
 

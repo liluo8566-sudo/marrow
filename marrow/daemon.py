@@ -39,6 +39,14 @@ llm = LLMClient(
 cortex_bridge.register(marrow_tool, _DB)
 
 
+def _localize_ts(row: dict, fields: tuple[str, ...]) -> dict:
+    """Convert the named UTC ISO fields of a DB row to local YYYY-MM-DD HH:MM."""
+    for f in fields:
+        if row.get(f):
+            row[f] = utc_iso_to_local_datetime(row[f])
+    return row
+
+
 @marrow_tool()
 def recall(
     query: Annotated[str, Field(description="Search text; matched over the event corpus via fused semantic+FTS+recency. Empty/whitespace query with since+until returns that window's digest rows instead. query='diary' + since/until returns diary rows for the window.")],
@@ -278,11 +286,12 @@ def tl(
     date: Annotated[str | None, Field(description="Optional YYYY-MM-DD, backdates the row.")] = None,
 ) -> dict:
     """Summarise each session into tl lines.
+    Call tl BEFORE composing your final reply — tool calls first, prose last.
+    Never re-print text already output this turn; if the reply was sent before tl, end with a one-line closer, not a repeat.
     Pass PARTS (timerange/user_word/assistant_word/body/importance) ONLY - code assemble rows.
-    - Casual chat: when topic/location/mood change or task/activity done, add one for previous turns.
+    - Casual chat (all tg/wx sessions + NY cli): add new tls to narrate our conversation - every 1-2 hours.
     - Coding/study sessions: keep 1 tl each session - update only when things changed.
     - Each session edits its own tl ONLY — never touch other sessions'; overlap is expected.
-    - Frequency: every 1-2h or 10-20 turns - you can skip even when hook nudges you.
     - query: look up rows/event_id by match and/or date. update/clear: address a row
       by event_id, OR by match (+optional date). e.g. update match='千层' date='2026-07-05'."""
     if action not in _TL_ACTIONS:
@@ -853,7 +862,7 @@ _ALERT_ACTIONS = {"list", "resolve"}
 @marrow_tool()
 def alert(
     action: Annotated[str, Field(description="'list' unresolved alerts (newest first), or 'resolve' one by alert_id.")],
-    alert_id: Annotated[int | None, Field(description="resolve only: id of the alert to resolve (via `mw resolve`, which refreshes the dashboard and restarts the watcher if code changed). Required for resolve.")] = None,
+    alert_id: Annotated[int | None, Field(description="resolve only: id of the alert to resolve (via `mw resolve`, which refreshes daybrief/monitor and restarts the watcher if code changed). Required for resolve.")] = None,
 ) -> dict | list[dict]:
     """List or resolve alerts."""
     if action not in _ALERT_ACTIONS:
@@ -866,7 +875,7 @@ def alert(
                 " FROM alerts WHERE resolved = 0"
                 " ORDER BY created_at DESC"
             ).fetchall()
-            return [dict(r) for r in rows]
+            return [_localize_ts(dict(r), ("created_at",)) for r in rows]
         finally:
             conn.close()
     # resolve
@@ -889,19 +898,22 @@ _MSG_ACTIONS = {"send", "list"}
 @marrow_tool()
 def msg(
     action: Annotated[str, Field(description="'send' a message, or 'list' your own recent outbox rows (debugging).")],
-    to: Annotated[str | None, Field(description="send only: tg | wx | cli | ct | session:<sid-prefix>. tg/wx = her phone (whitelisted senders only); cli = any cli session; ct = cortex; session:<prefix> resolves to exactly one live session (0 or many matches = refused).")] = None,
+    to: Annotated[str | None, Field(description="send only: tg | wx | cli | ct | session:<sid-prefix>. tg/wx = the resident session on that channel (whitelisted senders only); cli = any cli session; ct = cortex; session:<prefix> resolves to exactly one live session (0 or many matches = refused).")] = None,
     text: Annotated[str | None, Field(description="send only: message body (plain text). Required.")] = None,
-    watch_reply: Annotated[bool, Field(description="send only: be kicked awake the moment she replies on the target channel (default false).")] = False,
-    watch_timeout_min: Annotated[int | None, Field(description="send only: check back at N minutes: kicked only if no reply by then; if she already replied the watch clears silently (default none = no timeout watch).")] = None,
+    watch_reply: Annotated[bool, Field(description="send only: be kicked awake the moment the target channel replies (default false).")] = False,
+    watch_timeout_min: Annotated[int | None, Field(description="send only: check back at N minutes: kicked only if no reply by then; if the reply already landed the watch clears silently (default none = no timeout watch).")] = None,
     limit: Annotated[int, Field(ge=1, description="list only: max rows to return (default 20).")] = 20,
 ) -> dict | list[dict]:
-    """Leave a message across channels: to her phone (tg/wx, whitelisted senders) or covertly to another session (cli/ct). The resident session continues that conversation. Set watch_reply=true to be kicked awake the moment she replies; watch_timeout_min=N to check back at N minutes — kicked only if she hasn't replied by then.
+    """Send a message to another session (tg/wx/ct/cli). The msg is not visible to user - Only target channel can read and reply. Set watch_reply=true to be kicked awake the moment they reply.
     - 'send': needs `to` + `text`; tg/wx restricted to allowed sender channels.
     - 'list': your own pending/recent rows to confirm a send landed."""
     if action not in _MSG_ACTIONS:
         return {"ok": False, "error": f"unknown action {action!r}, expected one of {sorted(_MSG_ACTIONS)}"}
     if action == "list":
-        return _outbox.list_recent(limit=limit, db=_DB)
+        return [
+            _localize_ts(r, ("created_at", "sent_at", "replied_at"))
+            for r in _outbox.list_recent(limit=limit, db=_DB)
+        ]
     if not to:
         return {"ok": False, "error": "send requires `to`"}
     if not text:
@@ -1066,7 +1078,6 @@ def _tombstone_deleted(conn, select_sql: str, params, reason: str) -> None:
 
 
 def _do_event_clear(before: str | None, after: str | None, last: int | None) -> dict:
-    import re
     import shutil
     from datetime import datetime, timezone
 
@@ -1077,15 +1088,6 @@ def _do_event_clear(before: str | None, after: str | None, last: int | None) -> 
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     backup = f"/tmp/marrow-backup-purge-{ts}.db"
     shutil.copy2(str(_DB), backup)
-
-    if not (time_filtered or last):
-        dash = Path.home() / "Desktop" / "NY" / "dashboard.md"
-        if dash.exists():
-            text = dash.read_text(encoding="utf-8")
-            text = re.sub(
-                r"(<!-- id:dashboard\.timeline -->)\n## Timeline\n.*?(?=\n<!-- id:)",
-                r"\1\n## Timeline\n_none_\n", text, flags=re.DOTALL)
-            dash.write_text(text, encoding="utf-8")
 
     conn = storage.connect(_DB)
     counts = {}

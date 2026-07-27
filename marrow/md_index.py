@@ -200,7 +200,7 @@ class MdIndex:
         FULL semantic — overwrites `content_hash` for blocks whose body
         changed on disk. Used by `full_scan` + tests. **Watcher and
         `mw refresh` must NOT call this**: overwriting the baseline
-        destroys the "last auto-write" signal the dashboard inserter
+        destroys the "last auto-write" signal the subpage inserter
         compares user-edited bodies against. They call
         `sync_file_observe` instead.
 
@@ -260,7 +260,7 @@ class MdIndex:
         Used by the watcher debounce + `mw refresh` scan phase. Semantic:
         - new block_id on fs → record_block (first-sight baseline).
         - existing block_id, body changed on fs → leave `content_hash`
-          alone (this is the user-edit signal the dashboard inserter
+          alone (this is the user-edit signal the subpage inserter
           reads against to decide "preserve user body").
         - block_id in db, absent from fs → tombstone.
         - tombstoned block reappears on fs → record_block (fresh baseline)

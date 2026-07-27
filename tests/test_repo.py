@@ -324,7 +324,7 @@ def test_archive_events_bumps_mention_count_on_assistant_event(db):
 
 
 def test_archive_events_alias_match_counts(db):
-    eid = _seed_entity(db, "(屿忱)", aliases=["Stellan", "(阿屿)"])
+    eid = _seed_entity(db, "(言澈)", aliases=["Stellan", "(阿澈)"])
     rows = [{
         "session_id": "s1", "timestamp": "2026-05-17T04:02:00Z",
         "role": "user", "content": "talked to Stellan today",

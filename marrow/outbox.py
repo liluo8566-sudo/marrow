@@ -191,10 +191,18 @@ def deliver(
     *,
     is_cortex: bool = False,
     db: str | None = None,
+    settle: bool = True,
 ) -> str | None:
-    """Claim + render pending notes targeting the current session, mark them
-    sent. At-most-once: each row is claimed via a single atomic UPDATE guarded
-    on status='pending' (rowcount decides the winner between racing hooks).
+    """Claim + render notes targeting the current session. At-most-once claim:
+    each pending row moves pending→claimed via a single atomic UPDATE guarded on
+    status='pending' (rowcount decides the winner between racing hooks —
+    exactly-one-owner). Also re-renders rows this owner already claimed but never
+    settled (status='claimed', claimed_by='marrow.deliver') so an un-injected
+    note surfaces again — at-least-once visible.
+
+    settle (default True): mark the rendered rows sent (a real injection settles
+    them). settle=False leaves them claimed = pending-visible, so a passive
+    re-render can show them again without consuming.
 
     Targets matched:
       - session:<full-sid>  → exact sid match
@@ -202,8 +210,7 @@ def deliver(
       - ct                  → cortex session only
 
     Returns the joined note text (newline-separated) or None when nothing
-    delivered. A crash between claim and this return drops the note (status
-    stays 'claimed' as a forensic trace) — notes are non-critical.
+    delivered.
     """
     header_tmpl = str(
         config.load().get("outbox", {}).get("inject_header", "") or ""
@@ -219,15 +226,16 @@ def deliver(
         conds.append("target = 'ct'")
     if not conds:
         return None
+    target_sql = "(" + " OR ".join(conds) + ")"
 
     conn = storage.connect(db)
     try:
+        owned_ids: list[int] = []
         rows = conn.execute(
-            "SELECT id FROM outbox WHERE status = 'pending' AND ("
-            + " OR ".join(conds) + ") ORDER BY id",
+            "SELECT id FROM outbox WHERE status = 'pending' AND "
+            + target_sql + " ORDER BY id",
             params,
         ).fetchall()
-        delivered: list[str] = []
         for r in rows:
             rid = r["id"]
             with conn:
@@ -240,16 +248,33 @@ def deliver(
                 )
             if cur.rowcount != 1:
                 continue  # lost the claim race — another hook took it
+            owned_ids.append(rid)
+        # Re-render un-settled claims (a previous injection — this hook or the
+        # cortex assemble frozen-note path — never landed). Owner-agnostic on the
+        # settle side: the claim above is exactly-one-owner; re-rendering + settle
+        # of an already-claimed row is idempotent and injection is the sole settle
+        # authority (at-least-once visible; duplicate injection acceptable).
+        prior = conn.execute(
+            "SELECT id FROM outbox WHERE status = 'claimed' AND "
+            + target_sql + " ORDER BY id",
+            params,
+        ).fetchall()
+        ids = sorted({r["id"] for r in prior} | set(owned_ids))
+        delivered: list[str] = []
+        for rid in ids:
             full = conn.execute(
                 "SELECT id, created_at, from_sid, from_channel, body"
                 " FROM outbox WHERE id = ?", (rid,),
             ).fetchone()
-            delivered.append(_render_note(header_tmpl, full))
+            if full is not None:
+                delivered.append(_render_note(header_tmpl, full))
+        if settle and ids:
+            qmarks = ",".join("?" for _ in ids)
             with conn:
                 conn.execute(
                     "UPDATE outbox SET status = 'sent',"
                     " sent_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')"
-                    " WHERE id = ?", (rid,),
+                    " WHERE id IN (" + qmarks + ")", ids,
                 )
         return "\n\n".join(delivered) if delivered else None
     finally:

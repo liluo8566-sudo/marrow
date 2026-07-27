@@ -68,6 +68,20 @@ def _claude_bin() -> str:
     return b
 
 
+def _assistant_text(ev: dict) -> str:
+    """Concatenate the text blocks of one stream-json `assistant` event.
+    Used to salvage the last spoken text when the trailing result event
+    carries a blank `result` (turn ended on a tool_use). Returns "" if the
+    event has no text block."""
+    msg = ev.get("message")
+    content = msg.get("content") if isinstance(msg, dict) else None
+    if not isinstance(content, list):
+        return ""
+    parts = [b.get("text", "") for b in content
+             if isinstance(b, dict) and b.get("type") == "text"]
+    return "".join(parts).strip()
+
+
 def _kill_group(pgid: int, sig: int) -> None:
     """Kill the whole process group so claude's spawned descendants die
     with it, not just the direct child (orphan leak on timeout)."""
@@ -147,15 +161,6 @@ def _snapshot_rate_limit(ev: dict) -> None:
     _write_kv_rows(rows)
 
 
-def _snapshot_window_tokens(window: int) -> None:
-    """Snapshot the current per-wake context window size (same figure the
-    cap logic compares against, see _add_event_usage) as ct_rate_limit's
-    `window_tokens` key — cortex bulletin's 5th contract field. Written
-    from the already-computed cap-tracking sink, no new computation."""
-    _write_kv_rows([("window_tokens", str(window))])
-
-
-
 class LLMClient:
     def __init__(self, cfg: dict | None = None, on_alert=None):
         self.cfg = cfg or config.load()
@@ -203,20 +208,6 @@ class LLMClient:
                     )
         raise LLMError(f"{role}: all providers failed; last: {last}")
 
-    def call_cortex(self, prompt: str, *, cwd: str | None = None,
-                     resume_sid: str | None = None,
-                     timeout: float | None = None,
-                     max_tokens: int | None = None) -> dict:
-        """Cross-repo entry point for the cortex runner. The cortex repo spawns
-        marrow's venv python and calls `LLMClient().call_cortex(...)`
-        (~/CC-Lab/cortex/cortex/wake.py) — this method name + signature are a
-        stable contract. Full-env resumed cortex session lives in cortex_bridge
-        (organs extracted there); this thin delegate keeps the caller working."""
-        from . import cortex_bridge
-        return cortex_bridge.call_cortex(
-            self, prompt, cwd=cwd, resume_sid=resume_sid,
-            timeout=timeout, max_tokens=max_tokens)
-
     def _run(self, spec: dict, model: str, prompt: str) -> str:
         kind = spec.get("kind")
         if kind == "claude_cli":
@@ -248,76 +239,15 @@ class LLMClient:
         return result
 
     @staticmethod
-    def _add_event_usage(sink: dict, ev: dict) -> None:
-        """Fold one stream-json event's turn usage into the running per-wake
-        sink. Only assistant events carry message.usage; the trailing result
-        event and tool-result events add 0 (no double count).
-
-        A single API turn streams as MULTIPLE assistant lines (thinking
-        block, tool_use block, text block, ...) and every line repeats the
-        SAME usage under the SAME top-level `request_id` — summing them
-        naively over-counts real consumption ~Nx (live-confirmed 07-04).
-        Dedupe by request_id: a repeat request_id replaces (not adds to) its
-        prior contribution to the cumulative fields — "last-seen wins"
-        (the repeats are identical in practice, so this is a no-op delta,
-        but stays correct if they ever aren't). Events without a request_id
-        (only expected from synthetic/test input) are never deduped.
-
-        `in/out/cache_read/cache_write` are the cumulative deduped sums —
-        true consumption across the wake so far, used for the llm_call_cost
-        audit line. `window` is the CURRENT turn's context size
-        (input+cache_read+cache_creation), NOT cumulative — this is what the
-        per-wake cap compares against (Decided 07-04: matches the statusline
-        "total" figure the caller reasons with)."""
-        msg = ev.get("message")
-        usage = msg.get("usage") if isinstance(msg, dict) else None
-        if not isinstance(usage, dict):
-            return
-        sink["has_usage"] = True
-        i = usage.get("input_tokens") or 0
-        o = usage.get("output_tokens") or 0
-        cr = usage.get("cache_read_input_tokens") or 0
-        cw = usage.get("cache_creation_input_tokens") or 0
-        req_id = ev.get("request_id")
-        prior = sink["by_request"].get(req_id) if req_id is not None else None
-        if prior is not None:
-            pi, po, pcr, pcw = prior
-            sink["in"] += i - pi
-            sink["out"] += o - po
-            sink["cache_read"] += cr - pcr
-            sink["cache_write"] += cw - pcw
-        else:
-            sink["in"] += i
-            sink["out"] += o
-            sink["cache_read"] += cr
-            sink["cache_write"] += cw
-        if req_id is not None:
-            sink["by_request"][req_id] = (i, o, cr, cw)
-        sink["window"] = i + cr + cw
-
-    @staticmethod
-    def _sink_usage(sink: dict) -> dict:
-        return {"input_tokens": sink["in"], "output_tokens": sink["out"],
-                "cache_read_input_tokens": sink["cache_read"],
-                "cache_creation_input_tokens": sink["cache_write"]}
-
-    @staticmethod
     def _stream_subprocess(cmd: list[str], prompt: str, timeout: float,
                             env: dict, cwd: str | None = None,
-                            on_event=None, max_tokens: int | None = None,
-                            usage_sink: dict | None = None) -> str:
+                            on_event=None) -> str:
         """Spawn `cmd`, pipe one user message in via stdin, read stdout
         stream-json events until `result`. Process-group kill on timeout
         (SIGKILL) and on normal exit (SIGTERM->SIGKILL ladder) so claude's
         spawned descendants never leak. Returns the raw joined stdout lines.
         `on_event(ev, mono)` (optional) receives every parsed event plus a
-        synthetic {"type":"__spawned__"} right after Popen for latency probes.
-        `max_tokens`+`usage_sink` (optional) accumulate per-event usage
-        (deduped by request_id, see `_add_event_usage`) and break the stream
-        cleanly on breach (sink['capped']=True). Breach compares against
-        sink['window'] — the CURRENT turn's context size
-        (input+cache_read+cache_creation), not a cumulative sum across
-        turns (Decided 07-04: matches the statusline "total" figure)."""
+        synthetic {"type":"__spawned__"} right after Popen for latency probes."""
         msg = json.dumps({"type": "user", "message": {
             "role": "user", "content": prompt}})
         try:
@@ -365,11 +295,6 @@ class LLMClient:
                     on_event(ev, time.monotonic())
                 if ev.get("type") == "rate_limit_event":
                     _snapshot_rate_limit(ev)
-                if max_tokens is not None and usage_sink is not None:
-                    LLMClient._add_event_usage(usage_sink, ev)
-                    if usage_sink["window"] >= max_tokens:
-                        usage_sink["capped"] = True
-                        break
                 if ev.get("type") == "result":
                     break
         finally:
@@ -424,6 +349,7 @@ class LLMClient:
 
     @staticmethod
     def _parse_claude(out: str, fmt: str) -> str:
+        salvaged = ""  # last assistant text block (stream-json fallback)
         if fmt == "stream-json":
             rec = None
             for line in out.splitlines():
@@ -436,6 +362,10 @@ class LLMClient:
                     continue
                 if ev.get("type") == "result":
                     rec = ev
+                elif ev.get("type") == "assistant":
+                    txt = _assistant_text(ev)
+                    if txt:
+                        salvaged = txt
             if rec is None:
                 raise LLMError("claude_cli stream-json: no result event")
         else:
@@ -454,35 +384,17 @@ class LLMClient:
                 f"claude_cli refusal (stop_reason): {str(rec.get('result'))[:120]}")
         text = rec.get("result")
         if not text:
-            raise LLMError("claude_cli: empty result")
+            # No error/refusal but a blank result field: a turn that ended on a
+            # tool_use with no trailing prose leaves `result` empty. Salvage the
+            # last assistant text block; if the turn was genuinely text-free,
+            # return "" — a benign completion the caller handles (the cortex
+            # headless wake ignores text entirely, using only session_id). This
+            # replaced an unconditional LLMError that crashed such wakes.
+            return salvaged
         low = text.lower().lstrip()
         if any(low.startswith(fp) for fp in _REFUSAL_FINGERPRINTS):
             raise LLMError(f"claude_cli refusal (fingerprint): {text[:120]}")
         return text
-
-    @staticmethod
-    def _extract_session_id(out: str) -> str | None:
-        """Pull session_id off the final stream-json result record (verified
-        live: claude --output-format stream-json always carries it). Returns
-        None on any parse failure — caller (cortex) treats that as fresh."""
-        try:
-            rec = None
-            for line in out.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    ev = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if ev.get("type") == "result":
-                    rec = ev
-            if rec is None:
-                return None
-            sid = rec.get("session_id")
-            return str(sid) if sid else None
-        except Exception:
-            return None
 
     @staticmethod
     def _extract_usage(out: str, fmt: str) -> dict | None:

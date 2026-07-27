@@ -1,9 +1,8 @@
 """User-wake reset (Item 3): a real user message in a cortex window flips the
-session awake, marks the reply, clears silence state, restores the round's wait
-quota (F5: external trigger clears wait_spent — subsumes the old live-wait
-refund), clears the pending floor deadline + sentinel, and (re)spawns a
-watchdog. Machine lines (wake marker / monitor death / tuck-in) down the ear
-channel must NOT trigger it.
+session awake, marks the reply, resets the free-round silence cycle (drops any
+pending kick carrier + the last-injection marker), kills the pending
+sentinel, (re)spawns a watchdog and kicks the wake daemon. Machine lines
+(wake marker / tuck-in) must NOT trigger it.
 
 marrow venv cannot import cortex, so wake_state.json is manipulated directly —
 these tests exercise that direct path.
@@ -36,8 +35,8 @@ def cortex_env(tmp_path, monkeypatch):
             "venv_python": str(py), "repo_root": str(root),
             "wake_state_file": "wake_state.json",
             "watchdog_pidfile": "watchdog.pid",
-            "wake_marker": "[CORTEX-WAKE]", "tuck_in_marker": "[TUCK-IN]",
-            "machine_markers": ["[CORTEX-WAKE]", "[NEW ROUND]", "[TUCK-IN]",
+            "tuck_in_marker": "[TUCK-IN]",
+            "machine_markers": ["[NEW ROUND]", "[TUCK-IN]",
                                 "[NIGHT]", "[FUSE]", "[CTL]", "[CMD"],
             "compact_markers": ["===== BEGIN ORIGINAL TRANSCRIPT",
                                 "===== END ORIGINAL TRANSCRIPT"],
@@ -58,11 +57,10 @@ def _ws(home):
 # --- machine-line exclusion ---------------------------------------------------
 
 def test_is_machine_line_excludes_markers(cortex_env):
-    assert cortex_bridge.is_machine_line("[CORTEX-WAKE] 14:00") is True
     assert cortex_bridge.is_machine_line(
         "⏳ [TUCK-IN] It's been 20 mins — choose again") is True
     assert cortex_bridge.is_machine_line(
-        "<task-notification>Monitor stopped — foo</task-notification>") is True
+        "<task-notification>background shell exited</task-notification>") is True
     assert cortex_bridge.is_machine_line("hey are you there?") is False
     assert cortex_bridge.is_machine_line("") is True
 
@@ -200,6 +198,162 @@ def test_is_machine_line_harness_tags(cortex_env):
     assert cortex_bridge.is_machine_line("what does <tag> mean?") is False
 
 
+# --- wake bell: receipt sidecar / shape recognition ---------------------------
+
+def _put_receipt(home, text="☀️ 09:05", gen=3, state_id="cafe", rearm=False,
+                 ts=None, template_prefix="☀️ "):
+    from datetime import datetime, timezone
+    ws = _ws(home) if (home / "wake_state.json").exists() else {}
+    ws["wake_receipt"] = {
+        "text": text, "gen": gen, "state_id": state_id, "rearm": rearm,
+        "ts": ts or datetime.now(timezone.utc).isoformat(),
+        "template_prefix": template_prefix,
+    }
+    (home / "wake_state.json").write_text(json.dumps(ws))
+
+
+def test_match_wake_bell_receipt_exact_hit(cortex_env):
+    home, _ = cortex_env
+    _put_receipt(home, text="☀️ 09:05", gen=7, state_id="beef")
+    kind, tok, degraded = cortex_bridge.match_wake_bell("☀️ 09:05")
+    assert kind == "receipt" and tok == (7, "beef") and degraded is False
+    # exact-match only: a user line merely quoting the bell text is NOT a receipt.
+    assert cortex_bridge.match_wake_bell("did ☀️ 09:05 fire?") is None
+
+
+def test_match_wake_bell_receipt_wrapped_envelope(cortex_env):
+    home, _ = cortex_env
+    _put_receipt(home, text="☀️ 09:05")
+    wrapped = ("<task-notification>\n<event>☀️ 09:05</event>\n"
+               "</task-notification>")
+    kind, _, _ = cortex_bridge.match_wake_bell(wrapped)
+    assert kind == "receipt"
+
+
+def test_match_wake_bell_shape_fallback_no_receipt(cortex_env):
+    home, _ = cortex_env
+    # No receipt on disk -> shape fallback (fail-open), degraded=True, token None.
+    kind, tok, degraded = cortex_bridge.match_wake_bell("☀️ 09:05")
+    assert kind == "shape" and tok is None and degraded is True
+
+
+def test_match_wake_bell_legacy_marker_falls_through(cortex_env):
+    # Legacy '[CORTEX-WAKE] … {g..}' recognition removed post-migration (5f7efe7
+    # human-text bell + receipt sidecar). No receipt + no shape match -> not a
+    # bell -> falls through to normal user-prompt handling.
+    assert cortex_bridge.match_wake_bell("[CORTEX-WAKE] 09:00 {g5:abcd}") is None
+    assert cortex_bridge.is_machine_line("[CORTEX-WAKE] 09:00 {g5:abcd}") is False
+
+
+def test_match_wake_bell_ttl_expiry(cortex_env):
+    home, _ = cortex_env
+    from datetime import datetime, timezone, timedelta
+    old = (datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat()
+    _put_receipt(home, text="☀️ 09:05", ts=old)
+    # Receipt expired past receipt_ttl_min (default 15) -> not a receipt hit;
+    # the on-screen line still matches the shape -> degraded fallback.
+    kind, tok, degraded = cortex_bridge.match_wake_bell("☀️ 09:05")
+    assert kind == "shape" and degraded is True
+
+
+def test_match_wake_bell_user_text_equal_to_prefix_no_receipt(cortex_env):
+    """Documented residue: with NO receipt, an ordinary user line that merely
+    OPENS with the template prefix (not the exact '<prefix> HH:MM' shape) is NOT
+    a bell -> falls through to the user-wake reset. Only the near-exact bell
+    shape is swallowed (accepted fail-open degraded case)."""
+    assert cortex_bridge.match_wake_bell("☀️ 早安呀") is None
+    assert cortex_bridge.match_wake_bell("☀️ good morning") is None
+    # The near-exact shape IS swallowed (the accepted residue).
+    assert cortex_bridge.match_wake_bell("☀️ 09:05")[0] == "shape"
+
+
+def test_match_wake_bell_stale_epoch_suppressed_via_receipt(cortex_env, monkeypatch):
+    home, _ = cortex_env
+    _put_receipt(home, text="☀️ 09:05", gen=2, state_id="dd")
+    # Live epoch moved on -> the receipt token is stale.
+    monkeypatch.setattr(cortex_bridge, "wake_token_current", lambda tok: False)
+    kind, tok, _ = cortex_bridge.match_wake_bell("☀️ 09:05")
+    assert kind == "receipt" and tok == (2, "dd")
+    assert cortex_bridge.wake_token_current(tok) is False
+
+
+def test_is_machine_line_new_bell_shape(cortex_env):
+    home, _ = cortex_env
+    _put_receipt(home, text="☀️ 09:05", gen=1, state_id="ab")
+    assert cortex_bridge.is_machine_line("☀️ 09:05") is True
+    # A real user message that just opens with the emoji is NOT machine.
+    assert cortex_bridge.is_machine_line("☀️ 早安") is False
+
+
+_ZWJ_STATIC = "[🧚‍♀️ 笨鸭换岗成功]"  # bracketed multi-codepoint ZWJ emoji + CJK, static
+
+
+def test_match_wake_bell_static_zwj_receipt_exact(cortex_env):
+    """A fully STATIC template (no {hm}) with a ZWJ emoji round-trips through the
+    receipt exact-match — byte-for-byte, multi-codepoint intact."""
+    home, _ = cortex_env
+    _put_receipt(home, text=_ZWJ_STATIC, gen=8, state_id="feed",
+                 template_prefix=_ZWJ_STATIC)
+    # tag the receipt template as static (no {hm})
+    ws = _ws(home); ws["wake_receipt"]["template"] = _ZWJ_STATIC
+    (home / "wake_state.json").write_text(json.dumps(ws))
+    kind, tok, degraded = cortex_bridge.match_wake_bell(_ZWJ_STATIC)
+    assert kind == "receipt" and tok == (8, "feed") and degraded is False
+
+
+def test_match_wake_bell_static_zwj_shape_fallback(cortex_env, monkeypatch):
+    """Static template, no receipt -> shape fallback = EXACT match of the static
+    text (no time appended). A user line merely containing it is not a bell."""
+    monkeypatch.setattr(cortex_bridge, "wake_bell_template",
+                        lambda cfg=None: _ZWJ_STATIC)
+    kind, tok, degraded = cortex_bridge.match_wake_bell(_ZWJ_STATIC)
+    assert kind == "shape" and tok is None and degraded is True
+    # not the exact static text -> not a bell (falls through to user reset)
+    assert cortex_bridge.match_wake_bell(f"是 {_ZWJ_STATIC} 吗？") is None
+    assert cortex_bridge.match_wake_bell("🧚‍♀️ 早安") is None
+
+
+def test_match_wake_bell_bracketed_hm_shape_fallback(cortex_env, monkeypatch):
+    """A bracketed {hm} template '[<prefix> HH:MM]' matches the full bracketed
+    on-screen line via shape fallback — the suffix after {hm} (the ']') is
+    honored, not dropped (regression: hardcoded '$' after the time missed it)."""
+    # Both producer shapes are shape-fallback candidates -> pin both, else the
+    # other template's default would match on its own.
+    monkeypatch.setattr(cortex_bridge, "wake_bell_template",
+                        lambda cfg=None: "[☀️ {hm}]")
+    monkeypatch.setattr(cortex_bridge, "spawn_opener_template",
+                        lambda cfg=None: "[☀️ {hm}]")
+    kind, tok, degraded = cortex_bridge.match_wake_bell("[☀️ 09:05]")
+    assert kind == "shape" and tok is None and degraded is True
+    # missing the closing bracket -> not the bell shape
+    assert cortex_bridge.match_wake_bell("☀️ 09:05") is None
+
+
+def test_match_wake_bell_shape_fallback_covers_both_templates(cortex_env, monkeypatch):
+    """With no receipt, BOTH producer shapes are recognized: the resident bell
+    AND the fresh-spawn opener (they are separate config keys now)."""
+    monkeypatch.setattr(cortex_bridge, "wake_bell_template",
+                        lambda cfg=None: "⏰ {hm} 醒了")
+    monkeypatch.setattr(cortex_bridge, "spawn_opener_template",
+                        lambda cfg=None: "[🧚 shift change]")
+    assert cortex_bridge.match_wake_bell("⏰ 09:05 醒了")[0] == "shape"
+    assert cortex_bridge.match_wake_bell("[🧚 shift change]")[0] == "shape"
+    # neither shape -> ordinary user speech
+    assert cortex_bridge.match_wake_bell("⏰ 早安") is None
+
+
+def test_is_machine_line_bracketed_bell(cortex_env):
+    """The bracketed static bell classifies as a machine line via the receipt
+    exact match; a real user line merely quoting it stays user speech."""
+    home, _ = cortex_env
+    _put_receipt(home, text=_ZWJ_STATIC, gen=5, state_id="dead",
+                 template_prefix=_ZWJ_STATIC)
+    ws = _ws(home); ws["wake_receipt"]["template"] = _ZWJ_STATIC
+    (home / "wake_state.json").write_text(json.dumps(ws))
+    assert cortex_bridge.is_machine_line(_ZWJ_STATIC) is True
+    assert cortex_bridge.is_machine_line(f"是 {_ZWJ_STATIC} 吗？") is False
+
+
 # --- reset actions ------------------------------------------------------------
 
 def test_reset_flips_awake_and_marks_reply(cortex_env):
@@ -214,7 +368,6 @@ def test_reset_flips_awake_and_marks_reply(cortex_env):
     # key simply absent rather than explicitly None — .get() reads both the same.
     assert d.get("wake_log_id") is None
     assert d["transcript"] == "/x/y.jsonl"
-    assert "wait_spent" not in d  # fresh reset (no prior flag) -> absent
 
 
 def test_reset_logs_user_wake_row(cortex_env):
@@ -225,7 +378,8 @@ def test_reset_logs_user_wake_row(cortex_env):
     conn = sqlite3.connect(db)
     conn.execute(
         "CREATE TABLE ct_wake_log (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, "
-        "wake INTEGER, dry_run INTEGER, reasons TEXT, force_slept TEXT)")
+        "wake INTEGER, dry_run INTEGER, reasons TEXT, force_slept TEXT, "
+        "shell TEXT NOT NULL DEFAULT 'cli')")
     conn.commit()
     conn.close()
 
@@ -233,11 +387,13 @@ def test_reset_logs_user_wake_row(cortex_env):
 
     conn = sqlite3.connect(db)
     rows = conn.execute(
-        "SELECT id, reasons, force_slept FROM ct_wake_log WHERE wake=1").fetchall()
+        "SELECT id, reasons, force_slept, shell FROM ct_wake_log "
+        "WHERE wake=1").fetchall()
     conn.close()
     assert len(rows) == 1
     assert rows[0][1] == "user"
     assert rows[0][2] is None  # force_slept NULL -> auto-rate stats unaffected
+    assert rows[0][3] == "cli"  # stamped explicitly, not left to the DEFAULT
     assert _ws(home)["wake_log_id"] == rows[0][0]  # bound to the fresh row
 
 
@@ -274,88 +430,23 @@ def test_reset_db_write_does_not_hold_wake_state_lock(cortex_env, monkeypatch):
     assert _ws(home)["wake_log_id"] == 42  # patch-back still binds the id
 
 
-def test_reset_clears_silence_and_sentinel(cortex_env, monkeypatch):
+def test_reset_clears_silence_cycle_and_sentinel(cortex_env, monkeypatch):
+    """A user arrival resets the free-round silence cycle: drops any pending
+    kick carrier + the last-injection marker, kills the sentinel."""
     home, _ = cortex_env
     (home / "wake_state.json").write_text(json.dumps({
-        "awake": True, "silence_wait_until": "2026-01-01T00:00:00+00:00",
+        "awake": True, "kick_round": True,
         "tuck_pending": "2026-01-01T00:00:00+00:00", "sentinel_pid": 12345,
-        "wait_spent": True,
     }))
     killed = []
     monkeypatch.setattr(cortex_bridge, "_kill_pid", lambda p: killed.append(p))
     cortex_bridge._cortex_user_wake_reset({"transcript_path": "/t.jsonl"})
     d = _ws(home)
-    assert "silence_wait_until" not in d
+    assert "kick_round" not in d
     assert "tuck_pending" not in d
     assert "sentinel_pid" not in d
-    # F5: external trigger restores the wait quota (clears wait_spent).
-    assert "wait_spent" not in d
     assert d["user_replied_this_wake"] is True
     assert 12345 in killed  # sentinel SIGTERM'd
-
-
-def test_reset_restores_wait_quota(cortex_env):
-    """F5: a user message is an external trigger -> wait_spent cleared so the
-    next wait() is allowed, regardless of whether the wait_until was still live
-    (the old live-vs-expired refund distinction is gone)."""
-    home, _ = cortex_env
-    (home / "wake_state.json").write_text(json.dumps({
-        "awake": True, "silence_wait_until": "2099-01-01T00:00:00+00:00",
-        "wait_spent": True,
-    }))
-    cortex_bridge._cortex_user_wake_reset({"transcript_path": "/t.jsonl"})
-    d = _ws(home)
-    assert "silence_wait_until" not in d
-    assert "wait_spent" not in d  # quota restored
-
-
-def test_reset_restores_wait_quota_without_wait_until(cortex_env):
-    home, _ = cortex_env
-    (home / "wake_state.json").write_text(json.dumps({
-        "awake": True, "wait_spent": True,
-    }))
-    cortex_bridge._cortex_user_wake_reset({"transcript_path": "/t.jsonl"})
-    d = _ws(home)
-    assert "wait_spent" not in d  # restored even with no live wait
-
-
-# --- F5 round-activity feed (pretool_use) -------------------------------------
-
-def test_round_activity_restores_quota_for_non_wait_tool(cortex_env):
-    home, _ = cortex_env
-    (home / "wake_state.json").write_text(json.dumps({
-        "awake": True, "wait_spent": True,
-    }))
-    cortex_bridge._cortex_round_activity({"tool_name": "Bash"})
-    assert "wait_spent" not in _ws(home)  # a tool call restored the quota
-
-
-def test_round_activity_wait_tool_does_not_restore(cortex_env):
-    home, _ = cortex_env
-    (home / "wake_state.json").write_text(json.dumps({
-        "awake": True, "wait_spent": True,
-    }))
-    cortex_bridge._cortex_round_activity({"tool_name": "mcp__marrow__wait"})
-    assert _ws(home)["wait_spent"] is True  # wait() is not activity
-
-
-def test_round_activity_noop_when_not_awake(cortex_env):
-    home, _ = cortex_env
-    (home / "wake_state.json").write_text(json.dumps({
-        "awake": False, "wait_spent": True,
-    }))
-    cortex_bridge._cortex_round_activity({"tool_name": "Bash"})
-    assert _ws(home)["wait_spent"] is True  # asleep -> untouched
-
-
-def test_round_activity_noop_without_cortex_env(cortex_env, monkeypatch):
-    home, _ = cortex_env
-    (home / "wake_state.json").write_text(json.dumps({
-        "awake": True, "wait_spent": True,
-    }))
-    monkeypatch.delenv("MARROW_CORTEX", raising=False)
-    cortex_bridge._cortex_round_activity({"tool_name": "Bash"})
-    assert _ws(home)["wait_spent"] is True  # not a cortex session -> untouched
 
 
 def test_reset_stamps_last_user_msg_ts(cortex_env):
@@ -409,28 +500,51 @@ def test_reset_already_awake_preserves_awake_since(cortex_env):
     assert d["user_replied_this_wake"] is True
 
 
-def test_reset_clears_floor_deadline(cortex_env):
-    home, db = cortex_env
-    conn = sqlite3.connect(db)
-    conn.execute("CREATE TABLE ct_pacemaker_state (id INTEGER PRIMARY KEY, "
-                 "state TEXT, updated_at TEXT)")
-    conn.execute(
-        "INSERT INTO ct_pacemaker_state (id, state, updated_at) VALUES (1, ?, '')",
-        (json.dumps({"next_floor_due_at": "2026-07-11T05:00:00+10:00",
-                     "last_wake_at": "x"}),))
-    conn.commit()
-    conn.close()
+def test_reset_kicks_the_daemon_socket(cortex_env, monkeypatch):
+    """After the state write the reset sends one `<shell>\\n` kick to the
+    daemon socket — notification only, on top of every existing step."""
+    sent = []
+    monkeypatch.setattr(cortex_bridge, "_daemon_socket_path",
+                        lambda: cortex_env[0] / "state" / "cortex-daemon.sock")
+
+    class _Sock:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def settimeout(self, t):
+            sent.append(("timeout", t))
+
+        def connect(self, path):
+            sent.append(("connect", path))
+
+        def sendall(self, data):
+            sent.append(("send", data))
+
+    import socket as _s
+    monkeypatch.setattr(_s, "socket", lambda *a, **k: _Sock())
     cortex_bridge._cortex_user_wake_reset({})
-    conn = sqlite3.connect(db)
-    row = conn.execute("SELECT state FROM ct_pacemaker_state WHERE id=1").fetchone()
-    conn.close()
-    obj = json.loads(row[0])
-    assert obj["next_floor_due_at"] is None  # pending alarm cleared
-    assert obj["last_wake_at"] == "x"  # other keys untouched
+    assert ("connect", str(cortex_env[0] / "state" / "cortex-daemon.sock")) in sent
+    assert ("send", b"cli\n") in sent
+    # State write still happened — the kick is additive, not a replacement.
+    assert _ws(cortex_env[0])["awake"] is True
+
+
+def test_reset_survives_a_missing_daemon_socket(cortex_env):
+    """No daemon listening -> silent no-op, reset completes normally."""
+    cortex_bridge._cortex_user_wake_reset({})  # must not raise
+    assert _ws(cortex_env[0])["awake"] is True
+
+
+def test_daemon_socket_path_defaults_under_cortex_home(cortex_env):
+    home, _ = cortex_env
+    assert cortex_bridge._daemon_socket_path() == home / "state" / "cortex-daemon.sock"
 
 
 def test_reset_missing_table_no_crash(cortex_env):
-    # No ct_pacemaker_state table -> _clear_floor_deadline swallows the error.
+    # No ct_pacemaker_state table anywhere -> the reset no longer touches it.
     cortex_bridge._cortex_user_wake_reset({})  # must not raise
 
 
@@ -482,67 +596,6 @@ def test_latest_wake_log_id_missing_table(cortex_env):
     assert cortex_bridge._latest_wake_log_id() is None
 
 
-# --- window-closed proxy lie_down (Fix E) -------------------------------------
-
-def test_window_closed_runs_lie_down_when_awake(cortex_env, monkeypatch):
-    home, _ = cortex_env
-    (home / "wake_state.json").write_text(json.dumps({
-        "awake": True, "transcript": "/live.jsonl",
-    }))
-    calls = []
-    monkeypatch.setattr(cortex_bridge.subprocess, "run",
-                        lambda *a, **k: calls.append((a, k)))
-    cortex_bridge.cortex_window_closed("/live.jsonl")
-    assert len(calls) == 1
-    cmd = calls[0][0][0]
-    assert "cortex.lie_down" in cmd
-    assert "--force-slept" in cmd and "auto" in cmd
-    assert "--next-wake-min" in cmd
-
-
-def test_window_closed_noop_when_not_awake(cortex_env, monkeypatch):
-    home, _ = cortex_env
-    (home / "wake_state.json").write_text(json.dumps({"awake": False}))
-    calls = []
-    monkeypatch.setattr(cortex_bridge.subprocess, "run",
-                        lambda *a, **k: calls.append(1))
-    cortex_bridge.cortex_window_closed("/live.jsonl")
-    assert calls == []  # idempotent no-op
-
-
-def test_window_closed_skips_mismatched_transcript(cortex_env, monkeypatch):
-    home, _ = cortex_env
-    (home / "wake_state.json").write_text(json.dumps({
-        "awake": True, "transcript": "/other.jsonl",
-    }))
-    calls = []
-    monkeypatch.setattr(cortex_bridge.subprocess, "run",
-                        lambda *a, **k: calls.append(1))
-    cortex_bridge.cortex_window_closed("/live.jsonl")
-    assert calls == []  # different session's window -> skip
-
-
-def test_window_closed_runs_when_no_transcript_recorded(cortex_env, monkeypatch):
-    home, _ = cortex_env
-    (home / "wake_state.json").write_text(json.dumps({"awake": True}))
-    calls = []
-    monkeypatch.setattr(cortex_bridge.subprocess, "run",
-                        lambda *a, **k: calls.append(1))
-    cortex_bridge.cortex_window_closed("/live.jsonl")
-    assert calls == [1]  # no transcript recorded -> allowed
-
-
-def test_window_closed_noop_without_cortex_env(cortex_env, monkeypatch):
-    home, _ = cortex_env
-    (home / "wake_state.json").write_text(json.dumps({"awake": True}))
-    monkeypatch.delenv("MARROW_CORTEX", raising=False)
-    calls = []
-    monkeypatch.setattr(cortex_bridge.subprocess, "run",
-                        lambda *a, **k: calls.append(1))
-    cortex_bridge.cortex_window_closed("/live.jsonl")
-    assert calls == []
-
-
 # --- audit log on destructive reset -------------------------------------------
 
 def test_reset_writes_audit_log(cortex_env, monkeypatch):
@@ -556,7 +609,7 @@ def test_reset_writes_audit_log(cortex_env, monkeypatch):
     log = (home / "wake_audit.log").read_text()
     lines = [l for l in log.splitlines() if l.strip()]
     actions = {l.split("\t")[1] for l in lines}
-    assert {"awake_flip", "sentinel_kill", "floor_clear"} <= actions
+    assert {"awake_flip", "sentinel_kill"} <= actions
     # Trigger reason (first 80 chars of the message) is recorded.
     assert any("hey are you awake?" in l for l in lines)
     # sentinel line carries the killed pid.
@@ -572,7 +625,7 @@ def test_reset_audit_no_sentinel_line_when_absent(cortex_env):
     actions = {l.split("\t")[1] for l in lines}
     assert "sentinel_kill" not in actions  # no pid -> no kill line
     assert "awake_flip" not in actions     # already awake -> no flip line
-    assert "floor_clear" in actions        # floor clear always attempted
+    assert "user_reset_gen" in actions     # epoch bump always audited
 
 
 # --- cancellation epoch (gen) -------------------------------------------------
@@ -622,13 +675,7 @@ def test_reset_writes_gen_audit_line(cortex_env):
     assert gen_lines and "gen 2->3" in gen_lines[0]
 
 
-# --- wake-line token parse + validation + legacy tolerance --------------------
-
-def test_parse_gen_token_present_and_absent():
-    assert cortex_bridge.parse_gen_token("[CORTEX-WAKE] 09:00 {g7:abcd1234}") == (7, "abcd1234")
-    assert cortex_bridge.parse_gen_token("[CORTEX-WAKE] 09:00") is None   # legacy
-    assert cortex_bridge.parse_gen_token("") is None
-
+# --- wake-line token validation -----------------------------------------------
 
 def test_wake_token_current_matches_and_stale(cortex_env):
     home, _ = cortex_env
@@ -638,8 +685,8 @@ def test_wake_token_current_matches_and_stale(cortex_env):
     assert cortex_bridge.wake_token_current((4, "beef")) is False   # ABA state_id
 
 
-def test_wake_token_current_legacy_line_always_current(cortex_env):
-    """A token-less (legacy) wake line is processed as before."""
+def test_wake_token_current_tokenless_always_current(cortex_env):
+    """A token-less wake (receipt without gen/state_id) is processed as before."""
     home, _ = cortex_env
     (home / "wake_state.json").write_text(json.dumps({"gen": 9, "state_id": "x"}))
     assert cortex_bridge.wake_token_current(None) is True
@@ -650,3 +697,82 @@ def test_wake_token_current_no_epoch_recorded_is_current(cortex_env):
     home, _ = cortex_env
     (home / "wake_state.json").write_text(json.dumps({}))
     assert cortex_bridge.wake_token_current((1, "x")) is True
+
+
+# --- shell scoping: a non-cli shell must not write the cli ledger --------------
+
+@pytest.fixture()
+def tg_shell(cortex_env, tmp_path, monkeypatch):
+    """cortex_env re-pointed at the tg shell: [cortex].shells lists tg and the
+    per-shell ledger lives under tmp."""
+    home, db = cortex_env
+    base = config.load()
+    shells_dir = tmp_path / "shells"
+    shells_dir.mkdir()
+    cx = {**base["cortex"], "shells": ["cli", "tg"],
+          "shell_state_dir": str(shells_dir)}
+    monkeypatch.setattr(config, "load", lambda: {**base, "cortex": cx})
+    monkeypatch.setenv("MARROW_CORTEX", "tg")
+    return home, shells_dir
+
+
+def test_tg_turn_never_touches_cli_wake_state(tg_shell, monkeypatch):
+    """Root cause of the mid-sleep respawn: a tg-shell user message ran the cli
+    user-wake reset, which cleared wake_state.json's next_wake_at and flipped it
+    awake — cortex reconcile then read the deliberately closed cli window as an
+    "accidental close of awake window" and respawned it long before the booked
+    wake. The tg host cancels its OWN booked wake
+    (synapse_tg.shell.on_user_message), so marrow must leave the cli ledger
+    byte-for-byte alone."""
+    home, _ = tg_shell
+    seed = {"awake": False, "gen": 7, "state_id": "abc", "session_id": "S1",
+            "next_wake_at": "2026-07-26T20:02:00+10:00"}
+    (home / "wake_state.json").write_text(json.dumps(seed))
+    spawned = []
+    monkeypatch.setattr(cortex_bridge, "_spawn_watchdog_if_absent",
+                        lambda: spawned.append(1))
+    cortex_bridge._cortex_user_wake_reset({"transcript_path": "/tg/t.jsonl",
+                                           "prompt": "醒着么"})
+    assert _ws(home) == seed   # alarm + epoch + awake untouched
+    assert spawned == []       # and no cli watchdog started from a tg turn
+
+
+def test_cli_turn_still_clears_the_booked_alarm(cortex_env):
+    """The cli shell keeps the original behaviour: its own user message cancels
+    the pending alarm and bumps the cancellation epoch."""
+    home, _ = cortex_env
+    (home / "wake_state.json").write_text(json.dumps({
+        "awake": False, "gen": 3, "state_id": "z",
+        "next_wake_at": "2026-07-26T20:02:00+10:00"}))
+    cortex_bridge._cortex_user_wake_reset({"transcript_path": "/t.jsonl",
+                                           "prompt": "hi"})
+    d = _ws(home)
+    assert "next_wake_at" not in d
+    assert d["awake"] is True
+    assert d["gen"] == 4
+
+
+def test_presence_state_cli_reads_wake_state(cortex_env):
+    home, _ = cortex_env
+    (home / "wake_state.json").write_text(json.dumps({
+        "last_user_msg_ts": "2026-07-26T09:00:00+00:00",
+        "transcript": "/cli/c.jsonl"}))
+    ws = cortex_bridge._shell_presence_state()
+    assert ws["last_user_msg_ts"] == "2026-07-26T09:00:00+00:00"
+    assert ws["transcript"] == "/cli/c.jsonl"
+
+
+def test_presence_state_tg_reads_its_own_ledger(tg_shell):
+    """The 120k nudge's presence gate + handoff header must judge a tg window off
+    the tg ledger (host-written last_user_ts / session_id), never off cli's."""
+    home, shells_dir = tg_shell
+    (home / "wake_state.json").write_text(json.dumps({
+        "last_user_msg_ts": "2020-01-01T00:00:00+00:00",
+        "transcript": "/cli/c.jsonl"}))
+    (shells_dir / "tg.json").write_text(json.dumps({
+        "last_user_ts": "2026-07-26T09:46:49+00:00",
+        "session_id": "d994b51d-bc04-48ea-a8d7-d72274e28bb3"}))
+    ws = cortex_bridge._shell_presence_state()
+    assert ws["last_user_msg_ts"] == "2026-07-26T09:46:49+00:00"
+    assert ws["transcript"] == "d994b51d-bc04-48ea-a8d7-d72274e28bb3.jsonl"
+    assert cortex_bridge._user_active_within(ws, 15) is False   # stamp is old

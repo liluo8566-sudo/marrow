@@ -26,6 +26,56 @@ from typing import Any
 from marrow.paths import paths
 
 # ---------------------------------------------------------------------------
+# Config ([drift] section) — extends the built-in defaults below. Read once
+# and cached; tests reset via _reset_drift_cfg().
+# ---------------------------------------------------------------------------
+
+_DRIFT_CFG: dict | None = None
+
+
+def _drift_cfg() -> dict:
+    """Return the merged [drift] config (defaults + user overrides), cached."""
+    global _DRIFT_CFG
+    if _DRIFT_CFG is None:
+        try:
+            from marrow import config
+            _DRIFT_CFG = dict(config.load().get("drift", {}))
+        except Exception:
+            _DRIFT_CFG = {}
+    return _DRIFT_CFG
+
+
+def _reset_drift_cfg() -> None:
+    """Clear the cached config (test hook)."""
+    global _DRIFT_CFG
+    _DRIFT_CFG = None
+
+
+def _cfg_exclude_dirs() -> set[str]:
+    return EXCLUDE_DIRS_SCAN | set(_drift_cfg().get("exclude_dirs", []) or [])
+
+
+def _cfg_name_parts() -> tuple[str, ...]:
+    return tuple(_drift_cfg().get("exclude_name_parts", []) or [])
+
+
+def _cfg_ref_cap() -> int:
+    try:
+        return int(_drift_cfg().get("ref_cap", 200))
+    except (TypeError, ValueError):
+        return 200
+
+
+def _is_artifact_file(name: str) -> bool:
+    """True if the filename marks a snapshot/export/fixture artifact whose
+    contents must never produce refs (html export, eval baseline/fixture json,
+    rendered dir-tree, .gitignore data list). Config-driven via
+    [drift].exclude_name_parts (case-insensitive substring)."""
+    low = name.lower()
+    return any(part.lower() in low for part in _cfg_name_parts())
+
+
+# ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
@@ -256,8 +306,11 @@ def _find_refs_rg(old_name: str, rg_bin: str, roots: list[Path]) -> list[dict] |
     """Run ripgrep search. Returns parsed refs list or None on failure."""
     args = [rg_bin, "--line-number", "--column", "--no-heading",
             "--color=never", "-e", old_name]
-    for d in EXCLUDE_DIRS_SCAN:
+    for d in _cfg_exclude_dirs():
         args += ["--glob", f"!**/{d}/**"]
+    # Snapshot/export/fixture filename parts (html, baseline, .gitignore, ...).
+    for part in _cfg_name_parts():
+        args += ["--glob", f"!**/*{part}*"]
     # Exclude any path segment that *contains* `.bak` (catches
     # `.bak-20260518-220058`, `.venv.py314.bak/`, `foo.db.bak` etc.).
     for part in SKIP_SCAN_SUFFIX_PARTS:
@@ -300,6 +353,8 @@ def _find_refs_rg(old_name: str, rg_bin: str, roots: list[Path]) -> list[dict] |
         if len(parts) < 4:
             continue
         fpath, lineno, col, text = parts[0], parts[1], parts[2], parts[3]
+        if _is_artifact_file(Path(fpath).name):
+            continue
         if not _path_in_line(old_name, text):
             continue
         refs.append({"file": fpath, "line": int(lineno), "col": int(col), "text": text})
@@ -309,6 +364,7 @@ def _find_refs_rg(old_name: str, rg_bin: str, roots: list[Path]) -> list[dict] |
 def _find_refs_python(old_name: str, roots: list[Path]) -> list[dict]:
     """Pure-Python fallback: walk roots and grep for old_name in text files."""
     refs: list[dict] = []
+    exclude_dirs = _cfg_exclude_dirs()
     for root in roots:
         if not root.exists():
             continue
@@ -317,19 +373,19 @@ def _find_refs_python(old_name: str, roots: list[Path]) -> list[dict]:
             # Under ~/.claude: prune blacklisted top-level dirs immediately
             if cur == _CLAUDE_ROOT:
                 dirnames[:] = [d for d in dirnames if d in CLAUDE_WHITELIST
-                               and d not in EXCLUDE_DIRS_SCAN]
+                               and d not in exclude_dirs]
                 continue
             # Under ~/.config: prune top-level credentials / chat dumps
             if cur == _CONFIG_ROOT:
                 dirnames[:] = [d for d in dirnames
                                if d not in CONFIG_BLACKLIST
-                               and d not in EXCLUDE_DIRS_SCAN]
+                               and d not in exclude_dirs]
                 continue
             # Prune excluded dirs in-place; also drop any dir whose name
             # contains `.bak` (e.g. `.venv.py314.bak`, `.bak-2025…`).
             dirnames[:] = [
                 d for d in dirnames
-                if d not in EXCLUDE_DIRS_SCAN
+                if d not in exclude_dirs
                 and not any(p in d for p in SKIP_SCAN_SUFFIX_PARTS)
             ]
             for fname in filenames:
@@ -342,6 +398,9 @@ def _find_refs_python(old_name: str, roots: list[Path]) -> list[dict]:
                 if any(p in fname for p in SKIP_SCAN_SUFFIX_PARTS):
                     continue
                 if _is_atomic_write_artifact(fname):
+                    continue
+                # Snapshot/export/fixture artifacts (html, baseline, .gitignore).
+                if _is_artifact_file(fname):
                     continue
                 try:
                     if fpath.stat().st_size > 10 * 1024 * 1024:
@@ -378,14 +437,21 @@ def find_refs(old_name: str, roots: list[Path] | None = None) -> list[dict]:
 
 
 def _path_in_line(name: str, text: str) -> bool:
-    """Check that `name` in `text` appears in a path-shaped context."""
-    # Check quoted occurrences first
+    """Check that `name` in `text` appears in a path-shaped context.
+
+    A hit counts only when the old name is part of a path-like token:
+      - a quoted/backticked token (the quotes are the path marker), or
+      - an unquoted token containing '/'.
+    A bare `file.ext` mentioned in prose (no quotes, no slash) does NOT count.
+    """
+    # Quoted/backticked tokens: the quote marks a literal path reference, so a
+    # bare filename with an extension inside quotes is enough.
     for m in _QUOTE_RE.finditer(text):
         if name in m.group(1) and _is_path_shaped(m.group(1)):
             return True
-    # Check unquoted tokens with / or extension
+    # Unquoted tokens must contain '/' — a bare extension in prose is rejected.
     for token in re.split(r'\s+', text):
-        if name in token and _is_path_shaped(token):
+        if name in token and "/" in token:
             return True
     return False
 
@@ -412,16 +478,26 @@ def _make_id(src: str, dest: str) -> str:
 
 
 def write_pending(src: str, dest: str, refs: list[dict]) -> str:
-    """Write a drift pending JSON and return its id."""
+    """Write a drift pending JSON and return its id.
+
+    Refs beyond [drift].ref_cap are dropped so one runaway rename cannot
+    balloon into a multi-MB pending file; the record notes the truncation.
+    """
     pid = _make_id(src, dest)
-    preview_lines = [r["text"][:120] for r in refs[:5]]
+    cap = _cfg_ref_cap()
+    total = len(refs)
+    truncated = total > cap
+    kept = refs[:cap] if truncated else refs
+    preview_lines = [r["text"][:120] for r in kept[:5]]
     payload = {
         "id": pid,
         "src": src,
         "dest": dest,
-        "refs": refs,
+        "refs": kept,
         "diff_preview": preview_lines,
         "created_at": time.time(),
+        "total_refs": total,
+        "truncated": truncated,
     }
     pending_path = _pending_dir() / f"{pid}.json"
     pending_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")

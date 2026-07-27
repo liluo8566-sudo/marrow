@@ -259,7 +259,7 @@ def reconcile_milestones(conn: sqlite3.Connection,
     md_rows = _parse(md_text)
     # Reconcile operates on pinned=1 only — the confirmed subpage set.
     # pinned=0 candidates live outside the md ↔ db sync loop; daily.py
-    # writes them, dashboard renders them, the user promotes via pinned=1.
+    # writes them, subpages render them, the user promotes via pinned=1.
     db_rows = {
         r["id"]: dict(r) for r in conn.execute(
             "SELECT id, scope, date, title, description, theme, pinned, updated_at "
@@ -445,11 +445,11 @@ _ALERT_ID_RE = re.compile(r"<!-- id:alert\.(?P<id>\d+) -->")
 
 
 def reconcile_alerts(conn: sqlite3.Connection,
-                     dashboard_path: str | Path) -> ReconcileReport:
+                     page_path: str | Path) -> ReconcileReport:
     """Absorb md-side alert deletions back into the alerts table.
 
     Each rendered alert bullet carries `<!-- id:alert.N -->`. If the user
-    removes a bullet from the dashboard md, that row is treated as
+    removes a bullet from the monitor md, that row is treated as
     `resolved=1` — the md-side delete IS the resolve gesture. Idempotent;
     no-op when md is absent or the Alerts block is missing.
 
@@ -457,10 +457,10 @@ def reconcile_alerts(conn: sqlite3.Connection,
     snapshot (e.g. by a background hook) are not misread as user deletes.
     """
     rpt = ReconcileReport()
-    dashboard_path = Path(dashboard_path)
-    if not dashboard_path.exists():
+    page_path = Path(page_path)
+    if not page_path.exists():
         return rpt
-    text = dashboard_path.read_text(encoding="utf-8")
+    text = page_path.read_text(encoding="utf-8")
     start = text.find(_ALERT_H2)
     if start == -1:
         return rpt
@@ -478,7 +478,7 @@ def reconcile_alerts(conn: sqlite3.Connection,
         except ValueError:
             continue
 
-    md_mtime_iso = _md_mtime_iso(dashboard_path)
+    md_mtime_iso = _md_mtime_iso(page_path)
 
     sql = "SELECT id FROM alerts WHERE resolved=0"
     params: list = []
@@ -686,9 +686,9 @@ def _reconcile_self_edit(conn, rpt, eid, raw_text, row, now_iso) -> None:
 
 
 def reconcile_timeline(conn: sqlite3.Connection,
-                       dashboard_path: str | Path,
+                       page_path: str | Path,
                        *, db: str | None = None) -> ReconcileReport:
-    """Absorb timeline edits from the dashboard ## Timeline block back into DB.
+    """Absorb timeline edits from the daybrief ## Timeline block back into DB.
 
     Anchors:
       `<!-- tl:<sid> -->` → session_digests anchor (present/absent → hidden sweep)
@@ -699,10 +699,10 @@ def reconcile_timeline(conn: sqlite3.Connection,
     Lines starting with `+ ` → insert as manual events (channel='manual').
     """
     rpt = ReconcileReport()
-    dashboard_path = Path(dashboard_path)
-    if not dashboard_path.exists():
+    page_path = Path(page_path)
+    if not page_path.exists():
         return rpt
-    text = dashboard_path.read_text(encoding="utf-8")
+    text = page_path.read_text(encoding="utf-8")
     start = text.find(_TIMELINE_H2)
     if start == -1:
         return rpt
@@ -719,7 +719,7 @@ def reconcile_timeline(conn: sqlite3.Connection,
     # hand-deleted trail. A volatile second writer (Status zone) bumps mtime
     # every render, so mtime alone would lose its "content last rendered" meaning.
     trail_t_iso = _trail_t_iso(block)
-    md_mtime_iso = trail_t_iso or _md_mtime_iso(dashboard_path)
+    md_mtime_iso = trail_t_iso or _md_mtime_iso(page_path)
     # Zone fingerprint from the trail: lets the db_win branch tell render
     # residue (zone untouched since render) from a clobbered human edit,
     # content-based rather than mtime-based (mtime lies on multi-zone pages
@@ -1170,7 +1170,7 @@ def reconcile_timeline(conn: sqlite3.Connection,
                 continue
             # Freshness gate: DB row content-written after the render (t=) AND
             # md text still differs → md is the stale second surface, DB wins.
-            # Prevents the two-writer ping-pong (dashboard.md ⇄ daybrief.md).
+            # Prevents the two-writer ping-pong (render vs. hand-edit in daybrief.md).
             if md_mtime_iso and (row["mts"] or "") > md_mtime_iso:
                 _cur = (row["content"] or "")
                 _md = _TL_PERIOD_RE.sub("", _TL_HHMM_RE.sub("", raw_text)).strip()
