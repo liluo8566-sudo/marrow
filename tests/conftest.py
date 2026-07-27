@@ -30,9 +30,10 @@ Two autouse guards, plus a one-time import-time pin:
    the dependency; on any other host (or CI) these caches would resolve
    elsewhere and the fixtures would silently mismatch. We import the
    affected modules here, once, with `config.get_tz` briefly patched to
-   force Melbourne, then restore the real `get_tz` — so
-   `tests/test_config.py`'s own os_tz()/get_tz() behaviour tests still see
-   genuine host behaviour.
+   force Melbourne, then restore the real `get_tz`. This restore is what
+   allows `tests/test_config.py`'s own os_tz()/get_tz() behaviour tests
+   to see genuine host behaviour — the patch must not persist beyond the
+   import phase.
 """
 from __future__ import annotations
 
@@ -42,18 +43,6 @@ import sqlite3
 from pathlib import Path
 
 os.environ.setdefault("WATCHDOG_USE_POLLING", "1")
-
-# ── pin the test timezone BEFORE any marrow module import ──────────────────────
-# Tests assert Melbourne wall-clock times (AEST/AEDT), but several modules
-# cache the zone at import time (timecue._MELB, hooks._RECALL_TZ) — before the
-# session fixtures below redirect CONFIG_PATH — so a user config with any
-# other [core].timezone breaks the suite. conftest imports first, so patching
-# get_tz here guarantees every cache and runtime call sees Melbourne.
-from zoneinfo import ZoneInfo
-
-import marrow.config as _marrow_config
-
-_marrow_config.get_tz = lambda: ZoneInfo("Australia/Melbourne")
 
 import pytest
 
