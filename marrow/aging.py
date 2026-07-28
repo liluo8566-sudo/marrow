@@ -1,28 +1,26 @@
-"""Weekly maintenance: task auto-archive, milestone auto-confirm, vec eviction.
+"""Weekly maintenance: milestone auto-confirm, vec eviction, pruning.
 
 No LLM. Triggered by deploy/mw-aging.plist (Sun 12:00 local).
 
 Memes are permanent — no aging/DELETE pass (decided 2026-07-06).
 
 Passes (single txn):
-1. archive_tasks — status='active' AND 0 mentions in events over last 30d
-   → status = 'archived'.
-2. confirm_milestone_alerts — alerts.type='milestone_added' AND created_at
+1. confirm_milestone_alerts — alerts.type='milestone_added' AND created_at
    > 7d ago AND resolved=0 → set resolved=1, resolved_at=now.
-3. prune_md_index_tombstones — DELETE md_index rows whose tombstone_at is
+2. prune_md_index_tombstones — DELETE md_index rows whose tombstone_at is
    older than 30 days. Stops the table accumulating dead rows from blocks
    the user permanently removed.
-4. prune_projects_worktrees — delete every ~/.claude/projects/<slug>
+3. prune_projects_worktrees — delete every ~/.claude/projects/<slug>
    directory whose name contains "worktrees". cc auto-cleans jsonl 30d+
    but leaves the slug shells; worktree sessions are task-isolated and
    not part of the user's continuous memory, so the whole shell goes.
-5. evict_vec_window — DELETE events_vec + events_vec_meta rows whose
+4. evict_vec_window — DELETE events_vec + events_vec_meta rows whose
    events.timestamp is older than vec_window_days (config). Exempt rows:
    affect-linked (importance>=3) or recall_count>0. Safety caps abort the
    pass if eviction would exceed 25% of vec rows or 10000 rows. Backup
    gate: skip if newest marrow-YYYY-MM-DD.db backup is missing or >7d old.
    vec_window_days=0 disables the pass entirely.
-6. prune_outbox — DELETE outbox rows with status sent/failed older than
+5. prune_outbox — DELETE outbox rows with status sent/failed older than
    [outbox].retention_days. Pending/claimed rows are never aged.
 """
 from __future__ import annotations
@@ -37,47 +35,6 @@ import sys
 from datetime import date, timedelta
 from pathlib import Path
 from . import config, outbox as _outbox, repo, storage
-
-
-def _fts_phrase(q: str) -> str:
-    # Mirror repo._fts_query: phrase match, FTS5-safe (trigram tokenizer).
-    return '"' + q.replace('"', '""').strip() + '"'
-
-
-def archive_tasks(conn: sqlite3.Connection) -> int:
-    """status='active' tasks with 0 event mentions in last 30d → archived.
-
-    Mention = FTS5 phrase match of tasks.title against events.content from
-    the last 30d. Empty/whitespace titles are skipped (cannot mention).
-    """
-    rows = conn.execute(
-        "SELECT id, title FROM tasks WHERE status = 'active'"
-    ).fetchall()
-    archived = 0
-    for r in rows:
-        title = (r["title"] or "").strip()
-        if not title:
-            continue
-        try:
-            hits = conn.execute(
-                "SELECT COUNT(*) FROM events_fts f "
-                "JOIN events e ON e.id = f.rowid "
-                "WHERE events_fts MATCH ? "
-                "AND e.timestamp >= strftime('%Y-%m-%dT%H:%M:%SZ','now', '-30 days') "
-                "LIMIT 1",
-                (_fts_phrase(title),),
-            ).fetchone()[0]
-        except sqlite3.OperationalError:
-            continue
-        if hits == 0:
-            conn.execute(
-                "UPDATE tasks SET status = 'archived', "
-                "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') "
-                "WHERE id = ?",
-                (r["id"],),
-            )
-            archived += 1
-    return archived
 
 
 def confirm_milestone_alerts(conn: sqlite3.Connection) -> int:
@@ -305,7 +262,7 @@ def main(argv: list[str] | None = None) -> None:
     """Single entrypoint: run all passes, log summary."""
     ap = argparse.ArgumentParser(
         prog="marrow.aging",
-        description="Weekly DB maintenance: memes, tasks, milestones, vec window.",
+        description="Weekly DB maintenance: memes, milestones, vec window.",
     )
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--apply", action="store_true",
@@ -329,7 +286,6 @@ def main(argv: list[str] | None = None) -> None:
     vec: dict = {}
     try:
         with conn:
-            archived = archive_tasks(conn)
             confirmed = confirm_milestone_alerts(conn)
             tombs = prune_md_index_tombstones(conn)
             outbox_pruned = _outbox.prune(conn, outbox_retention)
@@ -346,8 +302,7 @@ def main(argv: list[str] | None = None) -> None:
                 "INSERT INTO audit_log "
                 "(target_table, target_id, action, summary) "
                 "VALUES ('aging', NULL, 'weekly', ?)",
-                (f"archived={archived} "
-                 f"confirmed={confirmed} "
+                (f"confirmed={confirmed} "
                  f"tombs={tombs} outbox_pruned={outbox_pruned} "
                  f"wtshells={wtshells} "
                  f"vec_evicted={vec['evicted']} vec_exempted={vec['exempted']} "
@@ -362,8 +317,7 @@ def main(argv: list[str] | None = None) -> None:
                  f"window_days={window_days} dry_run={dry_run}",),
             )
         sys.stderr.write(
-            f"[aging] archived={archived} "
-            f"confirmed={confirmed} "
+            f"[aging] confirmed={confirmed} "
             f"tombs={tombs} outbox_pruned={outbox_pruned} wtshells={wtshells} "
             f"vec_evicted={vec['evicted']} vec_exempted={vec['exempted']} "
             f"vec_skipped={vec['skipped']} vec_aborted={vec['aborted']}"

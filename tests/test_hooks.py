@@ -538,6 +538,40 @@ def test_backup_guard_scratchpad_silent(env, monkeypatch, capsys):
     assert _BG_MSG not in out.get("additionalContext", "")
 
 
+def test_backup_guard_scratchpad_dir_itself_silent(env, monkeypatch, capsys):
+    # Regression: the whitelist used a "/scratchpad/" substring test, so the
+    # directory ITSELF (no trailing slash) was denied.
+    rc = _pretool(monkeypatch, "Bash",
+                  {"command": "rm -rf /Users/x/project/scratchpad"})
+    assert rc == 0
+    out = _hook_out(capsys)
+    assert "permissionDecision" not in out
+    assert _BG_MSG not in out.get("additionalContext", "")
+
+
+def test_backup_guard_worktree_dir_itself_silent(env, monkeypatch, capsys):
+    rc = _pretool(monkeypatch, "Bash",
+                  {"command": "rm -rf /Users/x/proj/.claude/worktrees"})
+    assert rc == 0
+    assert "permissionDecision" not in _hook_out(capsys)
+
+
+def test_backup_guard_isolation_prefix_path_silent(env, monkeypatch, capsys):
+    # /tmp/claude-* and its /private twin are isolation zones (the /private one
+    # is not covered by the plain /tmp prefix rule).
+    rc = _pretool(monkeypatch, "Bash",
+                  {"command": "rm -rf /private/tmp/claude-501/proj/scratch"})
+    assert rc == 0
+    assert "permissionDecision" not in _hook_out(capsys)
+
+
+def test_backup_guard_non_whitelisted_lookalike_still_denies(env, monkeypatch, capsys):
+    # `scratchpads` (plural) is not the whitelisted `scratchpad` dir.
+    rc = _pretool(monkeypatch, "Bash", {"command": "rm -rf /Users/x/scratchpads"})
+    assert rc == 0
+    assert _out(capsys)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
 def test_backup_guard_recursive_rm_with_tar_backup_silent(env, monkeypatch, capsys):
     # Escape hatch: a backup action in the SAME command → fully silent allow,
     # no deny AND no reminder.
@@ -1057,12 +1091,29 @@ def test_git_branch_cap_d_asks_for_authorship(env, monkeypatch, capsys):
     assert out["permissionDecision"] == "ask"
 
 
-def test_git_worktree_remove_asks(env, monkeypatch, capsys):
-    rc = _pretool(monkeypatch, "Bash", {"command": "git worktree remove /tmp/wt"})
+def test_git_worktree_remove_forced_asks(env, monkeypatch, capsys):
+    rc = _pretool(monkeypatch, "Bash",
+                  {"command": "git worktree remove -f /Users/x/wt"})
     assert rc == 0
     out = _out(capsys)["hookSpecificOutput"]
     assert out["permissionDecision"] == "ask"
     assert _HEADLINE in out["permissionDecisionReason"]
+
+
+def test_git_worktree_remove_plain_silent(env, monkeypatch, capsys):
+    # git refuses to remove a dirty worktree itself → nothing to confirm.
+    rc = _pretool(monkeypatch, "Bash", {"command": "git worktree remove /Users/x/wt"})
+    assert rc == 0
+    out = _hook_out(capsys)
+    assert "permissionDecision" not in out
+
+
+def test_git_worktree_remove_long_force_asks(env, monkeypatch, capsys):
+    rc = _pretool(monkeypatch, "Bash",
+                  {"command": "git worktree remove --force /Users/x/wt"})
+    assert rc == 0
+    out = _out(capsys)["hookSpecificOutput"]
+    assert out["permissionDecision"] == "ask"
 
 
 def test_git_worktree_remove_in_worktree_cwd_silent(env, monkeypatch, capsys):
@@ -1126,6 +1177,235 @@ def test_git_revert_branch_cap_d_worktree_cwd_silent(env, monkeypatch, capsys):
     assert rc == 0
     out = _hook_out(capsys)
     assert "permissionDecision" not in out
+
+
+# -- isolation prefixes (ask tier) + agent branch teardown --------------------
+
+def _hooks_cfg(monkeypatch, **kv):
+    cfg = config.load()
+    cfg.setdefault("hooks", {}).update(kv)
+    monkeypatch.setattr(config, "load", lambda: cfg)
+    return cfg
+
+
+def test_isolation_prefix_cwd_tmp_claude_silent(env, monkeypatch, capsys):
+    # cwd inside a /private/tmp/claude-* agent scratch zone → ask skipped.
+    rc = _pretool(monkeypatch, "Bash", {"command": "git reset --hard HEAD~1"},
+                  cwd="/private/tmp/claude-501/proj/wt")
+    assert rc == 0
+    assert "permissionDecision" not in _hook_out(capsys)
+
+
+def test_isolation_prefix_cmd_tmp_claude_silent(env, monkeypatch, capsys):
+    rc = _pretool(monkeypatch, "Bash",
+                  {"command": "cd /tmp/claude-501/wt && git reset --hard HEAD~1"},
+                  cwd="/Users/x/proj")
+    assert rc == 0
+    assert "permissionDecision" not in _hook_out(capsys)
+
+
+def test_isolation_prefix_non_isolated_path_still_asks(env, monkeypatch, capsys):
+    rc = _pretool(monkeypatch, "Bash",
+                  {"command": "cd /tmp/other/wt && git reset --hard HEAD~1"},
+                  cwd="/Users/x/proj")
+    assert rc == 0
+    assert _out(capsys)["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+
+def test_isolation_prefixes_configurable(env, monkeypatch, capsys):
+    _hooks_cfg(monkeypatch, isolation_prefixes=["/sandbox/"])
+    rc = _pretool(monkeypatch, "Bash", {"command": "git reset --hard HEAD~1"},
+                  cwd="/opt/sandbox/run")
+    assert rc == 0
+    assert "permissionDecision" not in _hook_out(capsys)
+    # The built-in default no longer applies once overridden.
+    rc = _pretool(monkeypatch, "Bash", {"command": "git reset --hard HEAD~1"},
+                  cwd="/private/tmp/claude-501/wt")
+    assert rc == 0
+    assert _out(capsys)["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+
+def test_git_branch_cap_d_agent_branch_silent(env, monkeypatch, capsys):
+    # Agent worktree teardown from the main repo cwd → no popup.
+    rc = _pretool(monkeypatch, "Bash",
+                  {"command": "git branch -D worktree-agent-a1c3d3b9b8eccb8f5"},
+                  cwd="/Users/x/proj")
+    assert rc == 0
+    assert "permissionDecision" not in _hook_out(capsys)
+
+
+def test_git_branch_cap_d_mixed_operands_asks(env, monkeypatch, capsys):
+    rc = _pretool(monkeypatch, "Bash",
+                  {"command": "git branch -D worktree-agent-abc my-feature"},
+                  cwd="/Users/x/proj")
+    assert rc == 0
+    assert _out(capsys)["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+
+def test_git_branch_cap_d_no_operand_asks(env, monkeypatch, capsys):
+    rc = _pretool(monkeypatch, "Bash", {"command": "git branch -D"},
+                  cwd="/Users/x/proj")
+    assert rc == 0
+    assert _out(capsys)["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+
+def test_git_branch_lowercase_d_untouched(env, monkeypatch, capsys):
+    rc = _pretool(monkeypatch, "Bash", {"command": "git branch -d my-feature"},
+                  cwd="/Users/x/proj")
+    assert rc == 0
+    assert "permissionDecision" not in _hook_out(capsys)
+
+
+def test_agent_branch_prefixes_configurable(env, monkeypatch, capsys):
+    _hooks_cfg(monkeypatch, agent_branch_prefixes=["tmp/"])
+    rc = _pretool(monkeypatch, "Bash", {"command": "git branch -D tmp/scratch"},
+                  cwd="/Users/x/proj")
+    assert rc == 0
+    assert "permissionDecision" not in _hook_out(capsys)
+    rc = _pretool(monkeypatch, "Bash",
+                  {"command": "git branch -D worktree-agent-abc"},
+                  cwd="/Users/x/proj")
+    assert rc == 0
+    assert _out(capsys)["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+
+# -- session write ledger (own drafts are silently revertable) ----------------
+
+def _transcript(tmp_path, *file_paths, name="t.jsonl"):
+    """Synthetic session transcript with one Edit tool_use per path."""
+    p = tmp_path / name
+    lines = []
+    for fp in file_paths:
+        lines.append(json.dumps({
+            "type": "assistant",
+            "message": {"content": [
+                {"type": "tool_use", "name": "Edit", "input": {"file_path": fp}},
+            ]},
+        }))
+    p.write_text("\n".join(lines) + ("\n" if lines else ""))
+    return p
+
+
+def _pretool_t(monkeypatch, cmd, tpath, sid="s-wl", cwd="/repo"):
+    _stdin(monkeypatch, {
+        "session_id": sid, "tool_name": "Bash", "cwd": cwd,
+        "transcript_path": str(tpath), "tool_input": {"command": cmd},
+    })
+    return hooks.main(["pretool_use"])
+
+
+def test_write_ledger_own_file_dirty_silent(env, monkeypatch, capsys, tmp_path):
+    # Dirty target (git says modified) but the session wrote it → no popup.
+    monkeypatch.setattr(hooks, "_git_worktree_dirty", lambda *a: True)
+    f = tmp_path / "draft.py"
+    f.write_text("x")
+    t = _transcript(tmp_path, str(f))
+    assert _pretool_t(monkeypatch, f"git restore {f}", t) == 0
+    assert "permissionDecision" not in _hook_out(capsys)
+
+
+def test_write_ledger_unknown_file_dirty_asks(env, monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(hooks, "_git_worktree_dirty", lambda *a: True)
+    f = tmp_path / "draft.py"
+    other = tmp_path / "theirs.py"
+    f.write_text("x")
+    other.write_text("y")
+    t = _transcript(tmp_path, str(f))
+    assert _pretool_t(monkeypatch, f"git restore {other}", t) == 0
+    assert _out(capsys)["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+
+def test_write_ledger_mixed_operands_ask(env, monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(hooks, "_git_worktree_dirty", lambda *a: True)
+    mine, theirs = tmp_path / "mine.py", tmp_path / "theirs.py"
+    mine.write_text("x")
+    theirs.write_text("y")
+    t = _transcript(tmp_path, str(mine))
+    assert _pretool_t(monkeypatch, f"git restore {mine} {theirs}", t) == 0
+    assert _out(capsys)["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+
+def test_write_ledger_relative_operand_resolved_against_cwd(
+    env, monkeypatch, capsys, tmp_path
+):
+    monkeypatch.setattr(hooks, "_git_worktree_dirty", lambda *a: True)
+    f = tmp_path / "draft.py"
+    f.write_text("x")
+    t = _transcript(tmp_path, str(f))
+    assert _pretool_t(monkeypatch, "git restore draft.py", t,
+                      cwd=str(tmp_path)) == 0
+    assert "permissionDecision" not in _hook_out(capsys)
+
+
+def test_write_ledger_unreadable_transcript_asks(env, monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(hooks, "_git_worktree_dirty", lambda *a: True)
+    f = tmp_path / "draft.py"
+    f.write_text("x")
+    assert _pretool_t(monkeypatch, f"git restore {f}", tmp_path / "missing.jsonl") == 0
+    assert _out(capsys)["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+
+def test_write_ledger_is_incremental(env, monkeypatch, tmp_path):
+    a, b = tmp_path / "a.py", tmp_path / "b.py"
+    t = _transcript(tmp_path, str(a))
+    first = hooks._session_write_set("s-inc", str(t))
+    assert first == {os.path.realpath(str(a))}
+    cache = json.loads((config.DATA_DIR / "state" / "write_ledger" /
+                        "s-inc.json").read_text())
+    assert cache["offset"] == t.stat().st_size
+    with t.open("a") as fh:
+        fh.write(json.dumps({
+            "type": "assistant",
+            "message": {"content": [
+                {"type": "tool_use", "name": "Write",
+                 "input": {"file_path": str(b)}},
+            ]},
+        }) + "\n")
+    second = hooks._session_write_set("s-inc", str(t))
+    assert second == {os.path.realpath(str(a)), os.path.realpath(str(b))}
+
+
+def test_write_ledger_lazy_no_io_without_path_operands(
+    env, monkeypatch, capsys, tmp_path
+):
+    # The ledger costs a transcript tail scan + a cache write — it may only run
+    # when a checkout/restore segment with path operands needs it.
+    calls = []
+    monkeypatch.setattr(hooks, "_session_write_set",
+                        lambda *a: calls.append(a) or set())
+    t = _transcript(tmp_path, str(tmp_path / "draft.py"))
+    for cmd in ("ls -la", "pytest -q", "git status", "git reset --hard HEAD~1",
+                "git branch -D worktree-agent-abc"):
+        assert _pretool_t(monkeypatch, cmd, t) == 0
+        capsys.readouterr()
+    assert calls == []
+    assert not (config.DATA_DIR / "state" / "write_ledger").exists()
+
+
+def test_write_ledger_scanned_once_per_call(env, monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(hooks, "_git_worktree_dirty", lambda *a: True)
+    real = hooks._session_write_set
+    calls = []
+    monkeypatch.setattr(hooks, "_session_write_set",
+                        lambda *a: calls.append(a) or real(*a))
+    mine, theirs = tmp_path / "mine.py", tmp_path / "theirs.py"
+    mine.write_text("x")
+    theirs.write_text("y")
+    t = _transcript(tmp_path, str(mine))
+    # Two checkout/restore segments — the memo resolves the ledger only once.
+    assert _pretool_t(monkeypatch, f"git restore {mine} && git restore {theirs}",
+                      t) == 0
+    assert _out(capsys)["hookSpecificOutput"]["permissionDecision"] == "ask"
+    assert len(calls) == 1
+
+
+def test_write_ledger_does_not_exempt_reset_hard(env, monkeypatch, capsys, tmp_path):
+    # Ops with no path operand are untouched by the ledger.
+    f = tmp_path / "draft.py"
+    f.write_text("x")
+    t = _transcript(tmp_path, str(f))
+    assert _pretool_t(monkeypatch, "git reset --hard HEAD~1", t) == 0
+    assert _out(capsys)["hookSpecificOutput"]["permissionDecision"] == "ask"
 
 
 def test_git_revert_worktree_substring_compound_bypass_still_denies(
@@ -1249,7 +1529,7 @@ def test_reason_stash_drop_uses_stash_show(env, monkeypatch):
 
 def test_reason_worktree_remove_counts_dirty(env, monkeypatch):
     _fake_git(monkeypatch, {"status --porcelain": " M a\n?? b\n"})
-    out = _reason(monkeypatch, "git worktree remove /tmp/wt")
+    out = _reason(monkeypatch, "git worktree remove -f /tmp/wt")
     assert "remove a worktree directory" in out
     assert "File: /tmp/wt (2 uncommitted)" in out
     assert "LOC:" not in out

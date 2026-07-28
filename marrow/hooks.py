@@ -1998,6 +1998,31 @@ def _append_recall_log(sid: str, prompt_text: str, hits: list[dict]) -> None:
 _PLACEMENT_BASH_OPS = {"mv", "cp", "rename", "mmv", "touch", "mkdir"}
 
 
+# ── agent/worktree isolation zones ───────────────────────────────────────────
+# Path fragments marking throw-away agent workspaces. Shared by the backup
+# guard's whitelist (deny tier) and the git-revert guard's exemption (ask
+# tier): destructive housekeeping inside these zones can't lose the user's or
+# another session's work. Config: [hooks].isolation_prefixes.
+_ISOLATION_DEFAULT_PREFIXES = [
+    ".claude/worktrees/",
+    "/private/tmp/claude-",
+    "/tmp/claude-",
+]
+
+
+def _isolation_prefixes(hooks_cfg: dict) -> list[str]:
+    out = [p for p in (hooks_cfg or {}).get("isolation_prefixes") or []
+           if isinstance(p, str) and p.strip()]
+    return out or list(_ISOLATION_DEFAULT_PREFIXES)
+
+
+def _isolation_hit(text: str, prefixes: list[str]) -> bool:
+    """True when *text* (a cwd or a whole command) carries an isolation zone
+    fragment. Substring test — the path may sit anywhere in a command."""
+    t = text or ""
+    return any(p in t for p in prefixes)
+
+
 # ── backup guard (PreToolUse) — stateless, two tiers ─────────────────────────
 # Reminder tier — additionalContext text, fires EVERY matching call (no dedup,
 #   no state): any rm on a non-whitelisted path (non-recursive; recursive lands
@@ -2047,9 +2072,13 @@ _BG_DENY_MSG = (
 )
 
 
+_BG_WHITELIST_FRAGMENTS = ["/scratchpad/"]
+
+
 def _bg_is_whitelisted_path(p: str) -> bool:
-    """Whitelist scope: /tmp, /private/tmp, or any path containing /scratchpad/
-    or /.claude/worktrees/ — destructive ops there are silent."""
+    """Whitelist scope: /tmp, /private/tmp, any path inside a /scratchpad/ dir,
+    and the configured isolation zones — destructive ops there are silent.
+    A path that IS the zone directory itself (no trailing slash) counts too."""
     pp = (p or "").strip().strip("'\"")
     if not pp:
         return False
@@ -2057,9 +2086,13 @@ def _bg_is_whitelisted_path(p: str) -> bool:
         return True
     if pp.startswith("/tmp/") or pp.startswith("/private/tmp/"):
         return True
-    if "/scratchpad/" in pp or "/.claude/worktrees/" in pp:
-        return True
-    return False
+    try:
+        prefixes = _isolation_prefixes(config.load().get("hooks", {}) or {})
+    except Exception:  # noqa: BLE001 — fail-open to the built-in zones
+        prefixes = list(_ISOLATION_DEFAULT_PREFIXES)
+    # Probe with a trailing slash so `<...>/scratchpad` matches "/scratchpad/".
+    probe = pp if pp.endswith("/") else pp + "/"
+    return any(f in probe for f in _BG_WHITELIST_FRAGMENTS + prefixes)
 
 
 def _bg_resolve_for_whitelist(p: str, cwd: str) -> str:
@@ -2462,7 +2495,173 @@ def _git_revert_loss_holds(seg: str, cwd: str) -> bool:
     return _git_worktree_dirty(parsed["repo"] or cwd, parsed["paths"])
 
 
-def _git_revert_segment_matches(seg: str, pats: list, cwd: str = "") -> bool:
+# ── session write ledger (git-revert exemption) ──────────────────────────────
+# A session may silently discard files IT wrote this session — those are its
+# own drafts. Anything it never wrote may carry the user's (or another
+# session's) edits, so the ask stands. The write set comes from the session's
+# own transcript, cached per sid with a byte offset so only the tail is
+# rescanned (same shape as the ct cursor). Unreadable → empty set → ask.
+_WRITE_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
+
+
+def _write_ledger_path(sid: str) -> Path:
+    return config.DATA_DIR / "state" / "write_ledger" / f"{sid}.json"
+
+
+def _scan_write_paths(records: list) -> set:
+    out: set = set()
+    for r in records:
+        content = (r.get("message") or {}).get("content") if isinstance(r, dict) else None
+        if not isinstance(content, list):
+            continue
+        for it in content:
+            if not isinstance(it, dict) or it.get("type") != "tool_use":
+                continue
+            if it.get("name") not in _WRITE_TOOLS:
+                continue
+            args = it.get("input") or {}
+            for key in ("file_path", "notebook_path"):
+                v = args.get(key)
+                if isinstance(v, str) and v.strip():
+                    out.add(os.path.realpath(os.path.expanduser(v.strip())))
+    return out
+
+
+def _session_write_set(sid: str, tpath: str) -> set:
+    """Absolute realpaths this session wrote via Edit/Write/MultiEdit/
+    NotebookEdit. Incremental: cached paths + byte offset per sid, tail-only
+    rescan. Any failure returns an empty set (fail toward asking)."""
+    if not tpath:
+        return set()
+    try:
+        size = os.path.getsize(tpath)
+        cached: dict = {}
+        if sid:
+            try:
+                d = json.loads(_write_ledger_path(sid).read_text())
+                cached = d if isinstance(d, dict) else {}
+            except Exception:  # noqa: BLE001 — absent/corrupt cache → full scan
+                cached = {}
+        paths = {p for p in cached.get("paths") or [] if isinstance(p, str)}
+        off = cached.get("offset")
+        start = off if isinstance(off, int) and 0 <= off <= size else 0
+        if start >= size:
+            return paths
+        with open(tpath, "rb") as f:
+            f.seek(start)
+            blob = f.read()
+        records: list = []
+        for raw in blob.split(b"\n"):
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                records.append(json.loads(raw.decode("utf-8")))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+        paths |= _scan_write_paths(records)
+        if sid:
+            try:
+                p = _write_ledger_path(sid)
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(json.dumps({"offset": size, "paths": sorted(paths)}))
+            except Exception:  # noqa: BLE001 — cache is an optimisation only
+                pass
+        return paths
+    except Exception:  # noqa: BLE001
+        return set()
+
+
+def _memo0(fn):
+    """Memoise a zero-arg callable — the wrapped call runs at most once."""
+    box: list = []
+
+    def _get():
+        if not box:
+            box.append(fn())
+        return box[0]
+    return _get
+
+
+def _git_revert_own_writes(seg: str, cwd: str, write_set_fn) -> bool:
+    """True when EVERY explicit path operand of a checkout/restore segment is a
+    file this session wrote itself. Operands resolve against the segment's repo
+    dir and the repo root; both sides compared as realpaths.
+
+    *write_set_fn* is a memoised zero-arg provider, resolved only once a
+    segment actually needs the ledger — a non-git Bash call never reads or
+    writes the ledger files."""
+    if write_set_fn is None:
+        return False
+    parsed = _git_revert_parse(seg, cwd)
+    if not parsed or parsed["action"] not in ("checkout-file", "restore"):
+        return False
+    paths = parsed["paths"]
+    if not paths:
+        return False
+    write_set = write_set_fn()
+    if not write_set:
+        return False
+    base = parsed["repo"] or cwd
+    root = (_git_read(base, ["rev-parse", "--show-toplevel"]) or "").strip()
+    for raw in paths:
+        pp = (raw or "").strip().strip("'\"")
+        if not pp:
+            return False
+        e = os.path.expanduser(pp)
+        if os.path.isabs(e):
+            cands = [os.path.realpath(e)]
+        else:
+            cands = [os.path.realpath(os.path.join(b, e))
+                     for b in (base, root) if b]
+        if not any(c in write_set for c in cands):
+            return False
+    return True
+
+
+_AGENT_BRANCH_DEFAULT_PREFIXES = ["worktree-agent-"]
+
+
+def _git_seg_tokens(seg: str) -> list[str]:
+    import shlex
+    try:
+        return shlex.split(seg)
+    except Exception:  # noqa: BLE001 — unbalanced quotes
+        return (seg or "").split()
+
+
+def _git_worktree_remove_holds(seg: str, cwd: str = "") -> bool:
+    """Hold `git worktree remove` only in its forced form — git itself refuses
+    to remove a dirty worktree, so the plain form can't destroy work."""
+    parsed = _git_revert_parse(seg, cwd)
+    if not parsed:
+        return True
+    if parsed["action"] != "worktree-remove":
+        return False
+    return any(
+        t == "--force" or (t.startswith("-") and not t.startswith("--") and "f" in t)
+        for t in _git_seg_tokens(seg)
+    )
+
+
+def _git_branch_delete_holds(seg: str, cwd: str, hooks_cfg: dict) -> bool:
+    """Hold `git branch -D` unless EVERY operand is an agent branch (worktree
+    teardown). Config: [hooks].agent_branch_prefixes."""
+    parsed = _git_revert_parse(seg, cwd)
+    if not parsed:
+        return True
+    if parsed["action"] != "branch-D":
+        return False
+    ops = [r for r in parsed["refs"] if r != "branch"]
+    pres = [p for p in (hooks_cfg or {}).get("agent_branch_prefixes") or []
+            if isinstance(p, str) and p.strip()] or _AGENT_BRANCH_DEFAULT_PREFIXES
+    return not (ops and all(any(o.startswith(p) for p in pres) for o in ops))
+
+
+def _git_revert_segment_matches(
+    seg: str, pats: list, cwd: str = "", hooks_cfg: dict | None = None,
+    write_set_fn=None,
+) -> bool:
     """True if one shell segment contains a git revert-type op.
     `git restore --staged` alone (unstage only, no worktree discard) is safe
     — evaluated within this segment only, never command-wide."""
@@ -2482,25 +2681,32 @@ def _git_revert_segment_matches(seg: str, pats: list, cwd: str = "") -> bool:
             continue
         if restore_safe and "restore" in p:
             continue  # safe unstage-only restore — don't hold on this pattern
-        if ("checkout" in p or "restore" in p) and not _git_revert_loss_holds(
-            seg, cwd
-        ):
-            continue  # nothing uncommitted at the targets — no loss to confirm
+        if "checkout" in p or "restore" in p:
+            if _git_revert_own_writes(seg, cwd, write_set_fn):
+                continue  # only this session's own drafts — nothing to confirm
+            if not _git_revert_loss_holds(seg, cwd):
+                continue  # nothing uncommitted at the targets — no loss
+        if "worktree" in p and not _git_worktree_remove_holds(seg, cwd):
+            continue  # unforced worktree remove — git refuses if dirty
+        if "branch" in p and not _git_branch_delete_holds(seg, cwd, hooks_cfg or {}):
+            continue  # agent-branch teardown only
         return True
     return False
 
 
-def _git_revert_matches(cmd: str, cwd: str = "") -> bool:
+def _git_revert_matches(cmd: str, cwd: str = "", hooks_cfg: dict | None = None,
+                        write_set_fn=None) -> bool:
     """True if any shell segment of *cmd* contains a git revert-type op per
     config patterns."""
     if not cmd:
         return False
-    pats = (config.load().get("hooks", {}) or {}).get(
-        "git_revert_patterns"
-    ) or _GIT_REVERT_DEFAULT_PATTERNS
+    if hooks_cfg is None:
+        hooks_cfg = config.load().get("hooks", {}) or {}
+    pats = hooks_cfg.get("git_revert_patterns") or _GIT_REVERT_DEFAULT_PATTERNS
     for seg in _GIT_REVERT_SEP_RE.split(cmd):
         seg = seg.strip()
-        if seg and _git_revert_segment_matches(seg, pats, cwd):
+        if seg and _git_revert_segment_matches(seg, pats, cwd, hooks_cfg,
+                                               write_set_fn):
             return True
     return False
 
@@ -2770,7 +2976,8 @@ def _git_revert_owner(sid: str, cwd: str, ts: float | None) -> str | None:
     return f"Current Session · {hhmm}"
 
 
-def _git_revert_reason(inp: dict, hooks_cfg: dict, cmd: str) -> str:
+def _git_revert_reason(inp: dict, hooks_cfg: dict, cmd: str,
+                       write_set_fn=None) -> str:
     """Full ask reason: headline + Action/File/LOC/By. Degrades to headline +
     Action, and to the bare headline, when git or the DB can't answer."""
     template = hooks_cfg.get("git_revert_guard_message") or _GIT_REVERT_MSG
@@ -2780,7 +2987,8 @@ def _git_revert_reason(inp: dict, hooks_cfg: dict, cmd: str) -> str:
     hook_cwd = inp.get("cwd") or ""
     for seg in _GIT_REVERT_SEP_RE.split(cmd):
         seg = seg.strip()
-        if seg and _git_revert_segment_matches(seg, pats, hook_cwd):
+        if seg and _git_revert_segment_matches(seg, pats, hook_cwd, hooks_cfg,
+                                               write_set_fn):
             parsed = _git_revert_parse(seg, hook_cwd)
             break
     if not parsed:
@@ -2822,7 +3030,9 @@ def _git_revert_guard(inp: dict) -> str | None:
     Returns the 'ask' reason string to hold the call; "" when a git-revert op
     matched but it's worktree/agent cleanup (allow silently, skip the backup
     deny gate); None when it isn't a git-revert op at all (fall through).
-    Config: [hooks].git_revert_guard (default true) + git_revert_patterns.
+    Config: [hooks].git_revert_guard (default true) + git_revert_patterns,
+    isolation_prefixes, agent_branch_prefixes. checkout/restore of files this
+    session wrote itself is exempt (session write ledger).
     Fail-open: any error returns None."""
     try:
         if not isinstance(inp, dict) or inp.get("tool_name") != "Bash":
@@ -2832,21 +3042,27 @@ def _git_revert_guard(inp: dict) -> str | None:
             return None
         cmd = (inp.get("tool_input") or {}).get("command", "") or ""
         cwd = inp.get("cwd") or ""
-        if not isinstance(cmd, str) or not _git_revert_matches(cmd, cwd):
+        if not isinstance(cmd, str):
             return None
-        # Worktree/agent cleanup teardown stays allowed. Use the same
-        # `/.claude/worktrees/` path-substring test as the backup guard's
-        # whitelist; also honour a live worktree-session detection when the cwd
-        # resolves.
+        # Lazy: the ledger is read/written only if a checkout/restore segment
+        # with path operands actually needs it, and then only once.
+        sid, tpath = inp.get("session_id") or "", inp.get("transcript_path") or ""
+        write_set_fn = _memo0(lambda: _session_write_set(sid, tpath))
+        if not _git_revert_matches(cmd, cwd, hooks_cfg, write_set_fn):
+            return None
+        # Worktree/agent cleanup teardown stays allowed — the isolation zone in
+        # the cwd or anywhere in the command, or a live worktree-session
+        # detection when the cwd resolves. Whole-command level by design.
+        prefixes = _isolation_prefixes(hooks_cfg)
         if (
-            "/.claude/worktrees/" in cwd
-            or ".claude/worktrees/" in cmd
+            _isolation_hit(cwd, prefixes)
+            or _isolation_hit(cmd, prefixes)
             or _is_worktree_session(cwd)
         ):
             return ""
         reason = ""
         try:
-            reason = _git_revert_reason(inp, hooks_cfg, cmd)
+            reason = _git_revert_reason(inp, hooks_cfg, cmd, write_set_fn)
         except Exception:  # noqa: BLE001 — enrichment is additive, never fatal
             reason = ""
         # Never return "" here — the caller reads "" as worktree-exempt allow.

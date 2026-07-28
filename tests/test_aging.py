@@ -18,29 +18,6 @@ def db(tmp_path):
     conn.close()
 
 
-def _ins_event(conn, content, *, ts="now", sid="s1"):
-    if ts == "now":
-        conn.execute(
-            "INSERT INTO events (session_id, timestamp, role, content) "
-            "VALUES (?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), 'user', ?)",
-            (sid, content),
-        )
-    else:
-        conn.execute(
-            "INSERT INTO events (session_id, timestamp, role, content) "
-            "VALUES (?, ?, 'user', ?)",
-            (sid, ts, content),
-        )
-
-
-def _ins_task(conn, title, *, status="active"):
-    conn.execute(
-        "INSERT INTO tasks (category, title, status) VALUES ('study', ?, ?)",
-        (title, status),
-    )
-    return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-
-
 def _ins_alert(conn, atype, message, *, resolved=0, age_days=0):
     if age_days == 0:
         conn.execute(
@@ -64,54 +41,6 @@ def test_v3_memes_columns_present(db):
     assert "pinned" in cols
     assert "status" in cols
     assert db.execute("PRAGMA user_version").fetchone()[0] >= 3
-
-
-# ── archive_tasks ─────────────────────────────────────────────────────────────
-
-def test_archive_tasks_no_mention_archives(db):
-    tid = _ins_task(db, "forgotten thing", status="active")
-    db.commit()
-    n = aging.archive_tasks(db)
-    assert n == 1
-    row = db.execute(
-        "SELECT status FROM tasks WHERE id=?", (tid,)
-    ).fetchone()
-    assert row["status"] == "archived"
-
-
-def test_archive_tasks_recent_mention_keeps_active(db):
-    tid = _ins_task(db, "active project", status="active")
-    _ins_event(db, "working on active project today", sid="s1")
-    db.commit()
-    n = aging.archive_tasks(db)
-    assert n == 0
-    row = db.execute(
-        "SELECT status FROM tasks WHERE id=?", (tid,)
-    ).fetchone()
-    assert row["status"] == "active"
-
-
-def test_archive_tasks_old_mention_archives(db):
-    tid = _ins_task(db, "stale project", status="active")
-    _ins_event(db, "stale project ref",
-               ts="2026-01-01T00:00:00Z", sid="s1")
-    db.commit()
-    n = aging.archive_tasks(db)
-    assert n == 1
-    row = db.execute(
-        "SELECT status FROM tasks WHERE id=?", (tid,)
-    ).fetchone()
-    assert row["status"] == "archived"
-
-
-def test_archive_tasks_skips_already_archived(db):
-    _ins_task(db, "done thing", status="archived")
-    db.commit()
-    assert aging.archive_tasks(db) == 0
-
-
-def test_archive_tasks_empty_noop(db):
-    assert aging.archive_tasks(db) == 0
 
 
 # ── confirm_milestone_alerts ──────────────────────────────────────────────────
@@ -163,7 +92,6 @@ def test_main_runs_clean_on_empty_db(db, monkeypatch, capsys):
     _route_init_db(monkeypatch, p)
     aging.main([])
     cap = capsys.readouterr()
-    assert "archived=0" in cap.err
     assert "confirmed=0" in cap.err
 
 
@@ -181,7 +109,7 @@ def test_main_writes_audit_log(db, monkeypatch):
         ).fetchone()
         assert row is not None
         assert row["action"] == "weekly"
-        assert "archived=" in row["summary"]
+        assert "confirmed=" in row["summary"]
     finally:
         fresh.close()
 

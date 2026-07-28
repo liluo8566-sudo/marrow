@@ -52,14 +52,13 @@ def test_events_has_timerange_columns(conn):
 def test_tl_add_writes_tl_row_no_affect(conn):
     r = _add(conn)
     ev = conn.execute(
-        "SELECT role, channel, content, imp, flag, ts_start, ts_end"
+        "SELECT role, channel, content, imp, ts_start, ts_end"
         " FROM events WHERE id=?", (r["event_id"],)).fetchone()
     assert ev["role"] == "tl"
     assert ev["channel"] == "cli"  # MARROW_CHANNEL unset -> default platform
     # affect phrase lives verbatim inside content; no affect table write.
     assert ev["content"] == "【N愉悦♡Y委屈】body orig [3]"
     assert ev["imp"] == 3  # default
-    assert ev["flag"] is None
     assert ev["ts_start"] and ev["ts_end"]
     n_af = conn.execute("SELECT COUNT(*) c FROM affect WHERE event_id=?",
                         (r["event_id"],)).fetchone()["c"]

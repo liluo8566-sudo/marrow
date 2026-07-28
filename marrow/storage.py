@@ -15,7 +15,7 @@ import sqlite_vec
 
 from . import config
 
-SCHEMA_VERSION = 42
+SCHEMA_VERSION = 43
 
 # Tables whose id must never be reused (freed-id-reuse disease family): a plain
 # INTEGER PRIMARY KEY hands a deleted id back to the next INSERT, and side-tables
@@ -610,6 +610,7 @@ def init_db(path: str | None = None) -> sqlite3.Connection:
         _migrate_to_v40(conn)
         _migrate_to_v41(conn)
         _migrate_to_v42(conn)
+        _migrate_to_v43(conn)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     return conn
 
@@ -1224,9 +1225,10 @@ def _migrate_to_v28(conn: sqlite3.Connection) -> None:
 
 def _migrate_to_v29(conn: sqlite3.Connection) -> None:
     """v29: events.imp / events.flag — self-authored (role='tl') recall boost,
-    retire, milestone SQL (imp) + cortex management marks (flag, open vocab).
-    Retires the channel='self' marker: role='tl', channel backfilled to a real
-    platform, affect label folded into content. Idempotent.
+    retire, milestone SQL (imp) + cortex management marks (flag, open vocab;
+    flag dropped v43, never implemented). Retires the channel='self' marker:
+    role='tl', channel backfilled to a real platform, affect label folded
+    into content. Idempotent.
     """
     v = conn.execute("PRAGMA user_version").fetchone()[0]
     if v >= 29:
@@ -1698,6 +1700,20 @@ def _migrate_to_v42(conn: sqlite3.Connection) -> None:
     if v >= 42:
         return
     conn.execute("PRAGMA user_version=42")
+
+
+def _migrate_to_v43(conn: sqlite3.Connection) -> None:
+    """v43: drop events.flag — added v29 for cortex management marks, never
+    implemented (no writer ever set it). Idempotent — column-existence check
+    + user_version short-circuit.
+    """
+    v = conn.execute("PRAGMA user_version").fetchone()[0]
+    if v >= 43:
+        return
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(events)").fetchall()}
+    if "flag" in cols:
+        conn.execute("ALTER TABLE events DROP COLUMN flag")
+    conn.execute("PRAGMA user_version=43")
 
 
 def get_latest_watermark(conn, sid):

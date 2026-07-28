@@ -710,6 +710,40 @@ def cmd_ls(args) -> int:
         return 0
 
 
+def _embed_cfg() -> dict:
+    return config.load().get("embed_loop", {}) or {}
+
+
+def cmd_embed(args) -> int:
+    """Drain the vector backfill queue. Loads the ONNX model — meant to run as
+    a short-lived process (watcher EmbedLoop child) so its memory is returned
+    on exit. flock keeps two runs from embedding the same rows."""
+    import fcntl
+    from . import recall
+
+    cfg = _embed_cfg()
+    batch = int(args.batch if args.batch is not None else cfg.get("batch", 50))
+    max_batches = int(args.max_batches if args.max_batches is not None
+                      else cfg.get("max_batches", 20))
+    lock_path = Path(config.DATA_DIR) / "embed.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            print("embed: another run holds the lock, skipping")
+            return 0
+        total = 0
+        with _conn(args.db) as conn:
+            for _ in range(max_batches):
+                written = recall.embed_pending(conn, batch=batch)
+                total += written
+                if written == 0:
+                    break
+        print(f"embed: {total} rows")
+        return 0
+
+
 def cmd_install(args) -> int:
     from .install import run_install, run_uninstall
     if args.uninstall:
@@ -892,6 +926,16 @@ def build_parser() -> argparse.ArgumentParser:
     al_clear = al_sub.add_parser("clear", parents=[common],
                                  help="resolve every unresolved alert")
     al_clear.set_defaults(fn=cmd_alerts_clear)
+
+    emb = sub.add_parser("embed", parents=[common],
+                         help="backfill pending vectors (loads the model; "
+                              "run as a short-lived process)")
+    emb.add_argument("--batch", type=int, default=None,
+                     help="rows per lane per pass (default [embed_loop].batch)")
+    emb.add_argument("--max-batches", type=int, default=None,
+                     help="max passes before giving up "
+                          "(default [embed_loop].max_batches)")
+    emb.set_defaults(fn=cmd_embed)
 
     ins = sub.add_parser("install", help="Set up marrow globally")
     ins.add_argument("--update", action="store_true",

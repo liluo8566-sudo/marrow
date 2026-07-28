@@ -1,6 +1,6 @@
 """Global test fixtures.
 
-Two autouse guards, plus a one-time import-time pin:
+Three autouse guards, plus a one-time import-time pin:
 
 1. `_redirect_marrow_data_dir` (session-scope, autouse): patches
    `marrow.config.DATA_DIR` and `CONFIG_PATH` to a per-session tmp dir.
@@ -18,7 +18,13 @@ Two autouse guards, plus a one-time import-time pin:
    hook-side reference keeps tests isolated. The direct popen_detach
    contract test imports from `marrow.popen_detach` and is unaffected.
 
-3. `_pin_module_tz_caches_to_melbourne()` (module-level, runs once at
+3. `_pin_stickers_dir` (function-scope, autouse): pins
+   `sticker_ops.STICKERS_DIR` to tmp so nothing can fall back to the real
+   `~/Desktop/NY/stickers` — watcher.run's boot sweep would otherwise walk
+   (and unlink inside) the live vault, and its imagehash import leaks into
+   the sticker tests' fake-PIL setup.
+
+4. `_pin_module_tz_caches_to_melbourne()` (module-level, runs once at
    collection): several modules cache their working timezone as a
    MODULE-LEVEL constant computed once via `config.get_tz()` at import time
    (`timeline._TZ`, `tl_writer._TZ`, `timecue._MELB`, `timeutil._MELB`,
@@ -305,6 +311,25 @@ def _persona_markers(monkeypatch):
     monkeypatch.setattr(config, "persona",
                         lambda: {**real(),
                                  "user_marker": "N", "assistant_marker": "Y"})
+
+
+@pytest.fixture(autouse=True)
+def _pin_stickers_dir(monkeypatch, tmp_path):
+    """Pin sticker_ops.STICKERS_DIR to a tmp dir for EVERY test.
+
+    Unpinned, `_resolve_stickers_dir()` falls back to the real
+    `~/Desktop/NY/stickers` whenever the test config carries no
+    `paths.stickers_dir`. Any test that runs `watcher.run` (its boot sweep
+    calls sweep_file_orphans) then walks the live vault — which reads every
+    sticker and, on a phash match, unlinks the file. It also imports
+    `imagehash` as a side effect, and the sticker tests' fake PIL only works
+    while that import still fails, so the leak breaks them by file ordering.
+    Tests needing their own dir monkeypatch STICKERS_DIR again; their setattr
+    lands after this one and wins.
+    """
+    from marrow import sticker_ops
+
+    monkeypatch.setattr(sticker_ops, "STICKERS_DIR", tmp_path / "stickers")
 
 
 @pytest.fixture(autouse=True)

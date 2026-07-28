@@ -475,6 +475,47 @@ def embed_pending(
     return total
 
 
+# ── backlog probe (cheap SQL, never loads the embedder) ──────────────────────
+
+# Same predicate as the events lane in _LANES, ordered oldest-first so the
+# watcher can age the backlog without a full aggregate scan.
+_PENDING_OLDEST_EVENT_SQL = (
+    "SELECT e.created_at FROM events e "
+    "WHERE NOT EXISTS (SELECT 1 FROM events_vec v WHERE v.rowid=e.id) "
+    "  AND NOT EXISTS (SELECT 1 FROM events_vec_meta m WHERE m.rowid=e.id) "
+    "ORDER BY e.id ASC LIMIT 1"
+)
+
+
+def pending_counts(conn: sqlite3.Connection, cap: int = 1000) -> dict[str, int]:
+    """Rows `embed_pending` would pick up per lane, each capped at `cap`.
+
+    Reuses the lane pending_sql verbatim so detection can never drift from the
+    write path. Pure SQL — safe to call from the watcher process, which must
+    never load the ONNX model.
+    """
+    out: dict[str, int] = {}
+    for lane, cfg in _LANES.items():
+        try:
+            row = conn.execute(
+                f"SELECT COUNT(*) FROM ({cfg['pending_sql']})",  # noqa: S608
+                (cap,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            continue  # table/vec module absent — lane invisible, not fatal
+        out[lane] = int(row[0]) if row else 0
+    return out
+
+
+def pending_oldest_event_ts(conn: sqlite3.Connection) -> str | None:
+    """created_at of the oldest unembedded events row, or None if none pending."""
+    try:
+        row = conn.execute(_PENDING_OLDEST_EVENT_SQL).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return row[0] if row and row[0] else None
+
+
 # ── recall-count bump ────────────────────────────────────────────────────────
 
 def bump_recall_counts(event_ids: list[int], db: str | None = None) -> None:

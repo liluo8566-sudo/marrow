@@ -106,6 +106,27 @@ model = "BAAI/bge-m3"
 id = "bge-m3"
 dim = 1024
 
+[embed_loop]
+# Watcher-hosted vector backfill. Each tick counts unembedded rows with cheap
+# SQL; if any are pending it spawns a short-lived `mw embed` child so the ONNX
+# model loads there and its memory is returned on exit — the watcher process
+# never loads the embedder. false = no automatic backfill (manual `mw embed` /
+# event_embed MCP tool only); the backlog alert goes quiet too.
+enabled = true
+tick_s = 300
+# Rows per lane per embed pass, and max passes per child run.
+batch = 50
+max_batches = 20
+# Backlog watermark — last-line defence, fires even if the spawn path is
+# broken. One warn/embed alert per episode.
+# count: needs the line breached on TWO consecutive ticks, so a healthy bulk
+# rebuild (reimport / re-embed) that the next spawn drains never alarms.
+# hours: oldest unembedded event older than this alerts immediately.
+backlog_alert_count = 100
+backlog_alert_hours = 6
+# Consecutive non-zero child exits before a warn/embed alert.
+fail_alert_streak = 3
+
 [recall]
 # FTS5 always on. Vector path active when embedding model files are present.
 vector = true
@@ -272,8 +293,6 @@ show_silent_min = 15
 # Agent tokens don't occupy the main window and don't drive triggering.
 threshold_start = 100000
 threshold_step = 50000
-# Global daily net budget the SessionStart "Net Token Used today" line reads.
-daily_budget = 1000000
 # usage_snapshot collector tick — runs inside the watcher (always alive,
 # independent of cortex) so 5h/7d/cdx numbers stay fresh even when cortex is
 # off. Cortex's own tick may also call it; the write is idempotent (upsert).
@@ -370,7 +389,7 @@ handoff_carry_heading = "### 前情"
 # lie_down PreToolUse nudge (non-blocking additionalContext, every call).
 # {handoff} = the shell's own handoff path, filled by code. rotate arg selects
 # the rotate variant.
-lie_down_nudge_text = "Append one line to {handoff} if any activity. Skip if pure chat."
+lie_down_nudge_text = "Append one line to {handoff} - HH:mm <Activity> - <describe in one sentence>【desire】"
 lie_down_nudge_rotate_text = "Update {handoff} before rotate. Add todo if any."
 # Wake pipeline (v2). The ear is a Monitor tailing wake_signal_log_file; cortex
 # appends the human-text bell line to it, which surfaces as a user turn. Paths
@@ -536,6 +555,15 @@ token = ""
 #   backup_guard_intercept=false to downgrade deny items to reminders instead.
 backup_guard = true
 backup_guard_intercept = true
+# Agent/worktree isolation zones — throw-away workspaces where destructive
+# housekeeping can't lose the user's (or another session's) work. Matched as a
+# substring of a path, a cwd or a whole command. Shared by the backup guard's
+# whitelist and the git-revert guard's exemption.
+isolation_prefixes = [
+    ".claude/worktrees/",
+    "/private/tmp/claude-",
+    "/tmp/claude-",
+]
 # The reminder + deny messages are mechanism-defining copy — they live in code.
 
 # rm → trash auto-rewrite (PreToolUse). When a Bash `rm` segment's positional
@@ -566,6 +594,9 @@ git_force_push_guard = true
 # only) is treated as safe. checkout/restore ask only when the targets carry
 # uncommitted work (`git status --porcelain -- <targets>` non-empty); a
 # checkout with no tracked file operand is a branch switch and stays silent.
+# `git worktree remove` asks only in its forced form (-f/--force) — git refuses
+# to remove a dirty worktree by itself. `git branch -D` stays silent when EVERY
+# operand starts with an agent_branch_prefixes entry (worktree teardown).
 # Set git_revert_guard=false to disable.
 git_revert_guard = true
 git_revert_patterns = [
@@ -582,6 +613,9 @@ git_revert_patterns = [
 # Headline of the ask popup. `{action}` renders the human-readable phrase from
 # git_revert_action_labels below; the rest of the reason (Action/File/LOC/By)
 # is assembled by the guard and degrades to Action-only when git can't answer.
+# Branch-name prefixes owned by agent worktrees — `git branch -D` on these is
+# teardown, never the user's work.
+agent_branch_prefixes = ["worktree-agent-"]
 git_revert_guard_message = "⚠️ About to {action} — confirm?"
 # Per-op phrase for {action}: [hooks.git_revert_action_labels] at end of file.
 

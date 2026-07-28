@@ -383,6 +383,144 @@ class _StickerHandler(FileSystemEventHandler):
         self._schedule(str(Path(event.dest_path).resolve()))
 
 
+class EmbedLoop:
+    """Periodic vector backfill trigger + backlog watermark alert.
+
+    Each tick counts pending rows with cheap SQL and, when any are pending,
+    spawns a short-lived `mw embed` child — the model loads there and its
+    memory is returned on exit. This process never loads the embedder.
+    """
+
+    def __init__(self, conn_factory, cfg: dict | None = None) -> None:
+        if cfg is None:
+            cfg = config.load().get("embed_loop", {}) or {}
+        self._conn_factory = conn_factory
+        self._conn: sqlite3.Connection | None = None
+        self.enabled = bool(cfg.get("enabled", True))
+        self._tick_s = float(cfg.get("tick_s", 300) or 300)
+        self._batch = int(cfg.get("batch", 50) or 50)
+        self._max_batches = int(cfg.get("max_batches", 20) or 20)
+        self._backlog_count = int(cfg.get("backlog_alert_count", 100) or 100)
+        self._backlog_hours = float(cfg.get("backlog_alert_hours", 6) or 6)
+        self._fail_streak_max = int(cfg.get("fail_alert_streak", 3) or 3)
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._child = None
+        self._fails = 0
+        self._backlog_alerted = False
+        self._count_over_prev = False
+
+    def start(self) -> None:
+        self._thread = threading.Thread(
+            target=self._run, name="marrow-embed-loop", daemon=True
+        )
+        self._thread.start()
+
+    def stop(self, timeout: float = 10.0) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=timeout)
+
+    def _run(self) -> None:
+        self._conn = self._conn_factory()
+        try:
+            self._safe_tick()
+            while not self._stop.wait(self._tick_s):
+                self._safe_tick()
+        finally:
+            try:
+                self._conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._conn = None
+
+    def _safe_tick(self) -> None:
+        try:
+            self.tick()
+        except Exception:  # noqa: BLE001
+            logging.getLogger("marrow.watcher").exception("embed_loop tick error")
+
+    def tick(self) -> None:
+        from . import recall
+        counts = recall.pending_counts(self._conn, cap=self._backlog_count + 1)
+        total = sum(counts.values())
+        self._check_backlog(total)
+        if total <= 0:
+            return
+        if not self._reap():
+            return  # previous child still embedding — skip this tick
+        self._spawn()
+
+    def _reap(self) -> bool:
+        """True when no child is running. Tracks the consecutive-failure streak."""
+        child = self._child
+        if child is None:
+            return True
+        if child.poll() is None:
+            return False
+        rc = child.returncode
+        self._child = None
+        if rc == 0:
+            self._fails = 0
+            return True
+        self._fails += 1
+        if self._fails >= self._fail_streak_max:
+            repo.add_alert(
+                "warn", "embed", "embed_child_failed",
+                source="watcher.py",
+                message=(f"{self._fails} consecutive `mw embed` failures "
+                         f"(last exit {rc})"),
+                db=config.db_path(),
+            )
+            self._fails = 0
+        return True
+
+    def _spawn(self) -> None:
+        from .popen_detach import popen_detach
+        self._child = popen_detach(
+            [sys.executable, "-m", "marrow.cli", "embed",
+             "--batch", str(self._batch),
+             "--max-batches", str(self._max_batches)],
+            log_path=_logs_dir() / "embed.log",
+        )
+
+    def _check_backlog(self, total: int) -> None:
+        """Last-line defence: alert once while the backlog stays over the mark.
+
+        The count rule needs the line breached on two consecutive ticks. The
+        check runs before the spawn, so a healthy bulk rebuild (event_clear
+        reimport, migration re-embed) is over the line on the tick that
+        triggers the drain — only a stalled pipeline is still over on the next
+        one. The age rule stays immediate: a hours-old unembedded row is
+        already proof the drain is not happening.
+        """
+        from . import recall
+        from .sync_loop import _iso_to_posix
+        count_over = total > self._backlog_count
+        reason = None
+        if count_over and self._count_over_prev:
+            reason = f"{total} rows pending"
+        self._count_over_prev = count_over
+        if reason is None:
+            posix = _iso_to_posix(recall.pending_oldest_event_ts(self._conn) or "")
+            if posix is not None:
+                age_h = (time.time() - posix) / 3600.0
+                if age_h > self._backlog_hours:
+                    reason = f"oldest pending event {age_h:.1f}h old"
+        if reason is None:
+            self._backlog_alerted = False
+            return
+        if self._backlog_alerted:
+            return  # one alert per backlog episode, not one per tick
+        repo.add_alert(
+            "warn", "embed", "embed_backlog",
+            source="watcher.py",
+            message=f"embedding backlog: {reason}",
+            db=config.db_path(),
+        )
+        self._backlog_alerted = True
+
+
 def _warmup_imports() -> None:
     """Force-load every stdlib + marrow module the worker threads may touch.
 
@@ -439,6 +577,7 @@ class Watcher:
         self._sync_loop: SyncLoop | None = None
         self._atlas_sweep: AtlasSweepLoop | None = None
         self._usage_snapshot: UsageSnapshotLoop | None = None
+        self._embed_loop: EmbedLoop | None = None
         self.drift_watcher = DriftWatcher(roots=list(AUTHORIZED_ROOTS))
 
     def _fire_sync(self, path: str) -> None:
@@ -579,6 +718,30 @@ class Watcher:
                          self._usage_snapshot._tick_s)
         except Exception:
             self.log.exception("usage_snapshot loop failed to start; watcher continues without it")
+
+        # Vector backfill tick — replaces the retired sessionend embed call.
+        # Counts pending rows here, embeds in a short-lived child.
+        try:
+            loop = EmbedLoop(storage.connect)
+            if loop.enabled:
+                try:
+                    loop.start()
+                except Exception as e:
+                    repo.add_alert(
+                        "critical", "watcher",
+                        "watcher_thread_start_failed",
+                        source="watcher.py",
+                        message=f"Thread start failed: {e}",
+                        db=config.db_path(),
+                    )
+                    raise
+                self._embed_loop = loop
+                self.log.info("embed_loop started tick_s=%s", loop._tick_s)
+            else:
+                self.log.info("embed_loop disabled by config")
+        except Exception:
+            self.log.exception("embed_loop failed to start; watcher continues without it")
+
         if threading.current_thread() is threading.main_thread():
             signal.signal(signal.SIGTERM, self._on_signal)
             signal.signal(signal.SIGINT, self._on_signal)
@@ -593,6 +756,8 @@ class Watcher:
                 self._atlas_sweep.stop()
             if self._usage_snapshot is not None:
                 self._usage_snapshot.stop()
+            if self._embed_loop is not None:
+                self._embed_loop.stop()
             self.debouncer.flush()
             self.observer.stop()
             self.observer.join(timeout=5)

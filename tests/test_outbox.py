@@ -38,7 +38,7 @@ def _rows(p):
 def test_migration_creates_outbox_and_indexes(tmp_path):
     conn = storage.init_db(str(tmp_path / "m.db"))
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 42
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 43
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(outbox)")}
         assert {"id", "created_at", "from_sid", "from_channel", "target",
                 "body", "status", "sent_at", "retry_count", "watch_reply",
@@ -61,11 +61,11 @@ def test_migration_idempotent(tmp_path):
     # second init_db (re-run every migration) must not raise
     conn = storage.init_db(p)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 42
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 43
         storage._migrate_to_v40(conn)  # direct re-entry
         storage._migrate_to_v41(conn)
         storage._migrate_to_v42(conn)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 42
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 43
         # receipt + audit columns present + idempotent (re-init must not raise)
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(outbox)")}
         assert {"replied_at", "reply_text", "receipt_seen",
