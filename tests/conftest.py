@@ -267,8 +267,8 @@ def _redirect_marrow_data_dir(tmp_path_factory):
                "dir_tree_md", "logs_dir", "state_dir"):
         setattr(_paths_mod.paths, _f, tmp / Path(getattr(_paths_mod.paths, _f)).name)
     try:
-        from marrow import hooks as _hooks_mod
-        mp.setattr(_hooks_mod, "_SESSION_CLAIMS_PATH",
+        from marrow.hooks import lifecycle as _hooks_lifecycle
+        mp.setattr(_hooks_lifecycle, "_SESSION_CLAIMS_PATH",
                    tmp / "session_claims.json")
     except ImportError:
         pass
@@ -337,7 +337,7 @@ def _disable_hooks_popen_detach(monkeypatch, request):
     if "no_popen_patch" in request.keywords:
         return
     try:
-        from marrow import hooks
-        monkeypatch.setattr(hooks, "popen_detach", lambda *a, **kw: None)
+        from marrow.hooks import lifecycle
+        monkeypatch.setattr(lifecycle, "popen_detach", lambda *a, **kw: None)
     except ImportError:
         pass

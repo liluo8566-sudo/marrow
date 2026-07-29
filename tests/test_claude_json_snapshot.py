@@ -30,7 +30,7 @@ def env(tmp_path, monkeypatch):
     data_dir = tmp_path / "data"
     monkeypatch.setattr(config, "DATA_DIR", data_dir)
     monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setattr("marrow.hooks.Path.home", lambda: home)
+    monkeypatch.setattr("marrow.hooks.housekeep.Path.home", lambda: home)
     monkeypatch.setattr(config, "db_path", lambda: str(tmp_path / "t.db"))
     return home, data_dir
 
@@ -71,7 +71,7 @@ def test_unchanged_mcp_no_new_snapshot(env):
 
 def test_changed_mcp_creates_new_snapshot(env, monkeypatch):
     home, data_dir = env
-    monkeypatch.setattr(hooks, "datetime", _ticking_datetime())
+    monkeypatch.setattr(hooks.housekeep, "datetime", _ticking_datetime())
     (home / ".claude.json").write_text(json.dumps({"mcpServers": {"a": 1}}))
     hooks._claude_json_snapshot_block()
 
@@ -84,7 +84,7 @@ def test_changed_mcp_creates_new_snapshot(env, monkeypatch):
 
 def test_prune_keeps_newest_n(env, monkeypatch):
     home, data_dir = env
-    monkeypatch.setattr(hooks, "datetime", _ticking_datetime())
+    monkeypatch.setattr(hooks.housekeep, "datetime", _ticking_datetime())
     monkeypatch.setattr(config, "load", lambda: {"hooks": {"claude_json_snapshot_keep": 3}})
     for i in range(5):
         (home / ".claude.json").write_text(json.dumps({"mcpServers": {"a": i}}))

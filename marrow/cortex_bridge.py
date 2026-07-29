@@ -545,7 +545,7 @@ def register(marrow_tool, db: str | None = None) -> None:
 
 
 # ── hooks: kickout immunity / lie_down nudge / handoff page-turn / show 亮牌 ────
-# _window_tokens_from_transcript stays in hooks.py (shared with the all-session
+# _window_tokens_from_transcript stays in hooks/inject.py (shared with the all-session
 # _usage_threshold_context); it is imported lazily where needed below.
 
 def _cortex_lie_down_nudge(inp: dict) -> str | None:
@@ -1281,7 +1281,7 @@ def shell_state_write(data: dict, shell: str | None = None) -> Path:
 
 def next_wake_at(shell: str) -> str | None:
     """Raw next_wake_at ISO string for `shell`, or None when unset/no alarm.
-    cli reads the cortex wake_state.json ledger (same lock as hooks.py's read);
+    cli reads the cortex wake_state.json ledger (same lock as the hooks pkg's read);
     every other shell reads <shell_state_dir>/<shell>.json via shell_state_read."""
     if shell == "cli":
         p = _cortex_wake_state_path()
@@ -1809,26 +1809,27 @@ def _shell_presence_state() -> dict:
 
 
 # Window-occupancy 亮牌 nudge (mechanism-defining copy). show_tokens is the
-# off-switch (<= 0 = inert).
+# off-switch (<= 0 = inert) and fills {show_k} — the copy never restates the
+# threshold, so config stays the single source.
 _SHOW_TEXT = (
-    "Context ≥160k - If not actively chatting with user, handoff within 3 turns "
-    "and lie_down(rotate=True) to clear (rotate unlocks a short next_wake, "
-    "≥16min). If mid-conversation: carry on, the 180k fuse is the backstop."
+    "Context ≥{show_k}k - If not actively chatting with user, handoff within 3 "
+    "turns and lie_down(rotate=True) to clear (rotate unlocks a short next_wake, "
+    "≥16min). If mid-conversation: carry on, the fuse is the backstop."
 )
 
 
 def _cortex_show_context(tpath: str) -> str:
-    """Cortex-only (MARROW_CORTEX=1) window-occupancy 亮牌 at show_tokens (16万
-    soft, ahead of the 18万 cortex fuse). Suppressed when user is chatting
+    """Cortex-only (MARROW_CORTEX=1) window-occupancy 亮牌 at show_tokens (soft,
+    ahead of the cortex fuse). Suppressed when user is chatting
     (user_replied_this_wake). Empty for normal sessions, below threshold,
     or when show_tokens <= 0 (the off-switch)."""
     if not _shell_enabled():
         return ""
     cr = config.load().get("cortex_rotate", {}) or {}
-    text = _SHOW_TEXT
     show = int(cr.get("show_tokens", 160_000) or 0)
     if show <= 0:
         return ""
+    text = _SHOW_TEXT.format(show_k=round(show / 1000))
     from .hooks import _window_tokens_from_transcript
     if _window_tokens_from_transcript(tpath) < show:
         return ""

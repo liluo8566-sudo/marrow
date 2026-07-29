@@ -120,7 +120,7 @@ class TestSessionStartWorktreeGate:
         sid = "wt-session-1"
         _stdin(monkeypatch, {"session_id": sid, "cwd": wt})
         # popen_detach noop so the test doesn't fork catchup.
-        with patch.object(hooks, "popen_detach"):
+        with patch.object(hooks.lifecycle, "popen_detach"):
             rc = session_start()
         assert rc == 0
         out = json.loads(capsys.readouterr().out)
@@ -139,7 +139,7 @@ class TestSessionStartWorktreeGate:
         primary, _ = repo_with_worktree
         sid = "primary-session-1"
         _stdin(monkeypatch, {"session_id": sid, "cwd": primary})
-        with patch.object(hooks, "popen_detach"):
+        with patch.object(hooks.lifecycle, "popen_detach"):
             rc = session_start()
         assert rc == 0
         # Lifecycle row does NOT carry worktree=1 marker.
@@ -172,7 +172,7 @@ class TestSessionEndWorktreeGate:
         # transcript.clean / archive_events must NOT be called for worktree.
         with patch.object(hooks.transcript, "clean") as mclean, \
              patch.object(hooks.repo, "archive_events") as march, \
-             patch.object(hooks, "popen_detach") as mpop:
+             patch.object(hooks.lifecycle, "popen_detach") as mpop:
             rc = session_end()
         assert rc == 0
         mclean.assert_not_called()

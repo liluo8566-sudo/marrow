@@ -55,8 +55,15 @@ _ALL_PLISTS: list[tuple[str, str]] = [
     ("mw-aging.plist",          "com.marrow.aging"),
     ("mw-db-backup.plist",      "com.marrow.db-backup"),
     ("mw-refresh.plist",        "com.marrow.refresh"),
+    ("mw-sensors.plist",        "com.marrow.sensors"),
     ("mw-watcher.plist",        "com.marrow.watcher"),
 ]
+
+# Plists installed only when their config flag is on. Uninstall ignores this —
+# remove_plists() always boots every label out.
+_GATED_PLISTS: dict[str, tuple[str, str]] = {
+    "com.marrow.sensors": ("sensors", "enabled"),
+}
 
 # Retired labels (and any legacy plist filename they installed under). An
 # upgrade from an older install boots these out + removes their files so a
@@ -381,6 +388,15 @@ def _remove_obsolete_plists(domain: str) -> None:
             _ok(f"removed obsolete {tgt.name}")
 
 
+def _plist_gate_open(label: str) -> bool:
+    gate = _GATED_PLISTS.get(label)
+    if gate is None:
+        return True
+    section, key = gate
+    from . import config
+    return bool(config.load().get(section, {}).get(key))
+
+
 def install_plists() -> bool:
     _LAUNCH_AGENTS.mkdir(parents=True, exist_ok=True)
     (_CONFIG_DIR / "logs").mkdir(parents=True, exist_ok=True)
@@ -392,6 +408,9 @@ def install_plists() -> bool:
         src = _DEPLOY_DIR / fname
         if not src.exists():
             _act(f"[skip] {fname} not in deploy/")
+            continue
+        if not _plist_gate_open(label):
+            _act(f"[skip] {label} — {_GATED_PLISTS[label][0]} disabled")
             continue
         resolved = _resolve_plist(src.read_text())
         tgt = _LAUNCH_AGENTS / f"{label}.plist"

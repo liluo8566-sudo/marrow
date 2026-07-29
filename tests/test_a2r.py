@@ -61,7 +61,7 @@ def test_turn_inject_emits_care_text(monkeypatch, capsys):
 def test_turn_inject_wx_emits_schedule_no_time_line(monkeypatch, capsys):
     """WX branch: schedule fragment injected, but no '# Context — <time>' line."""
     monkeypatch.setenv("MARROW_CHANNEL", "wx")
-    monkeypatch.setattr(hooks, "_kickout_context", lambda channel, now, transcript_path=None: "")
+    monkeypatch.setattr(hooks.inject, "_kickout_context", lambda channel, now, transcript_path=None: "")
     from marrow import schedule as _sched
     monkeypatch.setattr(_sched, "check_and_inject", lambda sid: "Schedule update:\n+[X] a")
     _stdin(monkeypatch, {"session_id": "wx1", "transcript_path": "/x/a.jsonl"})
@@ -76,7 +76,7 @@ def test_turn_inject_wx_emits_schedule_no_time_line(monkeypatch, capsys):
 # ── B8: anti-late-night kickout nudge (turn_inject) ──────────────────────────
 
 def _freeze_melb(monkeypatch, hour, minute):
-    """Freeze hooks.datetime.now() + config.get_tz() to a fixed Melbourne
+    """Freeze hooks.inject.datetime.now() + config.get_tz() to a fixed Melbourne
     wall-clock instant, independent of the test env's default config
     (core.timezone defaults to Asia/Shanghai in config.default.toml)."""
     from datetime import datetime as _datetime
@@ -88,7 +88,7 @@ def _freeze_melb(monkeypatch, hour, minute):
         def now(cls, tz=None):
             return _datetime(2026, 7, 8, hour, minute, tzinfo=melb)
 
-    monkeypatch.setattr(hooks, "datetime", _Fake)
+    monkeypatch.setattr(hooks.inject, "datetime", _Fake)
     monkeypatch.setattr(config, "get_tz", lambda: melb)
 
 
@@ -96,7 +96,7 @@ def test_kickout_cli_wind_down_window(monkeypatch, capsys):
     _freeze_melb(monkeypatch, 21, 45)
     monkeypatch.delenv("MARROW_CORTEX", raising=False)
     monkeypatch.delenv("MARROW_CHANNEL", raising=False)
-    monkeypatch.setattr(hooks, "_kickout_context", lambda channel, now, transcript_path=None: "9点半啦-test")
+    monkeypatch.setattr(hooks.inject, "_kickout_context", lambda channel, now, transcript_path=None: "9点半啦-test")
     _stdin(monkeypatch, {"session_id": "s1", "transcript_path": "/x/a.jsonl"})
     hooks.turn_inject()
     ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
@@ -107,7 +107,7 @@ def test_kickout_cli_leave_window(monkeypatch, capsys):
     _freeze_melb(monkeypatch, 22, 30)
     monkeypatch.delenv("MARROW_CORTEX", raising=False)
     monkeypatch.delenv("MARROW_CHANNEL", raising=False)
-    monkeypatch.setattr(hooks, "_kickout_context", lambda channel, now, transcript_path=None: "该回卧室了-test")
+    monkeypatch.setattr(hooks.inject, "_kickout_context", lambda channel, now, transcript_path=None: "该回卧室了-test")
     _stdin(monkeypatch, {"session_id": "s1", "transcript_path": "/x/a.jsonl"})
     hooks.turn_inject()
     ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
@@ -133,14 +133,14 @@ def test_kickout_cortex_immune(monkeypatch, capsys):
     hooks.turn_inject()
     # cortex short-circuits _kickout_context before it even reads config —
     # verify directly rather than via injected ctx (defaults ship text-empty).
-    assert hooks._kickout_context("ct", hooks.datetime.now(config.get_tz())) == ""
+    assert hooks._kickout_context("ct", hooks.inject.datetime.now(config.get_tz())) == ""
 
 
 def test_kickout_wx_quiet_window(monkeypatch, capsys):
     _freeze_melb(monkeypatch, 23, 30)
     monkeypatch.delenv("MARROW_CORTEX", raising=False)
     monkeypatch.setenv("MARROW_CHANNEL", "wx")
-    monkeypatch.setattr(hooks, "_kickout_context", lambda channel, now, transcript_path=None: "老婆该睡了-test")
+    monkeypatch.setattr(hooks.inject, "_kickout_context", lambda channel, now, transcript_path=None: "老婆该睡了-test")
     _stdin(monkeypatch, {"session_id": "s1", "transcript_path": "/x/a.jsonl"})
     hooks.turn_inject()
     ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
@@ -167,7 +167,7 @@ def test_kickout_inert_when_text_empty(monkeypatch, capsys):
     hooks.turn_inject()
     ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
     assert "kickout" not in ctx.lower()
-    assert hooks._kickout_context("cli", hooks.datetime.now(config.get_tz())) == ""
+    assert hooks._kickout_context("cli", hooks.inject.datetime.now(config.get_tz())) == ""
 
 
 # ── agent_guard: burst protection ────────────────────────────────────────────

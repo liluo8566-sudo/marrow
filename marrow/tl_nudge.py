@@ -91,7 +91,7 @@ def maybe_nudge(conn, sid: str) -> str | None:
     """Increment sid's per-turn counter; return injection text at threshold.
 
     conn is unused (the counter is a state file, not a DB query) but kept in
-    the signature since hooks.py already passes it in.
+    the signature since the hooks pkg already passes it in.
     """
     if not enabled() or not sid or is_silent(sid):
         return None

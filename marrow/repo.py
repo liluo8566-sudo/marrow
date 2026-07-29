@@ -330,7 +330,7 @@ def archive_events(conn: sqlite3.Connection, rows: list[dict]) -> int:
     # Write path for #7 SessionEnd. Idempotent by source_hash; re-run skips.
     # Defensive gate: drop rows whose sid has session_block=archive regardless
     # of when the block was written. Catches sid-drift and any future write path
-    # that bypasses the hooks.py gate (belt-and-braces).
+    # that bypasses the hooks gate (belt-and-braces).
     from .cortex_bridge import is_machine_line
     n = 0
     sessions: set[str] = set()
