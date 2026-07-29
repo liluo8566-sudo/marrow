@@ -451,7 +451,7 @@ def test_reset_clears_silence_cycle_and_sentinel(cortex_env, monkeypatch):
 
 def test_reset_stamps_last_user_msg_ts(cortex_env):
     """FIX 3 presence gate source: a real user turn stamps last_user_msg_ts so
-    the 120k nudge can hold while the user is active. A stale prior stamp is
+    the occupancy nudge can hold while the user is active. A stale prior stamp is
     refreshed."""
     from datetime import datetime, timezone
     home, _ = cortex_env
@@ -763,7 +763,7 @@ def test_presence_state_cli_reads_wake_state(cortex_env):
 
 
 def test_presence_state_tg_reads_its_own_ledger(tg_shell):
-    """The 120k nudge's presence gate + handoff header must judge a tg window off
+    """The occupancy nudge's presence gate + handoff header must judge a tg window off
     the tg ledger (host-written last_user_ts / session_id), never off cli's."""
     home, shells_dir = tg_shell
     (home / "wake_state.json").write_text(json.dumps({

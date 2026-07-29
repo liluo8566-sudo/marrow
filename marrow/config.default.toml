@@ -279,7 +279,7 @@ im_quiet_text = ""
 # lie_down(rotate=True). Normal sessions never see this. The nudge text is
 # mechanism-defining copy (in code) and renders this threshold;
 # show_tokens = 0 is the off-switch.
-show_tokens = 160000
+show_tokens = 150000
 # Behavioural presence gate (mirrors cortex silent_max_min = 15): hold the nudge
 # while the user's last real message is younger than this many minutes (mid-chat
 # — the fuse is the backstop), inject once they have been silent this long. 0 =

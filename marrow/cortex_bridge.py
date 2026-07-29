@@ -1490,8 +1490,8 @@ def _cortex_user_wake_reset(inp: dict) -> None:
         d["gen"] = old_gen + 1
         new_gen = d["gen"]
         d["user_replied_this_wake"] = True
-        # Stamp the real user-message time so presence gates (e.g. the 120k
-        # show nudge) can hold while the user is actively chatting and fire once
+        # Stamp the real user-message time so presence gates (e.g. the
+        # occupancy nudge) can hold while the user is actively chatting and fire once
         # they have gone silent. Caller already excluded machine lines, so this
         # never counts an injected/machine turn as user presence.
         from datetime import timezone as _tz_u
@@ -1826,7 +1826,7 @@ def _cortex_show_context(tpath: str) -> str:
     if not _shell_enabled():
         return ""
     cr = config.load().get("cortex_rotate", {}) or {}
-    show = int(cr.get("show_tokens", 160_000) or 0)
+    show = int(cr.get("show_tokens", 150_000) or 0)
     if show <= 0:
         return ""
     text = _SHOW_TEXT.format(show_k=round(show / 1000))
@@ -1835,7 +1835,7 @@ def _cortex_show_context(tpath: str) -> str:
         return ""
     ws = _shell_presence_state()
     # Presence gate: hold the nudge while the user's last real message is younger
-    # than show_silent_min (mid-chat — the 180k fuse is the backstop). It retries
+    # than show_silent_min (mid-chat — the fuse is the backstop). It retries
     # on a later turn while tokens stay over threshold. Falls back to the boolean
     # user_replied_this_wake when no timestamp is stored (legacy state / gate off).
     silent_min = int(cr.get("show_silent_min", 0) or 0)
