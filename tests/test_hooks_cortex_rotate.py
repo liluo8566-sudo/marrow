@@ -50,14 +50,24 @@ def _enable_cortex(monkeypatch, home=None):
     monkeypatch.setattr(config, "load", _patched)
 
 
-def _write_wake_state(home, **fields):
-    """Write a wake_state.json under the cortex *home*/state/ for presence-gate tests."""
-    import json as _json
-    (home / "state").mkdir(parents=True, exist_ok=True)
-    (home / "state" / "wake_state.json").write_text(_json.dumps(fields))
+TG_WAKE_NOTE = "\u23f3 [NEW ROUND] 87 min since the user\u2019s last message."
 
 
-def test_show_fires_over_threshold(tmp_path, monkeypatch, capsys):
+def test_show_fires_on_a_machine_turn_over_threshold(tmp_path, monkeypatch, capsys):
+    """The tg wake note is a machine turn -> over threshold it carries the nudge."""
+    monkeypatch.setenv("MARROW_CORTEX", "1")
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    _enable_cortex(monkeypatch, home=tmp_path / "cortex")
+    show = config.load()["cortex_rotate"]["show_tokens"]
+    jl = _transcript(tmp_path, show + 1)
+    _stdin(monkeypatch, {"session_id": "s1", "transcript_path": str(jl),
+                         "prompt": TG_WAKE_NOTE})
+    assert hooks.main(["turn_inject"]) == 0
+    assert "lie_down(rotate=True)" in _ctx(capsys)
+
+
+def test_show_fires_when_the_prompt_is_absent(tmp_path, monkeypatch, capsys):
+    """No prompt in the payload -> treated as machine (fail-open toward nudging)."""
     monkeypatch.setenv("MARROW_CORTEX", "1")
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     _enable_cortex(monkeypatch, home=tmp_path / "cortex")
@@ -66,6 +76,19 @@ def test_show_fires_over_threshold(tmp_path, monkeypatch, capsys):
     _stdin(monkeypatch, {"session_id": "s1", "transcript_path": str(jl)})
     assert hooks.main(["turn_inject"]) == 0
     assert "lie_down(rotate=True)" in _ctx(capsys)
+
+
+def test_show_held_on_a_real_user_turn(tmp_path, monkeypatch, capsys):
+    """A real user turn never carries the nudge, however full the window."""
+    monkeypatch.setenv("MARROW_CORTEX", "1")
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    _enable_cortex(monkeypatch, home=tmp_path / "cortex")
+    show = config.load()["cortex_rotate"]["show_tokens"]
+    jl = _transcript(tmp_path, show + 50_000)
+    _stdin(monkeypatch, {"session_id": "s1", "transcript_path": str(jl),
+                         "prompt": "did the [NEW ROUND] path fire?"})
+    assert hooks.main(["turn_inject"]) == 0
+    assert "lie_down(rotate=True)" not in _ctx(capsys)
 
 
 def test_show_silent_below_threshold(tmp_path, monkeypatch, capsys):
@@ -74,9 +97,21 @@ def test_show_silent_below_threshold(tmp_path, monkeypatch, capsys):
     _enable_cortex(monkeypatch, home=tmp_path / "cortex")
     show = config.load()["cortex_rotate"]["show_tokens"]
     jl = _transcript(tmp_path, show - 1000)
-    _stdin(monkeypatch, {"session_id": "s1", "transcript_path": str(jl)})
+    _stdin(monkeypatch, {"session_id": "s1", "transcript_path": str(jl),
+                         "prompt": TG_WAKE_NOTE})
     assert hooks.main(["turn_inject"]) == 0
     assert "lie_down(rotate=True)" not in _ctx(capsys)
+
+
+def test_show_off_when_threshold_is_zero(tmp_path, monkeypatch):
+    """show_tokens = 0 is the off-switch, machine turn or not."""
+    from marrow import cortex_bridge
+    monkeypatch.setenv("MARROW_CORTEX", "1")
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    _enable_cortex(monkeypatch, home=tmp_path / "cortex")
+    monkeypatch.setattr(cortex_bridge, "_show_tokens", lambda: 0)
+    jl = _transcript(tmp_path, 900_000)
+    assert cortex_bridge._cortex_show_context(str(jl), TG_WAKE_NOTE) == ""
 
 
 def test_show_absent_for_normal_session(tmp_path, monkeypatch, capsys):
@@ -85,45 +120,17 @@ def test_show_absent_for_normal_session(tmp_path, monkeypatch, capsys):
     _enable_cortex(monkeypatch)
     show = config.load()["cortex_rotate"]["show_tokens"]
     jl = _transcript(tmp_path, show + 50_000)
-    _stdin(monkeypatch, {"session_id": "s1", "transcript_path": str(jl)})
+    _stdin(monkeypatch, {"session_id": "s1", "transcript_path": str(jl),
+                         "prompt": TG_WAKE_NOTE})
     assert hooks.main(["turn_inject"]) == 0
     assert "lie_down(rotate=True)" not in _ctx(capsys)
 
 
-def test_show_held_when_user_active(tmp_path, monkeypatch, capsys):
-    """FIX 3 presence gate: over-threshold but the user's last real message is
-    younger than show_silent_min -> hold the nudge (mid-chat, fuse is backstop)."""
-    from datetime import datetime, timezone
-    monkeypatch.setenv("MARROW_CORTEX", "1")
-    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
-    home = tmp_path / "cortex"
-    _enable_cortex(monkeypatch, home=home)
-    recent = datetime.now(timezone.utc).isoformat()
-    _write_wake_state(home, last_user_msg_ts=recent, user_replied_this_wake=True)
-    show = config.load()["cortex_rotate"]["show_tokens"]
-    jl = _transcript(tmp_path, show + 1)
-    _stdin(monkeypatch, {"session_id": "s1", "transcript_path": str(jl)})
-    assert hooks.main(["turn_inject"]) == 0
-    assert "lie_down(rotate=True)" not in _ctx(capsys)
-
-
-def test_show_fires_when_user_silent_past_threshold(tmp_path, monkeypatch, capsys):
-    """FIX 3 presence gate: over-threshold and the user has been silent past
-    show_silent_min -> inject once (the boolean user_replied_this_wake alone must
-    no longer suppress it)."""
-    from datetime import datetime, timedelta, timezone
-    monkeypatch.setenv("MARROW_CORTEX", "1")
-    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
-    home = tmp_path / "cortex"
-    _enable_cortex(monkeypatch, home=home)
-    silent = config.load()["cortex_rotate"]["show_silent_min"]
-    old = (datetime.now(timezone.utc) - timedelta(minutes=silent + 5)).isoformat()
-    _write_wake_state(home, last_user_msg_ts=old, user_replied_this_wake=True)
-    show = config.load()["cortex_rotate"]["show_tokens"]
-    jl = _transcript(tmp_path, show + 1)
-    _stdin(monkeypatch, {"session_id": "s1", "transcript_path": str(jl)})
-    assert hooks.main(["turn_inject"]) == 0
-    assert "lie_down(rotate=True)" in _ctx(capsys)
+def test_tg_wake_note_opener_is_a_machine_line():
+    """The real tg wake-note opening line must classify as machine — the whole
+    turn-type gate rests on it."""
+    from marrow import cortex_bridge
+    assert cortex_bridge.is_machine_line(TG_WAKE_NOTE) is True
 
 
 def test_window_tokens_parser_sums_last_usage(tmp_path):

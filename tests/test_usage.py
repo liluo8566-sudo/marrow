@@ -8,12 +8,13 @@ from __future__ import annotations
 import io
 import json
 import os
+import threading
 import time
 from datetime import datetime, timezone
 
 import pytest
 
-from marrow import config, cortex_bridge, hooks, storage, usage
+from marrow import config, cortex_bridge, hooks, repo, storage, usage
 
 
 def _assistant(cache_creation=0, output=0, cache_read=0, input_=0):
@@ -264,13 +265,12 @@ def _handoff_body(todos, log_lines, log_date="2026-07-01"):
 
 
 def _page_setup(tmp_path, monkeypatch, content, shell="1"):
-    """Home dir with handoff-cli.md + template. Routes cortex config here and
-    sets the shell env so _cortex_handoff_path resolves handoff-<shell>.md."""
+    """Home dir with the shared handoff.md + template, cortex config routed
+    here and the shell env set."""
     monkeypatch.setenv("MARROW_CORTEX", shell)
     home = tmp_path / "cortex_home"
     home.mkdir(parents=True, exist_ok=True)
-    name = "handoff-tg.md" if shell == "tg" else "handoff-cli.md"
-    hp = home / name
+    hp = home / "handoff.md"
     hp.write_text(content, encoding="utf-8")
     (home / "handoff_template.md").write_text(_TEMPLATE, encoding="utf-8")
     real_load = config.load
@@ -279,6 +279,7 @@ def _page_setup(tmp_path, monkeypatch, content, shell="1"):
         cfg = dict(real_load())
         cx = dict(cfg.get("cortex", {}))
         cx["home"] = str(home)
+        cx["handoff_file"] = "handoff.md"
         cx["handoff_archive_dir"] = "handoff_archive"
         cx["handoff_template_file"] = "handoff_template.md"
         cx["handoff_max_lines"] = 150
@@ -303,9 +304,10 @@ def test_page_turn_under_cap_noop(tmp_path, monkeypatch):
     body = _handoff_body(["[] keep"], [f"- x{i}" for i in range(140)])
     assert len(body.splitlines()) < 150
     home, hp = _page_setup(tmp_path, monkeypatch, body)
+    before = hp.stat().st_mtime
     cortex_bridge._cortex_handoff_page_turn_if_stale()
-    assert hp.exists()
-    assert "[] keep" in hp.read_text(encoding="utf-8")
+    assert hp.read_text(encoding="utf-8") == body
+    assert hp.stat().st_mtime == before
     assert not (home / "handoff_archive").exists()
 
 
@@ -318,7 +320,7 @@ def test_page_turn_over_cap_archives_and_carries(tmp_path, monkeypatch):
     cortex_bridge._cortex_handoff_page_turn_if_stale()
 
     # archive: range name, holds the whole old page
-    archived = home / "handoff_archive" / f"cli-2026-07-01~{datetime.now(config.get_tz()).strftime('%m-%d')}.md"
+    archived = home / "handoff_archive" / f"2026-07-01~{datetime.now(config.get_tz()).strftime('%m-%d')}.md"
     assert archived.exists()
     assert "line0" in archived.read_text(encoding="utf-8")
 
@@ -338,7 +340,7 @@ def test_page_turn_single_day_archive_name(tmp_path, monkeypatch):
     body = _handoff_body([], logs, log_date=today)
     home, hp = _page_setup(tmp_path, monkeypatch, body)
     cortex_bridge._cortex_handoff_page_turn_if_stale()
-    assert (home / "handoff_archive" / f"cli-{today}.md").exists()
+    assert (home / "handoff_archive" / f"{today}.md").exists()
 
 
 def test_page_turn_collision_suffix(tmp_path, monkeypatch):
@@ -348,43 +350,93 @@ def test_page_turn_collision_suffix(tmp_path, monkeypatch):
     home, hp = _page_setup(tmp_path, monkeypatch, body)
     archive_dir = home / "handoff_archive"
     archive_dir.mkdir(parents=True, exist_ok=True)
-    (archive_dir / f"cli-{today}.md").write_text("existing", encoding="utf-8")
+    (archive_dir / f"{today}.md").write_text("existing", encoding="utf-8")
     cortex_bridge._cortex_handoff_page_turn_if_stale()
-    assert (archive_dir / f"cli-{today}.md").read_text(encoding="utf-8") == "existing"
-    assert (archive_dir / f"cli-{today}-2.md").exists()
+    assert (archive_dir / f"{today}.md").read_text(encoding="utf-8") == "existing"
+    assert (archive_dir / f"{today}-2.md").exists()
 
 
-def test_page_turn_legacy_migration(tmp_path, monkeypatch):
-    """First cli run: legacy handoff.md migrates to handoff-cli.md before any
-    page-turn check."""
-    monkeypatch.setenv("MARROW_CORTEX", "1")
-    home = tmp_path / "cortex_home"
-    home.mkdir(parents=True, exist_ok=True)
-    (home / "handoff.md").write_text(_handoff_body(["[] t"], ["- l"]), encoding="utf-8")
-    (home / "handoff_template.md").write_text(_TEMPLATE, encoding="utf-8")
-    real_load = config.load
-
-    def _patched_load():
-        cfg = dict(real_load())
-        cx = dict(cfg.get("cortex", {}))
-        cx["home"] = str(home)
-        cfg["cortex"] = cx
-        return cfg
-
-    monkeypatch.setattr(config, "load", _patched_load)
-    cortex_bridge._cortex_handoff_page_turn_if_stale()
-    assert (home / "handoff-cli.md").exists()
-    assert not (home / "handoff.md").exists()
-
-
-def test_page_turn_post_migration_is_noop(tmp_path, monkeypatch):
-    """Legacy handoff.md gone + handoff-cli.md present (steady state): the
-    migration branch is skipped and an under-cap page is left byte-untouched."""
-    body = _handoff_body(["[] t"], ["- l"])
+def test_page_turn_write_failure_keeps_the_live_page(tmp_path, monkeypatch):
+    """A failed swap must never cost the handoff: the old page stays live, the
+    half-made archive copy and the temp page are cleaned up, and the next
+    SessionStart retries onto the same archive name. It also raises exactly
+    one alert via the existing repo.add_alert mechanism."""
+    logs = [f"- l{i}" for i in range(160)]
+    today = datetime.now(config.get_tz()).date().isoformat()
+    body = _handoff_body(["[] survive"], logs, log_date=today)
     home, hp = _page_setup(tmp_path, monkeypatch, body)
-    before = hp.stat().st_mtime
+
+    calls = []
+    monkeypatch.setattr(repo, "add_alert",
+                        lambda *a, **k: calls.append((a, k)) or 1)
+
+    def _boom(src, dst):
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(cortex_bridge.os, "replace", _boom)
     cortex_bridge._cortex_handoff_page_turn_if_stale()
+
     assert hp.read_text(encoding="utf-8") == body
-    assert hp.stat().st_mtime == before
-    assert not (home / "handoff.md").exists()
-    assert not (home / "handoff_archive").exists()
+    assert list((home / "handoff_archive").glob("*.md")) == []
+    assert list(home.glob("handoff.md.tmp*")) == []
+
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args[0] == "warn"
+    assert args[1] == "cortex_page_turn_failed"
+    assert args[2] == "cortex_page_turn_failed"
+    assert "no space left on device" in kwargs["message"]
+
+    monkeypatch.undo()
+    _page_setup(tmp_path, monkeypatch, body)
+    cortex_bridge._cortex_handoff_page_turn_if_stale()
+    assert (home / "handoff_archive" / f"{today}.md").exists()
+
+
+def test_page_turn_success_writes_no_alert(tmp_path, monkeypatch):
+    """The success path must never touch the alert mechanism."""
+    logs = [f"- HH:mm: line{i}" for i in range(160)]
+    body = _handoff_body(["[] survive"], logs)
+    home, hp = _page_setup(tmp_path, monkeypatch, body)
+
+    calls = []
+    monkeypatch.setattr(repo, "add_alert",
+                        lambda *a, **k: calls.append((a, k)) or 1)
+
+    cortex_bridge._cortex_handoff_page_turn_if_stale()
+
+    assert calls == []
+
+
+def test_page_turn_same_file_for_every_shell(tmp_path, monkeypatch):
+    body = _handoff_body(["[] t"], ["- l"])
+    home, hp = _page_setup(tmp_path, monkeypatch, body, shell="tg")
+    assert cortex_bridge._cortex_handoff_path() == hp
+    monkeypatch.setenv("MARROW_CORTEX", "cli")
+    assert cortex_bridge._cortex_handoff_path() == hp
+
+
+def test_page_turn_concurrent_shells_turn_once(tmp_path, monkeypatch):
+    logs = [f"- HH:mm: line{i}" for i in range(160)]
+    today = datetime.now(config.get_tz()).date().isoformat()
+    body = _handoff_body(["[] survive"], logs, log_date=today)
+    home, hp = _page_setup(tmp_path, monkeypatch, body)
+
+    start = threading.Barrier(2)
+
+    def _turn():
+        start.wait()
+        cortex_bridge._cortex_handoff_page_turn_if_stale()
+
+    threads = [threading.Thread(target=_turn) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    archives = sorted((home / "handoff_archive").glob("*.md"))
+    assert [a.name for a in archives] == [f"{today}.md"]
+    assert "line0" in archives[0].read_text(encoding="utf-8")
+    new_text = hp.read_text(encoding="utf-8")
+    assert "[] survive" in new_text
+    assert "line159" in new_text

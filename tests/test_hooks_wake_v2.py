@@ -264,14 +264,14 @@ def test_tuck_in_staged_note_expired_is_dropped(tmp_path, monkeypatch, capsys):
 def test_fuse_marker_injects_body_covertly(tmp_path, monkeypatch, capsys):
     """A ⚙️ [FUSE] marker turn (bare or ear-wrapped) injects the FUSE body via
     additionalContext — the body never rode the log line. {handoff} renders as
-    this shell's own handoff path (cli here)."""
+    the shared handoff path."""
     monkeypatch.setenv("MARROW_CORTEX", "1")
     _enable(monkeypatch, tmp_path, {})
     _stdin(monkeypatch, {"session_id": "s1",
                          "prompt": '<event>⚙️ [FUSE]</event>'})
     assert hooks.main(["user_prompt_submit"]) == 0
     ctx = _ctx(capsys)
-    assert str(tmp_path / "handoff-cli.md") in ctx
+    assert str(tmp_path / "handoff.md") in ctx
     assert "{handoff}" not in ctx
     assert "lie_down(rotate=True)" in ctx
 

@@ -278,13 +278,9 @@ im_quiet_text = ""
 # appends a one-line nudge to wrap up, write the handoff, and
 # lie_down(rotate=True). Normal sessions never see this. The nudge text is
 # mechanism-defining copy (in code) and renders this threshold;
-# show_tokens = 0 is the off-switch.
+# show_tokens = 0 is the off-switch. Only a machine turn (wake bell / free-round
+# / fuse / ctl / command body) carries the nudge; a real user turn never does.
 show_tokens = 150000
-# Behavioural presence gate (mirrors cortex silent_max_min = 15): hold the nudge
-# while the user's last real message is younger than this many minutes (mid-chat
-# — the fuse is the backstop), inject once they have been silent this long. 0 =
-# no gate (fire on the boolean user_replied_this_wake only).
-show_silent_min = 15
 
 [cortex_usage]
 # Net-token visibility (all sessions self-aware). Rendered by usage.py off the
@@ -381,13 +377,12 @@ repo_root = ""
 # read-only) instead of the frozen file; reflects current time + caller SID even
 # after a window rotation. Empty = disabled, static file only.
 render_module = ""
-# Handoff note file under <home>. Read via the cortex CLAUDE.md memory import,
-# not injected by SessionStart. Written by the session. Per-shell rolling log:
-# {shell} is filled by code (cli/tg). Line-count page-turn on a fresh
-# cortex-window SessionStart: > handoff_max_lines triggers archive to
-# <home>/<handoff_archive_dir>/ + fresh <handoff_template_file>, carrying
-# unchecked todos + last handoff_carry_lines activity lines.
-handoff_file_pattern = "handoff-{shell}.md"
+# Handoff note file under <home>, shared by every shell. Read via the cortex
+# CLAUDE.md memory import, not injected by SessionStart. Written by the session.
+# Line-count page-turn on a fresh cortex-window SessionStart: over
+# handoff_max_lines triggers archive to <home>/<handoff_archive_dir>/ + fresh
+# <handoff_template_file>, carrying unchecked todos + activity lines.
+handoff_file = "handoff.md"
 handoff_archive_dir = "handoff_archive"
 handoff_template_file = "handoff_template.md"
 # Page-turn thresholds (toml-tunable).
@@ -400,10 +395,18 @@ handoff_todo_heading = "## 待办"
 handoff_activity_heading = "## 日志"
 handoff_carry_heading = "### 前情"
 # lie_down PreToolUse nudge (non-blocking additionalContext, every call).
-# {handoff} = the shell's own handoff path, filled by code. rotate arg selects
-# the rotate variant.
+# {handoff} = the handoff path, filled by code. rotate arg selects the rotate
+# variant.
 lie_down_nudge_text = "Append one line to {handoff} - HH:mm <Activity> - <describe in one sentence>【desire】"
 lie_down_nudge_rotate_text = "Update {handoff} before rotate. Add todo if any."
+# transfer PreToolUse nudge (non-blocking). {handoff} = the handoff path. Blank
+# = no nudge.
+transfer_nudge_text = "Update {handoff} before transfer. Add todo if any."
+# Ceiling (seconds) on the transfer subprocess — the whole duty transition,
+# including the incoming cli window's wake. Keep it above cortex's own wake
+# ceiling (bell + retype ladder = 2x [wake].ear_timeout_sec) or a slow-but-normal
+# handover is killed mid-wake.
+transfer_timeout_sec = 240
 # Wake pipeline (v2). The ear is a Monitor tailing wake_signal_log_file; cortex
 # appends the human-text bell line to it, which surfaces as a user turn. Paths
 # for the note and signal log default to <home>/<file> (override with an
@@ -479,8 +482,7 @@ fuse_threshold = 2
 window_hours = 24
 # Notification copy. {count} = fuses in window, {hours} = window_hours,
 # {scope} = all/cli/tg. Display text — customise freely.
-trip_message = "Circuit breaker tripped: fuse #{count} within {hours}h. Cortex autonomous activity paused ({scope}). Clear with ct-wake."
-clear_message = "Circuit breaker cleared — cortex autonomous activity resumed."
+trip_message = "Circuit breaker tripped: fuse #{count} within {hours}h. Cortex autonomous activity paused ({scope}). Clear with ct-duty cli|tg|all."
 
 [outbox]
 # Cross-channel message drop (msg MCP tool → outbox table → channel adapters).
@@ -532,7 +534,7 @@ exclude_target_channels = []
 # Render-layer noise filter (applies to every replay path). Rows are only hidden
 # from the replay block — nothing is deleted from events.
 # drop_slash_commands: hide turns that are a bare slash command (/clear, /info,
-#   /ct-wake ...). Matched only when the WHOLE trimmed message is one line, the
+#   /ct-duty ...). Matched only when the WHOLE trimmed message is one line, the
 #   command token holds no further "/" (so a pasted /Users/... path survives),
 #   and the message is shorter than slash_command_max_chars. A "/" inside a
 #   sentence is never matched.

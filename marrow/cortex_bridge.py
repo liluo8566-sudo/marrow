@@ -327,7 +327,8 @@ def _cortex_paths() -> tuple[str, str]:
             str(c.get("repo_root") or "").strip())
 
 
-def _run_cortex_module(module: str, extra_args: list[str] | None = None) -> dict:
+def _run_cortex_module(module: str, extra_args: list[str] | None = None,
+                       timeout: float = 30) -> dict:
     py, root = _cortex_paths()
     if not py or not root:
         return {"ok": False, "error": "cortex not configured "
@@ -336,9 +337,10 @@ def _run_cortex_module(module: str, extra_args: list[str] | None = None) -> dict
     root = str(Path(root).expanduser())
     cmd = [py, "-m", module] + (extra_args or [])
     try:
-        p = subprocess.run(cmd, cwd=root, capture_output=True, text=True, timeout=30)
+        p = subprocess.run(cmd, cwd=root, capture_output=True, text=True,
+                           timeout=timeout)
     except subprocess.TimeoutExpired:
-        return {"ok": False, "error": f"{module} timed out after 30s"}
+        return {"ok": False, "error": f"{module} timed out after {timeout:g}s"}
     except OSError as exc:
         return {"ok": False, "error": f"{module} failed to launch: {exc}"}
     if p.returncode != 0:
@@ -420,11 +422,30 @@ def _log_shell_sleep_row(shell: str) -> int | None:
         conn.close()
 
 
-def _lie_down_shell(shell: str, next_wake_min: float,
-                    rotate: bool = False) -> dict:
+def _wake_band_clamp(minutes: float, human_override: bool = False) -> float:
+    """Normalise minutes into cortex's two legal wake bands, read from
+    cortex.toml [wake] (marrow venv cannot import cortex, so the numbers come
+    off the shared config). The gap between the bands is unselectable: a value
+    landing there snaps to the nearer edge. `human_override` (an explicit
+    minutes choice) passes untouched. Mirrors cortex's clamp_next_wake_minutes,
+    which owns the cli path."""
+    if human_override:
+        return float(minutes)
+    hi = float(_cortex_toml_section("wake", "next_wake_max", 360))
+    low_max = float(_cortex_toml_section("wake", "next_wake_low_max", 55))
+    high_min = float(_cortex_toml_section("wake", "next_wake_high_min", 180))
+    mins = max(0.0, min(float(minutes), hi))
+    if low_max < mins < high_min:
+        mins = low_max if mins <= (low_max + high_min) / 2 else high_min
+    return mins
+
+
+def _lie_down_shell(shell: str, next_wake_min: float, rotate: bool = False,
+                    human_override: bool = False) -> dict:
     """lie_down for a non-cli shell: the host owns the timing, so this only
     writes the wake ledger (<shell_state_dir>/<shell>.json) and kicks the host.
-    Minutes are clamped to cortex's [wake].next_wake_max band; 0 = wake now.
+    Minutes are normalised into cortex's legal wake bands (0 = wake now) unless
+    human_override carries an explicit choice through untouched.
 
     rotate=True adds the rotate_pending flag: the host claims it on the kicked
     pass and respawns the resident session (same end-of-window semantics as the
@@ -433,8 +454,7 @@ def _lie_down_shell(shell: str, next_wake_min: float,
 
     The sleep also lands one ct_wake_log row stamped with this shell, so the
     ledger records every shell's sleep (_log_shell_sleep_row)."""
-    day_max = float(_cortex_toml_section("wake", "next_wake_max", 240))
-    mins = max(0.0, min(float(next_wake_min), day_max))
+    mins = _wake_band_clamp(next_wake_min, human_override)
     when = datetime.now(config.get_tz()) + timedelta(minutes=mins)
     payload = {"next_wake_at": when.isoformat()}
     if rotate:
@@ -451,14 +471,15 @@ def lie_down(next_wake_min: float, rotate: bool = False,
              mode: str | None = None, human_override: bool = False) -> dict:
     # Description rendered from cortex config at register() (C9); see
     # _lie_down_doc. Kept minimal here — FastMCP reads __doc__ at registration.
-    # human_override = explicit minutes pierce the rotate clamp band (threaded
-    # straight to cortex's --human-override).
+    # human_override = explicit minutes pierce the wake bands (threaded straight
+    # to cortex's --human-override on the cli path, honoured in-process on the
+    # shell path).
     """lie_down(next_wake_min=N)."""
     shell = _cortex_shell_id()
     if not shell:
         return {"ok": False, "error": "MARROW_CORTEX is not a valid shell id"}
     if shell != "cli":
-        return _lie_down_shell(shell, next_wake_min, rotate)
+        return _lie_down_shell(shell, next_wake_min, rotate, human_override)
     args = ["--next-wake-min", str(next_wake_min)]
     if rotate:
         args += ["--rotate"]
@@ -491,6 +512,46 @@ def lie_down(next_wake_min: float, rotate: bool = False,
     return out
 
 
+_DEFAULT_TRANSFER_TIMEOUT = 240.0
+
+
+def _transfer_timeout() -> float:
+    """[cortex].transfer_timeout_sec — ceiling for the whole duty transition
+    subprocess. Must stay above cortex's own wake ceiling (an unheard bell on a
+    live cli window costs [wake].ear_timeout_sec twice, bell + retype ladder),
+    or a normal-but-slow handover is killed mid-wake."""
+    cx = config.load().get("cortex", {}) or {}
+    try:
+        return float(cx.get("transfer_timeout_sec") or _DEFAULT_TRANSFER_TIMEOUT)
+    except (TypeError, ValueError):
+        return _DEFAULT_TRANSFER_TIMEOUT
+
+
+def transfer(rotate: bool = False) -> dict:
+    # Description set at register() from _TRANSFER_DOC (user-final copy kept in
+    # one place); FastMCP reads __doc__ at registration.
+    """transfer()."""
+    shell = _cortex_shell_id()
+    if not shell:
+        return {"ok": False, "error": "MARROW_CORTEX is not a valid shell id"}
+    args = ["--transfer", shell]
+    if rotate:
+        args.append("--rotate")
+    out = _run_cortex_module("cortex.duty", args,
+                             timeout=_transfer_timeout())
+    # cortex.duty prints the outcome (or its refusal) as JSON on a clean exit;
+    # an unparseable stdout leaves the subprocess result standing.
+    if out.get("ok"):
+        try:
+            import json as _json
+            data = _json.loads(out.get("stdout") or "{}")
+            if isinstance(data, dict) and data:
+                return data
+        except (ValueError, TypeError):
+            pass
+    return out
+
+
 def say() -> dict:
     """Pop-up the window to seek attention. Use when you really want to find me."""
     return _run_cortex_module("cortex.say")
@@ -504,13 +565,22 @@ _DB = config.db_path()
 
 
 def _lie_down_doc() -> str:
-    """C9 (user-final): lie_down description with the clamp range rendered
-    from cortex config — [wake].next_wake_max (T3: 0-day_max for every hour,
-    night band retired). Never hardcoded in the string."""
+    """C9 (user-final): lie_down description with the two legal wake bands
+    rendered from cortex config — [wake].next_wake_low_max /
+    next_wake_high_min / next_wake_max. Never hardcoded in the string."""
+    low_max = int(_cortex_toml_section("wake", "next_wake_low_max", 55))
+    high_min = int(_cortex_toml_section("wake", "next_wake_high_min", 180))
     day_max = int(_cortex_toml_section("wake", "next_wake_max", 360))
-    return (f'lie_down(next_wake_min=N) [N=0-{day_max}]; '
+    band = f'N=0-{low_max} ∪ {high_min}-{day_max}'
+    return (f'lie_down(next_wake_min=N) [{band}]; '
             f'rotate to next window - lie_down(next_wake_min=N, rotate=True) '
-            f'[N=0-{day_max}, 0=rotate now]')
+            f'[{band}, 0=rotate now]')
+
+
+# transfer description (user-final). The target is always the other shell.
+_TRANSFER_DOC = ("transfer(): transfer between cortex shells (cli<->tg) - hold "
+                 "current one and kick the other. Update handoff first. "
+                 "transfer(rotate=True) to rotate current session.")
 
 
 def register(marrow_tool, db: str | None = None) -> None:
@@ -521,10 +591,11 @@ def register(marrow_tool, db: str | None = None) -> None:
       - wish registers for ALL sessions;
       - first / goal are PENDING — not registered anywhere yet (no injection
         mechanism wired; keep the functions + storage, just don't expose them);
-      - lie_down / say register ONLY in a cortex session (_CORTEX, the
-        import-time MARROW_CORTEX capture — the original inner env gate) whose
-        shell id is listed in [cortex].shells (shell resolved lazily here);
-        lie_down serves every listed shell, say the cli shell only.
+      - lie_down / transfer / say register ONLY in a cortex session (_CORTEX,
+        the import-time MARROW_CORTEX capture — the original inner env gate)
+        whose shell id is listed in [cortex].shells (shell resolved lazily
+        here); lie_down and transfer serve every listed shell, say the cli
+        shell only.
     Idempotent per process (FastMCP tolerates re-adding the same tool name)."""
     global _DB
     if db is not None:
@@ -540,6 +611,8 @@ def register(marrow_tool, db: str | None = None) -> None:
         # at registration (C9) — never hardcoded in the docstring.
         lie_down.__doc__ = _lie_down_doc()
         marrow_tool()(lie_down)
+        transfer.__doc__ = _TRANSFER_DOC
+        marrow_tool()(transfer)
         if shell == "cli":
             marrow_tool()(say)
 
@@ -551,7 +624,9 @@ def register(marrow_tool, db: str | None = None) -> None:
 def _cortex_lie_down_nudge(inp: dict) -> str | None:
     """Non-blocking PreToolUse additionalContext for every cortex lie_down call:
     reminds the session to log/handoff. Never denies. rotate arg selects the
-    rotate copy. Cortex window + lie_down only; None otherwise."""
+    rotate copy. A plain (rotate falsy) call from a window at/over the show
+    threshold also carries the rotate-instead hint. Either line can stand alone when
+    the other's copy is unset. Cortex window + lie_down only; None otherwise."""
     if not _shell_enabled():
         return None
     if inp.get("tool_name") != "mcp__marrow__lie_down":
@@ -560,17 +635,71 @@ def _cortex_lie_down_nudge(inp: dict) -> str | None:
     wants_rotate = bool(ti.get("rotate"))
     cx = config.load().get("cortex", {}) or {}
     key = "lie_down_nudge_rotate_text" if wants_rotate else "lie_down_nudge_text"
-    text = cx.get(key)
+    lines = [str(cx.get(key) or "").strip()]
+    if not wants_rotate:
+        lines.append(_lie_down_rotate_hint(inp.get("transcript_path"), cx))
+    text = "\n".join(ln for ln in lines if ln)
     if not text:
         return None
     return _fill_handoff(text)
 
 
+_DEFAULT_TRANSFER_NUDGE = "Update {handoff} before transfer. Add todo if any."
+
+
+def _cortex_transfer_nudge(inp: dict) -> str | None:
+    """Non-blocking PreToolUse additionalContext for every cortex transfer call:
+    the handoff is what the incoming shell reads, so it goes first. Override
+    [cortex].transfer_nudge_text; blank -> inject nothing. Cortex window +
+    transfer only; None otherwise."""
+    if not _shell_enabled():
+        return None
+    if inp.get("tool_name") != "mcp__marrow__transfer":
+        return None
+    cx = config.load().get("cortex", {}) or {}
+    if "transfer_nudge_text" in cx:
+        tmpl = str(cx.get("transfer_nudge_text") or "").strip()
+        if not tmpl:
+            return None
+    else:
+        tmpl = _DEFAULT_TRANSFER_NUDGE
+    return _fill_handoff(tmpl)
+
+
+# Rotate-instead hint for a plain lie_down on an over-threshold window. Shares
+# show_tokens with the 亮牌 nudge and fills {show_k} from it, so the copy never
+# restates the number.
+_LIE_DOWN_OVER_TEXT = (
+    "Current session context ≥{show_k}k - handoff + lie_down(rotate=True) "
+    "instead. Start next wake on a clean window."
+)
+
+
+def _lie_down_rotate_hint(tpath: str | None, cx: dict) -> str:
+    """The over-threshold half of the plain-lie_down nudge. Override
+    [cortex].lie_down_over_threshold_text ({show_k} = the threshold in k);
+    blank -> no hint. "" when the threshold is off, the window is under it, or
+    the transcript is missing/unreadable (occupancy reads 0)."""
+    show = _show_tokens()
+    if show <= 0:
+        return ""
+    if "lie_down_over_threshold_text" in cx:
+        tmpl = str(cx.get("lie_down_over_threshold_text") or "").strip()
+        if not tmpl:
+            return ""
+    else:
+        tmpl = _LIE_DOWN_OVER_TEXT
+    from .hooks import _window_tokens_from_transcript
+    if _window_tokens_from_transcript(str(tpath or "")) < show:
+        return ""
+    return tmpl.format(show_k=round(show / 1000))
+
+
 # MARROW_CORTEX values that mean "the default (cli) shell": unset, or the
 # legacy boolean marker from before the var carried a shell id.
 _LEGACY_CLI_MARKERS = frozenset({"1", "true", "yes", "on"})
-# A shell id names files (handoff-<shell>.md, <shell>.json) and is passed as a
-# subprocess argument, so it must be a bare token.
+# A shell id names files (<shell>.json) and is passed as a subprocess argument,
+# so it must be a bare token.
 _SHELL_ID_RE = _re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 _bad_shell_id_warned: set[str] = set()
 
@@ -609,18 +738,15 @@ def _cortex_shell_id() -> str | None:
 
 
 def _cortex_handoff_path():
-    """<[cortex].home>/handoff-<shell>.md — the per-shell handoff file a fresh
-    cortex window reads at SessionStart. None on config error or unusable
-    shell id."""
-    shell = _cortex_shell_id()
-    if not shell:
+    """<[cortex].home>/<handoff_file> — one handoff shared by every shell. None
+    on config error or unusable shell id (a refused window touches no cortex
+    state)."""
+    if not _cortex_shell_id():
         return None
     try:
         cx = config.load().get("cortex", {}) or {}
         home = (cx.get("home") or "~/.config/marrow/cortex")
-        pattern = (cx.get("handoff_file_pattern") or "handoff-{shell}.md")
-        name = pattern.replace("{shell}", shell)
-        return Path(home).expanduser() / name
+        return Path(home).expanduser() / (cx.get("handoff_file") or "handoff.md")
     except Exception:
         return None
 
@@ -862,11 +988,10 @@ def wakeup_note_text(transcript_path: str | None = None,
     back to the frozen file (config wakeup_note_file under home). None when both
     yield nothing so the caller injects nothing.
 
-    `shell` defaults to this window's shell id (MARROW_CORTEX) — the same
-    resolver the handoff file uses. Both paths are shell-scoped: the fresh
-    render passes --shell, and the fallback slices THIS shell's section out of
-    the sectioned note file (never another shell's, and never the heading —
-    that line is display-only)."""
+    `shell` defaults to this window's shell id (MARROW_CORTEX). Both paths are
+    shell-scoped: the fresh render passes --shell, and the fallback slices THIS
+    shell's section out of the sectioned note file (never another shell's, and
+    never the heading — that line is display-only)."""
     shell = shell or _cortex_shell_id()
     if not shell:
         return None
@@ -973,8 +1098,8 @@ def fuse_prompt_text() -> str | None:
 
 
 def _fill_handoff(text: str) -> str:
-    """Render {handoff} as this shell's own handoff path (shared by the lie_down
-    nudge + the FUSE body); bare "handoff" when the path is unresolvable."""
+    """Render {handoff} as the handoff path (shared by the lie_down nudge + the
+    FUSE body); bare "handoff" when the path is unresolvable."""
     p = _cortex_handoff_path()
     return text.replace("{handoff}", str(p) if p is not None else "handoff")
 
@@ -1490,10 +1615,9 @@ def _cortex_user_wake_reset(inp: dict) -> None:
         d["gen"] = old_gen + 1
         new_gen = d["gen"]
         d["user_replied_this_wake"] = True
-        # Stamp the real user-message time so presence gates (e.g. the
-        # occupancy nudge) can hold while the user is actively chatting and fire once
-        # they have gone silent. Caller already excluded machine lines, so this
-        # never counts an injected/machine turn as user presence.
+        # Stamp the real user-message time — cortex's watchdog reads it for
+        # idle tracking. Caller already excluded machine lines, so a machine
+        # turn never counts as user activity.
         from datetime import timezone as _tz_u
         d["last_user_msg_ts"] = datetime.now(_tz_u.utc).isoformat()
         # A user arrival resets the free-round silence cycle: drop the pending
@@ -1595,6 +1719,43 @@ def kick_cortex(kind: str, note_id=None, minutes=None) -> None:
 _HANDOFF_LOG_DATE_RE = _re.compile(r"^###\s*(\d{4}-\d{2}-\d{2})\b")
 _HANDOFF_UNCHECKED_RE = _re.compile(r"^\s*(?:-\s*)?\[\s*\]")
 _HANDOFF_HEADING_RE = _re.compile(r"^#{1,6}\s")
+_HANDOFF_LOCK_WAIT = 5.0
+_HANDOFF_LOCK_POLL = 0.02
+
+
+@_contextlib.contextmanager
+def _handoff_lock(p: Path):
+    """Exclusive flock on the sibling <handoff>.lock. Yields True when held,
+    False when unavailable — an unlocked turn would archive the same page
+    twice, so the caller skips and the next SessionStart retries."""
+    fd = None
+    got = False
+    try:
+        lp = p.parent / (p.name + ".lock")
+        lp.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(lp), os.O_CREAT | os.O_RDWR, 0o644)
+    except OSError:
+        fd = None
+    if fd is not None:
+        deadline = time.monotonic() + _HANDOFF_LOCK_WAIT
+        while True:
+            try:
+                _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+                got = True
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(_HANDOFF_LOCK_POLL)
+    try:
+        yield got
+    finally:
+        if fd is not None:
+            if got:
+                with _contextlib.suppress(OSError):
+                    _fcntl.flock(fd, _fcntl.LOCK_UN)
+            with _contextlib.suppress(OSError):
+                os.close(fd)
 
 
 def _handoff_headings() -> tuple[str, str, str]:
@@ -1634,13 +1795,13 @@ def _handoff_page_range(old_text: str) -> tuple[str | None, str]:
     return None, end
 
 
-def _handoff_archive_stem(shell: str, old_text: str) -> str:
-    """{shell}-{date} single day, {shell}-{date~date} range."""
+def _handoff_archive_stem(old_text: str) -> str:
+    """{date} single day, {date~date} range."""
     start, end = _handoff_page_range(old_text)
     if start is None or start == end:
-        return f"{shell}-{end}"
-    _, e_md = start[5:], end[5:]  # strip year for the range tail
-    return f"{shell}-{start}~{e_md}" if start[:4] == end[:4] else f"{shell}-{start}~{end}"
+        return end
+    e_md = end[5:]  # strip year for the range tail
+    return f"{start}~{e_md}" if start[:4] == end[:4] else f"{start}~{end}"
 
 
 def _build_fresh_page(template_text: str, todos: list[str], carry: list[str]) -> str:
@@ -1664,9 +1825,17 @@ def _build_fresh_page(template_text: str, todos: list[str], carry: list[str]) ->
 
 
 def _cortex_page_turn(p: Path, old_text: str) -> None:
-    """Archive the full page and replace it with a fresh template carrying
-    unchecked todos + the last handoff_carry_lines activity lines. Best-effort:
-    any failure leaves the file in place (the next SessionStart retries)."""
+    """Copy the full page into the archive, then swap in a fresh template
+    carrying unchecked todos + the last handoff_carry_lines activity lines.
+
+    Failure-safe by construction: the old page is COPIED (never moved), the new
+    page is composed in a temp file beside it, and one os.replace publishes it —
+    so any failure mid-way leaves the live handoff untouched and the next
+    SessionStart retries. A failed swap drops the archive copy it just made, so
+    the retry lands on the same name instead of a -2 twin. A failed swap also
+    raises one alert (deduped, so a persistent failure updates the same row
+    instead of flooding new ones) since a silent retry-forever would
+    otherwise go unnoticed."""
     cx = config.load().get("cortex", {}) or {}
     home_p = Path(cx.get("home") or "~/.config/marrow/cortex").expanduser()
     archive_dir = home_p / (cx.get("handoff_archive_dir") or "handoff_archive")
@@ -1697,153 +1866,95 @@ def _cortex_page_turn(p: Path, old_text: str) -> None:
                 carry = body[-carry_n:]
                 break
 
+    dest = None
+    tmp = p.with_name(f"{p.name}.tmp.{os.getpid()}")
     try:
         archive_dir.mkdir(parents=True, exist_ok=True)
-        stem = _handoff_archive_stem(_cortex_shell_id(), old_text)
+        stem = _handoff_archive_stem(old_text)
         dest = archive_dir / f"{stem}.md"
         n = 1
         while dest.exists():
             n += 1
             dest = archive_dir / f"{stem}-{n}.md"
-        shutil.move(str(p), str(dest))
+        shutil.copy2(str(p), str(dest))
 
-        p.write_text(_build_fresh_page(template_text, todos, carry),
-                     encoding="utf-8")
-    except OSError:
-        pass
+        tmp.write_text(_build_fresh_page(template_text, todos, carry),
+                       encoding="utf-8")
+        os.replace(tmp, p)
+    except OSError as exc:
+        with _contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
+        if dest is not None:
+            with _contextlib.suppress(OSError):
+                dest.unlink(missing_ok=True)
+        try:
+            from . import repo
+            repo.add_alert(
+                "warn", "cortex_page_turn_failed", "cortex_page_turn_failed",
+                source="cortex_bridge.py",
+                message=f"cortex handoff page-turn failed, retrying next"
+                        f" SessionStart: {exc}",
+                db=config.db_path(),
+            )
+        except Exception:  # noqa: BLE001 — a broken alert path must not break the retry
+            pass
 
 
 def _cortex_handoff_page_turn_if_stale() -> None:
-    """Line-count page-turn side effect for a fresh cortex window: own handoff
-    over handoff_max_lines -> archive + fresh template carrying todos/activity.
-    First cli run migrates a legacy handoff.md -> handoff-cli.md (one-time mv).
-    Under the line cap or unreadable -> no-op. No content returned; the cortex
+    """Line-count page-turn side effect for a fresh cortex window: handoff over
+    handoff_max_lines -> archive + fresh template carrying todos/activity. Under
+    the line cap or unreadable -> no-op. Read and turn share one flock so two
+    shells starting together turn the page once. No content returned; the cortex
     CLAUDE.md memory import is the sole read path."""
     p = _cortex_handoff_path()
     if p is None:
         return
-    # One-time legacy migration: handoff.md -> handoff-cli.md (cli only).
-    if _cortex_shell_id() == "cli" and not p.exists():
-        legacy = p.parent / "handoff.md"
-        if legacy.exists():
-            try:
-                shutil.move(str(legacy), str(p))
-            except OSError:
-                pass
-    try:
-        text = p.read_text(encoding="utf-8")
-    except OSError:
-        return
-    if not text.strip():
-        return
-    cx = config.load().get("cortex", {}) or {}
-    max_lines = int(cx.get("handoff_max_lines", 150) or 0)
-    if max_lines > 0 and len(text.splitlines()) > max_lines:
-        _cortex_page_turn(p, text)
-
-
-def _cortex_handoff_header(ws: dict) -> str:
-    """Build the 'HH:mm-HH:mm | SID xxxxxxxx' line appended to show_text so
-    cortex knows the time range and session id to write into its handoff."""
-    from datetime import timezone as _tz
-    since_raw = ws.get("awake_since")
-    since_str = "??:??"
-    if since_raw:
+    with _handoff_lock(p) as held:
+        if not held:
+            return
         try:
-            since_dt = datetime.fromisoformat(since_raw)
-            if since_dt.tzinfo is None:
-                since_dt = since_dt.replace(tzinfo=_tz.utc)
-            since_str = since_dt.astimezone(config.get_tz()).strftime("%H:%M")
-        except (ValueError, TypeError):
-            pass
-    now_str = datetime.now(config.get_tz()).strftime("%H:%M")
-    transcript_raw = ws.get("transcript")
-    sid = "unknown"
-    if transcript_raw:
-        try:
-            sid = Path(str(transcript_raw)).stem[:8]
-        except (OSError, ValueError):
-            pass
-    return f"{since_str}-{now_str} | SID {sid}"
-
-
-def _user_active_within(ws: dict, minutes: int) -> bool:
-    """True when the wake_state records a real user message younger than
-    *minutes*. No stamp = treat as not-active (silence gate fires). Machine turns
-    never write last_user_msg_ts, so they never count as presence."""
-    raw = ws.get("last_user_msg_ts")
-    if not raw:
-        return False
-    from datetime import timezone as _tz
-    try:
-        dt = datetime.fromisoformat(str(raw))
-    except (ValueError, TypeError):
-        return False
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=_tz.utc)
-    age = (datetime.now(_tz.utc) - dt).total_seconds()
-    return age < minutes * 60
-
-
-def _shell_presence_state() -> dict:
-    """Presence + handoff-header view for THIS window's shell. cli reads
-    wake_state.json; a non-cli shell reads its OWN host-written ledger and is
-    normalised onto the same keys (the host writes last_user_ts / session_id), so
-    a tg window never judges presence off the cli shell's state. Missing/corrupt
-    -> {}."""
-    if _cortex_shell_id() == "cli":
-        try:
-            return _wake_state_load(_cortex_wake_state_path())
-        except Exception:
-            return {}
-    try:
-        st = shell_state_read()
-    except Exception:
-        return {}
-    out: dict = {}
-    if st.get("last_user_ts"):
-        out["last_user_msg_ts"] = st["last_user_ts"]
-    if st.get("session_id"):
-        out["transcript"] = f"{st['session_id']}.jsonl"
-    return out
+            text = p.read_text(encoding="utf-8")
+        except OSError:
+            return
+        if not text.strip():
+            return
+        cx = config.load().get("cortex", {}) or {}
+        max_lines = int(cx.get("handoff_max_lines", 150) or 0)
+        if max_lines > 0 and len(text.splitlines()) > max_lines:
+            _cortex_page_turn(p, text)
 
 
 # Window-occupancy 亮牌 nudge (mechanism-defining copy). show_tokens is the
 # off-switch (<= 0 = inert) and fills {show_k} — the copy never restates the
 # threshold, so config stays the single source.
 _SHOW_TEXT = (
-    "Context ≥{show_k}k - If not actively chatting with user, handoff within 3 "
-    "turns and lie_down(rotate=True) to clear (rotate unlocks a short next_wake, "
-    "≥16min). If mid-conversation: carry on, the fuse is the backstop."
+    "Current session context ≥{show_k}k - handoff within 3 turns and "
+    "lie_down(rotate=True) to clear (rotate unlocks a short next_wake, ≥16min)."
 )
 
 
-def _cortex_show_context(tpath: str) -> str:
+def _show_tokens() -> int:
+    """[cortex_rotate].show_tokens — the window-occupancy threshold shared by the
+    UserPromptSubmit 亮牌 and the lie_down rotate hint. <= 0 = both inert."""
+    cr = config.load().get("cortex_rotate", {}) or {}
+    return int(cr.get("show_tokens", 150_000) or 0)
+
+
+def _cortex_show_context(tpath: str, prompt: str | None) -> str:
     """Cortex-only (MARROW_CORTEX=1) window-occupancy 亮牌 at show_tokens (soft,
-    ahead of the cortex fuse). Suppressed when user is chatting
-    (user_replied_this_wake). Empty for normal sessions, below threshold,
-    or when show_tokens <= 0 (the off-switch)."""
+    ahead of the cortex fuse). Gate order: cortex shell on -> show_tokens > 0
+    (the off-switch) -> window tokens at/over it -> the turn is a machine line
+    (is_machine_line: wake bell / free-round / fuse / ctl / command body; an
+    empty prompt counts as machine too). A real user turn never carries the
+    nudge — mid-chat the fuse is the backstop. Anything that fails returns ""."""
     if not _shell_enabled():
         return ""
-    cr = config.load().get("cortex_rotate", {}) or {}
-    show = int(cr.get("show_tokens", 150_000) or 0)
+    show = _show_tokens()
     if show <= 0:
         return ""
-    text = _SHOW_TEXT.format(show_k=round(show / 1000))
     from .hooks import _window_tokens_from_transcript
     if _window_tokens_from_transcript(tpath) < show:
         return ""
-    ws = _shell_presence_state()
-    # Presence gate: hold the nudge while the user's last real message is younger
-    # than show_silent_min (mid-chat — the fuse is the backstop). It retries
-    # on a later turn while tokens stay over threshold. Falls back to the boolean
-    # user_replied_this_wake when no timestamp is stored (legacy state / gate off).
-    silent_min = int(cr.get("show_silent_min", 0) or 0)
-    if silent_min > 0 and _user_active_within(ws, silent_min):
+    if not is_machine_line(prompt or ""):
         return ""
-    if silent_min <= 0 and ws.get("user_replied_this_wake"):
-        return ""
-    header = _cortex_handoff_header(ws)
-    if header:
-        text = f"{text}\nHandoff section header: {header}"
-    return text
+    return _SHOW_TEXT.format(show_k=round(show / 1000))

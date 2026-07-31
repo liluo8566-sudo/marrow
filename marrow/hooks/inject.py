@@ -221,7 +221,8 @@ def turn_inject() -> int:
         pass
 
     kickout_full = f"\n\n{kickout_ctx}" if kickout_ctx else ""
-    show_ctx = cortex_bridge._cortex_show_context(tpath) if cortex_bridge.enabled() else ""
+    show_ctx = (cortex_bridge._cortex_show_context(tpath, inp.get("prompt"))
+                if cortex_bridge.enabled() else "")
     show_full = f"\n\n{show_ctx}" if show_ctx else ""
     usage_ctx = _usage_threshold_context(sid, tpath)
     usage_full = f"\n\n{usage_ctx}" if usage_ctx else ""

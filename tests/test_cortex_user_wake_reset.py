@@ -450,9 +450,8 @@ def test_reset_clears_silence_cycle_and_sentinel(cortex_env, monkeypatch):
 
 
 def test_reset_stamps_last_user_msg_ts(cortex_env):
-    """FIX 3 presence gate source: a real user turn stamps last_user_msg_ts so
-    the occupancy nudge can hold while the user is active. A stale prior stamp is
-    refreshed."""
+    """A real user turn stamps last_user_msg_ts — cortex's watchdog reads it. A
+    stale prior stamp is refreshed."""
     from datetime import datetime, timezone
     home, _ = cortex_env
     (home / "wake_state.json").write_text(json.dumps({
@@ -463,14 +462,12 @@ def test_reset_stamps_last_user_msg_ts(cortex_env):
     d = _ws(home)
     ts = datetime.fromisoformat(d["last_user_msg_ts"])
     assert (datetime.now(timezone.utc) - ts).total_seconds() < 60
-    # helper agrees the user is active within 15 min
-    assert cortex_bridge._user_active_within(d, 15) is True
 
 
 def test_machine_turn_does_not_refresh_user_ts(cortex_env):
     """Trap: machine/injected turns must never count as user presence. The hook
     gates _cortex_user_wake_reset behind is_machine_line, so a machine line never
-    reaches the writer and the stale ts is preserved (helper reports inactive)."""
+    reaches the writer and the stale ts is preserved."""
     home, _ = cortex_env
     stale = "2020-01-01T00:00:00+00:00"
     (home / "wake_state.json").write_text(json.dumps({
@@ -482,7 +479,6 @@ def test_machine_turn_does_not_refresh_user_ts(cortex_env):
     assert cortex_bridge.is_machine_line(wrapped) is True
     d = _ws(home)
     assert d["last_user_msg_ts"] == stale  # never refreshed
-    assert cortex_bridge._user_active_within(d, 15) is False
 
 
 def test_reset_already_awake_preserves_awake_since(cortex_env):
@@ -751,28 +747,3 @@ def test_cli_turn_still_clears_the_booked_alarm(cortex_env):
     assert d["awake"] is True
     assert d["gen"] == 4
 
-
-def test_presence_state_cli_reads_wake_state(cortex_env):
-    home, _ = cortex_env
-    (home / "wake_state.json").write_text(json.dumps({
-        "last_user_msg_ts": "2026-07-26T09:00:00+00:00",
-        "transcript": "/cli/c.jsonl"}))
-    ws = cortex_bridge._shell_presence_state()
-    assert ws["last_user_msg_ts"] == "2026-07-26T09:00:00+00:00"
-    assert ws["transcript"] == "/cli/c.jsonl"
-
-
-def test_presence_state_tg_reads_its_own_ledger(tg_shell):
-    """The occupancy nudge's presence gate + handoff header must judge a tg window off
-    the tg ledger (host-written last_user_ts / session_id), never off cli's."""
-    home, shells_dir = tg_shell
-    (home / "wake_state.json").write_text(json.dumps({
-        "last_user_msg_ts": "2020-01-01T00:00:00+00:00",
-        "transcript": "/cli/c.jsonl"}))
-    (shells_dir / "tg.json").write_text(json.dumps({
-        "last_user_ts": "2026-07-26T09:46:49+00:00",
-        "session_id": "d994b51d-bc04-48ea-a8d7-d72274e28bb3"}))
-    ws = cortex_bridge._shell_presence_state()
-    assert ws["last_user_msg_ts"] == "2026-07-26T09:46:49+00:00"
-    assert ws["transcript"] == "d994b51d-bc04-48ea-a8d7-d72274e28bb3.jsonl"
-    assert cortex_bridge._user_active_within(ws, 15) is False   # stamp is old

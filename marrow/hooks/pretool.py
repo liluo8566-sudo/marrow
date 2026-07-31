@@ -115,18 +115,20 @@ def pretool_use() -> int:
             })
             return 0
 
-        # Cortex lie_down nudge — non-blocking additionalContext on every cortex
-        # lie_down call (rotate arg selects the rotate copy). Emitted on its own
-        # (lie_down is not a placement op, so it falls out of the Write/Bash
-        # guidance path). Never denies.
-        lie_down_nudge: str | None = None
+        # Cortex tool nudge — non-blocking additionalContext on every cortex
+        # lie_down (rotate arg selects the rotate copy) or transfer call. Each
+        # tool's helper returns None for the other's call, so at most one line
+        # stands. Emitted on its own (neither is a placement op, so both fall
+        # out of the Write/Bash guidance path). Never denies.
+        cortex_nudge: str | None = None
         try:
             if cortex_bridge.enabled():
-                lie_down_nudge = cortex_bridge._cortex_lie_down_nudge(inp)
+                cortex_nudge = (cortex_bridge._cortex_lie_down_nudge(inp)
+                                or cortex_bridge._cortex_transfer_nudge(inp))
         except Exception:  # noqa: BLE001 — fail-open, never blocks the hook
-            lie_down_nudge = None
-        if lie_down_nudge:
-            _emit_hso({"additionalContext": lie_down_nudge})
+            cortex_nudge = None
+        if cortex_nudge:
+            _emit_hso({"additionalContext": cortex_nudge})
             return 0
 
         # Deny tier — block dangerous ops (recursive delete / db destruction

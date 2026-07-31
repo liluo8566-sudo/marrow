@@ -430,7 +430,7 @@ def test_shell_gates_go_plain_when_shell_not_listed(monkeypatch):
     monkeypatch.setenv("MARROW_CORTEX", "tg")
     inp = {"tool_name": "mcp__marrow__lie_down", "tool_input": {"rotate": True}}
     assert cortex_bridge._cortex_lie_down_nudge(inp) is None
-    assert cortex_bridge._cortex_show_context("") == ""
+    assert cortex_bridge._cortex_show_context("", None) == ""
 
 
 # ── per-shell state file ──────────────────────────────────────────────────────
@@ -478,9 +478,11 @@ def test_shell_state_path_defaults_to_data_dir_and_env_shell(monkeypatch):
 
 # ── T9: lie_down routing for a non-cli shell ──────────────────────────────────
 
-def _tg_lie_down_env(monkeypatch, tmp_path, sock=""):
-    """tg-shell window with its own state dir; cortex.toml supplies the clamp."""
-    (tmp_path / "cortex.toml").write_text("[wake]\nnext_wake_max = 240\n")
+def _tg_lie_down_env(monkeypatch, tmp_path, sock="", wake=None):
+    """tg-shell window with its own state dir; cortex.toml supplies the bands."""
+    (tmp_path / "cortex.toml").write_text(
+        wake or "[wake]\nnext_wake_low_max = 55\nnext_wake_high_min = 180\n"
+                "next_wake_max = 360\n")
     monkeypatch.setattr(cortex_bridge, "_cortex_toml_path",
                         lambda: tmp_path / "cortex.toml")
     _force_enabled(monkeypatch, True,
@@ -521,15 +523,52 @@ def test_tg_lie_down_zero_is_immediate(monkeypatch, tmp_path):
     assert abs((when - datetime.now(when.tzinfo)).total_seconds()) < 5
 
 
+def _tg_booked_minutes(next_wake_min, **kw):
+    """Minutes the tg ledger actually booked for a lie_down call."""
+    from datetime import datetime
+    cortex_bridge.lie_down(next_wake_min=next_wake_min, **kw)
+    when = datetime.fromisoformat(
+        cortex_bridge.shell_state_read("tg")["next_wake_at"])
+    return (when - datetime.now(when.tzinfo)).total_seconds() / 60
+
+
 def test_tg_lie_down_clamps_to_next_wake_max(monkeypatch, tmp_path):
     _tg_lie_down_env(monkeypatch, tmp_path)
     monkeypatch.setattr(cortex_bridge, "_shell_kick", lambda shell: True)
-    cortex_bridge.lie_down(next_wake_min=9999)
-    from datetime import datetime
-    when = datetime.fromisoformat(
-        cortex_bridge.shell_state_read("tg")["next_wake_at"])
-    delta = (when - datetime.now(when.tzinfo)).total_seconds()
-    assert 239 * 60 < delta <= 240 * 60
+    assert 359 < _tg_booked_minutes(9999) <= 360
+
+
+@pytest.mark.parametrize("given,expected", [
+    (117, 55), (118, 180),                # dead zone snaps to the nearer edge
+    (55, 55), (180, 180), (360, 360),     # band edges pass through
+    (30, 30), (300, 300),                 # inside a band, untouched
+])
+def test_tg_lie_down_snaps_into_the_two_bands(monkeypatch, tmp_path,
+                                              given, expected):
+    """The shell path applies the same two legal bands as cortex's cli path:
+    anything in the gap between them snaps to the nearer edge."""
+    _tg_lie_down_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(cortex_bridge, "_shell_kick", lambda shell: True)
+    assert expected - 1 < _tg_booked_minutes(given) <= expected
+
+
+def test_tg_lie_down_human_override_pierces_the_bands(monkeypatch, tmp_path):
+    """An explicit human choice reaches the ledger untouched — 90 stays 90
+    even though it sits in the unselectable gap."""
+    _tg_lie_down_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(cortex_bridge, "_shell_kick", lambda shell: True)
+    assert 89 < _tg_booked_minutes(90, human_override=True) <= 90
+
+
+def test_tg_lie_down_band_edges_come_from_cortex_config(monkeypatch, tmp_path):
+    """Band edges are config, not constants: a custom [wake] moves the snap."""
+    _tg_lie_down_env(monkeypatch, tmp_path,
+                     wake="[wake]\nnext_wake_low_max = 20\n"
+                          "next_wake_high_min = 100\nnext_wake_max = 200\n")
+    monkeypatch.setattr(cortex_bridge, "_shell_kick", lambda shell: True)
+    assert 19 < _tg_booked_minutes(55) <= 20
+    assert 99 < _tg_booked_minutes(70) <= 100
+    assert 199 < _tg_booked_minutes(9999) <= 200
 
 
 def test_tg_lie_down_survives_a_dead_host(monkeypatch, tmp_path):
@@ -704,10 +743,11 @@ def test_cli_lie_down_path_untouched_by_the_shell_route(env, monkeypatch, tmp_pa
 
 
 def test_tool_descriptions_render_clamp_numbers_from_config(monkeypatch, tmp_path):
-    """C9: lie_down description renders the clamp range from cortex.toml at
-    register(), never hardcoded. T3: single 0-day_max band, night retired."""
+    """C9: lie_down description renders the two legal bands from cortex.toml at
+    register(), never hardcoded."""
     (tmp_path / "cortex.toml").write_text(
-        "[wake]\nnext_wake_max = 200\n")
+        "[wake]\nnext_wake_low_max = 20\nnext_wake_high_min = 100\n"
+        "next_wake_max = 200\n")
     monkeypatch.setattr(cortex_bridge.config, "db_path",
                         lambda: str(tmp_path / "marrow.db"))
     _force_enabled(monkeypatch, True)
@@ -715,13 +755,13 @@ def test_tool_descriptions_render_clamp_numbers_from_config(monkeypatch, tmp_pat
     monkeypatch.setattr(cortex_bridge, "_CORTEX", True)
     cortex_bridge.register(mt)
     ld = m._tool_manager._tools["lie_down"].description
-    assert "N=0-200" in ld
+    assert ld.count("N=0-20 ∪ 100-200") == 2
     # No stale hardcoded ranges leaked in.
-    assert "16-55" not in ld
+    assert "16-55" not in ld and "N=0-200" not in ld
 
 
 def test_tool_descriptions_fall_back_to_defaults(monkeypatch, tmp_path):
-    """No cortex.toml -> tolerant default (day_max 360, T3 clamp)."""
+    """No cortex.toml -> tolerant defaults for both bands."""
     monkeypatch.setattr(cortex_bridge.config, "db_path",
                         lambda: str(tmp_path / "marrow.db"))  # no cortex.toml here
     _force_enabled(monkeypatch, True)
@@ -729,10 +769,9 @@ def test_tool_descriptions_fall_back_to_defaults(monkeypatch, tmp_path):
     monkeypatch.setattr(cortex_bridge, "_CORTEX", True)
     cortex_bridge.register(mt)
     ld = m._tool_manager._tools["lie_down"].description
-    assert "N=0-360" in ld and "rotate=True" in ld
-    assert 'mode="night"' not in ld and "night mode" not in ld
-    # Retired tail copy (Monitor-era TaskStop drill) must be gone.
-    assert "TaskStop" not in ld and "monitor" not in ld.lower()
+    assert ld == ('lie_down(next_wake_min=N) [N=0-55 ∪ 180-360]; '
+                  'rotate to next window - lie_down(next_wake_min=N, '
+                  'rotate=True) [N=0-55 ∪ 180-360, 0=rotate now]')
 
 
 def test_switch_off_show_context_gated_empty(monkeypatch, tmp_path):
@@ -740,7 +779,7 @@ def test_switch_off_show_context_gated_empty(monkeypatch, tmp_path):
     switch off the hook call site never invokes it (call-site gate), and even if
     invoked without MARROW_CORTEX it returns empty."""
     monkeypatch.delenv("MARROW_CORTEX", raising=False)
-    assert cortex_bridge._cortex_show_context(str(tmp_path / "none.jsonl")) == ""
+    assert cortex_bridge._cortex_show_context(str(tmp_path / "none.jsonl"), None) == ""
 
 
 # ── wake v2 (Item 1-3) ────────────────────────────────────────────────────────

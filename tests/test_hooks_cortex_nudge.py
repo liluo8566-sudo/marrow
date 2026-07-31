@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import io
 import json
-import time
 
 import pytest
 
@@ -53,7 +52,7 @@ def test_nudge_plain_lie_down(tmp_path, monkeypatch, capsys):
     hso = _out(capsys)
     want = config.load()["cortex"]["lie_down_nudge_text"].split("{handoff}")[0]
     assert want in hso["additionalContext"]
-    assert "handoff-cli.md" in hso["additionalContext"]
+    assert "handoff.md" in hso["additionalContext"]
     assert "permissionDecision" not in hso
 
 
@@ -65,7 +64,7 @@ def test_nudge_rotate_uses_rotate_copy(tmp_path, monkeypatch, capsys):
     # fresh handoff so the deny gate stays open — rotate copy still selected
     home = tmp_path / "cortex"
     home.mkdir(parents=True, exist_ok=True)
-    hp = home / "handoff-cli.md"
+    hp = home / "handoff.md"
     hp.write_text("note", encoding="utf-8")
     _stdin(monkeypatch, {"tool_name": "mcp__marrow__lie_down",
                          "transcript_path": str(jl), "tool_input": {"rotate": True}})
@@ -106,3 +105,100 @@ def test_no_nudge_for_non_cortex(tmp_path, monkeypatch, capsys):
 def test_nudge_helper_none_for_other_tool():
     inp = {"tool_name": "mcp__marrow__say", "tool_input": {}}
     assert cortex_bridge._cortex_lie_down_nudge(inp) is None
+
+
+# ── over-threshold rotate hint on a plain lie_down ────────────────────────────
+
+def _patch_cfg(monkeypatch, home, cortex=None, rotate=None):
+    real = config.load
+
+    def _patched():
+        cfg = dict(real())
+        cx = dict(cfg.get("cortex", {}))
+        cx["enabled"] = True
+        cx["home"] = str(home)
+        cx.update(cortex or {})
+        cfg["cortex"] = cx
+        cr = dict(cfg.get("cortex_rotate", {}))
+        cr.update(rotate or {})
+        cfg["cortex_rotate"] = cr
+        return cfg
+
+    monkeypatch.setattr(config, "load", _patched)
+
+
+@pytest.fixture()
+def hint_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("MARROW_CORTEX", "1")
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    return tmp_path
+
+
+def _nudge(tmp_path, tokens=10_000, rotate=False, tpath=True):
+    jl = _big_transcript(tmp_path, tokens)
+    inp = {"tool_name": "mcp__marrow__lie_down",
+           "tool_input": {"rotate": True} if rotate else {}}
+    if tpath:
+        inp["transcript_path"] = str(jl)
+    return cortex_bridge._cortex_lie_down_nudge(inp)
+
+
+def test_hint_when_plain_lie_down_over_threshold(hint_env, monkeypatch):
+    _patch_cfg(monkeypatch, hint_env / "cortex", rotate={"show_tokens": 5_000})
+    out = _nudge(hint_env)
+    assert "≥5k" in out
+    assert "rotate=True" in out
+    assert "Append one line" in out
+
+
+def test_no_hint_when_rotate_already_requested(hint_env, monkeypatch):
+    _patch_cfg(monkeypatch, hint_env / "cortex", rotate={"show_tokens": 5_000})
+    out = _nudge(hint_env, rotate=True)
+    assert "≥5k" not in out
+    assert "before rotate" in out
+
+
+def test_no_hint_under_threshold(hint_env, monkeypatch):
+    _patch_cfg(monkeypatch, hint_env / "cortex", rotate={"show_tokens": 5_000})
+    out = _nudge(hint_env, tokens=1_000)
+    assert "≥5k" not in out
+    assert "Append one line" in out
+
+
+def test_show_tokens_zero_disables_hint(hint_env, monkeypatch):
+    _patch_cfg(monkeypatch, hint_env / "cortex", rotate={"show_tokens": 0})
+    out = _nudge(hint_env)
+    assert "≥" not in out
+    assert "Append one line" in out
+
+
+def test_hint_stands_alone_when_base_copy_unset(hint_env, monkeypatch):
+    _patch_cfg(monkeypatch, hint_env / "cortex",
+               cortex={"lie_down_nudge_text": ""}, rotate={"show_tokens": 5_000})
+    out = _nudge(hint_env)
+    assert out is not None
+    assert out.startswith("Current session context ≥5k")
+    assert "\n" not in out
+
+
+def test_no_nudge_at_all_when_both_copies_empty(hint_env, monkeypatch):
+    _patch_cfg(monkeypatch, hint_env / "cortex",
+               cortex={"lie_down_nudge_text": "",
+                       "lie_down_over_threshold_text": ""},
+               rotate={"show_tokens": 5_000})
+    assert _nudge(hint_env) is None
+
+
+def test_missing_transcript_path_skips_hint(hint_env, monkeypatch):
+    _patch_cfg(monkeypatch, hint_env / "cortex", rotate={"show_tokens": 5_000})
+    out = _nudge(hint_env, tpath=False)
+    assert "≥5k" not in out
+    assert "Append one line" in out
+
+
+def test_hint_copy_overridable_from_config(hint_env, monkeypatch):
+    _patch_cfg(monkeypatch, hint_env / "cortex",
+               cortex={"lie_down_over_threshold_text": "rotate now ({show_k}k)"},
+               rotate={"show_tokens": 5_000})
+    out = _nudge(hint_env)
+    assert "rotate now (5k)" in out

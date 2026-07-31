@@ -161,11 +161,11 @@ def test_slash_command_drops_the_whole_turn(tmp_path, monkeypatch):
     _setup(monkeypatch, tmp_path, db, {"max_turns": 5, "max_lines": 0})
     _ev(db, SID_OTHER, "user", "real question here")
     _ev(db, SID_OTHER, "assistant", "real answer here")
-    _ev(db, SID_OTHER, "user", "/ct-wake")
+    _ev(db, SID_OTHER, "user", "/ct-duty")
     _ev(db, SID_OTHER, "assistant", "command output nobody needs")
     out = replay.context(SID_SELF, "cli")
     assert "real question here" in out and "real answer here" in out
-    assert "/ct-wake" not in out
+    assert "/ct-duty" not in out
     assert "command output nobody needs" not in out
     # the dropped rows still moved the marker — they can only ever drop
     assert _marker(SID_SELF) == 4
