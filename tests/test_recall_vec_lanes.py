@@ -642,3 +642,69 @@ def test_tasks_slot_reserved_when_limit_gt_5(db, monkeypatch):
         f"task slot not reserved; results kinds = "
         f"{[r.get('kind') for r in results]}"
     )
+
+
+# ── E. shadow-rowids probe equivalence ───────────────────────────────────────
+
+def test_events_pending_shadow_rowids_equivalence(db):
+    """pending_sql uses events_vec_rowids (shadow B-tree) for existence probes.
+
+    Verify the predicate returns the same set as the naive events_vec probe
+    across all four meaningful row states: unembedded, embedded, evicted
+    (meta tombstone only), and vec-without-meta.
+    """
+    import struct
+
+    def fake_blob():
+        return struct.pack("1024f", *([0.01] * 1024))
+
+    # (a) unembedded: no vec, no meta -> should appear in pending
+    eid_a = _make_event(db, "unembedded event")
+
+    # (b) fully embedded: vec + meta -> NOT pending
+    eid_b = _make_event(db, "embedded event")
+    db.execute(
+        "INSERT INTO events_vec(rowid, embedding) VALUES(?, ?)", (eid_b, fake_blob()))
+    db.execute(
+        "INSERT INTO events_vec_meta(rowid, embedder_id, dim) VALUES(?, 'bge-m3', 1024)",
+        (eid_b,))
+    db.commit()
+
+    # (c) evicted: meta tombstone present, vec deleted -> NOT pending
+    eid_c = _make_event(db, "evicted event")
+    db.execute(
+        "INSERT INTO events_vec(rowid, embedding) VALUES(?, ?)", (eid_c, fake_blob()))
+    db.execute(
+        "INSERT INTO events_vec_meta(rowid, embedder_id, dim) VALUES(?, 'bge-m3', 1024)",
+        (eid_c,))
+    db.commit()
+    db.execute("DELETE FROM events_vec WHERE rowid=?", (eid_c,))
+    db.commit()
+
+    # (d) vec-only: vec row present, no meta -> NOT pending (rowids shadow covers it)
+    eid_d = _make_event(db, "vec-only event")
+    db.execute(
+        "INSERT INTO events_vec(rowid, embedding) VALUES(?, ?)", (eid_d, fake_blob()))
+    db.commit()
+
+    old_sql = (
+        "SELECT e.id FROM events e "
+        "WHERE NOT EXISTS (SELECT 1 FROM events_vec v WHERE v.rowid=e.id) "
+        "  AND NOT EXISTS (SELECT 1 FROM events_vec_meta m WHERE m.rowid=e.id) "
+        "ORDER BY e.id DESC LIMIT 1000"
+    )
+    new_sql = (
+        "SELECT e.id FROM events e "
+        "WHERE NOT EXISTS (SELECT 1 FROM events_vec_rowids v WHERE v.rowid=e.id) "
+        "  AND NOT EXISTS (SELECT 1 FROM events_vec_meta m WHERE m.rowid=e.id) "
+        "ORDER BY e.id DESC LIMIT 1000"
+    )
+
+    old_ids = {r["id"] for r in db.execute(old_sql).fetchall()}
+    new_ids = {r["id"] for r in db.execute(new_sql).fetchall()}
+
+    assert old_ids == new_ids, f"predicate mismatch: old={old_ids} new={new_ids}"
+    assert eid_a in new_ids, "unembedded row must be pending"
+    assert eid_b not in new_ids, "embedded row must not be pending"
+    assert eid_c not in new_ids, "evicted row must not be pending"
+    assert eid_d not in new_ids, "vec-only row must not be pending"

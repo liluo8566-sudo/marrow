@@ -141,9 +141,16 @@ _LANES: dict[str, dict[str, str]] = {
         # a meta-only test skips them forever (vec-lane poisoning). The second
         # clause keeps intentionally-evicted rows (aging.py drops the vector but
         # KEEPS the meta as an eviction tombstone) out of the pending set.
+        #
+        # Existence probe uses events_vec_rowids (the vec0 module's own rowid
+        # registry, a real B-tree with INTEGER PRIMARY KEY) instead of the vec0
+        # virtual table itself. Probing the virtual table triggers an internal
+        # chunk scan (VIRTUAL TABLE INDEX 1:2) making the anti-join O(rows×chunks)
+        # and holding a read lock long enough to starve writers under DELETE
+        # journal mode. Measured: 7654 ms → 20 ms on 44k-row production DB.
         "pending_sql": (
             "SELECT e.id AS id, e.content AS text FROM events e "
-            "WHERE NOT EXISTS (SELECT 1 FROM events_vec v WHERE v.rowid=e.id) "
+            "WHERE NOT EXISTS (SELECT 1 FROM events_vec_rowids v WHERE v.rowid=e.id) "
             "  AND NOT EXISTS (SELECT 1 FROM events_vec_meta m "
             "                  WHERE m.rowid=e.id) "
             "ORDER BY e.id DESC LIMIT ?"
@@ -481,7 +488,7 @@ def embed_pending(
 # watcher can age the backlog without a full aggregate scan.
 _PENDING_OLDEST_EVENT_SQL = (
     "SELECT e.created_at FROM events e "
-    "WHERE NOT EXISTS (SELECT 1 FROM events_vec v WHERE v.rowid=e.id) "
+    "WHERE NOT EXISTS (SELECT 1 FROM events_vec_rowids v WHERE v.rowid=e.id) "
     "  AND NOT EXISTS (SELECT 1 FROM events_vec_meta m WHERE m.rowid=e.id) "
     "ORDER BY e.id ASC LIMIT 1"
 )
