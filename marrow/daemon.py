@@ -11,7 +11,9 @@ when [cortex].enabled — a clean marrow shows none of them.
 """
 from __future__ import annotations
 
+import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 from typing import Annotated
 
@@ -1166,8 +1168,41 @@ def event_clear(
     return _do_event_clear(before or None, after or None, last or None)
 
 
+def _init_db_guarded() -> None:
+    # Fuse: a locked DB at startup must degrade to "serve + alert" rather than
+    # stall up to 30s and eat the MCP client handshake window, leaving a
+    # silently-dead session. With busy_ms=3000, init_db raises OperationalError
+    # promptly on lock contention; we log, write a best-effort alert, and let
+    # mcp.run() proceed — an already-initialised DB does not need another pass.
+    try:
+        storage.init_db(_DB, busy_ms=3000).close()
+    except sqlite3.OperationalError as exc:
+        if "locked" not in str(exc).lower():
+            raise
+        msg = "daemon init_db skipped: database is locked (serving with existing schema)"
+        print(f"[daemon] {msg}", file=sys.stderr)
+        try:
+            # Use a short busy timeout so a still-locked DB doesn't stall the
+            # alert write itself — degrade gracefully if the insert also fails.
+            aconn = sqlite3.connect(str(_DB), timeout=2.0)
+            aconn.execute("PRAGMA busy_timeout=2000")
+            try:
+                with aconn:
+                    aconn.execute(
+                        "INSERT OR IGNORE INTO alerts"
+                        " (severity, type, fingerprint, message, source)"
+                        " VALUES (?, ?, ?, ?, ?)",
+                        ("warn", "daemon_init_db_locked",
+                         "daemon_init_db_locked", msg, "daemon.py"),
+                    )
+            finally:
+                aconn.close()
+        except Exception as alert_exc:  # noqa: BLE001
+            print(f"[daemon] alert write also failed: {alert_exc!r}", file=sys.stderr)
+
+
 def main() -> None:
-    storage.init_db(_DB).close()
+    _init_db_guarded()
     mcp.run()
 
 

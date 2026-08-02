@@ -432,9 +432,11 @@ def connect(path: str | None = None) -> sqlite3.Connection:
     return conn
 
 
-def init_db(path: str | None = None) -> sqlite3.Connection:
+def init_db(path: str | None = None, *, busy_ms: int | None = None) -> sqlite3.Connection:
     cfg = config.load()
     conn = connect(path)
+    if busy_ms is not None:
+        conn.execute(f"PRAGMA busy_timeout={busy_ms}")
     dim = int(cfg.get("embedding", {}).get("dim", 1024))
     with conn:
         # Pre-_TABLES renames: legacy populated tables (`threads`, `vocab`)
