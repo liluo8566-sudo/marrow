@@ -904,7 +904,7 @@ def msg(
     watch_timeout_min: Annotated[int | None, Field(description="send only: check back at N minutes: kicked only if no reply by then; if the reply already landed the watch clears silently (default none = no timeout watch).")] = None,
     limit: Annotated[int, Field(ge=1, description="list only: max rows to return (default 20).")] = 20,
 ) -> dict | list[dict]:
-    """Send a message to another session (tg/wx/ct/cli). The msg is not visible to user - Only target channel can read and reply. Set watch_reply=true to be kicked awake the moment they reply.
+    """Send a message to another session (tg/wx/ct/cli). 霜霜 can see it — talk to her directly. Set watch_reply=true to be kicked awake the moment they reply.
     - 'send': needs `to` + `text`; tg/wx restricted to allowed sender channels.
     - 'list': your own pending/recent rows to confirm a send landed."""
     if action not in _MSG_ACTIONS:
