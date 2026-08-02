@@ -1,9 +1,10 @@
 """Cross-session replay — stateless latest-window query + private marker.
 
 Covers: seed on first call, nothing-new -> empty, marker advance, whole-turn
-slash drop, drop_patterns, 2/4 caps from config, exclusion semantics (own sid,
-own-shell channels, ct for plain sessions), exclude_target_channels, idle gate,
-enabled=false, and the marker-lock busy skip (no unlocked write).
+slash drop, drop_patterns, 2/4 caps from config, exclusion semantics (own sid
+only by default, cortex.toml shell override), exclude_target_channels, idle
+gate, enabled=false, the one-marker-per-sid contract shared by SessionStart and
+turn_inject, and the marker-lock busy skip (no unlocked write).
 """
 from __future__ import annotations
 
@@ -219,13 +220,14 @@ def test_own_sid_never_replays_to_itself(tmp_path, monkeypatch):
     assert replay.context(SID_SELF, "cli") == ""
 
 
-def test_plain_session_excludes_ct_source_rows(tmp_path, monkeypatch):
+def test_plain_session_sees_every_source_channel(tmp_path, monkeypatch):
+    """Default contract: the global latest window, own sid the only exclusion."""
     db = _fresh_db(tmp_path)
     _setup(monkeypatch, tmp_path, db)
     _ev(db, SID_CT, "assistant", "cortex self-talk", channel="ct")
     _ev(db, SID_OTHER, "user", "human words", channel="tg")
     out = replay.context(SID_SELF, "cli")
-    assert "human words" in out and "cortex self-talk" not in out
+    assert "human words" in out and "cortex self-talk" in out
 
 
 def test_exclude_target_channels_silences_a_destination(tmp_path, monkeypatch):
@@ -236,29 +238,44 @@ def test_exclude_target_channels_silences_a_destination(tmp_path, monkeypatch):
     assert replay.context(SID_SELF, "cli") != ""
 
 
-def test_shell_exclude_defaults(tmp_path, monkeypatch):
+def test_shell_exclude_defaults_are_empty(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "db_path", lambda: str(tmp_path / "none.db"))
+    monkeypatch.setattr(cortex_bridge, "_cortex_toml_section",
+                        lambda *a, **k: None)
+    assert replay.shell_exclude_channels("cli") == []
+    assert replay.shell_exclude_channels("tg") == []
+    assert replay.shell_exclude_channels("wx") == []  # unmapped -> unqualified
+
+
+def test_shell_exclude_honours_the_cortex_toml_override(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "db_path", lambda: str(tmp_path / "none.db"))
+    monkeypatch.setattr(cortex_bridge, "_cortex_toml_section",
+                        lambda *a, **k: {"cli": ["ct"], "tg": ["tg"]})
     assert replay.shell_exclude_channels("cli") == ["ct"]
     assert replay.shell_exclude_channels("tg") == ["tg"]
-    assert replay.shell_exclude_channels("wx") == ["ct"]  # unmapped -> unqualified
+    assert replay.shell_exclude_channels("wx") == []  # unmapped -> unqualified
 
 
-def test_cortex_cli_window_excludes_ct_and_ignores_the_idle_gate(tmp_path, monkeypatch):
+def test_cortex_window_sees_ct_rows_and_ignores_the_idle_gate(tmp_path, monkeypatch):
     db = _fresh_db(tmp_path)
     _setup(monkeypatch, tmp_path, db, {"idle_gate_min": 999})
     monkeypatch.setattr(cortex_bridge, "is_cortex_session", lambda t: True)
+    monkeypatch.setattr(cortex_bridge, "_cortex_toml_section",
+                        lambda *a, **k: None)
     monkeypatch.setenv("MARROW_CORTEX", "1")
-    _ev(db, SID_CT, "assistant", "own cortex chatter", channel="ct")
+    _ev(db, SID_CT, "assistant", "other cortex chatter", channel="ct")
     _ev(db, SID_OTHER, "user", "someone else typed", channel="cli")
     _ev(db, SID_SELF, "user", "just now", ts=_iso(datetime.now(timezone.utc)))
     out = replay.context(SID_SELF, "cli", transcript_path="/t/x.jsonl")
-    assert "someone else typed" in out and "own cortex chatter" not in out
+    assert "someone else typed" in out and "other cortex chatter" in out
 
 
-def test_cortex_tg_shell_excludes_tg_and_keeps_ct(tmp_path, monkeypatch):
+def test_cortex_shell_override_drops_that_shells_channel(tmp_path, monkeypatch):
     db = _fresh_db(tmp_path)
     _setup(monkeypatch, tmp_path, db)
     monkeypatch.setattr(cortex_bridge, "is_cortex_session", lambda t: True)
+    monkeypatch.setattr(cortex_bridge, "_cortex_toml_section",
+                        lambda *a, **k: {"tg": ["tg"]})
     monkeypatch.setenv("MARROW_CORTEX", "tg")
     _ev(db, "tgsid111", "user", "telegram window talking", channel="tg")
     _ev(db, SID_CT, "assistant", "cli cortex talking", channel="ct")
@@ -350,6 +367,29 @@ def test_turn_inject_is_the_only_outlet_on_a_wake_turn(tmp_path, monkeypatch):
     assert first.count("news from elsewhere") == 1
     second = _run_hook(monkeypatch, hooks.turn_inject, payload)
     assert "news from elsewhere" not in second
+
+
+def test_session_start_seed_and_turn_inject_share_one_marker(tmp_path, monkeypatch):
+    """SessionStart (lifecycle.py calls replay.context with the same sid) and
+    turn_inject key the same marker file, so seeded content never re-injects."""
+    db = _fresh_db(tmp_path)
+    _setup(monkeypatch, tmp_path, db)
+    monkeypatch.setattr(cortex_bridge, "is_cortex_session", lambda t: True)
+    monkeypatch.setenv("MARROW_CORTEX", "1")
+    _ev(db, SID_OTHER, "user", "news from elsewhere")
+    seed = replay.context(SID_SELF, "cli", transcript_path="/t/x.jsonl")
+    assert "news from elsewhere" in seed
+    assert _marker(SID_SELF) == 1
+    out = _run_hook(monkeypatch, hooks.turn_inject,
+                    {"session_id": SID_SELF, "transcript_path": "/t/x.jsonl",
+                     "prompt": "hello"})
+    assert "news from elsewhere" not in out
+    _ev(db, SID_OTHER, "assistant", "brand new line")
+    out2 = _run_hook(monkeypatch, hooks.turn_inject,
+                     {"session_id": SID_SELF, "transcript_path": "/t/x.jsonl",
+                      "prompt": "hello again"})
+    assert out2.count("brand new line") == 1
+    assert _marker(SID_SELF) == 2
 
 
 def test_wakeup_note_text_falls_back_to_this_shells_section(tmp_path, monkeypatch):

@@ -1,5 +1,5 @@
 ---
-description: Cortex — rotate duty. Args: cli | tg | off | all.
+description: Cortex — rotate duty and/or kick shell. Args: cli | tg | off | all.
 ---
 
 ⚙️ [CMD ct-duty] Decide which cortex shell is **on duty**. At most one runs; the other is held. This is also the release for a manual pause or an automatic fuse trip — the command clears the breaker first.
@@ -18,5 +18,7 @@ Order inside a swap is fixed: the hold lands on disk before any kick, so the two
 The mode argument is required and must be one of the four; anything else exits non-zero without touching state.
 
 Do not spawn, resume or put down any window yourself — the CLI owns both pipelines. Plumbing that stays available for narrower work: `cortex.ctl pause|wake|resume [--shell cli|tg]` (breaker only, no duty change).
+
+Pausing or resuming a single shell WITHOUT changing who is on duty -> /ct-pause, never map that request onto a duty mode.
 
 Report the one-line output in plain words (breaker cleared? / new mode + hold / which shell woke, fresh or resumed / cli put down). To inspect state first: `<venv_python> -m cortex.ctl status`.

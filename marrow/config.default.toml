@@ -522,8 +522,9 @@ wire_channels = ["tg", "wx"]
 #   during focused work). First turn = injects. 0 = every turn. Cortex windows
 #   are exempt (every turn).
 # exclude_target_channels: non-cortex sessions on these channels receive NOTHING.
-#   ct is NOT listed — the cortex window is a normal consumer here.
-#   Source ct events are excluded by the query itself.
+#   Source channels are NOT filtered by default — every consumer sees the same
+#   global latest window and excludes only its own session_id (ct rows included).
+#   cortex.toml [note].shell_replay_exclude re-enables per-shell source exclusion.
 enabled = true
 max_turns = 2
 max_lines = 4

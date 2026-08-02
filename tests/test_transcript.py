@@ -550,14 +550,14 @@ def test_rows_from_records_drops_harness_junk_rows(tmp_path):
     rows = transcript.clean(jl)
     assert [r["content"] for r in rows] == [
         "quotes `<task-notification>` mid-sentence, keep me",
-        '<image path="/stk/a.png"/>\n\n真实回复文字',
+        "真实回复文字",  # media tag stripped at write time
     ]
 
 
 def test_clean_drops_empty_content_after_stripping(tmp_path):
     # A row whose content is only a command-message tag becomes empty after
-    # strip_harness_markers; the `if not text: continue` guard at
-    # transcript.py:208 drops it so no empty event row is archived.
+    # strip_harness_markers; the `if not text: continue` guard drops it so no
+    # empty event row is archived.
     jl = _w(tmp_path / "s.jsonl", [
         {"type": "user", "sessionId": "s1", "timestamp": "t",
          "message": {"role": "user",
@@ -630,3 +630,51 @@ def test_strip_media_markers():
         '[sticker: wink]\nreal words') == "real words"
     assert transcript.strip_media_markers("plain text") == "plain text"
     assert transcript.strip_media_markers("") == ""
+
+
+def test_strip_media_markers_keeps_paragraph_structure():
+    # tag on its own line: the line goes, ONE blank line survives between the
+    # paragraphs it separated
+    assert transcript.strip_media_markers(
+        '早\n\n<gif path="/a.gif"/>\n\n吃了吗') == "早\n\n吃了吗"
+    assert transcript.strip_media_markers(
+        '早\n\n   <gif path="/a.gif"/>   \n\n吃了吗') == "早\n\n吃了吗"
+    # single break stays single; consecutive marker lines fold into one break
+    assert transcript.strip_media_markers(
+        '早\n<gif path="/a.gif"/>\n吃') == "早\n吃"
+    assert transcript.strip_media_markers(
+        'a\n<image path="/a.png"/>\n<gif path="/b.gif"/>\nb') == "a\nb"
+    # inline tag leaves exactly one space, never a double
+    assert transcript.strip_media_markers(
+        'hey <image path="/a.png"/> there') == "hey there"
+    # text without a tag is returned untouched, long blank runs included
+    assert transcript.strip_media_markers(
+        "plain\n\n\n\ntext") == "plain\n\n\n\ntext"
+
+
+def test_strip_media_markers_drops_the_tg_quote_marker():
+    assert transcript.strip_media_markers(
+        "<quote>你别管了</quote>好，那两个我不碰。") == "好，那两个我不碰。"
+    assert transcript.strip_media_markers(
+        "<quote>多行\n片段</quote>\n\nreal reply") == "real reply"
+    # mid-body mention is prose, not the protocol marker — untouched
+    mid = "we should strip <quote>x</quote> tags one day"
+    assert transcript.strip_media_markers(mid) == mid
+
+
+def test_media_markers_are_stripped_at_write_time(tmp_path):
+    """Archived rows are clean at the source, so recall reads no media junk."""
+    jl = _w(tmp_path / "m.jsonl", [
+        {"type": "user", "sessionId": "s1", "timestamp": "t",
+         "message": {"role": "user",
+                     "content": "[time: 2026-06-28 Sun 17:07 | gap: 0m] 早安"}},
+        {"type": "assistant", "sessionId": "s1", "timestamp": "t",
+         "message": {"role": "assistant", "model": "claude-opus-4-7",
+                     "content": [{"type": "text",
+                                  "text": '早\n\n<gif path="/stk/b.gif"/>\n\n吃了吗'}]}},
+        {"type": "user", "sessionId": "s1", "timestamp": "t",
+         "message": {"role": "user",
+                     "content": '<file path="/tmp/a.pdf"/>'}},
+    ])
+    rows = transcript.clean(jl)
+    assert [r["content"] for r in rows] == ["早安", "早\n\n吃了吗"]

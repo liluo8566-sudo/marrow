@@ -22,11 +22,12 @@ from pathlib import Path
 
 from . import config, cortex_bridge, storage, transcript
 
-# Every cortex shell drops its OWN channel: the cli shell talks on 'ct', the tg
-# shell on 'tg'. Mirror of cortex note.py; cortex.toml [note].shell_replay_exclude
-# wins when set. Unknown shell -> the unqualified set.
-_DEFAULT_SHELL_EXCLUDE = {"cli": ["ct"], "tg": ["tg"]}
-_UNQUALIFIED_EXCLUDE = ["ct"]
+# No channel is excluded by default: every consumer sees the ONE global latest
+# window and drops only its own session_id. cortex.toml [note].shell_replay_exclude
+# re-enables per-shell channel exclusion when set; an unknown shell falls back to
+# the unqualified set.
+_DEFAULT_SHELL_EXCLUDE: dict[str, list[str]] = {"cli": [], "tg": []}
+_UNQUALIFIED_EXCLUDE: list[str] = []
 
 _SLASH_HEAD = _re.compile(r"^/[A-Za-z][A-Za-z0-9_:.-]*$")
 
@@ -174,8 +175,9 @@ def render(rows, header: str, max_turns: int, per_chars: int,
 
 
 def shell_exclude_channels(shell: str | None) -> list[str]:
-    """The channels a cortex `shell` must drop from replay — its own self-talk.
-    Unmapped or unusable shell id -> the unqualified exclude list."""
+    """The channels a cortex `shell` drops from replay — empty unless cortex.toml
+    [note].shell_replay_exclude configures one. Unmapped or unusable shell id ->
+    the unqualified exclude list."""
     mapping = cortex_bridge._cortex_toml_section("note", "shell_replay_exclude", None)
     if not isinstance(mapping, dict):
         mapping = _DEFAULT_SHELL_EXCLUDE
@@ -269,8 +271,10 @@ def _last_user_age_min(conn, sid: str) -> float | None:
 
 def context(sid: str, channel: str, *, transcript_path: str | None = None) -> str:
     """Replay for a hook-driven session (turn_inject and SessionStart share this
-    one outlet). Cortex windows exclude their own shell's channels and are exempt
-    from the idle gate; every other session excludes 'ct'."""
+    one outlet AND one marker, keyed by sid, so content is never shown twice).
+    Every session sees the same global latest window and excludes only its own
+    sid; cortex windows are additionally exempt from the idle gate. Channel
+    exclusion is opt-in via cortex.toml [note].shell_replay_exclude."""
     if not sid:
         return ""
     cfg = (config.load().get("replay", {}) or {})
