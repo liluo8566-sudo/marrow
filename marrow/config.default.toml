@@ -248,6 +248,15 @@ hidden = []
 [transcript]
 
 [turn_inject]
+# Phone vitals one-liner: path to a JSON snapshot pulled from an external
+# tracker; empty = off. Injected on zone change, on first turn of a session,
+# and at most once per interval otherwise.
+# zones = named circles for coordinate -> label mapping.
+vitals_file = ""
+vitals_interval_min = 60
+vitals_stale_min = 90
+vitals_zones = []   # e.g. [{ name = "home", lat = 10.0, lon = 20.0, radius_m = 300 }]
+
 # Per-turn care directive injected every UserPromptSubmit (config-first).
 # Emotion-first, preference-style wording. Edit freely — no code change.
 care_text = """
