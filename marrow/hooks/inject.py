@@ -116,7 +116,8 @@ def _usage_threshold_context(sid: str, tpath: str) -> str:
 
 def turn_inject() -> int:
     """Inject current time + delta since last reply, plus the B8 kickout
-    nudge (config [kickout]).
+    nudge (config [kickout]) and the throttled presence line (config
+    [presence]).
 
     WX bridge injects its own time via system prompt — skip the time+delta
     stamp when MARROW_CHANNEL=wx, but the kickout nudge still applies there.
@@ -160,17 +161,26 @@ def turn_inject() -> int:
         except Exception:
             return ""
 
+    def _presence_fragment() -> str:
+        try:
+            from .. import presence as _presence
+            frag = _presence.render(sid)
+            return f"\n\n{frag}" if frag else ""
+        except Exception:
+            return ""
+
     if channel == "wx":
         # WX bridge injects its own time — skip the time stamp only; the
         # schedule + tl fragments and kickout nudge still apply.
         wx_sched = _sched_fragment()
         wx_tl = _tl_fragment()
+        wx_presence = _presence_fragment()
         wx_kick = f"\n\n{kickout_ctx}" if kickout_ctx else ""
         wx_replay = _replay_fragment()
         wx_replay = f"\n\n{wx_replay}" if wx_replay else ""
         wx_own = _outbound_notes(sid, channel)
         wx_own = f"\n\n{wx_own}" if wx_own else ""
-        wx_ctx = f"{wx_sched}{wx_tl}{wx_kick}{wx_replay}{wx_own}".strip()
+        wx_ctx = f"{wx_sched}{wx_tl}{wx_presence}{wx_kick}{wx_replay}{wx_own}".strip()
         if wx_ctx:
             json.dump(
                 {"hookSpecificOutput": {
@@ -209,6 +219,7 @@ def turn_inject() -> int:
 
     sched_ctx = _sched_fragment()
     tl_ctx = _tl_fragment()
+    presence_ctx = _presence_fragment()
 
     # Absorbed global turn-inject: per-turn care directive (config-lives).
     care_ctx = ""
@@ -230,7 +241,7 @@ def turn_inject() -> int:
     replay_full = f"\n\n{replay_ctx}" if replay_ctx else ""
     own_ctx = _outbound_notes(sid, channel)
     own_full = f"\n\n{own_ctx}" if own_ctx else ""
-    ctx = (f"# Context — {now_str}{delta}{sched_ctx}{tl_ctx}{care_ctx}"
+    ctx = (f"# Context — {now_str}{delta}{sched_ctx}{tl_ctx}{presence_ctx}{care_ctx}"
            f"{kickout_full}{show_full}{usage_full}{replay_full}{own_full}")
     json.dump(
         {"hookSpecificOutput": {

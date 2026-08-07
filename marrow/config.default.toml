@@ -340,6 +340,17 @@ auth_user = ""
 auth_pass = ""
 silent_alert_hours = 24
 
+[presence]
+# Per-turn presence heartbeat (UserPromptSubmit): one line with the current
+# location zone (from [sensors] state) plus macOS frontmost app / HID idle.
+# Throttled by wall clock, independent of any silence timer — a non-stop
+# conversation still gets a refresh every interval_min minutes. A session with
+# no stamp yet injects on its first turn. Idle threshold for Inactive vs Active
+# = [cortex].away_idle_min. channels gates by MARROW_CHANNEL (empty = "cli").
+enabled = true
+interval_min = 30
+channels = ["cli", "tg", "wx"]
+
 [cortex]
 # Master switch: cortex is an optional autonomous-wake layer living in a separate repo; false = clean marrow, no cortex organs.
 enabled = false
