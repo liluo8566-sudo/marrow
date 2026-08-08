@@ -1,4 +1,4 @@
-"""Tests for _vitals_fragment in marrow.hooks.inject."""
+"""Tests for _vitals_fragment and _phone_app_fragment in marrow.hooks.inject."""
 from __future__ import annotations
 
 import json
@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from marrow import config
-from marrow.hooks.inject import _vitals_fragment, _last_app_segment
+from marrow.hooks.inject import _vitals_fragment, _last_app_segment, _phone_app_fragment
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -264,8 +264,8 @@ def test_pings_missing_file(tmp_path):
     assert result == ""
 
 
-def test_pings_segment_in_vitals_line(isolated, monkeypatch, tmp_path):
-    """When pings_file is set, the 📱 segment appears in the full vitals line."""
+def test_pings_segment_not_in_vitals_line(isolated, monkeypatch, tmp_path):
+    """📱 segment must NOT appear inside _vitals_fragment (decoupled)."""
     _tmp, vf, make_cfg = isolated
     snap = _make_snap()
     _write_snap(vf, snap)
@@ -274,8 +274,8 @@ def test_pings_segment_in_vitals_line(isolated, monkeypatch, tmp_path):
     cfg = make_cfg()
     cfg["turn_inject"]["pings_file"] = str(pf)
     monkeypatch.setattr(config, "load", lambda: cfg)
-    result = _vitals_fragment("sid_pings")
-    assert "📱 YouTube 2m前" in result
+    result = _vitals_fragment("sid_pings_decoupled")
+    assert "📱" not in result
 
 
 def test_stray_space_keys_parsed(isolated, monkeypatch):
@@ -289,3 +289,90 @@ def test_stray_space_keys_parsed(isolated, monkeypatch):
     result = _vitals_fragment("sid9")
     assert "📍 家" in result
     assert "🔋56%" in result
+
+
+# ---------------------------------------------------------------------------
+# _phone_app_fragment gate-behavior tests
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def app_isolated(tmp_path, monkeypatch):
+    """Patch config so DATA_DIR points to tmp_path and pings_file is set."""
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    pf = tmp_path / "pings.json"
+    _orig_cfg = config.load()
+
+    def _make_cfg(pings_path=None):
+        import copy
+        base = copy.deepcopy(_orig_cfg)
+        base.setdefault("turn_inject", {})
+        base["turn_inject"]["pings_file"] = str(pings_path or pf)
+        return base
+
+    return tmp_path, pf, _make_cfg
+
+
+def test_app_fragment_off_when_key_unset(tmp_path, monkeypatch):
+    """Returns '' when pings_file is absent from config."""
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    base = config.load()
+    base.setdefault("turn_inject", {})["pings_file"] = ""
+    monkeypatch.setattr(config, "load", lambda: base)
+    result = _phone_app_fragment("sidA1")
+    assert result == ""
+
+
+def test_app_fragment_first_turn_emits(app_isolated, monkeypatch):
+    """First turn (no state file) → emits if a ping exists."""
+    tmp_path, pf, make_cfg = app_isolated
+    pf.write_text(json.dumps([_make_ping("微信", 30)]), encoding="utf-8")
+    monkeypatch.setattr(config, "load", lambda: make_cfg())
+    result = _phone_app_fragment("sidA2")
+    assert "📱 微信 刚刚" == result
+
+
+def test_app_fragment_same_ping_second_turn_returns_empty(app_isolated, monkeypatch):
+    """Second call with same ping ts → '' (gated out)."""
+    tmp_path, pf, make_cfg = app_isolated
+    pf.write_text(json.dumps([_make_ping("微信", 30)]), encoding="utf-8")
+    monkeypatch.setattr(config, "load", lambda: make_cfg())
+    first = _phone_app_fragment("sidA3")
+    assert first  # emitted
+    second = _phone_app_fragment("sidA3")
+    assert second == ""  # same ping, gated
+
+
+def test_app_fragment_new_ping_emits_again(app_isolated, monkeypatch):
+    """Newer ping ts → emits again despite prior stamp."""
+    tmp_path, pf, make_cfg = app_isolated
+    ts1 = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat()
+    pf.write_text(json.dumps([{"app": "抖音", "event": "open", "ts": ts1}]), encoding="utf-8")
+    monkeypatch.setattr(config, "load", lambda: make_cfg())
+    first = _phone_app_fragment("sidA4")
+    assert "📱 抖音" in first
+
+    # Write a newer ping.
+    ts2 = (datetime.now(timezone.utc) - timedelta(seconds=10)).isoformat()
+    pf.write_text(json.dumps([
+        {"app": "抖音", "event": "open", "ts": ts1},
+        {"app": "小红书", "event": "open", "ts": ts2},
+    ]), encoding="utf-8")
+    second = _phone_app_fragment("sidA4")
+    assert "📱 小红书" in second  # new ping → emit
+
+
+def test_app_fragment_no_pings_returns_empty(app_isolated, monkeypatch):
+    """Empty pings array → '' (first turn too)."""
+    tmp_path, pf, make_cfg = app_isolated
+    pf.write_text("[]", encoding="utf-8")
+    monkeypatch.setattr(config, "load", lambda: make_cfg())
+    result = _phone_app_fragment("sidA5")
+    assert result == ""
+
+
+def test_app_fragment_missing_file_returns_empty(app_isolated, monkeypatch):
+    """Non-existent pings file → ''."""
+    tmp_path, pf, make_cfg = app_isolated
+    monkeypatch.setattr(config, "load", lambda: make_cfg(pings_path=tmp_path / "missing.json"))
+    result = _phone_app_fragment("sidA6")
+    assert result == ""
