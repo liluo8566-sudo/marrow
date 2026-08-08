@@ -761,14 +761,13 @@ def _render_note_fresh(transcript_path: str | None,
         return None
     py = str(Path(py).expanduser())
     root = str(Path(root).expanduser())
-    # --no-ct: the renderer must not append its own ct-note section here.
     # --mirror: the renderer itself writes this shell's section of the on-disk
     # note (cortex owns that file format — see cortex/note_file.py), so marrow
     # never rewrites the whole file and never clobbers another shell.
     shell = shell or _cortex_shell_id()
     if not shell:
         return None
-    cmd = [py, "-m", module, "--no-ct", "--mirror", "--shell", shell]
+    cmd = [py, "-m", module, "--mirror", "--shell", shell]
     if transcript_path:
         cmd += ["--transcript", str(transcript_path)]
     try:
