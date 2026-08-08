@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from marrow import config
-from marrow.hooks.inject import _vitals_fragment
+from marrow.hooks.inject import _vitals_fragment, _last_app_segment
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -185,6 +185,97 @@ def test_throttle_interval_elapsed_injects(isolated, monkeypatch):
 
     second = _vitals_fragment("sid8")
     assert second  # interval elapsed
+
+
+# ---------------------------------------------------------------------------
+# _last_app_segment tests
+# ---------------------------------------------------------------------------
+
+def _make_ping(app: str, offset_s: int) -> dict:
+    dt = datetime.now(timezone.utc) - timedelta(seconds=offset_s)
+    return {"app": app, "event": "open", "ts": dt.isoformat()}
+
+
+def _make_pings_cfg(pings_path: Path) -> dict:
+    return {"pings_file": str(pings_path)}
+
+
+def test_pings_off_when_key_unset():
+    """Returns '' when pings_file is absent from config."""
+    result = _last_app_segment({})
+    assert result == ""
+
+
+def test_pings_off_when_key_empty():
+    """Returns '' when pings_file is an empty string."""
+    result = _last_app_segment({"pings_file": ""})
+    assert result == ""
+
+
+def test_pings_recent_minutes(tmp_path):
+    """Ping from 5 minutes ago → '📱 {app} 5m前'."""
+    pf = tmp_path / "pings.json"
+    pf.write_text(json.dumps([_make_ping("小红书", 300)]), encoding="utf-8")
+    result = _last_app_segment({"pings_file": str(pf)})
+    assert "📱 小红书 5m前" == result
+
+
+def test_pings_recent_seconds(tmp_path):
+    """Ping from 30 seconds ago → '📱 {app} 刚刚'."""
+    pf = tmp_path / "pings.json"
+    pf.write_text(json.dumps([_make_ping("微信", 30)]), encoding="utf-8")
+    result = _last_app_segment({"pings_file": str(pf)})
+    assert "📱 微信 刚刚" == result
+
+
+def test_pings_hours_old(tmp_path):
+    """Ping from 3 hours ago → '📱 {app} 3h前'."""
+    pf = tmp_path / "pings.json"
+    pf.write_text(json.dumps([_make_ping("抖音", 10800)]), encoding="utf-8")
+    result = _last_app_segment({"pings_file": str(pf)})
+    assert "📱 抖音 3h前" == result
+
+
+def test_pings_empty_file(tmp_path):
+    """Empty array → ''."""
+    pf = tmp_path / "pings.json"
+    pf.write_text("[]", encoding="utf-8")
+    result = _last_app_segment({"pings_file": str(pf)})
+    assert result == ""
+
+
+def test_pings_malformed_entry_falls_back_to_earlier_valid(tmp_path):
+    """Malformed entries are skipped; last valid entry is used."""
+    pf = tmp_path / "pings.json"
+    entries = [
+        _make_ping("telegram", 600),          # valid, 10m ago
+        {"app": "", "event": "open", "ts": datetime.now(timezone.utc).isoformat()},  # empty app
+        {"app": "微博", "event": "open", "ts": "not-a-date"},                         # bad ts
+    ]
+    pf.write_text(json.dumps(entries), encoding="utf-8")
+    result = _last_app_segment({"pings_file": str(pf)})
+    # Last valid entry is "telegram" 10m ago; the two malformed ones after it are skipped.
+    assert "📱 telegram 10m前" == result
+
+
+def test_pings_missing_file(tmp_path):
+    """Non-existent pings file → ''."""
+    result = _last_app_segment({"pings_file": str(tmp_path / "nonexistent.json")})
+    assert result == ""
+
+
+def test_pings_segment_in_vitals_line(isolated, monkeypatch, tmp_path):
+    """When pings_file is set, the 📱 segment appears in the full vitals line."""
+    _tmp, vf, make_cfg = isolated
+    snap = _make_snap()
+    _write_snap(vf, snap)
+    pf = tmp_path / "pings.json"
+    pf.write_text(json.dumps([_make_ping("YouTube", 120)]), encoding="utf-8")
+    cfg = make_cfg()
+    cfg["turn_inject"]["pings_file"] = str(pf)
+    monkeypatch.setattr(config, "load", lambda: cfg)
+    result = _vitals_fragment("sid_pings")
+    assert "📱 YouTube 2m前" in result
 
 
 def test_stray_space_keys_parsed(isolated, monkeypatch):

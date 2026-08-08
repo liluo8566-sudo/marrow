@@ -114,6 +114,53 @@ def _usage_threshold_context(sid: str, tpath: str) -> str:
         return ""
 
 
+def _last_app_segment(ti: dict) -> str:
+    """Return a '📱 {app} {age}' segment from pings_file, or '' if off/unavailable."""
+    try:
+        from pathlib import Path as _Path
+
+        pf = (ti.get("pings_file") or "").strip()
+        if not pf:
+            return ""
+        ppath = _Path(pf).expanduser()
+        try:
+            entries = json.loads(ppath.read_text(encoding="utf-8"))
+        except Exception:
+            return ""
+        if not isinstance(entries, list):
+            return ""
+
+        now_utc = datetime.now(timezone.utc)
+        last_app: str = ""
+        last_dt: datetime | None = None
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            app = (entry.get("app") or "").strip()
+            if not app:
+                continue
+            ts_str = (entry.get("ts") or "").strip()
+            try:
+                dt = datetime.fromisoformat(ts_str)
+            except Exception:
+                continue
+            last_app = app
+            last_dt = dt
+
+        if not last_app or last_dt is None:
+            return ""
+
+        age_s = (now_utc - last_dt.astimezone(timezone.utc)).total_seconds()
+        if age_s < 60:
+            return f"📱 {last_app} 刚刚"
+        elif age_s < 3600:
+            return f"📱 {last_app} {int(age_s // 60)}m前"
+        else:
+            return f"📱 {last_app} {int(age_s // 3600)}h前"
+    except Exception:
+        return ""
+
+
 def _vitals_fragment(sid: str) -> str:
     """Phone-vitals one-liner for per-turn context injection (config-gated).
 
@@ -233,6 +280,10 @@ def _vitals_fragment(sid: str) -> str:
                 segments.append(f"{temp} {weather}".strip())
             if steps:
                 segments.append(f"今日{steps}步")
+            # Last phone app segment (config-gated).
+            pings_seg = _last_app_segment(ti)
+            if pings_seg:
+                segments.append(pings_seg)
             line = " · ".join(segments)
 
         # Write state.
