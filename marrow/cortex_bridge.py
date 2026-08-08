@@ -1634,7 +1634,7 @@ def _cortex_user_wake_reset(inp: dict) -> None:
                     _wake_state_save(p, d2)
 
 
-# ── external wake (cortex.kick) ────────────────────────────────────────────────
+# ── cortex.toml readers ───────────────────────────────────────────────────────
 
 def _cortex_toml_path() -> Path:
     """cortex.toml lives beside marrow's config (shared config dir). Read
