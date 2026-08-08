@@ -326,6 +326,18 @@ def _sid_is_blocked(conn: sqlite3.Connection, sid: str) -> bool:
     return bool(row and row[0] == "archive")
 
 
+def _event_skip_prefixes() -> list[str]:
+    """Config-driven prefix list for the ingest-side skip filter
+    ([recall] event_skip_prefixes). Default empty = no filtering. Read at call
+    time so a watcher restart picks up config changes.
+    """
+    try:
+        raw = config.load().get("recall", {}).get("event_skip_prefixes", []) or []
+        return [str(p) for p in raw if str(p)]
+    except Exception:
+        return []
+
+
 def archive_events(conn: sqlite3.Connection, rows: list[dict]) -> int:
     # Write path for #7 SessionEnd. Idempotent by source_hash; re-run skips.
     # Defensive gate: drop rows whose sid has session_block=archive regardless
@@ -336,6 +348,8 @@ def archive_events(conn: sqlite3.Connection, rows: list[dict]) -> int:
     sessions: set[str] = set()
     inserted: list[dict] = []
     _blocked_cache: dict[str, bool] = {}
+    # Load once per call — avoids repeated TOML parses in the per-row loop.
+    _skip_pfx = _event_skip_prefixes()
     with conn:
         for r in rows:
             sid = r["session_id"]
@@ -347,6 +361,11 @@ def archive_events(conn: sqlite3.Connection, rows: list[dict]) -> int:
             # not real user speech: no DB row, no FTS, no embed, no recall. The
             # transcript file stays the audit trail.
             if r["role"] == "user" and is_machine_line(r["content"]):
+                continue
+            # Ingest-side skip: content starting with any configured prefix is
+            # never written to events/FTS/vec. Applies to transcript-extracted rows
+            # only (this is the sole archive_events choke point). Empty list = no-op.
+            if _skip_pfx and any(r["content"].startswith(p) for p in _skip_pfx):
                 continue
             h = _hash(sid, r["timestamp"], r["role"],
                       r["content"])

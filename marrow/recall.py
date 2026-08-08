@@ -35,9 +35,18 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# Group-chat events must not be embedded (FTS only).
-# Prefix is composed by synapse_tg loop.py _chat_meta() as "[群:<title> from:..."
-_GROUP_PREFIX = "[群:"
+def _embed_skip_prefixes() -> list[str]:
+    """Config-driven prefix list for the embed skip-list ([recall] embed_skip_prefixes).
+
+    Default empty = no filtering (upstream behavior). Read at call time so a
+    watcher restart picks up config changes without a code deploy.
+    """
+    try:
+        from . import config as _config
+        raw = _config.load().get("recall", {}).get("embed_skip_prefixes", []) or []
+        return [str(p) for p in raw if str(p)]
+    except Exception:
+        return []
 
 
 # ── embedder singleton ────────────────────────────────────────────────────────
@@ -432,14 +441,17 @@ def _embed_pending_lane(
         def _shape(text: str) -> str:
             return _media_tag.sub(" ", text or "").strip()
     pairs = [(r["id"], _shape(r["text"])) for r in rows]
-    # Events lane: group-chat messages must not enter the vector index — they
-    # are noise from external chats that pollute semantic recall. Insert a
-    # meta-only tombstone so pending_counts immediately drops them and the row
-    # is never re-queued. Check the raw content (pre-shape); the prefix always
-    # survives shaping unchanged.
+    # Events lane: rows whose raw content starts with any configured embed-skip
+    # prefix must not enter the vector index — they get a meta-only tombstone so
+    # pending_counts immediately drops them and the row is never re-queued. Check
+    # the raw content (pre-shape); prefixes always survive shaping unchanged.
+    # Empty prefix list = no filtering (zero overhead, upstream behavior).
     if lane == "events":
+        _skip_pfx = _embed_skip_prefixes()
         group_ids = [r["id"] for r in rows
-                     if (r["text"] or "").startswith(_GROUP_PREFIX)]
+                     if _skip_pfx and any(
+                         (r["text"] or "").startswith(p) for p in _skip_pfx
+                     )]
         if group_ids:
             mt = cfg["meta_table"]
             with conn:

@@ -171,6 +171,15 @@ event_context_window = 1
 # entry are stripped from the query before FTS + vec. Populate after reviewing
 # data collection results from the parallel stopword agent.
 stopwords = []
+# Embed skip-prefixes: events lane rows whose raw content starts with any
+# entry get a meta-only tombstone instead of a vector embedding (FTS still
+# works). Default empty = no filtering. Restart watcher to apply.
+# e.g. embed_skip_prefixes = ["[群:外卖群 ", "[群:邻居群 "]
+embed_skip_prefixes = []
+# Ingest skip-prefixes: transcript-extracted events whose content starts with
+# any entry are never written to events/FTS/vec at all. Default empty.
+# e.g. event_skip_prefixes = ["[群:外卖群 ", "[群:邻居群 "]
+event_skip_prefixes = []
 # Per-project recall-off (C3 groundwork, HANDOVER queue item 2): session cwd
 # starting with any entry skips recall injection entirely (hooks/recall_inject.py
 # user_prompt_submit, checked before query construction). Empty = no opt-out.

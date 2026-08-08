@@ -192,3 +192,64 @@ def test_archive_events_skips_machine_line_keeps_user_line(db, monkeypatch):
         "SELECT content FROM events WHERE session_id=?", (sid,)).fetchall()]
     assert contents == ["早安，今天做什么"]
     conn.close()
+
+
+# ── ingest-side event_skip_prefixes filter ────────────────────────────────────
+
+def test_archive_events_skips_configured_prefix(db, monkeypatch):
+    """Content starting with a configured event_skip_prefix is never written
+    to events/FTS/vec. Normal content in the same batch is inserted."""
+    from marrow import repo
+    monkeypatch.setattr(repo, "_event_skip_prefixes",
+                        lambda: ["[群:外卖群 ", "[群:邻居群 "])
+    conn = storage.connect(db)
+    sid = "skip-prefix-sid"
+    rows = [
+        {"session_id": sid, "timestamp": "2026-08-09T10:00:00Z",
+         "role": "user", "content": "[群:外卖群 from:骑手(55555)] 已到楼下"},
+        {"session_id": sid, "timestamp": "2026-08-09T10:01:00Z",
+         "role": "user", "content": "今天天气不错"},
+    ]
+    n = archive_events(conn, rows)
+    assert n == 1  # only the normal row inserted
+    contents = [r[0] for r in conn.execute(
+        "SELECT content FROM events WHERE session_id=?", (sid,)).fetchall()]
+    assert contents == ["今天天气不错"]
+    conn.close()
+
+
+def test_archive_events_non_configured_prefix_is_inserted(db, monkeypatch):
+    """A group prefix NOT in event_skip_prefixes (family group) must be
+    inserted normally."""
+    from marrow import repo
+    monkeypatch.setattr(repo, "_event_skip_prefixes",
+                        lambda: ["[群:外卖群 ", "[群:邻居群 "])
+    conn = storage.connect(db)
+    sid = "family-group-sid"
+    rows = [
+        {"session_id": sid, "timestamp": "2026-08-09T11:00:00Z",
+         "role": "user", "content": "[群:家群 from:妈妈(11111)] 回家吃饭"},
+    ]
+    n = archive_events(conn, rows)
+    assert n == 1  # family group is NOT in skip list -> inserted
+    assert conn.execute(
+        "SELECT COUNT(*) FROM events WHERE session_id=?", (sid,)
+    ).fetchone()[0] == 1
+    conn.close()
+
+
+def test_archive_events_empty_skip_prefix_inserts_all(db, monkeypatch):
+    """Empty event_skip_prefixes = upstream behavior: all rows inserted."""
+    from marrow import repo
+    monkeypatch.setattr(repo, "_event_skip_prefixes", lambda: [])
+    conn = storage.connect(db)
+    sid = "no-skip-sid"
+    rows = [
+        {"session_id": sid, "timestamp": "2026-08-09T12:00:00Z",
+         "role": "user", "content": "[群:任意群 from:某人(00001)] 随意消息"},
+        {"session_id": sid, "timestamp": "2026-08-09T12:01:00Z",
+         "role": "user", "content": "普通消息"},
+    ]
+    n = archive_events(conn, rows)
+    assert n == 2  # no filter = both inserted
+    conn.close()

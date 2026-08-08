@@ -711,10 +711,18 @@ def test_events_pending_shadow_rowids_equivalence(db):
 
 
 # ── F. group-chat exclusion from vector index ─────────────────────────────────
+# All three tests inject the skip-prefix config via monkeypatch so the filter
+# is config-driven (empty default = no filtering). The family group "[群:家群 "
+# is intentionally NOT in the skip list and must be embedded normally.
 
-def test_group_event_gets_meta_tombstone_no_vector(db):
-    """Group-prefixed events must receive a meta tombstone (FTS only) and
+_SKIP_PREFIXES = ["[群:测试群 ", "[群:重复群 ", "[群:计数群 ", "[群:外卖群 "]
+
+
+def test_group_event_gets_meta_tombstone_no_vector(db, monkeypatch):
+    """Configured-prefix events must receive a meta tombstone (FTS only) and
     must never appear in events_vec. Normal events beside them are embedded."""
+    monkeypatch.setattr(rm, "_embed_skip_prefixes", lambda: _SKIP_PREFIXES)
+
     group_content = "[群:测试群 from:小明(12345)] 大家好"
     normal_content = "今天天气很好"
     gid = _make_event(db, group_content, session_id="s-grp",
@@ -755,9 +763,11 @@ def test_group_event_gets_meta_tombstone_no_vector(db):
     ).fetchone()[0] == 0
 
 
-def test_group_event_tombstone_is_idempotent(db):
-    """Running embed_pending twice on a group-prefixed event must not write
+def test_group_event_tombstone_is_idempotent(db, monkeypatch):
+    """Running embed_pending twice on a configured-prefix event must not write
     duplicate meta rows and must leave embed() uncalled for that row."""
+    monkeypatch.setattr(rm, "_embed_skip_prefixes", lambda: _SKIP_PREFIXES)
+
     group_content = "[群:重复群 from:用户(99999)] 重复消息"
     gid = _make_event(db, group_content, session_id="s-idem",
                       timestamp="2026-08-09T09:00:00Z")
@@ -776,9 +786,11 @@ def test_group_event_tombstone_is_idempotent(db):
     mock_emb.embed.assert_not_called()
 
 
-def test_group_event_pending_counts_zero_after_tombstone(db):
-    """pending_counts must report 0 for events lane once group events have
-    been tombstoned (they no longer appear in the pending SQL)."""
+def test_group_event_pending_counts_zero_after_tombstone(db, monkeypatch):
+    """pending_counts must report 0 for events lane once configured-prefix
+    events have been tombstoned (they no longer appear in the pending SQL)."""
+    monkeypatch.setattr(rm, "_embed_skip_prefixes", lambda: _SKIP_PREFIXES)
+
     group_content = "[群:计数群 from:机器人(77777)] 自动消息"
     _make_event(db, group_content, session_id="s-cnt",
                 timestamp="2026-08-09T10:00:00Z")
@@ -797,3 +809,59 @@ def test_group_event_pending_counts_zero_after_tombstone(db):
     # After: pending count drops to 0
     post = rm.pending_counts(db)
     assert post.get("events", 0) == 0
+
+
+def test_non_configured_group_is_embedded_normally(db, monkeypatch):
+    """A group prefix NOT in embed_skip_prefixes (e.g. the family group) must
+    be embedded normally — no tombstone, full vec + meta rows written."""
+    # "[群:家群 " is the family group — intentionally absent from the skip list.
+    monkeypatch.setattr(rm, "_embed_skip_prefixes", lambda: _SKIP_PREFIXES)
+
+    family_content = "[群:家群 from:妈妈(11111)] 晚饭好了"
+    fid = _make_event(db, family_content, session_id="s-fam",
+                      timestamp="2026-08-09T11:00:00Z")
+
+    captured = {}
+    mock_emb = MagicMock()
+
+    def _embed(texts):
+        captured["texts"] = list(texts)
+        return np.stack([_fake_vec(1000 + i) for i, _ in enumerate(texts)])
+
+    mock_emb.embed.side_effect = _embed
+
+    with patch.object(rm, "_ensure_embedder", return_value=mock_emb):
+        n = rm.embed_pending(db, batch=10)
+
+    assert n == 1
+    assert captured.get("texts") == [family_content]
+
+    # Family group event: both meta and vector rows written (embedded, not tombstoned)
+    assert db.execute(
+        "SELECT COUNT(*) FROM events_vec_meta WHERE rowid=?", (fid,)
+    ).fetchone()[0] == 1
+    assert db.execute(
+        "SELECT COUNT(*) FROM events_vec WHERE rowid=?", (fid,)
+    ).fetchone()[0] == 1
+
+
+def test_empty_skip_prefix_embeds_all(db, monkeypatch):
+    """Empty embed_skip_prefixes = upstream behavior: all events embedded."""
+    monkeypatch.setattr(rm, "_embed_skip_prefixes", lambda: [])
+
+    group_content = "[群:任意群 from:某人(00001)] 测试消息"
+    gid = _make_event(db, group_content, session_id="s-empty",
+                      timestamp="2026-08-09T12:00:00Z")
+
+    mock_emb = MagicMock()
+    mock_emb.embed.side_effect = lambda texts: np.stack(
+        [_fake_vec(1100 + i) for i, _ in enumerate(texts)])
+
+    with patch.object(rm, "_ensure_embedder", return_value=mock_emb):
+        n = rm.embed_pending(db, batch=10)
+
+    # With no skip list, the event gets embedded normally
+    assert n == 1
+    assert db.execute(
+        "SELECT COUNT(*) FROM events_vec WHERE rowid=?", (gid,)
+    ).fetchone()[0] == 1
