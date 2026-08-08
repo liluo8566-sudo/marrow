@@ -6,7 +6,7 @@ import os
 import re as _re
 import sys
 from datetime import datetime, timezone
-from .. import config, cortex_bridge, outbox, repo, storage
+from .. import config, cortex_bridge, repo, storage
 from ..timeutil import (
     utc_iso_to_local_datetime,
     format_recall_ts,
@@ -229,20 +229,10 @@ def user_prompt_submit() -> int:
                     "suppressed (superseded epoch)")
                 return 0
             _note = cortex_bridge.wakeup_note_text(tpath)
-            # Merge any ct-targeted outbox notes into the wake payload — the
-            # normal delivery path below never runs on a wake turn, so ct notes
-            # must be consumed here (same atomic claim/consume ordering).
-            try:
-                _ob = outbox.deliver(
-                    inp.get("session_id") if isinstance(inp, dict) else None,
-                    "ct", is_cortex=True, db=config.db_path())
-            except Exception:
-                _ob = None
-            _payload = "\n\n".join(p for p in (_note, _ob) if p)
-            if _payload:
+            if _note:
                 json.dump({"hookSpecificOutput": {
                     "hookEventName": "UserPromptSubmit",
-                    "additionalContext": _payload,
+                    "additionalContext": _note,
                 }}, sys.stdout)
             return 0
         # Real user message (NOT a machine line down the ear channel) → user-wake
@@ -269,24 +259,9 @@ def user_prompt_submit() -> int:
     if prompt_text.startswith("===== BEGIN ORIGINAL TRANSCRIPT"):
         return 0
 
-    # Outbox delivery (cli/session/ct notes): claim + render notes targeting this
-    # session (exact sid, 'cli' broadcast for cli sessions, 'ct' for the cortex
-    # session), consume-once. The wake branch above delivers ct notes on a wake
-    # turn (and returns before here); a normal cortex turn never hits that branch,
-    # so ct notes must be claimed here too — same atomic claim resolves the race
-    # so a row taken by either path is never re-delivered. Seeds _nudge_line so it
-    # lands on every emit path (renders above recall / other nudges).
-    _is_ct_claimant = cortex_bridge.is_cortex_session(tpath)
+    # Nudge line: accumulated by the sticker / tl reminders below, rendered above
+    # recall on every emit path.
     _nudge_line: str | None = None
-    try:
-        _msg_note = outbox.deliver(
-            sid, os.environ.get("MARROW_CHANNEL") or "cli",
-            is_cortex=_is_ct_claimant,
-            db=config.db_path())
-        if _msg_note:
-            _nudge_line = _msg_note
-    except Exception:
-        pass
 
     # Sticker nudge: increment turn counter; flag nudge if 10 turns since last sticker.
     if sid and os.environ.get("MARROW_BRIDGE") == "1":

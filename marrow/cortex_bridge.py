@@ -383,18 +383,6 @@ def _shell_kick(shell: str) -> bool:
         return False
 
 
-def shell_direct(text: str, shell: str = "tg") -> dict:
-    """Directed kick: leave `text` in the shell's ledger (pending_note) and poke
-    its host. The host claims the text on its next pass and feeds it as that
-    round's turn — asleep shells wake for it, live ones take it next turn. Host
-    down = the text still lands on the host's next recompute tick."""
-    body = (text or "").strip()
-    if not body:
-        return {"ok": False, "error": "empty direction"}
-    shell_state_write({"pending_note": body}, shell=shell)
-    return {"ok": True, "shell": shell, "kicked": _shell_kick(shell)}
-
-
 def _log_shell_sleep_row(shell: str) -> int | None:
     """Insert this shell's ct_wake_log row for a voluntary lie_down, so the
     sleep ledger covers every shell, not just cli (the cli row is written by
@@ -552,11 +540,6 @@ def transfer(rotate: bool = False) -> dict:
     return out
 
 
-def say() -> dict:
-    """Pop-up the window to seek attention. Use when you really want to find me."""
-    return _run_cortex_module("cortex.say")
-
-
 # ── daemon registration ───────────────────────────────────────────────────────
 
 # DB the tools read/write. Set at register() time from the daemon's own _DB so
@@ -587,15 +570,11 @@ def register(marrow_tool, db: str | None = None) -> None:
     """Install the cortex MCP tools onto the daemon when [cortex].enabled.
 
     `marrow_tool` is daemon.marrow_tool (the alwaysLoad tool decorator). enabled
-    == False => no-op (none of the tools reach the schema). When enabled:
-      - wish registers for ALL sessions;
-      - first / goal are PENDING — not registered anywhere yet (no injection
-        mechanism wired; keep the functions + storage, just don't expose them);
-      - lie_down / transfer / say register ONLY in a cortex session (_CORTEX,
-        the import-time MARROW_CORTEX capture — the original inner env gate)
-        whose shell id is listed in [cortex].shells (shell resolved lazily
-        here); lie_down and transfer serve every listed shell, say the cli
-        shell only.
+    == False => no-op (none of the tools reach the schema). When enabled,
+    lie_down / transfer register ONLY in a cortex session (_CORTEX, the
+    import-time MARROW_CORTEX capture — the original inner env gate) whose
+    shell id is listed in [cortex].shells (shell resolved lazily here); both
+    serve every listed shell.
     Idempotent per process (FastMCP tolerates re-adding the same tool name)."""
     global _DB
     if db is not None:
@@ -613,8 +592,6 @@ def register(marrow_tool, db: str | None = None) -> None:
         marrow_tool()(lie_down)
         transfer.__doc__ = _TRANSFER_DOC
         marrow_tool()(transfer)
-        if shell == "cli":
-            marrow_tool()(say)
 
 
 # ── hooks: kickout immunity / lie_down nudge / handoff page-turn / show 亮牌 ────
@@ -784,8 +761,7 @@ def _render_note_fresh(transcript_path: str | None,
         return None
     py = str(Path(py).expanduser())
     root = str(Path(root).expanduser())
-    # --no-ct: the wake-branch hook delivers ct notes via outbox.deliver, so the
-    # fresh render must not also peek them (would double them in one payload).
+    # --no-ct: the renderer must not append its own ct-note section here.
     # --mirror: the renderer itself writes this shell's section of the on-disk
     # note (cortex owns that file format — see cortex/note_file.py), so marrow
     # never rewrites the whole file and never clobbers another shell.

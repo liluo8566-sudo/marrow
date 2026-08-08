@@ -91,12 +91,9 @@ from .recall_inject import (  # noqa: F401
 )
 from .state import (  # noqa: F401
     _RECALL_TZ,
-    _load_outbound_cursor,
     _load_recall_seen,
     _load_sticker_nudge,
-    _outbound_notes,
     _prune_recall_logs,
-    _save_outbound_cursor,
     _save_recall_seen,
     _save_sticker_nudge,
 )

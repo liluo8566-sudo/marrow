@@ -58,7 +58,6 @@ def cortex_env(tmp_path, monkeypatch):
             "handoff_file": "handoff.md",
             "wake_signal_log_file": "state/wake_signal.log",
         },
-        "outbox": {"inject_header": "📮 Message from {channel}·{sid4} {time}"},
         "recall": {"exclude_cwds": []},
         "replay": {"enabled": False},
     })

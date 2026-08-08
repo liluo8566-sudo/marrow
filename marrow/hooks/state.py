@@ -1,5 +1,5 @@
 """Per-session hook state files: recall dedup, sticker nudge,
-ct cursor, outbound cursor, ct_activity, recall logs."""
+ct cursor, ct_activity, recall logs."""
 from __future__ import annotations
 
 import json
@@ -7,7 +7,7 @@ import re as _re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from .. import config, replay, storage, transcript
+from .. import config
 
 _RECALL_TZ = config.get_tz()
 
@@ -120,108 +120,6 @@ def _save_ct_cursor(sid: str, last_uuid: str | None, offset: int) -> None:
         p.write_text(json.dumps({"last_uuid": last_uuid, "offset": offset}))
     except Exception:
         pass
-
-
-# ── own-channel outbound-note cursor (turn_inject, F6) ───────────────────────
-# One file per sid holding the last-rendered outbox.sent_at, same dir pattern as
-# replay. Absent = first sight → seed to MAX(sent_at), future-only. Advance is
-# monotonic forward-only (cutoff = max sent_at of the rendered subset), so a
-# note surfaced once is never re-injected.
-
-def _outbound_cursor_path(sid: str) -> Path:
-    return config.DATA_DIR / "state" / "outbound" / f"{sid}"
-
-
-def _load_outbound_cursor(sid: str) -> str | None:
-    """Cursor value, or None only when never seeded (file absent). A seeded but
-    empty baseline (first sight with no notes yet) returns "" — distinct from
-    None so it is not re-seeded and past notes surface once."""
-    if not sid:
-        return None
-    try:
-        return _outbound_cursor_path(sid).read_text().strip()
-    except Exception:
-        return None
-
-
-def _save_outbound_cursor(sid: str, sent_at: str) -> None:
-    """Persist the cursor. An empty string is a valid seed (file present but no
-    baseline yet) — write it so the sid counts as seeded."""
-    if not sid:
-        return
-    p = _outbound_cursor_path(sid)
-    try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(str(sent_at or ""))
-    except Exception:
-        pass
-
-
-def _outbound_notes(sid: str, channel: str) -> str:
-    """F6 own-channel note visibility. A bridge sends an outbound note on a
-    channel (e.g. cortex→tg) straight to the wire, bypassing that channel's
-    resident session — so she later replies to a note it never saw. This surfaces
-    the notes bridge-delivered on THIS channel since the per-sid cursor, so the
-    resident session sees them before her reply.
-
-    Reads outbox rows with target=channel, status='sent', sent_at past the cursor
-    (already-delivered outbound notes only — never her replies). First sight seeds
-    the cursor to MAX(sent_at) (future-only, no backfill). Advance is monotonic
-    forward-only to the max rendered sent_at, so a note is surfaced exactly once.
-    Data already in outbox — no writes to the DB, no transcript writes."""
-    if not sid or not channel:
-        return ""
-    cfg = (config.load().get("outbox", {}) or {})
-    if channel not in (cfg.get("wire_channels", ["tg", "wx"]) or []):
-        return ""  # cli/ct/session are delivered inline by outbox.deliver
-    header = cfg.get("own_note_header", "📤 Sent on this channel")
-    per_chars = int(
-        (config.load().get("replay", {}) or {}).get("per_msg_chars", 150)
-    )
-    conn = storage.connect(config.db_path())
-    try:
-        since = _load_outbound_cursor(sid)
-        if since is None:
-            row = conn.execute(
-                "SELECT MAX(sent_at) AS m FROM outbox"
-                " WHERE target = ? AND status = 'sent'",
-                (channel,),
-            ).fetchone()
-            seed = (row["m"] if row else None) or ""
-            _save_outbound_cursor(sid, seed or "")
-            return ""  # first sight — future-only, never backfill
-        where_since = " AND sent_at > ?" if since else ""
-        params = (channel,) + ((since,) if since else ())
-        rows = conn.execute(
-            "SELECT id, body, sent_at FROM outbox"
-            " WHERE target = ? AND status = 'sent' AND sent_at IS NOT NULL"
-            + where_since + " ORDER BY sent_at ASC, id ASC",
-            params,
-        ).fetchall()
-    except sqlite3.OperationalError:
-        return ""
-    finally:
-        conn.close()
-
-    if not rows:
-        return ""
-
-    tz = config.get_tz()
-    lines = [header]
-    cutoff = since
-    for r in rows:
-        sent_at = r["sent_at"]
-        if sent_at and (not cutoff or str(sent_at) > str(cutoff)):
-            cutoff = sent_at
-        hm = replay.local_hm(sent_at, tz)
-        body = replay.truncate(transcript.strip_media_markers(r["body"]) or "", per_chars)
-        lines.append(f"[{hm}] {body}")
-
-    # Monotonic forward-only advance to the max rendered sent_at (F8 semantics).
-    if cutoff and (not since or str(cutoff) > str(since)):
-        _save_outbound_cursor(sid, str(cutoff))
-
-    return "\n".join(lines)
 
 
 def _ensure_ct_activity(conn: sqlite3.Connection) -> None:
