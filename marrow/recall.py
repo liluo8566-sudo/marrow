@@ -35,6 +35,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Group-chat events must not be embedded (FTS only).
+# Prefix is composed by synapse_tg loop.py _chat_meta() as "[群:<title> from:..."
+_GROUP_PREFIX = "[群:"
+
+
 # ── embedder singleton ────────────────────────────────────────────────────────
 
 _BGE_M3_HF_ID = "BAAI/bge-m3"
@@ -427,6 +432,24 @@ def _embed_pending_lane(
         def _shape(text: str) -> str:
             return _media_tag.sub(" ", text or "").strip()
     pairs = [(r["id"], _shape(r["text"])) for r in rows]
+    # Events lane: group-chat messages must not enter the vector index — they
+    # are noise from external chats that pollute semantic recall. Insert a
+    # meta-only tombstone so pending_counts immediately drops them and the row
+    # is never re-queued. Check the raw content (pre-shape); the prefix always
+    # survives shaping unchanged.
+    if lane == "events":
+        group_ids = [r["id"] for r in rows
+                     if (r["text"] or "").startswith(_GROUP_PREFIX)]
+        if group_ids:
+            mt = cfg["meta_table"]
+            with conn:
+                for rid in group_ids:
+                    conn.execute(
+                        f"INSERT OR IGNORE INTO {mt}(rowid, embedder_id, dim) "
+                        f"VALUES(?, ?, ?)",
+                        (rid, embedder_id, dim),
+                    )
+            pairs = [(i, t) for i, t in pairs if i not in set(group_ids)]
     # Guard: if shaping strips a row down to empty, skip embedding it — leave
     # it for the whole-row junk logic (transcript._is_harness_row / repair
     # script). Should not happen post-repair (bare marker rows are junk-

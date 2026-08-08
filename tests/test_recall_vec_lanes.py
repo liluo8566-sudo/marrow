@@ -708,3 +708,92 @@ def test_events_pending_shadow_rowids_equivalence(db):
     assert eid_b not in new_ids, "embedded row must not be pending"
     assert eid_c not in new_ids, "evicted row must not be pending"
     assert eid_d not in new_ids, "vec-only row must not be pending"
+
+
+# ── F. group-chat exclusion from vector index ─────────────────────────────────
+
+def test_group_event_gets_meta_tombstone_no_vector(db):
+    """Group-prefixed events must receive a meta tombstone (FTS only) and
+    must never appear in events_vec. Normal events beside them are embedded."""
+    group_content = "[群:测试群 from:小明(12345)] 大家好"
+    normal_content = "今天天气很好"
+    gid = _make_event(db, group_content, session_id="s-grp",
+                      timestamp="2026-08-09T08:00:00Z")
+    nid = _make_event(db, normal_content, session_id="s-nrm",
+                      timestamp="2026-08-09T08:01:00Z")
+
+    captured = {}
+    mock_emb = MagicMock()
+
+    def _embed(texts):
+        captured["texts"] = list(texts)
+        return np.stack([_fake_vec(800 + i) for i, _ in enumerate(texts)])
+
+    mock_emb.embed.side_effect = _embed
+
+    with patch.object(rm, "_ensure_embedder", return_value=mock_emb):
+        n = rm.embed_pending(db, batch=10)
+
+    # Only the normal event should have been embedded
+    assert n == 1
+    assert captured.get("texts") == [normal_content]
+
+    # Normal event: both meta and vector rows written
+    assert db.execute(
+        "SELECT COUNT(*) FROM events_vec_meta WHERE rowid=?", (nid,)
+    ).fetchone()[0] == 1
+    assert db.execute(
+        "SELECT COUNT(*) FROM events_vec WHERE rowid=?", (nid,)
+    ).fetchone()[0] == 1
+
+    # Group event: meta tombstone present, no vector
+    assert db.execute(
+        "SELECT COUNT(*) FROM events_vec_meta WHERE rowid=?", (gid,)
+    ).fetchone()[0] == 1
+    assert db.execute(
+        "SELECT COUNT(*) FROM events_vec WHERE rowid=?", (gid,)
+    ).fetchone()[0] == 0
+
+
+def test_group_event_tombstone_is_idempotent(db):
+    """Running embed_pending twice on a group-prefixed event must not write
+    duplicate meta rows and must leave embed() uncalled for that row."""
+    group_content = "[群:重复群 from:用户(99999)] 重复消息"
+    gid = _make_event(db, group_content, session_id="s-idem",
+                      timestamp="2026-08-09T09:00:00Z")
+
+    mock_emb = MagicMock()
+    mock_emb.embed.side_effect = lambda texts: np.stack(
+        [_fake_vec(900 + i) for i, _ in enumerate(texts)])
+
+    with patch.object(rm, "_ensure_embedder", return_value=mock_emb):
+        rm.embed_pending(db, batch=10)
+        rm.embed_pending(db, batch=10)  # second run
+
+    assert db.execute(
+        "SELECT COUNT(*) FROM events_vec_meta WHERE rowid=?", (gid,)
+    ).fetchone()[0] == 1  # INSERT OR IGNORE kept it at 1
+    mock_emb.embed.assert_not_called()
+
+
+def test_group_event_pending_counts_zero_after_tombstone(db):
+    """pending_counts must report 0 for events lane once group events have
+    been tombstoned (they no longer appear in the pending SQL)."""
+    group_content = "[群:计数群 from:机器人(77777)] 自动消息"
+    _make_event(db, group_content, session_id="s-cnt",
+                timestamp="2026-08-09T10:00:00Z")
+
+    mock_emb = MagicMock()
+    mock_emb.embed.side_effect = lambda texts: np.stack(
+        [_fake_vec(950 + i) for i, _ in enumerate(texts)])
+
+    # Before embed_pending: group event is pending
+    pre = rm.pending_counts(db)
+    assert pre.get("events", 0) == 1
+
+    with patch.object(rm, "_ensure_embedder", return_value=mock_emb):
+        rm.embed_pending(db, batch=10)
+
+    # After: pending count drops to 0
+    post = rm.pending_counts(db)
+    assert post.get("events", 0) == 0
