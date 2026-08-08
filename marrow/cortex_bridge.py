@@ -1666,32 +1666,6 @@ def _cortex_toml_section(section: str, key: str, default):
         return default
 
 
-def kick_cortex(kind: str, note_id=None, minutes=None) -> None:
-    """Fire cortex.kick as a detached, fire-and-forget subprocess in the cortex
-    venv (marrow venv cannot import cortex). Never blocks the caller; any launch
-    failure is swallowed. `kind` in {reply, timeout, note}."""
-    py, root = _cortex_paths()
-    if not py or not root:
-        return
-    py = str(Path(py).expanduser())
-    root = str(Path(root).expanduser())
-    argv = [py, "-m", "cortex.kick", "--kind", str(kind)]
-    if note_id is not None:
-        argv += ["--note-id", str(note_id)]
-    if minutes is not None:
-        argv += ["--minutes", str(minutes)]
-    try:
-        log = _cortex_path("wake_audit_log_file", "state/wake_audit.log").with_suffix(".kick.log")
-        log.parent.mkdir(parents=True, exist_ok=True)
-        f = open(log, "a")
-        subprocess.Popen(
-            argv, cwd=root, stdout=f, stderr=f, stdin=subprocess.DEVNULL,
-            start_new_session=True, env={**os.environ},
-        )
-    except OSError:
-        pass
-
-
 _HANDOFF_LOG_DATE_RE = _re.compile(r"^###\s*(\d{4}-\d{2}-\d{2})\b")
 _HANDOFF_UNCHECKED_RE = _re.compile(r"^\s*(?:-\s*)?\[\s*\]")
 _HANDOFF_HEADING_RE = _re.compile(r"^#{1,6}\s")
