@@ -44,6 +44,11 @@ def _embed_skip_prefixes() -> list[str]:
     try:
         from . import config as _config
         raw = _config.load().get("recall", {}).get("embed_skip_prefixes", []) or []
+        if not isinstance(raw, list):
+            logger.warning(
+                "embed_skip_prefixes must be a TOML array, got %r — ignoring", raw
+            )
+            return []
         return [str(p) for p in raw if str(p)]
     except Exception:
         return []
@@ -309,7 +314,26 @@ def embed_event(
     embedder_id: str = "bge-m3",
     dim: int = 1024,
 ) -> bool:
-    """Embed one event and write events_vec + events_vec_meta. Idempotent."""
+    """Embed one event and write events_vec + events_vec_meta. Idempotent.
+
+    Checks embed_skip_prefixes before embedding — skip-prefix rows get a
+    meta-only tombstone (embedder_id='skip') so they stay out of vec recall.
+    """
+    _skip_pfx = _embed_skip_prefixes()
+    if _skip_pfx and any(text.startswith(p) for p in _skip_pfx):
+        cfg = _LANES["events"]
+        mt = cfg["meta_table"]
+        exists = conn.execute(
+            f"SELECT 1 FROM {mt} WHERE rowid=?", (event_id,)
+        ).fetchone()
+        if not exists:
+            with conn:
+                conn.execute(
+                    f"INSERT OR IGNORE INTO {mt}(rowid, embedder_id, dim) "
+                    f"VALUES(?, 'skip', 0)",
+                    (event_id,),
+                )
+        return False
     return _embed_one(conn, "events", event_id, text, embedder_id, dim)
 
 
@@ -441,27 +465,36 @@ def _embed_pending_lane(
         def _shape(text: str) -> str:
             return _media_tag.sub(" ", text or "").strip()
     pairs = [(r["id"], _shape(r["text"])) for r in rows]
-    # Events lane: rows whose raw content starts with any configured embed-skip
+    # Events lane: rows whose shaped content starts with any configured embed-skip
     # prefix must not enter the vector index — they get a meta-only tombstone so
     # pending_counts immediately drops them and the row is never re-queued. Check
-    # the raw content (pre-shape); prefixes always survive shaping unchanged.
+    # the shaped text (already in pairs) so that rows stored as
+    # "[time: ...]\n[群:...]" are correctly matched after _shape strips the anchor.
     # Empty prefix list = no filtering (zero overhead, upstream behavior).
     if lane == "events":
         _skip_pfx = _embed_skip_prefixes()
-        group_ids = [r["id"] for r in rows
-                     if _skip_pfx and any(
-                         (r["text"] or "").startswith(p) for p in _skip_pfx
-                     )]
+        group_ids: list[int] = []
+        if _skip_pfx:
+            group_ids = [eid for eid, shaped in pairs
+                         if any(shaped.startswith(p) for p in _skip_pfx)]
+        tombstoned = 0
         if group_ids:
+            _skip_set = set(group_ids)
             mt = cfg["meta_table"]
+            # Use embedder_id="skip" to distinguish these intentional tombstones
+            # from real eviction tombstones and poisoned meta. repair_vec_meta.py
+            # must exclude embedder_id='skip' rows from its poisoned_meta predicate.
             with conn:
                 for rid in group_ids:
                     conn.execute(
                         f"INSERT OR IGNORE INTO {mt}(rowid, embedder_id, dim) "
-                        f"VALUES(?, ?, ?)",
-                        (rid, embedder_id, dim),
+                        f"VALUES(?, 'skip', 0)",
+                        (rid,),
                     )
-            pairs = [(i, t) for i, t in pairs if i not in set(group_ids)]
+                    tombstoned += 1
+            pairs = [(i, t) for i, t in pairs if i not in _skip_set]
+    else:
+        tombstoned = 0
     # Guard: if shaping strips a row down to empty, skip embedding it — leave
     # it for the whole-row junk logic (transcript._is_harness_row / repair
     # script). Should not happen post-repair (bare marker rows are junk-
@@ -469,7 +502,7 @@ def _embed_pending_lane(
     ids = [i for i, t in pairs if t]
     texts = [t for i, t in pairs if t]
     if not texts:
-        return 0
+        return tombstoned
     _CHUNK = 50
     chunks = [texts[i:i + _CHUNK] for i in range(0, len(texts), _CHUNK)]
     vecs = np.concatenate([emb.embed(c) for c in chunks], axis=0)
@@ -494,7 +527,7 @@ def _embed_pending_lane(
                 (rid, embedder_id, dim),
             )
             written += 1
-    return written
+    return written + tombstoned
 
 
 def embed_pending(

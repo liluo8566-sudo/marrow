@@ -4,10 +4,27 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from .. import config, cortex_bridge, replay, storage
 from ._shared import _read_input
 from .state import _outbound_notes
+
+# Per-process config cache: re-reads TOML at most once per second so the hook
+# hot path (~5 config.load() calls per prompt) becomes ~5 dict lookups instead.
+_CFG_CACHE: dict = {}
+_CFG_CACHE_TS: float = 0.0
+_CFG_CACHE_TTL: float = 1.0
+
+
+def _load_cfg() -> dict:
+    global _CFG_CACHE, _CFG_CACHE_TS
+    now = time.monotonic()
+    if now - _CFG_CACHE_TS < _CFG_CACHE_TTL and _CFG_CACHE:
+        return _CFG_CACHE
+    _CFG_CACHE = config.load()
+    _CFG_CACHE_TS = now
+    return _CFG_CACHE
 
 def _in_time_window(now_min: int, start: str, end: str) -> bool:
     """Minute-of-day membership; wraps past midnight when end <= start."""
@@ -114,53 +131,6 @@ def _usage_threshold_context(sid: str, tpath: str) -> str:
         return ""
 
 
-def _last_app_segment(ti: dict) -> str:
-    """Return a '📱 {app} {age}' segment from pings_file, or '' if off/unavailable."""
-    try:
-        from pathlib import Path as _Path
-
-        pf = (ti.get("pings_file") or "").strip()
-        if not pf:
-            return ""
-        ppath = _Path(pf).expanduser()
-        try:
-            entries = json.loads(ppath.read_text(encoding="utf-8"))
-        except Exception:
-            return ""
-        if not isinstance(entries, list):
-            return ""
-
-        now_utc = datetime.now(timezone.utc)
-        last_app: str = ""
-        last_dt: datetime | None = None
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            app = (entry.get("app") or "").strip()
-            if not app:
-                continue
-            ts_str = (entry.get("ts") or "").strip()
-            try:
-                dt = datetime.fromisoformat(ts_str)
-            except Exception:
-                continue
-            last_app = app
-            last_dt = dt
-
-        if not last_app or last_dt is None:
-            return ""
-
-        age_s = (now_utc - last_dt.astimezone(timezone.utc)).total_seconds()
-        if age_s < 60:
-            return f"📱 {last_app} 刚刚"
-        elif age_s < 3600:
-            return f"📱 {last_app} {int(age_s // 60)}m前"
-        else:
-            return f"📱 {last_app} {int(age_s // 3600)}h前"
-    except Exception:
-        return ""
-
-
 def _phone_app_fragment(sid: str) -> str:
     """Independent per-session gate for the 📱 phone-app segment.
 
@@ -173,7 +143,7 @@ def _phone_app_fragment(sid: str) -> str:
     First turn of a session: emits if a ping exists (fresh context).
     """
     try:
-        ti = config.load().get("turn_inject", {}) or {}
+        ti = _load_cfg().get("turn_inject", {}) or {}
         pf = (ti.get("pings_file") or "").strip()
         if not pf:
             return ""
@@ -192,6 +162,7 @@ def _phone_app_fragment(sid: str) -> str:
         last_app: str = ""
         last_dt: datetime | None = None
         last_ts_str: str = ""
+        best_dt: datetime | None = None
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
@@ -201,11 +172,16 @@ def _phone_app_fragment(sid: str) -> str:
             ts_str = (entry.get("ts") or "").strip()
             try:
                 dt = datetime.fromisoformat(ts_str)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
             except Exception:
                 continue
-            last_app = app
-            last_dt = dt
-            last_ts_str = ts_str
+            # Use max-by-ts so out-of-order entries don't produce stale "latest".
+            if best_dt is None or dt > best_dt:
+                best_dt = dt
+                last_app = app
+                last_dt = dt
+                last_ts_str = ts_str
 
         if not last_app or last_dt is None:
             return ""
@@ -214,6 +190,14 @@ def _phone_app_fragment(sid: str) -> str:
         state_dir = config.DATA_DIR / "state" / "pings_inject"
         state_dir.mkdir(parents=True, exist_ok=True)
         state_file = state_dir / sid
+        # Prune state files older than 7 days.
+        try:
+            cutoff = datetime.now(timezone.utc).timestamp() - 7 * 86400
+            for f in state_dir.iterdir():
+                if f.is_file() and f.stat().st_mtime < cutoff:
+                    f.unlink(missing_ok=True)
+        except Exception:
+            pass
 
         stored_ts: str = ""
         try:
@@ -225,7 +209,7 @@ def _phone_app_fragment(sid: str) -> str:
             return ""
 
         # New ping — emit and stamp.
-        age_s = (now_utc - last_dt.astimezone(timezone.utc)).total_seconds()
+        age_s = (now_utc - last_dt).total_seconds()
         if age_s < 60:
             seg = f"📱 {last_app} 刚刚"
         elif age_s < 3600:
@@ -251,7 +235,7 @@ def _vitals_fragment(sid: str) -> str:
     state/vitals_inject/<sid> JSON so subsequent calls can gate correctly.
     """
     try:
-        ti = config.load().get("turn_inject", {}) or {}
+        ti = _load_cfg().get("turn_inject", {}) or {}
         vf = (ti.get("vitals_file") or "").strip()
         if not vf:
             return ""
@@ -268,32 +252,39 @@ def _vitals_fragment(sid: str) -> str:
         # Strip stray leading/trailing spaces from keys (some producers add them).
         snap = {k.strip(): v for k, v in raw.items()}
 
-        interval_min = int(ti.get("vitals_interval_min", 60) or 60)
-        stale_min = int(ti.get("vitals_stale_min", 90) or 90)
+        _iv = ti.get("vitals_interval_min")
+        interval_min = int(_iv) if _iv is not None else 60
+        _sm = ti.get("vitals_stale_min")
+        stale_min = int(_sm) if _sm is not None else 90
         zones = ti.get("vitals_zones") or []
 
-        # Parse timestamp.
+        # Parse timestamp. Tracker writes naive UTC; treat naive as UTC explicitly.
         ts_str = snap.get("ts", "")
         snap_dt: datetime | None = None
         try:
             snap_dt = datetime.fromisoformat(ts_str)
+            if snap_dt.tzinfo is None:
+                snap_dt = snap_dt.replace(tzinfo=timezone.utc)
         except Exception:
             pass
 
         age_s: float = float("inf")
         if snap_dt is not None:
-            age_s = (datetime.now(timezone.utc) - snap_dt.astimezone(timezone.utc)).total_seconds()
+            age_s = (datetime.now(timezone.utc) - snap_dt).total_seconds()
 
         stale = age_s > stale_min * 60
 
-        # Resolve zone label.
+        # Resolve zone label. None when lat/lon missing — don't crash, don't
+        # write an empty zone label to state (would trigger false zone-change on
+        # next location-bearing turn and render a dangling "📍 " line).
         lat_s = snap.get("lat", "")
         lon_s = snap.get("lon", "")
-        zone_label: str = ""
+        zone_label: str | None = None
         try:
             lat = float(lat_s)
             lon = float(lon_s)
             best_dist = float("inf")
+            resolved = ""
             for z in zones:
                 zlat = float(z.get("lat", 0))
                 zlon = float(z.get("lon", 0))
@@ -304,16 +295,23 @@ def _vitals_fragment(sid: str) -> str:
                 dist = math.sqrt(dlat ** 2 + dlon ** 2)
                 if dist <= r and dist < best_dist:
                     best_dist = dist
-                    zone_label = str(z.get("name", ""))
-            if not zone_label:
-                zone_label = f"外面({lat:.4f},{lon:.4f})"
+                    resolved = str(z.get("name", ""))
+            zone_label = resolved if resolved else f"外面({lat:.4f},{lon:.4f})"
         except Exception:
-            zone_label = ""
+            zone_label = None  # no valid coordinates in this snapshot
 
         # Throttle state.
         state_dir = config.DATA_DIR / "state" / "vitals_inject"
         state_dir.mkdir(parents=True, exist_ok=True)
         state_file = state_dir / sid
+        # Prune state files older than 7 days to keep the dir bounded.
+        try:
+            cutoff = now_epoch - 7 * 86400
+            for f in state_dir.iterdir():
+                if f.is_file() and f.stat().st_mtime < cutoff:
+                    f.unlink(missing_ok=True)
+        except Exception:
+            pass
 
         now_epoch = datetime.now(timezone.utc).timestamp()
         last_ts: float = 0.0
@@ -325,11 +323,11 @@ def _vitals_fragment(sid: str) -> str:
         except Exception:
             pass
 
-        first_turn = last_ts == 0.0
-        zone_changed = (zone_label != last_zone) and not stale
+        # zone_changed only when we have a real zone label to compare.
+        zone_changed = (zone_label is not None and zone_label != last_zone) and not stale
         interval_elapsed = (now_epoch - last_ts) >= interval_min * 60
 
-        if not first_turn and not zone_changed and not interval_elapsed:
+        if not zone_changed and not interval_elapsed:
             return ""
 
         # Build the line.
@@ -348,14 +346,16 @@ def _vitals_fragment(sid: str) -> str:
             if snap_dt is not None:
                 tz_local = config.get_tz()
                 local_time = snap_dt.astimezone(tz_local).strftime("%H:%M")
-            parts = [f"📍 ⚠️ 手机{age_str}没上报 · 最后: {zone_label}"]
+            loc_part = f" · 最后: {zone_label}" if zone_label is not None else ""
+            parts = [f"📍 ⚠️ 手机{age_str}没上报{loc_part}"]
             if batt:
                 parts.append(f"🔋{batt}%")
             if local_time:
                 parts.append(f"({local_time})")
             line = " ".join(parts)
         else:
-            segments = [f"📍 {zone_label}"]
+            loc_seg = f"📍 {zone_label}" if zone_label is not None else "📍"
+            segments = [loc_seg]
             if batt:
                 segments.append(f"🔋{batt}%")
             if temp or weather:
@@ -364,10 +364,11 @@ def _vitals_fragment(sid: str) -> str:
                 segments.append(f"今日{steps}步")
             line = " · ".join(segments)
 
-        # Write state.
+        # Write state — only update zone when we resolved one.
+        saved_zone = zone_label if zone_label is not None else last_zone
         try:
             state_file.write_text(
-                json.dumps({"ts": now_epoch, "zone": zone_label}),
+                json.dumps({"ts": now_epoch, "zone": saved_zone}),
                 encoding="utf-8",
             )
         except Exception:

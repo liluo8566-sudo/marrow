@@ -171,14 +171,16 @@ event_context_window = 1
 # entry are stripped from the query before FTS + vec. Populate after reviewing
 # data collection results from the parallel stopword agent.
 stopwords = []
-# Embed skip-prefixes: events lane rows whose raw content starts with any
+# Embed skip-prefixes: events lane rows whose shaped content starts with any
 # entry get a meta-only tombstone instead of a vector embedding (FTS still
 # works). Default empty = no filtering. Restart watcher to apply.
-# e.g. embed_skip_prefixes = ["[群:外卖群 ", "[群:邻居群 "]
+# Blanket form (all TG group chats): embed_skip_prefixes = ["[群:"]
+# Per-group form: embed_skip_prefixes = ["[群:外卖群 ", "[群:邻居群 "]
 embed_skip_prefixes = []
 # Ingest skip-prefixes: transcript-extracted events whose content starts with
 # any entry are never written to events/FTS/vec at all. Default empty.
-# e.g. event_skip_prefixes = ["[群:外卖群 ", "[群:邻居群 "]
+# Blanket form: event_skip_prefixes = ["[群:"]
+# Per-group form: event_skip_prefixes = ["[群:外卖群 ", "[群:邻居群 "]
 event_skip_prefixes = []
 # Per-project recall-off (C3 groundwork, HANDOVER queue item 2): session cwd
 # starting with any entry skips recall injection entirely (hooks/recall_inject.py
@@ -265,6 +267,9 @@ vitals_file = ""
 vitals_interval_min = 60
 vitals_stale_min = 90
 vitals_zones = []   # e.g. [{ name = "home", lat = 10.0, lon = 20.0, radius_m = 300 }]
+# Phone-app pings file: JSON array of {app, event, ts} records from phone shortcuts.
+# Empty = off.
+pings_file = ""
 
 # Per-turn care directive injected every UserPromptSubmit (config-first).
 # Emotion-first, preference-style wording. Edit freely — no code change.

@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from marrow import config
-from marrow.hooks.inject import _vitals_fragment, _last_app_segment, _phone_app_fragment
+from marrow.hooks.inject import _vitals_fragment, _phone_app_fragment
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -48,6 +48,16 @@ def _make_snap(extra: dict | None = None, offset_s: int = 30) -> dict:
 
 def _write_snap(path: Path, snap: dict) -> None:
     path.write_text(json.dumps(snap), encoding="utf-8")
+
+
+@pytest.fixture(autouse=True)
+def _clear_inject_cfg_cache():
+    """Clear the inject module config cache before each test so monkeypatched
+    config.load values are always picked up immediately."""
+    import marrow.hooks.inject as _inj
+    _inj._CFG_CACHE.clear()
+    yield
+    _inj._CFG_CACHE.clear()
 
 
 @pytest.fixture()
@@ -188,7 +198,9 @@ def test_throttle_interval_elapsed_injects(isolated, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# _last_app_segment tests
+# _phone_app_fragment format tests (live path, was: _last_app_segment)
+# These redirect the old _last_app_segment unit tests to the live path.
+# Each uses a unique sid so the new-ping gate never blocks the first call.
 # ---------------------------------------------------------------------------
 
 def _make_ping(app: str, offset_s: int) -> dict:
@@ -200,52 +212,76 @@ def _make_pings_cfg(pings_path: Path) -> dict:
     return {"pings_file": str(pings_path)}
 
 
-def test_pings_off_when_key_unset():
+def _pings_cfg(tmp_path, pf_path, monkeypatch):
+    """Monkeypatch config so _phone_app_fragment uses tmp_path state + given pings file."""
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    base = config.load()
+    base.setdefault("turn_inject", {})["pings_file"] = str(pf_path)
+    monkeypatch.setattr(config, "load", lambda: base)
+
+
+def test_pings_off_when_key_unset(tmp_path, monkeypatch):
     """Returns '' when pings_file is absent from config."""
-    result = _last_app_segment({})
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    base = config.load()
+    base.setdefault("turn_inject", {})["pings_file"] = ""
+    monkeypatch.setattr(config, "load", lambda: base)
+    result = _phone_app_fragment("sid_pings_unset")
     assert result == ""
 
 
-def test_pings_off_when_key_empty():
+def test_pings_off_when_key_empty(tmp_path, monkeypatch):
     """Returns '' when pings_file is an empty string."""
-    result = _last_app_segment({"pings_file": ""})
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    base = config.load()
+    base.setdefault("turn_inject", {})["pings_file"] = ""
+    monkeypatch.setattr(config, "load", lambda: base)
+    result = _phone_app_fragment("sid_pings_empty")
     assert result == ""
 
 
-def test_pings_recent_minutes(tmp_path):
+def test_pings_recent_minutes(tmp_path, monkeypatch):
     """Ping from 5 minutes ago → '📱 {app} 5m前'."""
     pf = tmp_path / "pings.json"
     pf.write_text(json.dumps([_make_ping("小红书", 300)]), encoding="utf-8")
-    result = _last_app_segment({"pings_file": str(pf)})
+    _pings_cfg(tmp_path, pf, monkeypatch)
+    result = _phone_app_fragment("sid_pings_min")
     assert "📱 小红书 5m前" == result
 
 
-def test_pings_recent_seconds(tmp_path):
+def test_pings_recent_seconds(tmp_path, monkeypatch):
     """Ping from 30 seconds ago → '📱 {app} 刚刚'."""
     pf = tmp_path / "pings.json"
     pf.write_text(json.dumps([_make_ping("微信", 30)]), encoding="utf-8")
-    result = _last_app_segment({"pings_file": str(pf)})
+    _pings_cfg(tmp_path, pf, monkeypatch)
+    result = _phone_app_fragment("sid_pings_sec")
     assert "📱 微信 刚刚" == result
 
 
-def test_pings_hours_old(tmp_path):
+def test_pings_hours_old(tmp_path, monkeypatch):
     """Ping from 3 hours ago → '📱 {app} 3h前'."""
     pf = tmp_path / "pings.json"
     pf.write_text(json.dumps([_make_ping("抖音", 10800)]), encoding="utf-8")
-    result = _last_app_segment({"pings_file": str(pf)})
+    _pings_cfg(tmp_path, pf, monkeypatch)
+    result = _phone_app_fragment("sid_pings_hr")
     assert "📱 抖音 3h前" == result
 
 
-def test_pings_empty_file(tmp_path):
+def test_pings_empty_file(tmp_path, monkeypatch):
     """Empty array → ''."""
     pf = tmp_path / "pings.json"
     pf.write_text("[]", encoding="utf-8")
-    result = _last_app_segment({"pings_file": str(pf)})
+    _pings_cfg(tmp_path, pf, monkeypatch)
+    result = _phone_app_fragment("sid_pings_empty_file")
     assert result == ""
 
 
-def test_pings_malformed_entry_falls_back_to_earlier_valid(tmp_path):
-    """Malformed entries are skipped; last valid entry is used."""
+def test_pings_malformed_entry_best_valid_wins(tmp_path, monkeypatch):
+    """Malformed entries are skipped; max-by-ts valid entry is used.
+
+    Previously: last-by-position (wrong). Now: max-by-ts.
+    telegram at -600s is the only valid entry, so it must win.
+    """
     pf = tmp_path / "pings.json"
     entries = [
         _make_ping("telegram", 600),          # valid, 10m ago
@@ -253,14 +289,15 @@ def test_pings_malformed_entry_falls_back_to_earlier_valid(tmp_path):
         {"app": "微博", "event": "open", "ts": "not-a-date"},                         # bad ts
     ]
     pf.write_text(json.dumps(entries), encoding="utf-8")
-    result = _last_app_segment({"pings_file": str(pf)})
-    # Last valid entry is "telegram" 10m ago; the two malformed ones after it are skipped.
+    _pings_cfg(tmp_path, pf, monkeypatch)
+    result = _phone_app_fragment("sid_pings_malformed")
     assert "📱 telegram 10m前" == result
 
 
-def test_pings_missing_file(tmp_path):
+def test_pings_missing_file(tmp_path, monkeypatch):
     """Non-existent pings file → ''."""
-    result = _last_app_segment({"pings_file": str(tmp_path / "nonexistent.json")})
+    _pings_cfg(tmp_path, tmp_path / "nonexistent.json", monkeypatch)
+    result = _phone_app_fragment("sid_pings_missing")
     assert result == ""
 
 
@@ -376,3 +413,58 @@ def test_app_fragment_missing_file_returns_empty(app_isolated, monkeypatch):
     monkeypatch.setattr(config, "load", lambda: make_cfg(pings_path=tmp_path / "missing.json"))
     result = _phone_app_fragment("sidA6")
     assert result == ""
+
+
+# ---------------------------------------------------------------------------
+# B1: naive timestamps treated as UTC
+# ---------------------------------------------------------------------------
+
+def test_vitals_naive_ts_treated_as_utc(isolated, monkeypatch):
+    """B1: a naive timestamp in the snapshot must not be misread as local time.
+
+    When the tracker writes a naive UTC timestamp (no +HH:MM suffix), the
+    fragment must treat it as UTC, not as local time. A snapshot stamped
+    30 seconds ago (naive UTC) must render as fresh, not stale.
+    """
+    tmp_path, vf, make_cfg = isolated
+    snap = _make_snap(offset_s=30)
+    # Strip the +00:00 suffix to make the timestamp naive.
+    snap["ts"] = snap["ts"].replace("+00:00", "").replace("Z", "")
+    _write_snap(vf, snap)
+    monkeypatch.setattr(config, "load", lambda: make_cfg(stale=90))
+    result = _vitals_fragment("sid_naive_ts")
+    # A naive ts 30s ago treated as UTC → fresh → no ⚠️ stale warning.
+    assert "⚠️" not in result
+    assert "📍" in result
+
+
+def test_pings_naive_ts_treated_as_utc(tmp_path, monkeypatch):
+    """B1: naive ping timestamp must be treated as UTC when computing age."""
+    pf = tmp_path / "pings.json"
+    dt_naive = (datetime.now(timezone.utc) - timedelta(seconds=300)).replace(tzinfo=None)
+    pf.write_text(json.dumps([{"app": "小红书", "event": "open",
+                                "ts": dt_naive.isoformat()}]), encoding="utf-8")
+    _pings_cfg(tmp_path, pf, monkeypatch)
+    result = _phone_app_fragment("sid_naive_ping")
+    # 300s = 5 minutes; naive treated as UTC → "5m前" not "1x h前" or "⚠"
+    assert "📱 小红书 5m前" == result
+
+
+# ---------------------------------------------------------------------------
+# B5: max-by-ts picks the latest ping regardless of array order
+# ---------------------------------------------------------------------------
+
+def test_pings_max_by_ts_not_last_by_position(tmp_path, monkeypatch):
+    """B5: the newest ping by timestamp wins, even if it appears earlier in the array."""
+    pf = tmp_path / "pings.json"
+    ts_newer = (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat()
+    ts_older = (datetime.now(timezone.utc) - timedelta(seconds=3600)).isoformat()
+    # Newer entry appears FIRST; last-by-position would pick the older one.
+    entries = [
+        {"app": "小红书", "event": "open", "ts": ts_newer},
+        {"app": "抖音", "event": "open", "ts": ts_older},
+    ]
+    pf.write_text(json.dumps(entries), encoding="utf-8")
+    _pings_cfg(tmp_path, pf, monkeypatch)
+    result = _phone_app_fragment("sid_max_ts")
+    assert "📱 小红书 1m前" == result

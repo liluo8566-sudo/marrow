@@ -79,9 +79,12 @@ def _build_plan(conn: sqlite3.Connection) -> dict:
     orphan_meta_gt_max = conn.execute(
         "SELECT COUNT(*) FROM events_vec_meta WHERE rowid > ?", (max_id,)
     ).fetchone()[0]
+    # Exclude intentional skip-prefix tombstones (embedder_id='skip') — those
+    # are correctly meta-only by design and must not be wiped by the repair.
     poisoned_meta = conn.execute(
         "SELECT COUNT(*) FROM events_vec_meta m "
         "WHERE m.rowid IN (SELECT id FROM events) "
+        "  AND m.embedder_id != 'skip' "
         "  AND NOT EXISTS (SELECT 1 FROM events_vec v WHERE v.rowid=m.rowid)"
     ).fetchone()[0]
 
@@ -131,8 +134,11 @@ def _apply(conn: sqlite3.Connection, plan: dict) -> None:
             "DELETE FROM events_vec WHERE rowid NOT IN (SELECT id FROM events)")
         conn.execute(
             "DELETE FROM events_vec_meta WHERE rowid NOT IN (SELECT id FROM events)")
+        # Skip embedder_id='skip' rows — they are intentional tombstones for
+        # configured-prefix events (group chat etc.) and must not be deleted.
         conn.execute(
             "DELETE FROM events_vec_meta WHERE rowid IN (SELECT id FROM events) "
+            "AND embedder_id != 'skip' "
             "AND NOT EXISTS (SELECT 1 FROM events_vec v WHERE v.rowid=events_vec_meta.rowid)")
 
 

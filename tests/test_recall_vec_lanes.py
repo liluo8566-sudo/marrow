@@ -742,8 +742,8 @@ def test_group_event_gets_meta_tombstone_no_vector(db, monkeypatch):
     with patch.object(rm, "_ensure_embedder", return_value=mock_emb):
         n = rm.embed_pending(db, batch=10)
 
-    # Only the normal event should have been embedded
-    assert n == 1
+    # n = 1 (embedded normal) + 1 (tombstoned group) = 2 (A4: tombstoned rows count as progress)
+    assert n == 2
     assert captured.get("texts") == [normal_content]
 
     # Normal event: both meta and vector rows written
@@ -754,10 +754,13 @@ def test_group_event_gets_meta_tombstone_no_vector(db, monkeypatch):
         "SELECT COUNT(*) FROM events_vec WHERE rowid=?", (nid,)
     ).fetchone()[0] == 1
 
-    # Group event: meta tombstone present, no vector
+    # Group event: meta tombstone present with 'skip' marker, no vector
     assert db.execute(
         "SELECT COUNT(*) FROM events_vec_meta WHERE rowid=?", (gid,)
     ).fetchone()[0] == 1
+    assert db.execute(
+        "SELECT embedder_id FROM events_vec_meta WHERE rowid=?", (gid,)
+    ).fetchone()["embedder_id"] == "skip"
     assert db.execute(
         "SELECT COUNT(*) FROM events_vec WHERE rowid=?", (gid,)
     ).fetchone()[0] == 0
@@ -865,3 +868,124 @@ def test_empty_skip_prefix_embeds_all(db, monkeypatch):
     assert db.execute(
         "SELECT COUNT(*) FROM events_vec WHERE rowid=?", (gid,)
     ).fetchone()[0] == 1
+
+
+# ── G. A1: skip-check uses shaped text, not raw content ──────────────────────
+
+def test_group_event_with_time_anchor_still_tombstoned(db, monkeypatch):
+    """A1: event stored as '[time: ...]\n[群:...]' must be tombstoned.
+
+    The raw content starts with '[time:' which would bypass a startswith check
+    on '[群:'. _shape strips the time anchor so the shaped text starts with
+    '[群:' and the skip config correctly matches it.
+    """
+    monkeypatch.setattr(rm, "_embed_skip_prefixes", lambda: ["[群:"])
+
+    # Store content with time-anchor prefix (as happens after a session gap).
+    anchored = "[time: 2026-08-09 Sat 10:00 | gap: 5m]\n[群:测试群 from:小明] 早安"
+    gid = _make_event(db, anchored, session_id="s-anchor",
+                      timestamp="2026-08-09T02:00:00Z")
+
+    mock_emb = MagicMock()
+    mock_emb.embed.side_effect = lambda texts: np.stack(
+        [_fake_vec(2000 + i) for i, _ in enumerate(texts)])
+
+    with patch.object(rm, "_ensure_embedder", return_value=mock_emb):
+        n = rm.embed_pending(db, batch=10)
+
+    mock_emb.embed.assert_not_called()
+    assert n == 1  # tombstoned rows count as progress (A4)
+    assert db.execute(
+        "SELECT COUNT(*) FROM events_vec WHERE rowid=?", (gid,)
+    ).fetchone()[0] == 0
+    # Tombstone uses embedder_id='skip' marker (A3).
+    row = db.execute(
+        "SELECT embedder_id FROM events_vec_meta WHERE rowid=?", (gid,)
+    ).fetchone()
+    assert row is not None
+    assert row["embedder_id"] == "skip"
+
+
+# ── H. A2: string-typed config is rejected with warning, not iterated ─────────
+
+def test_string_skip_config_returns_empty_list(monkeypatch, caplog):
+    """A2: a bare string config value must be rejected (not iterated char-by-char)."""
+    import logging
+    from marrow import config as _config
+
+    def _bad_load():
+        return {"recall": {"embed_skip_prefixes": "[群:"}}
+
+    monkeypatch.setattr(_config, "load", _bad_load)
+    with caplog.at_level(logging.WARNING, logger="marrow.recall"):
+        result = rm._embed_skip_prefixes()
+    assert result == []
+    assert "TOML array" in caplog.text
+
+
+def test_string_event_skip_config_returns_empty_list(monkeypatch, caplog):
+    """A2: event_skip_prefixes as string must be rejected with a warning."""
+    import logging
+    from marrow import config as _config, repo
+
+    def _bad_load():
+        return {"recall": {"event_skip_prefixes": "[群:"}}
+
+    monkeypatch.setattr(_config, "load", _bad_load)
+    with caplog.at_level(logging.WARNING):
+        result = repo._event_skip_prefixes()
+    assert result == []
+
+
+# ── I. A3: repair script excludes 'skip' tombstones ──────────────────────────
+
+def test_skip_tombstone_not_counted_as_poisoned_meta(db, monkeypatch):
+    """A3: events_vec_meta rows with embedder_id='skip' must not appear in
+    repair_vec_meta's poisoned_meta count."""
+    monkeypatch.setattr(rm, "_embed_skip_prefixes", lambda: ["[群:"])
+
+    group_content = "[群:外卖群 from:骑手] 已到楼下"
+    gid = _make_event(db, group_content)
+
+    mock_emb = MagicMock()
+    mock_emb.embed.side_effect = lambda texts: np.stack(
+        [_fake_vec(3000 + i) for i, _ in enumerate(texts)])
+    with patch.object(rm, "_ensure_embedder", return_value=mock_emb):
+        rm.embed_pending(db, batch=10)
+
+    # Verify tombstone is 'skip'-marked.
+    row = db.execute(
+        "SELECT embedder_id FROM events_vec_meta WHERE rowid=?", (gid,)
+    ).fetchone()
+    assert row["embedder_id"] == "skip"
+
+    # Simulate what repair_vec_meta's poisoned_meta query checks.
+    poisoned = db.execute(
+        "SELECT COUNT(*) FROM events_vec_meta m "
+        "WHERE m.rowid IN (SELECT id FROM events) "
+        "  AND m.embedder_id != 'skip' "
+        "  AND NOT EXISTS (SELECT 1 FROM events_vec v WHERE v.rowid=m.rowid)"
+    ).fetchone()[0]
+    assert poisoned == 0  # skip-tombstone must NOT be counted
+
+
+# ── J. A4: tombstoned rows count as progress ─────────────────────────────────
+
+def test_tombstoned_rows_count_as_written(db, monkeypatch):
+    """A4: embed_pending must return tombstoned count so cmd_embed's
+    'if written == 0: break' doesn't exit early when backlog is all group rows."""
+    monkeypatch.setattr(rm, "_embed_skip_prefixes", lambda: ["[群:"])
+
+    for i in range(3):
+        _make_event(db, f"[群:群{i} from:人] 消息{i}", session_id="s-progress",
+                    timestamp=f"2026-08-09T0{i}:00:00Z")
+
+    mock_emb = MagicMock()
+    mock_emb.embed.side_effect = lambda texts: np.stack(
+        [_fake_vec(4000 + i) for i, _ in enumerate(texts)])
+
+    with patch.object(rm, "_ensure_embedder", return_value=mock_emb):
+        n = rm.embed_pending(db, batch=10)
+
+    mock_emb.embed.assert_not_called()
+    assert n == 3  # 3 tombstoned = 3 progress units

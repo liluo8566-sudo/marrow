@@ -331,8 +331,14 @@ def _event_skip_prefixes() -> list[str]:
     ([recall] event_skip_prefixes). Default empty = no filtering. Read at call
     time so a watcher restart picks up config changes.
     """
+    import logging as _logging
     try:
         raw = config.load().get("recall", {}).get("event_skip_prefixes", []) or []
+        if not isinstance(raw, list):
+            _logging.getLogger(__name__).warning(
+                "event_skip_prefixes must be a TOML array, got %r — ignoring", raw
+            )
+            return []
         return [str(p) for p in raw if str(p)]
     except Exception:
         return []
