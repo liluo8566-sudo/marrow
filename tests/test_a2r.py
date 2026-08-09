@@ -1,6 +1,7 @@
 """A2r revision — imp boost + source tag, care inject, agent guard, install dedup."""
 from __future__ import annotations
 
+import datetime
 import io
 import json
 
@@ -31,10 +32,12 @@ def conn(tmp_path):
 
 def test_recall_tags_tl_vs_event(conn):
     # a plain event and a tl row sharing an FTS keyword
+    # Use a recent timestamp so both rows clear the recency-weighted min_score gate.
+    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     conn.execute("INSERT INTO events (session_id, timestamp, role, content)"
-                 " VALUES ('s1', '2026-07-01T00:00:00Z', 'user', 'kangaroo picnic')")
+                 " VALUES ('s1', ?, 'user', 'kangaroo picnic')", (ts,))
     conn.execute("INSERT INTO events (session_id, timestamp, role, content, imp)"
-                 " VALUES ('s2', '2026-07-01T00:00:00Z', 'tl', '【N 愉悦·5】kangaroo picnic', 5)")
+                 " VALUES ('s2', ?, 'tl', '【N 愉悦·5】kangaroo picnic', 5)", (ts,))
     conn.commit()
     hits = recall.recall_fusion(conn, "kangaroo", limit=10)
     tags = {h.get("source_tag") for h in hits if h.get("id")}
