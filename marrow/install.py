@@ -54,6 +54,7 @@ _MARROW_HOOKS: dict[str, list[dict]] = {
 _ALL_PLISTS: list[tuple[str, str]] = [
     ("mw-aging.plist",          "com.marrow.aging"),
     ("mw-db-backup.plist",      "com.marrow.db-backup"),
+    ("mw-embedd.plist",         "com.marrow.embedd"),
     ("mw-refresh.plist",        "com.marrow.refresh"),
     ("mw-sensors.plist",        "com.marrow.sensors"),
     ("mw-watcher.plist",        "com.marrow.watcher"),
@@ -63,6 +64,7 @@ _ALL_PLISTS: list[tuple[str, str]] = [
 # remove_plists() always boots every label out.
 _GATED_PLISTS: dict[str, tuple[str, str]] = {
     "com.marrow.sensors": ("sensors", "enabled"),
+    "com.marrow.embedd": ("embedd", "enabled"),
 }
 
 # Retired labels (and any legacy plist filename they installed under). An

@@ -30,7 +30,7 @@ nothing writes them now (tasks via cadence rem/cal; timeline via tl MCP).
 Three runtimes:
 - **hooks** — one-shot per CC lifecycle event, exit after injecting/spawning.
 - **watcher** — launchd persistent (KeepAlive); hosts SyncLoop(5s) + AtlasSweepLoop(60s) + UsageSnapshotLoop + EmbedLoop(300s, §4.2) threads. Any thread failing to start raises a critical/watcher `watcher_thread_start_failed` alert; the watcher keeps running without it.
-- **daemon** — stdio MCP, 12 action-dispatch tools (recall, atlas_lookup, event_embed, tl, sticker, sticker_admin, goal, wish, first, dim, alert, event_clear — full list §5.4), spawned by CC via .mcp.json, no plist; holds bge-m3 in memory. sticker_admin write actions call write_subpage after DB commit for immediate md sync.
+- **daemon** — stdio MCP, 12 action-dispatch tools (recall, atlas_lookup, event_embed, tl, sticker, sticker_admin, goal, wish, first, dim, alert, event_clear — full list §5.4), spawned by CC via .mcp.json, no plist; embeds via the shared embedd service (§4.2), loads bge-m3 in-process only as fallback. sticker_admin write actions call write_subpage after DB commit for immediate md sync.
 
 ### 1.2 Hooks registry (marrow/hooks/ package)
 
@@ -76,6 +76,10 @@ Three runtimes:
 - bge-m3 ONNX CPU singleton, 1024d, CLS-pool L2-norm, max_length 512. `recall:embed_pending` iterates 7 lanes (events/memes/entities/milestones/diary/tasks/stickers), batch 50/lane, so events backlog can't starve others; diary lane sweeps orphaned vec rows (rowid reuse after DELETE+INSERT).
 - Auto-backfill: `watcher:EmbedLoop` ([embed_loop], tick 300s). Tick counts pending rows via `recall:pending_counts` (wraps each lane's pending_sql in COUNT, capped) — pure SQL, watcher never loads the model. Pending>0 → detached `mw embed` child (popen_detach) does the embedding and frees the model memory on exit; one child at a time (Popen handle + flock in the CLI). `fail_alert_streak` consecutive non-zero exits → warn/embed `embed_child_failed`.
 - Backlog watermark (last-line defence, fires even if the spawn path is broken): pending > `backlog_alert_count` on two consecutive ticks (check runs pre-spawn, so a healthy bulk rebuild is draining by tick 2) OR oldest unembedded events.created_at older than `backlog_alert_hours` (immediate) → one warn/embed `embed_backlog`; re-arms after the backlog clears.
+- Chokepoint `recall:embed_texts` — the only path any caller uses (`_embed_one`, `_embed_pending_lane`, `recall_fusion` query vec, `daemon:_sticker_search`, `semantic_dedup:cosine_top_match`, and through it memes_dedup/candidates). `recall:embed_available` = same routing for the cheap "can we embed at all" probe.
+- Shared service `embedd.py` ([embedd], `python -m marrow.embedd`, launchd com.marrow.embedd, `deploy/mw-embedd.plist`, gated by `install.py _GATED_PLISTS`): ONE process holds bge-m3 (~1.3GB RSS), everyone else stays thin. Unix stream socket at `<state_dir>/embedd.sock` (config `socket_path` overrides), newline-delimited JSON — `{"op":"embed","texts":[…]}` → `{"ok":true,"vecs":<b64 f32>,"n":N,"dim":D}`, `{"op":"ping"}` → `{"ok":true,"loaded":bool}`, errors `{"ok":false,"error":…}`. Single instance via flock on `<DATA_DIR>/embedd.lock`; stale socket file unlinked at bind. Model loads on the first embed and is dropped (`recall:_release_embedder` + gc) after `idle_minutes` idle, so RSS returns; next request reloads. The service calls the local loader directly — `embedd:is_service_process` keeps it from routing into itself.
+- Fallback: socket file absent → silent in-process load (service simply not installed). Socket present but connect/IO/response fails → in-process load + warn/embedd `embedd_service_unreachable`, rate-limited by `alert_cooldown_hours` via mtime of `<state_dir>/embedd_alert.stamp`. No model files anywhere → `embed_texts` returns None, callers degrade exactly as before.
+- Tests: autouse `conftest:_disable_embedd_service` forces `embedd.enabled()` false so no test hits the live socket (it would return real vectors over the stub embedders); `live_embedd` marker opts out.
 
 ### 4.3 recall fusion (`recall:recall_fusion` / entry `recall:recall_with_config`)
 - Events: FTS5 (phrase-quoted, BM25-normalised) ∪ vec cosine, merged by id. Weighted sum: vec .55 · bm25 .30 · recency .15 · affect .10. Recency exp(-days/30) with floors: imp 5 / override → 0.5 · imp 3-4 → 0.18 · imp ≤2 → 0.
@@ -190,7 +194,8 @@ Three runtimes:
 - com.marrow.refresh — manual trigger only (RunAtLoad false, no schedule), `mw refresh --all` (daybrief + monitor + subpages).
 - com.marrow.db-backup 03:00 daily — VACUUM INTO local + iCloud offsite, keep 14 each.
 - com.marrow.aging Sun 12:00 weekly — cleanup passes (§10).
-- install.py `_ALL_PLISTS` sole provisioning source: aging/db-backup/refresh/watcher. `_OBSOLETE_PLISTS` boots out + deletes retired dashboard-tick/daily-routine/daily-catchup on upgrade.
+- com.marrow.embedd — persistent shared embed service (§4.2), KeepAlive SuccessfulExit=false, gated by `[embedd].enabled`.
+- install.py `_ALL_PLISTS` sole provisioning source: aging/db-backup/embedd/refresh/watcher (+ sensors, gated). `_OBSOLETE_PLISTS` boots out + deletes retired dashboard-tick/daily-routine/daily-catchup on upgrade.
 - cli.py install-launchd/uninstall-launchd path retired (was duplicate, listed dead goose-bites/jsonl-cleanup jobs).
 - MCP daemon has no plist (CC-spawned).
 

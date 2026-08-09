@@ -121,6 +121,49 @@ def _ensure_embedder() -> "_BgeM3Embedder | None":
     return _EMBEDDER
 
 
+def _release_embedder() -> None:
+    """Drop the singleton so its RSS can be reclaimed (embedd idle eviction)."""
+    global _EMBEDDER
+    with _EMBEDDER_LOCK:
+        _EMBEDDER = None
+
+
+# ── embed chokepoint ─────────────────────────────────────────────────────────
+
+def embed_texts(texts: list[str]) -> "NDArray[np.float32] | None":
+    """Embed via the shared embedd service, else in-process. None = no model.
+
+    A missing socket file means the service was never installed — fall back
+    silently. A socket that exists but cannot serve is a real fault: fall back
+    and raise a rate-limited warn alert.
+    """
+    if not texts:
+        return np.zeros((0, 0), dtype=np.float32)
+    from . import embedd
+    if embedd.enabled() and not embedd.is_service_process():
+        try:
+            return embedd.client_embed(texts)
+        except embedd.ServiceAbsent:
+            pass
+        except embedd.ServiceUnreachable as e:
+            logger.warning("embedd unreachable, falling back locally: %s", e)
+            embedd.alert_unreachable(str(e))
+    emb = _ensure_embedder()
+    if emb is None:
+        return None
+    return emb.embed(texts)
+
+
+def embed_available() -> bool:
+    """True when embedding can run. A live service answers without any local
+    load; only when it cannot does this fall back to loading in-process."""
+    from . import embedd
+    if embedd.enabled() and not embedd.is_service_process():
+        if embedd.ping() is not None:
+            return True
+    return _ensure_embedder() is not None
+
+
 # ── vec serialization ─────────────────────────────────────────────────────────
 
 def _vec_to_blob(v: NDArray[np.float32]) -> bytes:
@@ -283,16 +326,16 @@ def _embed_one(
     dim: int,
 ) -> bool:
     """Idempotent single-row embed for any lane."""
-    emb = _ensure_embedder()
-    if emb is None:
-        return False
     cfg = _LANES[lane]
     exists = conn.execute(
         f"SELECT 1 FROM {cfg['meta_table']} WHERE rowid=?", (rowid,)
     ).fetchone()
     if exists:
         return False
-    vec = emb.embed([text])[0]
+    vecs = embed_texts([text])
+    if vecs is None:
+        return False
+    vec = vecs[0]
     blob = _vec_to_blob(vec)
     with conn:
         conn.execute(
@@ -441,8 +484,7 @@ def _embed_pending_lane(
     dim: int,
 ) -> int:
     """Backfill one lane. Returns count written. Caller ensures embedder loaded."""
-    emb = _ensure_embedder()
-    if emb is None:
+    if not embed_available():
         return 0
     if lane == "diary":
         _sweep_diary_orphans(conn)
@@ -505,7 +547,10 @@ def _embed_pending_lane(
         return tombstoned
     _CHUNK = 50
     chunks = [texts[i:i + _CHUNK] for i in range(0, len(texts), _CHUNK)]
-    vecs = np.concatenate([emb.embed(c) for c in chunks], axis=0)
+    chunk_vecs = [embed_texts(c) for c in chunks]
+    if any(cv is None for cv in chunk_vecs):
+        return 0
+    vecs = np.concatenate(chunk_vecs, axis=0)
     written = 0
     vt = cfg["vec_table"]
     mt = cfg["meta_table"]
@@ -542,7 +587,7 @@ def embed_pending(
     Per-lane budget = `batch` so a large events backlog cannot starve the
     cross-table lanes on a single hook firing. Returns total rows written.
     """
-    if _ensure_embedder() is None:
+    if not embed_available():
         return 0
     total = 0
     for lane in _LANES:
@@ -1398,8 +1443,8 @@ def recall_fusion(
         if not q:
             return []
 
-    emb = _ensure_embedder()
-    vec_available = emb is not None
+    qvecs = embed_texts([q])
+    vec_available = qvecs is not None and len(qvecs) > 0
 
     # cwd bias setup: load rules once, classify the query's bucket. Per-event
     # classification happens in the scoring loop using the same `rules`.
@@ -1433,7 +1478,7 @@ def recall_fusion(
     # ── vec candidates ────────────────────────────────────────────────────────
     vec_rows: list[sqlite3.Row] = []
     if vec_available:
-        qvec = emb.embed([q])[0]
+        qvec = qvecs[0]
         qblob = _vec_to_blob(qvec)
         # When a time window is active, fetch a larger candidate set and filter
         # in Python. sqlite-vec KNN (MATCH+k=) cannot reliably apply arbitrary

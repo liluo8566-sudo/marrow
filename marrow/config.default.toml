@@ -127,6 +127,24 @@ backlog_alert_hours = 6
 # Consecutive non-zero child exits before a warn/embed alert.
 fail_alert_streak = 3
 
+[embedd]
+# Shared embed service (com.marrow.embedd): one process holds the bge-m3 ONNX
+# model (~1.3GB RSS) and answers over a unix socket, so every other marrow
+# process stays thin. Callers fall back to loading the model in-process when
+# the socket is absent (service not installed) or unusable.
+enabled = true
+# Drop the model after this long without an embed request; RSS returns to the
+# OS and the next request reloads it. 0 = never evict.
+idle_minutes = 30
+# Socket path. Empty = <state_dir>/embedd.sock.
+socket_path = ""
+# Connect must be fast (the service is local); reads are slow on a cold load
+# because the first request pays the model load.
+connect_timeout_s = 0.5
+read_timeout_s = 120
+# Rate limit for the warn alert raised when the socket exists but cannot serve.
+alert_cooldown_hours = 6
+
 [recall]
 # FTS5 always on. Vector path active when embedding model files are present.
 vector = true

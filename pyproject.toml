@@ -15,7 +15,10 @@ dependencies = [
 mw = "marrow.cli:main"
 
 [tool.pytest.ini_options]
-markers = ["manual: only when PYTEST_RUN_MANUAL=1"]
+markers = [
+    "manual: only when PYTEST_RUN_MANUAL=1",
+    "live_embedd: opt out of the autouse embedd-service kill switch",
+]
 pythonpath = ["."]
 
 [build-system]

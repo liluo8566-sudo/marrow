@@ -34,8 +34,7 @@ def cosine_top_match(conn: sqlite3.Connection, query: str,
     target dedup to cut inference cost.
     """
     from . import recall  # lazy: heavy onnxruntime import
-    emb = recall._ensure_embedder()
-    if emb is None:
+    if not recall.embed_available():
         return None
     if not targets:
         return (-1, 0.0)
@@ -54,7 +53,9 @@ def cosine_top_match(conn: sqlite3.Connection, query: str,
         uniq_to_orig.append(i)
     if not uniq:
         return (-1, 0.0)
-    vecs = emb.embed([query, *uniq])
+    vecs = recall.embed_texts([query, *uniq])
+    if vecs is None:
+        return None
     q = vecs[0]
     best_idx = -1
     best_score = 0.0

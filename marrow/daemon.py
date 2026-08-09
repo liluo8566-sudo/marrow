@@ -410,11 +410,11 @@ def _sticker_search(query: str, limit: int, animated: bool) -> list[dict]:
     conn = storage.connect(_DB)
     try:
         try:
-            from .recall import _blob_to_vec, _ensure_embedder, _vec_to_blob
+            from .recall import _blob_to_vec, _vec_to_blob, embed_texts
             _ = _blob_to_vec
-            emb = _ensure_embedder()
-            if emb is not None:
-                query_vec = emb.embed([query])[0]
+            query_vecs = embed_texts([query])
+            if query_vecs is not None:
+                query_vec = query_vecs[0]
                 hits = conn.execute(
                     "SELECT rowid, distance FROM stickers_vec "
                     "WHERE embedding MATCH ? AND k = ? ORDER BY distance",

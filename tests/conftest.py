@@ -1,6 +1,6 @@
 """Global test fixtures.
 
-Three autouse guards, plus a one-time import-time pin:
+Four autouse guards, plus a one-time import-time pin:
 
 1. `_redirect_marrow_data_dir` (session-scope, autouse): patches
    `marrow.config.DATA_DIR` and `CONFIG_PATH` to a per-session tmp dir.
@@ -24,7 +24,13 @@ Three autouse guards, plus a one-time import-time pin:
    (and unlink inside) the live vault, and its imagehash import leaks into
    the sticker tests' fake-PIL setup.
 
-4. `_pin_module_tz_caches_to_melbourne()` (module-level, runs once at
+4. `_disable_embedd_service` (function-scope, autouse): forces
+   `embedd.enabled()` off so no test reaches the live com.marrow.embedd
+   socket — it would answer with real bge-m3 vectors and shadow the stub
+   embedders the recall/dedup suites patch in. Mark a test `live_embedd`
+   to opt out.
+
+5. `_pin_module_tz_caches_to_melbourne()` (module-level, runs once at
    collection): several modules cache their working timezone as a
    MODULE-LEVEL constant computed once via `config.get_tz()` at import time
    (`timeline._TZ`, `tl_writer._TZ`, `timecue._MELB`, `timeutil._MELB`,
@@ -330,6 +336,22 @@ def _pin_stickers_dir(monkeypatch, tmp_path):
     from marrow import sticker_ops
 
     monkeypatch.setattr(sticker_ops, "STICKERS_DIR", tmp_path / "stickers")
+
+
+@pytest.fixture(autouse=True)
+def _disable_embedd_service(monkeypatch, request):
+    """Keep every test off the real embed service socket.
+
+    `recall.embed_texts` prefers the live com.marrow.embedd socket, which on
+    this machine returns REAL bge-m3 vectors — silently overriding the stub
+    embedders the recall/dedup suites patch in. Forcing the gate off makes
+    every test take the in-process path it was written against. The embedd
+    tests carry `live_embedd` to opt back out.
+    """
+    if "live_embedd" in request.keywords:
+        return
+    from marrow import embedd
+    monkeypatch.setattr(embedd, "enabled", lambda: False)
 
 
 @pytest.fixture(autouse=True)
