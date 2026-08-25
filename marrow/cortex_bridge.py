@@ -14,7 +14,7 @@ Two independent gates, both must be open for any cortex behaviour:
      value. A clean marrow install shows ZERO cortex behaviour.
   2. MARROW_CORTEX (env) — "is this the cortex session". Set by the shell's
      host on the cortex window it spawns.
-     The lie_down / wait / say tools additionally require it at import time;
+     The lie_down / transfer tools additionally require it at import time;
      the hook branches require it at call time.
 
 So enabled == organs installed; MARROW_CORTEX == this is the cortex window.
@@ -58,7 +58,7 @@ def is_cortex_session(transcript_path: str | None = None) -> bool:
 
 
 # Import-time capture of the cortex-session env marker, mirroring the original
-# daemon._CORTEX: the lie_down / wait / say tools register into the MCP schema
+# daemon._CORTEX: the lie_down / transfer tools register into the MCP schema
 # only when this daemon subprocess was spawned by a cortex window (the window
 # sets MARROW_CORTEX explicitly before spawn). Normal sessions never see them.
 _CORTEX = bool(os.environ.get("MARROW_CORTEX"))
@@ -316,7 +316,7 @@ def goal(
         conn.close()
 
 
-# ── cortex (lie_down / say) ───────────────────────────────────────────────────
+# ── cortex (lie_down / transfer) ─────────────────────────────────────────────
 
 def _cortex_paths() -> tuple[str, str]:
     """(venv_python, repo_root) from marrow config [cortex]; either empty =
